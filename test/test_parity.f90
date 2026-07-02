@@ -12,6 +12,8 @@ program test_parity
    call t_list_downgrade_views()
    call t_u64()
    call t_list_of_text()
+   call t_bulk_accessors()
+   call t_incremental_unpack()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -200,5 +202,63 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(r)
    end subroutine t_list_of_text
+
+   subroutine t_bulk_accessors()
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer(int32), allocatable :: got(:)
+      integer(int32) :: put(0:3)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_FOUR, 4_int64, err)
+      put = [11_int32, 22_int32, 33_int32, 44_int32]
+      call capnp_list_set_all_i32(lst, put, err)
+      call check_(err == CAPNP_OK, 'bulk: set_all')
+      call capnp_list_get_all_i32(lst, got, err)
+      call check_(err == CAPNP_OK .and. size(got) == 4, 'bulk: get_all size')
+      call check_(all(got == put), 'bulk: values round trip')
+      ! Size mismatch is an argument error.
+      call capnp_list_set_all_i32(lst, put(0:2), err)
+      call check_(err == CAPNP_ERR_ARG, 'bulk: size mismatch rejected')
+      call capnp_message_free(msg)
+   end subroutine t_bulk_accessors
+
+   !> The incremental unpacker must reproduce whole-buffer capnp_unpack for
+   !> every chunk split position of the spec vector plus escape runs.
+   subroutine t_incremental_unpack()
+      type(capnp_unpacker_t) :: u
+      integer(int8), allocatable :: whole(:), inc(:), packed(:)
+      integer(int8) :: src(0:31)
+      integer(int64) :: outn, cut
+      integer :: err, i
+      ! Mixed content: spec-vector words, a zero run, a raw run.
+      src = 0_int8
+      src(0) = 8_int8
+      src(4) = 3_int8
+      src(6) = 2_int8
+      do i = 16, 31
+         src(i) = int(mod(i*7, 127) + 1, int8) ! fully nonzero -> raw run
+      end do
+      call capnp_pack(src, packed, err)
+      call check_(err == CAPNP_OK, 'inc: packed source')
+      call capnp_unpack(packed, whole, err)
+      call check_(err == CAPNP_OK .and. size(whole) == 32 .and. &
+                  all(whole == src), 'inc: whole-buffer reference')
+      do cut = 1_int64, size(packed, kind=int64) - 1_int64
+         u = capnp_unpacker_t()
+         if (allocated(inc)) deallocate (inc)
+         outn = 0_int64
+         call capnp_unpack_push(u, packed(0:cut - 1), inc, outn, err)
+         call check_(err == CAPNP_OK, 'inc: first chunk ok')
+         call capnp_unpack_push(u, packed(cut:), inc, outn, err)
+         call check_(err == CAPNP_OK, 'inc: second chunk ok')
+         if (outn /= 32_int64 .or. .not. all(inc(0:outn - 1) == src)) then
+            call check_(.false., 'inc: split reproduces source')
+            print '(a,i0)', '  failing split at byte ', cut
+            return
+         end if
+      end do
+      call check_(.true., 'inc: all splits reproduce source')
+   end subroutine t_incremental_unpack
 
 end program test_parity

@@ -12,6 +12,24 @@ module capnp_packed
    private
 
    public :: capnp_pack, capnp_unpack
+   public :: capnp_unpacker_t, capnp_unpack_push
+
+   !> Incremental unpacker (capn-stream parity): feed arbitrary chunk
+   !> boundaries with capnp_unpack_push; decoded words accumulate on the
+   !> caller's output buffer.
+   integer, parameter :: US_TAG = 0        !< expecting a tag byte
+   integer, parameter :: US_PAYLOAD = 1    !< collecting flagged bytes of one word
+   integer, parameter :: US_ZERO_COUNT = 2 !< expecting the zero-run count byte
+   integer, parameter :: US_RAW_COUNT = 3  !< expecting the raw-run count byte
+   integer, parameter :: US_RAW = 4        !< copying raw words verbatim
+
+   type :: capnp_unpacker_t
+      integer :: state = US_TAG
+      integer :: tag = 0
+      integer :: bit = 0                 ! next tag bit to inspect
+      integer(int8) :: word(0:7) = 0_int8
+      integer(int64) :: raw_left = 0_int64 ! raw bytes still owed
+   end type capnp_unpacker_t
 
 contains
 
@@ -153,6 +171,83 @@ contains
          allocate (outb(0))
       end if
    end subroutine capnp_unpack
+
+   !> Feed one chunk into the incremental unpacker. Decoded bytes append to
+   !> out at position outn (both grown/updated); chunks may split anywhere,
+   !> including inside a word's payload or before a count byte.
+   subroutine capnp_unpack_push(u, chunk, out, outn, err)
+      type(capnp_unpacker_t), intent(inout) :: u
+      integer(int8), intent(in) :: chunk(0:)
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn
+      integer, intent(out) :: err
+      integer(int64) :: ipos, n, take, cap
+      integer :: b, k
+      err = CAPNP_OK
+      n = size(chunk, kind=int64)
+      if (.not. allocated(out)) then
+         allocate (out(0:max(8_int64*n, 64_int64) - 1))
+         out = 0_int8
+         outn = 0_int64
+      end if
+      cap = size(out, kind=int64)
+      ipos = 0_int64
+      do while (ipos < n)
+         select case (u%state)
+         case (US_TAG)
+            u%tag = cp_u8(chunk(ipos))
+            ipos = ipos + 1
+            u%word = 0_int8
+            u%bit = 0
+            u%state = US_PAYLOAD
+         case (US_PAYLOAD)
+            do k = u%bit, 7
+               if (btest(u%tag, k)) then
+                  if (ipos >= n) then
+                     u%bit = k
+                     return ! word continues in the next chunk
+                  end if
+                  u%word(k) = chunk(ipos)
+                  ipos = ipos + 1
+               end if
+            end do
+            call ensure(out, cap, outn + 8_int64)
+            out(outn:outn + 7) = u%word
+            outn = outn + 8
+            if (u%tag == 0) then
+               u%state = US_ZERO_COUNT
+            else if (u%tag == 255) then
+               u%state = US_RAW_COUNT
+            else
+               u%state = US_TAG
+            end if
+         case (US_ZERO_COUNT)
+            b = cp_u8(chunk(ipos))
+            ipos = ipos + 1
+            call ensure(out, cap, outn + int(b, int64)*8_int64)
+            out(outn:outn + int(b, int64)*8_int64 - 1) = 0_int8
+            outn = outn + int(b, int64)*8_int64
+            u%state = US_TAG
+         case (US_RAW_COUNT)
+            b = cp_u8(chunk(ipos))
+            ipos = ipos + 1
+            u%raw_left = int(b, int64)*8_int64
+            if (u%raw_left == 0_int64) then
+               u%state = US_TAG
+            else
+               u%state = US_RAW
+            end if
+         case (US_RAW)
+            take = min(u%raw_left, n - ipos)
+            call ensure(out, cap, outn + take)
+            out(outn:outn + take - 1) = chunk(ipos:ipos + take - 1)
+            outn = outn + take
+            ipos = ipos + take
+            u%raw_left = u%raw_left - take
+            if (u%raw_left == 0_int64) u%state = US_TAG
+         end select
+      end do
+   end subroutine capnp_unpack_push
 
    subroutine ensure(buf, cap, need)
       integer(int8), allocatable, intent(inout) :: buf(:)

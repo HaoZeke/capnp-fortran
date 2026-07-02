@@ -28,12 +28,16 @@ module capnp_message
    public :: capnp_list_get_text, capnp_list_set_text
    public :: capnp_get_i8, capnp_set_i8
    public :: capnp_list_get_i8, capnp_list_set_i8
+   public :: capnp_list_get_all_i8, capnp_list_set_all_i8
    public :: capnp_get_i16, capnp_set_i16
    public :: capnp_list_get_i16, capnp_list_set_i16
+   public :: capnp_list_get_all_i16, capnp_list_set_all_i16
    public :: capnp_get_i32, capnp_set_i32
    public :: capnp_list_get_i32, capnp_list_set_i32
+   public :: capnp_list_get_all_i32, capnp_list_set_all_i32
    public :: capnp_get_i64, capnp_set_i64
    public :: capnp_list_get_i64, capnp_list_set_i64
+   public :: capnp_list_get_all_i64, capnp_list_set_all_i64
    public :: capnp_get_u8, capnp_set_u8
    public :: capnp_get_u16, capnp_set_u16
    public :: capnp_get_u32, capnp_set_u32
@@ -702,6 +706,42 @@ contains
       call cp_put_i8 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i8
 
+   !> Whole-list read (capn_getv parity). arr is allocated to the length.
+   subroutine capnp_list_get_all_i8 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int8), allocatable, intent(out) :: arr(:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
+      if (capnp_list_len(p) == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         arr(i) = capnp_list_get_i8 (p, i, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_get_all_i8
+
+   !> Whole-list write (capn_setv parity). size(arr) must equal the length.
+   subroutine capnp_list_set_all_i8 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int8), intent(in) :: arr(0:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (size(arr, kind=int64) /= capnp_list_len(p)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         call capnp_list_set_i8 (p, i, arr(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_set_all_i8
+
    function capnp_get_i16 (p, off, default) result(v)
       type(capnp_ptr_t), intent(in) :: p
       integer(int64), intent(in) :: off
@@ -760,6 +800,42 @@ contains
       if (err /= CAPNP_OK) return
       call cp_put_i16 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i16
+
+   !> Whole-list read (capn_getv parity). arr is allocated to the length.
+   subroutine capnp_list_get_all_i16 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int16), allocatable, intent(out) :: arr(:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
+      if (capnp_list_len(p) == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         arr(i) = capnp_list_get_i16 (p, i, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_get_all_i16
+
+   !> Whole-list write (capn_setv parity). size(arr) must equal the length.
+   subroutine capnp_list_set_all_i16 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int16), intent(in) :: arr(0:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (size(arr, kind=int64) /= capnp_list_len(p)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         call capnp_list_set_i16 (p, i, arr(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_set_all_i16
 
    function capnp_get_i32 (p, off, default) result(v)
       type(capnp_ptr_t), intent(in) :: p
@@ -820,6 +896,42 @@ contains
       call cp_put_i32 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i32
 
+   !> Whole-list read (capn_getv parity). arr is allocated to the length.
+   subroutine capnp_list_get_all_i32 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int32), allocatable, intent(out) :: arr(:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
+      if (capnp_list_len(p) == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         arr(i) = capnp_list_get_i32 (p, i, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_get_all_i32
+
+   !> Whole-list write (capn_setv parity). size(arr) must equal the length.
+   subroutine capnp_list_set_all_i32 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int32), intent(in) :: arr(0:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (size(arr, kind=int64) /= capnp_list_len(p)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         call capnp_list_set_i32 (p, i, arr(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_set_all_i32
+
    function capnp_get_i64 (p, off, default) result(v)
       type(capnp_ptr_t), intent(in) :: p
       integer(int64), intent(in) :: off
@@ -878,6 +990,42 @@ contains
       if (err /= CAPNP_OK) return
       call cp_put_i64 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i64
+
+   !> Whole-list read (capn_getv parity). arr is allocated to the length.
+   subroutine capnp_list_get_all_i64 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), allocatable, intent(out) :: arr(:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
+      if (capnp_list_len(p) == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         arr(i) = capnp_list_get_i64 (p, i, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_get_all_i64
+
+   !> Whole-list write (capn_setv parity). size(arr) must equal the length.
+   subroutine capnp_list_set_all_i64 (p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: arr(0:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (size(arr, kind=int64) /= capnp_list_len(p)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         call capnp_list_set_i64 (p, i, arr(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_set_all_i64
 
    ! Unsigned views: same wire bytes, widened into the next signed kind so
    ! the full unsigned range is representable.
