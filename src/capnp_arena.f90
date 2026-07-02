@@ -1,6 +1,8 @@
 !> Segments and the message arena. A message owns a set of flat byte
-!> segments; builders allocate zeroed word runs from them, readers wrap
-!> received bytes and enforce traversal guards.
+!> segments; builders allocate zeroed word runs from them, readers either
+!> copy received bytes or view them in place (zero-copy, capn_init_mem
+!> parity). Segment storage is a pointer array so a view can alias caller
+!> memory; `owned` records who deallocates.
 module capnp_arena
    use capnp_kinds, only: int8, int64, CAPNP_OK, CAPNP_ERR_ALLOC, CAPNP_ERR_ARG, &
                           CAPNP_WORD_BYTES, CAPNP_DEFAULT_TRAVERSAL_WORDS, &
@@ -11,14 +13,18 @@ module capnp_arena
    public :: capnp_segment_t, capnp_message_t
    public :: capnp_message_init_builder, capnp_message_free
    public :: capnp_arena_alloc, capnp_arena_alloc_in
+   public :: capnp_segment_view
 
    integer(int64), parameter :: DEFAULT_FIRST_WORDS = 1024_int64
    integer(int64), parameter :: MAX_SEGMENT_WORDS = 536870912_int64
 
    type :: capnp_segment_t
       !> Storage, 0-based. Capacity is size(bytes); len is the used prefix.
-      integer(int8), allocatable :: bytes(:)
+      !> owned segments are deallocated by capnp_message_free; views alias
+      !> caller memory, which must outlive the message.
+      integer(int8), pointer :: bytes(:) => null()
       integer(int64) :: len = 0_int64
+      logical :: owned = .false.
    end type capnp_segment_t
 
    type :: capnp_message_t
@@ -36,11 +42,12 @@ contains
    !> the root pointer. first_words bounds the first segment's capacity; a
    !> small value forces multi-segment messages (and thus far pointers) early.
    subroutine capnp_message_init_builder(msg, err, first_words)
-      type(capnp_message_t), intent(out) :: msg
+      type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: first_words
       integer(int64) :: cap
       err = CAPNP_OK
+      call capnp_message_free(msg)
       cap = DEFAULT_FIRST_WORDS
       if (present(first_words)) cap = max(1_int64, first_words)
       msg%is_builder = .true.
@@ -51,11 +58,33 @@ contains
       msg%segs(1)%bytes(0:CAPNP_WORD_BYTES - 1) = 0_int8
    end subroutine capnp_message_init_builder
 
+   !> Alias a caller buffer slice as a read-only segment (zero-copy). The
+   !> buffer must stay allocated, unmoved, and targeted for the message's
+   !> lifetime.
+   subroutine capnp_segment_view(seg, buf, nbytes)
+      type(capnp_segment_t), intent(inout) :: seg
+      integer(int8), intent(in), pointer :: buf(:)
+      integer(int64), intent(in) :: nbytes
+      seg%bytes(0:) => buf
+      seg%len = nbytes
+      seg%owned = .false.
+   end subroutine capnp_segment_view
+
    subroutine capnp_message_free(msg)
       type(capnp_message_t), intent(inout) :: msg
-      if (allocated(msg%segs)) deallocate (msg%segs)
+      integer :: i
+      if (allocated(msg%segs)) then
+         do i = 1, size(msg%segs)
+            if (msg%segs(i)%owned .and. associated(msg%segs(i)%bytes)) &
+               deallocate (msg%segs(i)%bytes)
+            msg%segs(i)%bytes => null()
+         end do
+         deallocate (msg%segs)
+      end if
       msg%nsegs = 0
       msg%is_builder = .false.
+      msg%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      msg%depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
    end subroutine capnp_message_free
 
    !> Allocate nwords zeroed words. Tries the last segment; if the run does
@@ -129,8 +158,10 @@ contains
       if (msg%nsegs == size(msg%segs)) then
          allocate (tmp(2*size(msg%segs)))
          do i = 1, msg%nsegs
-            call move_alloc(msg%segs(i)%bytes, tmp(i)%bytes)
+            tmp(i)%bytes => msg%segs(i)%bytes
             tmp(i)%len = msg%segs(i)%len
+            tmp(i)%owned = msg%segs(i)%owned
+            msg%segs(i)%bytes => null()
          end do
          call move_alloc(tmp, msg%segs)
       end if
@@ -140,18 +171,22 @@ contains
 
    !> Grow (or create) a segment's storage to at least cap_bytes, preserving
    !> contents. Indices stay valid: offsets are array indices, not addresses.
+   !> Growing a view copies it into owned storage first.
    subroutine seg_reserve(seg, cap_bytes)
       type(capnp_segment_t), intent(inout) :: seg
       integer(int64), intent(in) :: cap_bytes
-      integer(int8), allocatable :: tmp(:)
-      if (.not. allocated(seg%bytes)) then
+      integer(int8), pointer :: tmp(:)
+      if (.not. associated(seg%bytes)) then
          allocate (seg%bytes(0:cap_bytes - 1))
+         seg%owned = .true.
          return
       end if
       if (size(seg%bytes, kind=int64) >= cap_bytes) return
       allocate (tmp(0:cap_bytes - 1))
-      tmp(0:seg%len - 1) = seg%bytes(0:seg%len - 1)
-      call move_alloc(tmp, seg%bytes)
+      if (seg%len > 0_int64) tmp(0:seg%len - 1) = seg%bytes(0:seg%len - 1)
+      if (seg%owned) deallocate (seg%bytes)
+      seg%bytes => tmp
+      seg%owned = .true.
    end subroutine seg_reserve
 
 end module capnp_arena

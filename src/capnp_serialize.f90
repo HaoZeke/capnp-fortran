@@ -13,6 +13,7 @@ module capnp_serialize
    private
 
    public :: capnp_serialize_bytes, capnp_deserialize_bytes
+   public :: capnp_deserialize_view
    public :: capnp_write_file, capnp_read_file
 
 contains
@@ -52,15 +53,81 @@ contains
    !> Parse a framed byte buffer into a reader message (segments copied).
    subroutine capnp_deserialize_bytes(bytes, msg, err, traversal_words, depth_limit)
       integer(int8), intent(in) :: bytes(0:)
-      type(capnp_message_t), intent(out) :: msg
+      type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
       integer, intent(in), optional :: depth_limit
-      integer(int64) :: nsegs64, header_bytes, pos, n
+      integer(int64) :: pos, n
       integer :: i, nsegs
-      err = CAPNP_OK
+      call capnp_message_free(msg)
+      call parse_header(bytes, nsegs, pos, err)
+      if (err /= CAPNP_OK) return
       if (present(traversal_words)) msg%traversal_words = traversal_words
       if (present(depth_limit)) msg%depth_limit = depth_limit
+      msg%is_builder = .false.
+      msg%nsegs = nsegs
+      allocate (msg%segs(nsegs))
+      do i = 1, nsegs
+         n = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))*CAPNP_WORD_BYTES
+         if (pos + n > size(bytes, kind=int64)) then
+            err = CAPNP_ERR_FRAMING
+            return
+         end if
+         allocate (msg%segs(i)%bytes(0:max(n, 8_int64) - 1))
+         msg%segs(i)%owned = .true.
+         msg%segs(i)%bytes = 0_int8
+         if (n > 0_int64) msg%segs(i)%bytes(0:n - 1) = bytes(pos:pos + n - 1)
+         msg%segs(i)%len = n
+         pos = pos + n
+      end do
+   end subroutine capnp_deserialize_bytes
+
+   !> Zero-copy variant (capn_init_mem parity): segments alias slices of the
+   !> caller's buffer, which must be a target and outlive the message. The
+   !> message is a reader; builders always own their storage.
+   subroutine capnp_deserialize_view(bytes, msg, err, traversal_words, depth_limit)
+      integer(int8), intent(in), target :: bytes(0:)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(out) :: err
+      integer(int64), intent(in), optional :: traversal_words
+      integer, intent(in), optional :: depth_limit
+      integer(int64) :: pos, n
+      integer :: i, nsegs
+      call capnp_message_free(msg)
+      call parse_header(bytes, nsegs, pos, err)
+      if (err /= CAPNP_OK) return
+      if (present(traversal_words)) msg%traversal_words = traversal_words
+      if (present(depth_limit)) msg%depth_limit = depth_limit
+      msg%is_builder = .false.
+      msg%nsegs = nsegs
+      allocate (msg%segs(nsegs))
+      do i = 1, nsegs
+         n = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))*CAPNP_WORD_BYTES
+         if (pos + n > size(bytes, kind=int64)) then
+            err = CAPNP_ERR_FRAMING
+            return
+         end if
+         if (n > 0_int64) then
+            msg%segs(i)%bytes(0:n - 1) => bytes(pos:pos + n - 1)
+         else
+            msg%segs(i)%bytes => null()
+         end if
+         msg%segs(i)%owned = .false.
+         msg%segs(i)%len = n
+         pos = pos + n
+      end do
+   end subroutine capnp_deserialize_view
+
+   !> Validate the segment table; nsegs and the first content byte out.
+   subroutine parse_header(bytes, nsegs, content_pos, err)
+      integer(int8), intent(in) :: bytes(0:)
+      integer, intent(out) :: nsegs
+      integer(int64), intent(out) :: content_pos
+      integer, intent(out) :: err
+      integer(int64) :: nsegs64
+      err = CAPNP_OK
+      nsegs = 0
+      content_pos = 0_int64
       if (size(bytes, kind=int64) < 8_int64) then
          err = CAPNP_ERR_FRAMING
          return
@@ -71,28 +138,12 @@ contains
          return
       end if
       nsegs = int(nsegs64)
-      header_bytes = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64*8_int64
-      if (size(bytes, kind=int64) < header_bytes) then
+      content_pos = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64*8_int64
+      if (size(bytes, kind=int64) < content_pos) then
          err = CAPNP_ERR_FRAMING
-         return
+         nsegs = 0
       end if
-      msg%is_builder = .false.
-      msg%nsegs = nsegs
-      allocate (msg%segs(nsegs))
-      pos = header_bytes
-      do i = 1, nsegs
-         n = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))*CAPNP_WORD_BYTES
-         if (pos + n > size(bytes, kind=int64)) then
-            err = CAPNP_ERR_FRAMING
-            return
-         end if
-         allocate (msg%segs(i)%bytes(0:max(n, 8_int64) - 1))
-         msg%segs(i)%bytes = 0_int8
-         if (n > 0_int64) msg%segs(i)%bytes(0:n - 1) = bytes(pos:pos + n - 1)
-         msg%segs(i)%len = n
-         pos = pos + n
-      end do
-   end subroutine capnp_deserialize_bytes
+   end subroutine parse_header
 
    subroutine capnp_write_file(path, bytes, err)
       character(len=*), intent(in) :: path

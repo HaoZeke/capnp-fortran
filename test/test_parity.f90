@@ -14,6 +14,7 @@ program test_parity
    call t_list_of_text()
    call t_bulk_accessors()
    call t_incremental_unpack()
+   call t_zero_copy_view()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -222,6 +223,30 @@ contains
       call check_(err == CAPNP_ERR_ARG, 'bulk: size mismatch rejected')
       call capnp_message_free(msg)
    end subroutine t_bulk_accessors
+
+   !> A view reader aliases the caller's buffer: mutating the buffer after
+   !> capnp_deserialize_view must show through the reader (proof of no copy).
+   subroutine t_zero_copy_view()
+      type(capnp_message_t), target :: msg, vr
+      type(capnp_ptr_t) :: root, r
+      integer(int8), allocatable, target :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(root, 0_int64, 100_int32, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_view(bytes, vr, err)
+      call check_(err == CAPNP_OK, 'view: deserializes')
+      r = capnp_root(vr, err)
+      call check_(capnp_get_i32(r, 0_int64) == 100_int32, 'view: reads value')
+      ! Data word starts at byte 16 (8 header + 8 root pointer).
+      bytes(16) = 101_int8
+      call check_(capnp_get_i32(r, 0_int64) == 101_int32, 'view: aliases caller buffer')
+      call capnp_message_free(vr) ! must not free the caller's buffer
+      call check_(allocated(bytes) .and. bytes(16) == 101_int8, 'view: free leaves buffer')
+      call capnp_message_free(msg)
+   end subroutine t_zero_copy_view
 
    !> The incremental unpacker must reproduce whole-buffer capnp_unpack for
    !> every chunk split position of the spec vector plus escape runs.

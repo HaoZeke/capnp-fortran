@@ -417,8 +417,43 @@ contains
       call w('   type :: '//tn//'_t')
       call w('      type(capnp_ptr_t) :: p')
       call w('   end type '//tn//'_t')
+      call emit_union_tag_decls(np, tn, err)
       call w('')
    end subroutine emit_struct_decl
+
+   !> Named tag constants for union members: <PREFIX>_<FIELD>_WHICH, the
+   !> value <prefix>_which(h) returns when that member is active.
+   recursive subroutine emit_union_tag_decls(np, pfx, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=*), intent(in) :: pfx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f
+      character(len=:), allocatable :: fn
+      integer(int64) :: i
+      integer :: disc, gidx
+      fl = node_struct_fields(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         call field_name(f, fn, err)
+         if (err /= CAPNP_OK) return
+         disc = field_discriminant(f)
+         if (disc /= NO_DISCRIMINANT) then
+            call w('   integer, parameter :: '//upcase(pfx)//'_'// &
+                   upcase(snake(fn))//'_WHICH = '//itoa(int(disc, int64)))
+         end if
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = find_node(field_group_type_id(f))
+            if (gidx == 0) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            call emit_union_tag_decls(g_nodes(gidx)%p, pfx//'_'//snake(fn), err)
+            if (err /= CAPNP_OK) return
+         end if
+      end do
+   end subroutine emit_union_tag_decls
 
    subroutine emit_struct_procs(np, err)
       type(capnp_ptr_t), intent(in) :: np

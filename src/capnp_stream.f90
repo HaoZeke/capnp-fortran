@@ -26,7 +26,7 @@ contains
 
    subroutine capnp_deserialize_packed_bytes(bytes, msg, err, traversal_words, depth_limit)
       integer(int8), intent(in) :: bytes(0:)
-      type(capnp_message_t), intent(out) :: msg
+      type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
       integer, intent(in), optional :: depth_limit
@@ -48,7 +48,7 @@ contains
 
    subroutine capnp_read_message(path, msg, err)
       character(len=*), intent(in) :: path
-      type(capnp_message_t), intent(out) :: msg
+      type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
       call capnp_read_file(path, bytes, err)
@@ -68,7 +68,7 @@ contains
 
    subroutine capnp_read_message_packed(path, msg, err)
       character(len=*), intent(in) :: path
-      type(capnp_message_t), intent(out) :: msg
+      type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
       call capnp_read_file(path, bytes, err)
