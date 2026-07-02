@@ -19,6 +19,7 @@ capnp_fsrc = files(
   'src/capnp_union.f90',
   'src/capnp_serialize.f90',
   'src/capnp_stream.f90',
+  'src/capnp_canonical.f90',
   'src/capnp.f90',
   'src/capnp_cabi.f90',
 )
