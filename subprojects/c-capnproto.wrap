@@ -1,0 +1,10 @@
+[wrap-git]
+url = https://github.com/opensourcerouting/c-capnproto.git
+revision = master
+depth = 1
+
+# c-capnproto ships its own autotools/cmake build, which we do not use: the
+# top-level meson.build compiles lib/capn.c, lib/capn-malloc.c and
+# lib/capn-stream.c directly from the fetched tree. This wrap only fetches the
+# sources. Run `meson subprojects download` to populate subprojects/c-capnproto,
+# or clone manually (see interop/README.md).
