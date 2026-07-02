@@ -1,0 +1,20 @@
+name = "capnp"
+version = "0.1.0"
+license = "MIT"
+author = "Rohit Goswami"
+maintainer = "rgoswami@ieee.org"
+copyright = "Copyright 2026, Rohit Goswami"
+description = "Native modern-Fortran implementation of Cap'n Proto serialization"
+
+[build]
+auto-executables = false
+auto-tests = true
+auto-examples = false
+
+[library]
+source-dir = "src"
+
+[fortran]
+implicit-typing = false
+implicit-external = false
+source-form = "free"
