@@ -24,7 +24,7 @@ program capnpc_fortran
       call get_command_argument(1, arg)
       call capnp_read_file(trim(arg), bytes, err)
    else
-      call capnp_read_file('/dev/stdin', bytes, err)
+      call read_stdin(bytes, err)
    end if
    if (err /= CAPNP_OK) call die('cannot read CodeGeneratorRequest', err)
 
@@ -51,6 +51,43 @@ program capnpc_fortran
    end do
 
 contains
+
+   !> Drain stdin (a pipe: no queryable size) into a byte buffer.
+   subroutine read_stdin(b, err)
+      integer(int8), allocatable, intent(out) :: b(:)
+      integer, intent(out) :: err
+      integer(int8), allocatable :: tmp(:)
+      integer(int8) :: byte
+      integer(int64) :: n, cap
+      integer :: unit, ios
+      err = CAPNP_OK
+      open (newunit=unit, file='/dev/stdin', access='stream', form='unformatted', &
+            action='read', iostat=ios)
+      if (ios /= 0) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      cap = 65536_int64
+      allocate (b(0:cap - 1))
+      n = 0_int64
+      do
+         read (unit, iostat=ios) byte
+         if (ios /= 0) exit
+         if (n == cap) then
+            allocate (tmp(0:2*cap - 1))
+            tmp(0:cap - 1) = b
+            call move_alloc(tmp, b)
+            cap = 2*cap
+         end if
+         b(n) = byte
+         n = n + 1
+      end do
+      close (unit)
+      allocate (tmp(0:max(n, 1_int64) - 1))
+      if (n > 0_int64) tmp(0:n - 1) = b(0:n - 1)
+      call move_alloc(tmp, b)
+      if (n == 0_int64) err = CAPNP_ERR_IO
+   end subroutine read_stdin
 
    subroutine die(what, code)
       character(len=*), intent(in) :: what
