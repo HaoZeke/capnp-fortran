@@ -56,3 +56,4 @@ Testing/
 *.tmp
 # vcpkg
 vcpkg_installed/
+third_party/

@@ -27,10 +27,12 @@ capnp_fsrc = files(
 capnp_flib = static_library('capnp_f', capnp_fsrc)
 
 # c-capnproto reference runtime. It ships autotools/cmake, but the runtime is
-# just three .c files plus its headers, so we compile those directly from the
-# fetched subproject tree (see subprojects/c-capnproto.wrap and interop/README.md).
+# just three .c files plus its headers, so we compile those directly from a
+# vendored clone (see interop/README.md).
 fs = import('fs')
-ccapnp_lib_dir = 'subprojects/c-capnproto/lib'
+# third_party/, not subprojects/: meson sandboxes subprojects/ against direct
+# file references, and c-capnproto has no meson build of its own.
+ccapnp_lib_dir = 'third_party/c-capnproto/lib'
 have_ccapnp = fs.is_dir(ccapnp_lib_dir)
 
 if have_ccapnp
@@ -51,9 +53,9 @@ else
   ccapnp_lib = []
   message(
     'c-capnproto sources not found under ' + ccapnp_lib_dir + '; the golden '
-    + 'master tests will be skipped. Fetch with `meson subprojects download` '
-    + 'or `git clone https://github.com/opensourcerouting/c-capnproto '
-    + 'subprojects/c-capnproto`.',
+    + 'master tests will be skipped. Fetch with `git clone '
+    + 'https://github.com/opensourcerouting/c-capnproto '
+    + 'third_party/c-capnproto`.',
   )
 endif
 

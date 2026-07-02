@@ -13,19 +13,14 @@ Everything needed is in the `interop` pixi environment.
 ## Fetch the reference sources
 
 c-capnproto ships an autotools/cmake build we do not use; the Meson build
-compiles its three runtime `.c` files directly. Fetch them once via the wrap:
+compiles its three runtime `.c` files directly from a vendored clone
+(`third_party/`, untracked):
 
 ```console
-$ pixi run -e interop meson subprojects download
+$ git clone https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
 ```
 
-or clone manually into the expected location:
-
-```console
-$ git clone https://github.com/opensourcerouting/c-capnproto subprojects/c-capnproto
-```
-
-The sources must end up under `subprojects/c-capnproto/lib/` (`capn.c`,
+The sources must end up under `third_party/c-capnproto/lib/` (`capn.c`,
 `capn-malloc.c`, `capn-stream.c`, `capnp_c.h`, `capnp_priv.h`). If they are
 absent, `meson setup` still succeeds but the golden-master executable is
 skipped with a message.
