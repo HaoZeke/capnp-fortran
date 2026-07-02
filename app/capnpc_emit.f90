@@ -62,7 +62,9 @@ contains
       do i = 1, len(s)
          c = s(i:i)
          if (c >= 'A' .and. c <= 'Z') then
-            if (i > 1) o = o//'_'
+            if (i > 1) then
+               if (o(len(o):len(o)) /= '_') o = o//'_'
+            end if
             o = o//achar(iachar(c) + 32)
          else
             o = o//c
