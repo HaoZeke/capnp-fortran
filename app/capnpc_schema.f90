@@ -51,11 +51,12 @@ module capnpc_schema
    public :: node_struct_fields, node_enumerants, node_const_type, node_const_value
    public :: field_name, field_code_order, field_discriminant, field_which
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
+   public :: field_slot_had_default
    public :: enumerant_name
    public :: type_which, type_list_element, type_type_id
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
-   public :: value_text, value_enum
+   public :: value_text, value_enum, value_pointer, value_data
 
 contains
 
@@ -257,6 +258,12 @@ contains
       v = capnp_get_i64(p, 16_int64)
    end function field_group_type_id
 
+   function field_slot_had_default(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      logical :: v
+      v = capnp_get_bool(p, 128_int64)
+   end function field_slot_had_default
+
    ! --- Enumerant: 1 data word, 2 ptrs -----------------------------------
 
    subroutine enumerant_name(p, s, err)
@@ -361,6 +368,21 @@ contains
       real(real64) :: v
       v = capnp_get_f64(p, 8_int64)
    end function value_f64
+
+   !> The default object behind a struct/list/anyPointer Value variant.
+   function value_pointer(p, err) result(q)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      q = capnp_getp(p, 0, err)
+   end function value_pointer
+
+   subroutine value_data(p, b, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int8), allocatable, intent(out) :: b(:)
+      integer, intent(out) :: err
+      call capnp_get_data(p, 0, b, err)
+   end subroutine value_data
 
    subroutine value_text(p, s, err)
       type(capnp_ptr_t), intent(in) :: p
