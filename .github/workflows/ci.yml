@@ -1,0 +1,48 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: default
+      - name: fypp templates are in sync
+        run: |
+          pixi run gen
+          git diff --exit-code -- src/
+      - name: build
+        run: pixi run build
+      - name: test
+        run: pixi run test
+      - name: codegen output matches checked-in modules
+        run: |
+          BIN=$(find build -name capnpc-fortran -type f | head -1)
+          mkdir -p /tmp/gen && cd /tmp/gen
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/addressbook.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/kitchen.cgr.bin"
+          diff addressbook_capnp.f90 "$GITHUB_WORKSPACE/test/generated/addressbook_capnp.f90"
+          diff kitchen_capnp.f90 "$GITHUB_WORKSPACE/test/generated/kitchen_capnp.f90"
+          diff common_capnp.f90 "$GITHUB_WORKSPACE/test/generated/common_capnp.f90"
+
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: interop
+      - name: fetch c-capnproto
+        run: git clone --depth 1 https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+      - name: build
+        run: |
+          pixi run -e interop meson setup build-interop .
+          pixi run -e interop meson compile -C build-interop
+      - name: golden master vs c-capnproto
+        run: pixi run -e interop meson test -C build-interop -v
