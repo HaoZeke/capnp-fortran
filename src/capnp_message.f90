@@ -23,6 +23,9 @@ module capnp_message
    public :: capnp_get_text, capnp_set_text, capnp_get_data, capnp_set_data
    public :: capnp_get_bool, capnp_set_bool
    public :: capnp_list_get_bool, capnp_list_set_bool
+   public :: capnp_copy
+   public :: capnp_get_u64, capnp_set_u64
+   public :: capnp_list_get_text, capnp_list_set_text
    public :: capnp_get_i8, capnp_set_i8
    public :: capnp_list_get_i8, capnp_list_set_i8
    public :: capnp_get_i16, capnp_set_i16
@@ -41,6 +44,9 @@ module capnp_message
 
    !> Resolved object handle; value type, cheap to copy. For composite lists
    !> off points past the tag word and dwords/pwords hold the element sizes.
+   !> dbits >= 0 marks a synthetic struct view over a primitive list element
+   !> (schema-evolution upgrade); reads beyond dbits yield defaults and
+   !> writes beyond it are bounds errors.
    type :: capnp_ptr_t
       integer :: kind = CAPNP_PK_NULL
       integer :: seg = 0
@@ -50,6 +56,7 @@ module capnp_message
       integer :: esize = -1
       integer(int64) :: nelem = 0_int64
       integer(int64) :: capidx = 0_int64
+      integer(int64) :: dbits = -1_int64
       type(capnp_message_t), pointer :: msg => null()
    end type capnp_ptr_t
 
@@ -270,6 +277,18 @@ contains
       r = ((nbytes + 7_int64)/8_int64)*8_int64
    end function word_round
 
+   !> Accessible data-section size in bits: the synthetic-view limit when
+   !> set, the full section otherwise.
+   pure function data_bits(p) result(b)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: b
+      if (p%dbits >= 0_int64) then
+         b = p%dbits
+      else
+         b = int(p%dwords, int64)*64_int64
+      end if
+   end function data_bits
+
    ! ------------------------------------------------------------------
    ! Roots and pointer fields
    ! ------------------------------------------------------------------
@@ -307,15 +326,22 @@ contains
          if (i < 0 .or. i >= p%pwords) return
          slot = p%off + int(p%dwords, int64)*8_int64 + int(i, int64)*8_int64
       case (CAPNP_PK_LIST)
-         if (p%esize /= CAPNP_SZ_PTR) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
          if (i < 0 .or. int(i, int64) >= p%nelem) then
             err = CAPNP_ERR_BOUNDS
             return
          end if
-         slot = p%off + int(i, int64)*8_int64
+         select case (p%esize)
+         case (CAPNP_SZ_PTR)
+            slot = p%off + int(i, int64)*8_int64
+         case (CAPNP_SZ_COMPOSITE)
+            ! Downgrade view: first pointer of the element's pointer section.
+            if (p%pwords < 1) return
+            slot = p%off + int(i, int64)*int(p%dwords + p%pwords, int64)*8_int64 &
+                   + int(p%dwords, int64)*8_int64
+         case default
+            err = CAPNP_ERR_KIND
+            return
+         end select
       case default
          err = CAPNP_ERR_KIND
          return
@@ -323,17 +349,21 @@ contains
       call resolve_at(p%msg, p%seg, slot, 1, q, err)
    end function capnp_getp
 
-   !> Struct element i of a composite list.
+   !> Struct element i of a struct list. Composite lists give the real
+   !> element; primitive and pointer lists give the schema-evolution upgrade
+   !> view (the element is field @0 of a synthetic struct, per the spec's
+   !> list-upgrade rules). Bit lists cannot upgrade.
    function capnp_list_get_struct(p, i, err) result(q)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: i
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      integer :: sb
       err = CAPNP_OK
       q = capnp_ptr_t()
       if (.not. associated(p%msg)) return
       q%msg => p%msg
-      if (p%kind /= CAPNP_PK_LIST .or. p%esize /= CAPNP_SZ_COMPOSITE) then
+      if (p%kind /= CAPNP_PK_LIST) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -341,11 +371,31 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
-      q%kind = CAPNP_PK_STRUCT
-      q%seg = p%seg
-      q%off = p%off + int(i, int64)*int(p%dwords + p%pwords, int64)*8_int64
-      q%dwords = p%dwords
-      q%pwords = p%pwords
+      select case (p%esize)
+      case (CAPNP_SZ_COMPOSITE)
+         q%kind = CAPNP_PK_STRUCT
+         q%seg = p%seg
+         q%off = p%off + int(i, int64)*int(p%dwords + p%pwords, int64)*8_int64
+         q%dwords = p%dwords
+         q%pwords = p%pwords
+      case (CAPNP_SZ_BYTE, CAPNP_SZ_TWO, CAPNP_SZ_FOUR, CAPNP_SZ_EIGHT)
+         sb = capnp_list_step_bits(p%esize)
+         q%kind = CAPNP_PK_STRUCT
+         q%seg = p%seg
+         q%off = p%off + int(i, int64)*int(sb/8, int64)
+         q%dwords = 1
+         q%pwords = 0
+         q%dbits = int(sb, int64)
+      case (CAPNP_SZ_PTR)
+         q%kind = CAPNP_PK_STRUCT
+         q%seg = p%seg
+         q%off = p%off + int(i, int64)*8_int64
+         q%dwords = 0
+         q%pwords = 1
+         q%dbits = 0_int64
+      case default
+         err = CAPNP_ERR_KIND
+      end select
    end function capnp_list_get_struct
 
    !> Element i of a pointer list (alias of capnp_getp for lists).
@@ -449,7 +499,7 @@ contains
    !> reference q. Same-segment references encode relative struct/list
    !> pointers; cross-segment references get a far pointer via a landing pad
    !> in q's segment.
-   subroutine capnp_setp(p, i, q, err)
+   recursive subroutine capnp_setp(p, i, q, err)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: i
       type(capnp_ptr_t), intent(in) :: q
@@ -514,7 +564,7 @@ contains
       end select
    end function local_ptr_word
 
-   subroutine write_ptr_slot(msg, sseg, slot, q, err)
+   recursive subroutine write_ptr_slot(msg, sseg, slot, q, err)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: sseg
       integer(int64), intent(in) :: slot
@@ -531,8 +581,14 @@ contains
          return
       end if
       if (.not. associated(q%msg, msg)) then
-         ! Cross-message adoption is a later feature (deep copy).
-         err = CAPNP_ERR_ARG
+         ! Cross-message reference: deep-copy the object into this message
+         ! (capnp C++ set() semantics), then link locally.
+         block
+            type(capnp_ptr_t) :: c
+            c = capnp_copy(msg, q, err)
+            if (err /= CAPNP_OK) return
+            call write_ptr_slot(msg, sseg, slot, c, err)
+         end block
          return
       end if
       if (q%kind == CAPNP_PK_CAP) then
@@ -552,6 +608,35 @@ contains
       end if
    end subroutine write_ptr_slot
 
+   !> Byte address of element i viewed as a want_bits scalar. A
+   !> matching-width primitive list addresses the element directly; a
+   !> composite list downgrades to field @0 of each element (list-upgrade
+   !> rules); anything else is a kind error.
+   function list_elem_base(p, i, want_bits, err) result(base)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: i
+      integer, intent(in) :: want_bits
+      integer, intent(out) :: err
+      integer(int64) :: base
+      err = CAPNP_OK
+      base = 0_int64
+      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (i < 0_int64 .or. i >= p%nelem) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (capnp_list_step_bits(p%esize) == want_bits .and. p%esize /= CAPNP_SZ_PTR) then
+         base = p%off + i*int(want_bits/8, int64)
+      else if (p%esize == CAPNP_SZ_COMPOSITE .and. p%dwords >= 1) then
+         base = p%off + i*int(p%dwords + p%pwords, int64)*8_int64
+      else
+         err = CAPNP_ERR_KIND
+      end if
+   end function list_elem_base
+
    ! ------------------------------------------------------------------
    ! Primitive struct fields. Reads past the data section return the
    ! default (spec: short structs from older schema versions). Writes past
@@ -567,7 +652,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 1_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 1_int64)*8_int64 > data_bits(p)) return
       v = ieor(cp_get_i8 (p%msg%segs(p%seg)%bytes, p%off + off), d)
    end function capnp_get_i8
 
@@ -585,7 +670,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 1_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 1_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -597,18 +682,12 @@ contains
       integer(int64), intent(in) :: i
       integer, intent(out) :: err
       integer(int8) :: v
+      integer(int64) :: base
       err = CAPNP_OK
       v = 0_int8
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 8) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      v = cp_get_i8 (p%msg%segs(p%seg)%bytes, p%off + i*1_int64)
+      base = list_elem_base(p, i, 8, err)
+      if (err /= CAPNP_OK) return
+      v = cp_get_i8 (p%msg%segs(p%seg)%bytes, base)
    end function capnp_list_get_i8
 
    subroutine capnp_list_set_i8 (p, i, v, err)
@@ -616,17 +695,11 @@ contains
       integer(int64), intent(in) :: i
       integer(int8), intent(in) :: v
       integer, intent(out) :: err
+      integer(int64) :: base
       err = CAPNP_OK
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 8) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      call cp_put_i8 (p%msg%segs(p%seg)%bytes, p%off + i*1_int64, v)
+      base = list_elem_base(p, i, 8, err)
+      if (err /= CAPNP_OK) return
+      call cp_put_i8 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i8
 
    function capnp_get_i16 (p, off, default) result(v)
@@ -638,7 +711,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 2_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 2_int64)*8_int64 > data_bits(p)) return
       v = ieor(cp_get_i16 (p%msg%segs(p%seg)%bytes, p%off + off), d)
    end function capnp_get_i16
 
@@ -656,7 +729,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 2_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 2_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -668,18 +741,12 @@ contains
       integer(int64), intent(in) :: i
       integer, intent(out) :: err
       integer(int16) :: v
+      integer(int64) :: base
       err = CAPNP_OK
       v = 0_int16
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 16) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      v = cp_get_i16 (p%msg%segs(p%seg)%bytes, p%off + i*2_int64)
+      base = list_elem_base(p, i, 16, err)
+      if (err /= CAPNP_OK) return
+      v = cp_get_i16 (p%msg%segs(p%seg)%bytes, base)
    end function capnp_list_get_i16
 
    subroutine capnp_list_set_i16 (p, i, v, err)
@@ -687,17 +754,11 @@ contains
       integer(int64), intent(in) :: i
       integer(int16), intent(in) :: v
       integer, intent(out) :: err
+      integer(int64) :: base
       err = CAPNP_OK
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 16) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      call cp_put_i16 (p%msg%segs(p%seg)%bytes, p%off + i*2_int64, v)
+      base = list_elem_base(p, i, 16, err)
+      if (err /= CAPNP_OK) return
+      call cp_put_i16 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i16
 
    function capnp_get_i32 (p, off, default) result(v)
@@ -709,7 +770,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) return
       v = ieor(cp_get_i32 (p%msg%segs(p%seg)%bytes, p%off + off), d)
    end function capnp_get_i32
 
@@ -727,7 +788,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -739,18 +800,12 @@ contains
       integer(int64), intent(in) :: i
       integer, intent(out) :: err
       integer(int32) :: v
+      integer(int64) :: base
       err = CAPNP_OK
       v = 0_int32
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 32) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      v = cp_get_i32 (p%msg%segs(p%seg)%bytes, p%off + i*4_int64)
+      base = list_elem_base(p, i, 32, err)
+      if (err /= CAPNP_OK) return
+      v = cp_get_i32 (p%msg%segs(p%seg)%bytes, base)
    end function capnp_list_get_i32
 
    subroutine capnp_list_set_i32 (p, i, v, err)
@@ -758,17 +813,11 @@ contains
       integer(int64), intent(in) :: i
       integer(int32), intent(in) :: v
       integer, intent(out) :: err
+      integer(int64) :: base
       err = CAPNP_OK
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 32) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      call cp_put_i32 (p%msg%segs(p%seg)%bytes, p%off + i*4_int64, v)
+      base = list_elem_base(p, i, 32, err)
+      if (err /= CAPNP_OK) return
+      call cp_put_i32 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i32
 
    function capnp_get_i64 (p, off, default) result(v)
@@ -780,7 +829,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 8_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 8_int64)*8_int64 > data_bits(p)) return
       v = ieor(cp_get_i64 (p%msg%segs(p%seg)%bytes, p%off + off), d)
    end function capnp_get_i64
 
@@ -798,7 +847,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 8_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 8_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -810,18 +859,12 @@ contains
       integer(int64), intent(in) :: i
       integer, intent(out) :: err
       integer(int64) :: v
+      integer(int64) :: base
       err = CAPNP_OK
       v = 0_int64
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 64) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      v = cp_get_i64 (p%msg%segs(p%seg)%bytes, p%off + i*8_int64)
+      base = list_elem_base(p, i, 64, err)
+      if (err /= CAPNP_OK) return
+      v = cp_get_i64 (p%msg%segs(p%seg)%bytes, base)
    end function capnp_list_get_i64
 
    subroutine capnp_list_set_i64 (p, i, v, err)
@@ -829,17 +872,11 @@ contains
       integer(int64), intent(in) :: i
       integer(int64), intent(in) :: v
       integer, intent(out) :: err
+      integer(int64) :: base
       err = CAPNP_OK
-      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg) .or. &
-          capnp_list_step_bits(p%esize) /= 64) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      if (i < 0_int64 .or. i >= p%nelem) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      call cp_put_i64 (p%msg%segs(p%seg)%bytes, p%off + i*8_int64, v)
+      base = list_elem_base(p, i, 64, err)
+      if (err /= CAPNP_OK) return
+      call cp_put_i64 (p%msg%segs(p%seg)%bytes, base, v)
    end subroutine capnp_list_set_i64
 
    ! Unsigned views: same wire bytes, widened into the next signed kind so
@@ -853,7 +890,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 1_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 1_int64)*8_int64 > data_bits(p)) return
       v = ieor(iand(int(cp_get_i8 (p%msg%segs(p%seg)%bytes, p%off + off), int16), &
                     255_int16), d)
    end function capnp_get_u8
@@ -873,7 +910,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 1_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 1_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -892,7 +929,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 2_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 2_int64)*8_int64 > data_bits(p)) return
       v = ieor(iand(int(cp_get_i16 (p%msg%segs(p%seg)%bytes, p%off + off), int32), &
                     65535_int32), d)
    end function capnp_get_u16
@@ -912,7 +949,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 2_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 2_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -931,7 +968,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) return
       v = ieor(iand(int(cp_get_i32 (p%msg%segs(p%seg)%bytes, p%off + off), int64), &
                     4294967295_int64), d)
    end function capnp_get_u32
@@ -951,7 +988,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -972,7 +1009,7 @@ contains
       if (present(default)) d = cp_f32_bits(default)
       x = cp_bits_f32 (d)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) return
       x = cp_bits_f32 (ieor(cp_get_i32 (p%msg%segs(p%seg)%bytes, p%off + off), d))
    end function capnp_get_f32
 
@@ -990,7 +1027,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 4_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 4_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -1023,7 +1060,7 @@ contains
       if (present(default)) d = cp_f64_bits(default)
       x = cp_bits_f64 (d)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (off < 0_int64 .or. off + 8_int64 > int(p%dwords, int64)*8_int64) return
+      if (off < 0_int64 .or. (off + 8_int64)*8_int64 > data_bits(p)) return
       x = cp_bits_f64 (ieor(cp_get_i64 (p%msg%segs(p%seg)%bytes, p%off + off), d))
    end function capnp_get_f64
 
@@ -1041,7 +1078,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (off < 0_int64 .or. off + 8_int64 > int(p%dwords, int64)*8_int64) then
+      if (off < 0_int64 .or. (off + 8_int64)*8_int64 > data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -1079,7 +1116,7 @@ contains
       if (present(default)) d = default
       v = d
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) return
-      if (bit_off < 0_int64 .or. bit_off >= int(p%dwords, int64)*64_int64) return
+      if (bit_off < 0_int64 .or. bit_off >= data_bits(p)) return
       byte = p%off + bit_off/8_int64
       bit = int(mod(bit_off, 8_int64))
       v = btest(p%msg%segs(p%seg)%bytes(byte), bit) .neqv. d
@@ -1101,7 +1138,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      if (bit_off < 0_int64 .or. bit_off >= int(p%dwords, int64)*64_int64) then
+      if (bit_off < 0_int64 .or. bit_off >= data_bits(p)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -1247,5 +1284,147 @@ contains
       end if
       call capnp_setp(p, i, q, err)
    end subroutine capnp_set_data
+
+   !> Text element i of a List(Text) (or any pointer/composite list whose
+   !> elements are text).
+   subroutine capnp_list_get_text(p, i, str, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      character(len=:), allocatable, intent(out) :: str
+      integer, intent(out) :: err
+      call capnp_get_text(p, i, str, err)
+   end subroutine capnp_list_get_text
+
+   subroutine capnp_list_set_text(p, i, str, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      character(len=*), intent(in) :: str
+      integer, intent(out) :: err
+      call capnp_set_text(p, i, str, err)
+   end subroutine capnp_list_set_text
+
+   ! ------------------------------------------------------------------
+   ! u64: identical wire bytes to i64, kept for capnp-c surface parity.
+   ! The int64 container carries the two's-complement bit pattern.
+   ! ------------------------------------------------------------------
+
+   function capnp_get_u64(p, off, default) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: off
+      integer(int64), intent(in), optional :: default
+      integer(int64) :: v
+      v = capnp_get_i64(p, off, default)
+   end function capnp_get_u64
+
+   subroutine capnp_set_u64(p, off, v, err, default)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: off
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      integer(int64), intent(in), optional :: default
+      call capnp_set_i64(p, off, v, err, default)
+   end subroutine capnp_set_u64
+
+   ! ------------------------------------------------------------------
+   ! Deep copy: clone an object (from any message) into a builder message.
+   ! This is what capnp C++ set() does for cross-message pointers and the
+   ! basis of orphan adoption.
+   ! ------------------------------------------------------------------
+
+   recursive function capnp_copy(msg, src, err) result(q)
+      type(capnp_message_t), intent(inout), target :: msg
+      type(capnp_ptr_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      q = copy_depth(msg, src, 0, err)
+   end function capnp_copy
+
+   recursive function copy_depth(msg, src, depth, err) result(q)
+      type(capnp_message_t), intent(inout), target :: msg
+      type(capnp_ptr_t), intent(in) :: src
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      type(capnp_ptr_t) :: r, c
+      integer(int64) :: i, nb
+      err = CAPNP_OK
+      q = capnp_ptr_t()
+      if (depth > msg%depth_limit) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      select case (src%kind)
+      case (CAPNP_PK_NULL)
+         return
+      case (CAPNP_PK_CAP)
+         q%msg => msg
+         q%kind = CAPNP_PK_CAP
+         q%capidx = src%capidx
+      case (CAPNP_PK_STRUCT)
+         q = capnp_new_struct(msg, src%dwords, src%pwords, err)
+         if (err /= CAPNP_OK) return
+         call copy_struct_body(q, src, depth, err)
+      case (CAPNP_PK_LIST)
+         select case (src%esize)
+         case (CAPNP_SZ_COMPOSITE)
+            q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, err)
+            if (err /= CAPNP_OK) return
+            do i = 0_int64, src%nelem - 1_int64
+               c = capnp_list_get_struct(q, int(i), err)
+               if (err /= CAPNP_OK) return
+               r = capnp_list_get_struct(src, int(i), err)
+               if (err /= CAPNP_OK) return
+               call copy_struct_body(c, r, depth + 1, err)
+               if (err /= CAPNP_OK) return
+            end do
+         case (CAPNP_SZ_PTR)
+            q = capnp_new_list(msg, CAPNP_SZ_PTR, src%nelem, err)
+            if (err /= CAPNP_OK) return
+            do i = 0_int64, src%nelem - 1_int64
+               r = capnp_getp(src, int(i), err)
+               if (err /= CAPNP_OK) return
+               c = copy_depth(msg, r, depth + 1, err)
+               if (err /= CAPNP_OK) return
+               call capnp_setp(q, int(i), c, err)
+               if (err /= CAPNP_OK) return
+            end do
+         case default
+            q = capnp_new_list(msg, src%esize, src%nelem, err)
+            if (err /= CAPNP_OK) return
+            nb = (int(capnp_list_step_bits(src%esize), int64)*src%nelem + 7_int64)/8_int64
+            if (nb > 0_int64) then
+               q%msg%segs(q%seg)%bytes(q%off:q%off + nb - 1) = &
+                  src%msg%segs(src%seg)%bytes(src%off:src%off + nb - 1)
+            end if
+         end select
+      end select
+   end function copy_depth
+
+   !> Copy the contents of struct src into the (already allocated) struct
+   !> dst: overlapping data bytes verbatim, pointer fields recursively.
+   recursive subroutine copy_struct_body(dst, src, depth, err)
+      type(capnp_ptr_t), intent(in) :: dst, src
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: r, c
+      integer(int64) :: nb
+      integer :: i, np
+      err = CAPNP_OK
+      nb = min(int(dst%dwords, int64)*8_int64, (data_bits(src) + 7_int64)/8_int64)
+      if (nb > 0_int64) then
+         dst%msg%segs(dst%seg)%bytes(dst%off:dst%off + nb - 1) = &
+            src%msg%segs(src%seg)%bytes(src%off:src%off + nb - 1)
+      end if
+      np = min(dst%pwords, src%pwords)
+      do i = 0, np - 1
+         r = capnp_getp(src, i, err)
+         if (err /= CAPNP_OK) return
+         if (r%kind == CAPNP_PK_NULL) cycle
+         c = copy_depth(dst%msg, r, depth + 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(dst, i, c, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine copy_struct_body
 
 end module capnp_message
