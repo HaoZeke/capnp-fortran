@@ -15,6 +15,7 @@ program test_parity
    call t_bulk_accessors()
    call t_incremental_unpack()
    call t_zero_copy_view()
+   call t_disown_adopt()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -223,6 +224,30 @@ contains
       call check_(err == CAPNP_ERR_ARG, 'bulk: size mismatch rejected')
       call capnp_message_free(msg)
    end subroutine t_bulk_accessors
+
+   !> Disown detaches a subtree (slot zeroed, storage intact); re-linking it
+   !> elsewhere in the same message is adoption without copy.
+   subroutine t_disown_adopt()
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, kid, orphan, back
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      kid = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(kid, 0_int64, 555_int64, err)
+      call capnp_setp(root, 0, kid, err)
+      call capnp_set_root(msg, root, err)
+
+      orphan = capnp_disown(root, 0, err)
+      call check_(err == CAPNP_OK .and. orphan%kind == CAPNP_PK_STRUCT, 'orphan: disowned')
+      back = capnp_getp(root, 0, err)
+      call check_(err == CAPNP_OK .and. back%kind == CAPNP_PK_NULL, 'orphan: slot cleared')
+      call capnp_setp(root, 1, orphan, err)
+      call check_(err == CAPNP_OK, 'orphan: adopted in new slot')
+      back = capnp_getp(root, 1, err)
+      call check_(capnp_get_i64(back, 0_int64) == 555_int64, 'orphan: contents intact')
+      call capnp_message_free(msg)
+   end subroutine t_disown_adopt
 
    !> A view reader aliases the caller's buffer: mutating the buffer after
    !> capnp_deserialize_view must show through the reader (proof of no copy).

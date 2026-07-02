@@ -26,9 +26,10 @@ module capnp_message
    public :: capnp_get_text, capnp_set_text, capnp_get_data, capnp_set_data
    public :: capnp_get_bool, capnp_set_bool
    public :: capnp_list_get_bool, capnp_list_set_bool
-   public :: capnp_copy
+   public :: capnp_copy, capnp_disown
    public :: capnp_get_u64, capnp_set_u64
    public :: capnp_list_get_text, capnp_list_set_text
+   public :: capnp_list_get_all_bool, capnp_list_set_all_bool
 #:for _, N in INTS
    public :: capnp_get_${N}$, capnp_set_${N}$
    public :: capnp_list_get_${N}$, capnp_list_set_${N}$
@@ -1064,6 +1065,69 @@ contains
       integer(int64), intent(in), optional :: default
       call capnp_set_i64(p, off, v, err, default)
    end subroutine capnp_set_u64
+
+   subroutine capnp_list_get_all_bool(p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      logical, allocatable, intent(out) :: arr(:)
+      integer, intent(out) :: err
+      integer(int64) :: i, n
+      err = CAPNP_OK
+      n = capnp_list_len(p)
+      allocate (arr(0:max(n, 1_int64) - 1))
+      if (n == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0))
+         return
+      end if
+      do i = 0_int64, n - 1_int64
+         arr(i) = capnp_list_get_bool(p, i, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_get_all_bool
+
+   subroutine capnp_list_set_all_bool(p, arr, err)
+      type(capnp_ptr_t), intent(in) :: p
+      logical, intent(in) :: arr(0:)
+      integer, intent(out) :: err
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (size(arr, kind=int64) /= capnp_list_len(p)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      do i = 0_int64, capnp_list_len(p) - 1_int64
+         call capnp_list_set_bool(p, i, arr(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine capnp_list_set_all_bool
+
+   !> Detach pointer field i from struct p, returning the object (orphan
+   !> disown): the slot is zeroed, the object's storage stays put and can be
+   !> re-linked with capnp_setp within the same message.
+   function capnp_disown(p, i, err) result(q)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      integer(int64) :: slot
+      q = capnp_getp(p, i, err)
+      if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
+      if (.not. p%msg%is_builder) then
+         err = CAPNP_ERR_ARG
+         q = capnp_ptr_t()
+         return
+      end if
+      select case (p%kind)
+      case (CAPNP_PK_STRUCT)
+         slot = p%off + int(p%dwords, int64)*8_int64 + int(i, int64)*8_int64
+      case (CAPNP_PK_LIST)
+         slot = p%off + int(i, int64)*8_int64
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      call cp_put_i64(p%msg%segs(p%seg)%bytes, slot, 0_int64)
+   end function capnp_disown
 
    ! ------------------------------------------------------------------
    ! Deep copy: clone an object (from any message) into a builder message.
