@@ -9,6 +9,7 @@ module capnp
    use capnp_packed
    use capnp_union
    use capnp_stream
+   use capnp_canonical
    implicit none
    public
 end module capnp

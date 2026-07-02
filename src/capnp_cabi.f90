@@ -32,13 +32,13 @@ contains
    ! Internal helpers (not part of the C ABI).
    ! ------------------------------------------------------------------
 
-   pure logical function msg_ok(h)
+   logical function msg_ok(h)
       integer, intent(in) :: h
       msg_ok = (h >= 1 .and. h <= MAXMSG)
       if (msg_ok) msg_ok = g_used(h)
    end function msg_ok
 
-   pure logical function obj_ok(h, id)
+   logical function obj_ok(h, id)
       integer, intent(in) :: h, id
       obj_ok = msg_ok(h)
       if (obj_ok) obj_ok = (id >= 1 .and. id <= g_nobj(h))
