@@ -7,6 +7,8 @@ module capnp
    use capnp_message
    use capnp_serialize
    use capnp_packed
+   use capnp_union
+   use capnp_stream
    implicit none
    public
 end module capnp
