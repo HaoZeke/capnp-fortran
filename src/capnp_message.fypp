@@ -850,6 +850,7 @@ contains
       end if
       n = q%nelem - 1_int64 ! trailing NUL
       if (n <= 0_int64) return
+      deallocate (str)
       allocate (character(len=n) :: str)
       do j = 0_int64, n - 1_int64
          str(j + 1:j + 1) = char(cp_u8(q%msg%segs(q%seg)%bytes(q%off + j)))
