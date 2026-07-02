@@ -1,0 +1,27 @@
+[workspace]
+name = "capnp-fortran"
+description = "Native modern-Fortran Cap'n Proto implementation"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+fypp = ">=3.2"
+fpm = ">=0.10"
+gfortran = ">=13"
+capnproto = ">=1.0"
+
+[feature.interop.dependencies]
+meson = ">=1.4"
+ninja = "*"
+cmocka = "*"
+pkg-config = "*"
+c-compiler = "*"
+
+[environments]
+default = []
+interop = ["interop"]
+
+[tasks]
+gen = { cmd = "bash scripts/fypp-gen.sh" }
+build = { cmd = "fpm build" }
+test = { cmd = "fpm test" }
