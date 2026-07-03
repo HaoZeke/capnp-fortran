@@ -1,4 +1,7 @@
-!> Umbrella module: `use capnp` exposes the full public API.
+!> Umbrella module: `use capnp` exposes the serialization API (wire
+!> format, message I/O, packed codec, canonicalization). RPC lives in
+!> `capnp_rpc`, `capnp_rpc_transport`, and `capnp_posix`; the C ABI shim
+!> lives in `capnp_cabi`; none of these are re-exported here.
 module capnp
    use capnp_kinds
    use capnp_endian

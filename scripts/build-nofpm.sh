@@ -37,7 +37,9 @@ TEST_MODULES=(
   test/generated/common_capnp.f90
   test/generated/addressbook_capnp.f90
   test/generated/kitchen_capnp.f90
+  test/generated/adder_capnp.f90
   test/rpc_servers.f90
+  test/rpc_adder_impl.f90
 )
 
 TEST_PROGRAMS=(
@@ -49,6 +51,7 @@ TEST_PROGRAMS=(
   test/test_parity.f90
   test/test_canonical.f90
   test/test_rpc.f90
+  test/test_rpc_typed.f90
 )
 
 OBJS=()

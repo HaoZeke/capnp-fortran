@@ -1,8 +1,11 @@
 # API reference
 
-`use capnp` exposes everything below. Every fallible operation returns an
-`err` code; `CAPNP_OK` (0) means success. Byte buffers are `integer(int8)`
-arrays, 0-based by convention. Word offsets and lengths are `integer(int64)`.
+`use capnp` exposes the serialization API: everything below except the C
+ABI (`capnp_cabi`) and RPC (`capnp_rpc`, `capnp_posix`,
+`capnp_rpc_transport`) sections, which are separate modules used
+explicitly. Every fallible operation returns an `err` code; `CAPNP_OK` (0)
+means success. Byte buffers are `integer(int8)` arrays, 0-based by
+convention. Word offsets and lengths are `integer(int64)`.
 
 ## Error codes (`capnp_kinds`)
 

@@ -31,6 +31,10 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
   builds identical messages with this runtime and with
   [c-capnproto](https://github.com/opensourcerouting/c-capnproto), comparing
   wire bytes (see `interop/README.md`).
+- RPC level 1: two-party vat over a POSIX socket transport
+  (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
+  promise pipelining, embargo echo, and level 2 persistence hooks;
+  protocol-tested against a live capnp-C++ peer.
 
 ## Parity
 
