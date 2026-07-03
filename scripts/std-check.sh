@@ -25,7 +25,8 @@ SOURCES=(
   src/rpc_capnp.f90
   src/rpc_twoparty_capnp.f90
   src/capnp_rpc.f90
-  app/capnpc_schema.f90
+  src/capnp_schema.f90
+  src/capnp_dynamic.f90
   app/capnpc_emit.f90
   app/main.f90
   test/addressbook_schema.f90
@@ -33,6 +34,7 @@ SOURCES=(
   test/generated/addressbook_capnp.f90
   test/generated/kitchen_capnp.f90
   test/generated/adder_capnp.f90
+  test/generated/box_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/check.f90
@@ -44,6 +46,8 @@ SOURCES=(
   test/test_canonical.f90
   test/test_rpc.f90
   test/test_rpc_typed.f90
+  test/test_dynamic.f90
+  test/test_generic.f90
   interop/rpc_client.f90
 )
 

@@ -29,6 +29,8 @@ LIB_SOURCES=(
   src/rpc_capnp.f90
   src/rpc_twoparty_capnp.f90
   src/capnp_rpc.f90
+  src/capnp_schema.f90
+  src/capnp_dynamic.f90
 )
 
 # Support modules used by test programs, in dependency order.
@@ -38,6 +40,7 @@ TEST_MODULES=(
   test/generated/addressbook_capnp.f90
   test/generated/kitchen_capnp.f90
   test/generated/adder_capnp.f90
+  test/generated/box_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
 )
@@ -52,6 +55,8 @@ TEST_PROGRAMS=(
   test/test_canonical.f90
   test/test_rpc.f90
   test/test_rpc_typed.f90
+  test/test_dynamic.f90
+  test/test_generic.f90
 )
 
 OBJS=()

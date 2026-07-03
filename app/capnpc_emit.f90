@@ -3,7 +3,7 @@
 !> scopes join with underscores (Person.PhoneNumber -> person_phone_number).
 module capnpc_emit
    use capnp
-   use capnpc_schema
+   use capnp_schema
    implicit none
    private
 

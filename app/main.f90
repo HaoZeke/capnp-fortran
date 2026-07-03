@@ -9,7 +9,7 @@
 !>   capnp compile -o- schema.capnp > req.bin && capnpc-fortran req.bin
 program capnpc_fortran
    use capnp
-   use capnpc_schema
+   use capnp_schema
    use capnpc_emit
    implicit none
 

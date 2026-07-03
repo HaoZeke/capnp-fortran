@@ -2,7 +2,7 @@
 !> needs. Offsets come from `capnp compile -ocapnp schema.capnp` (capnp
 !> 1.4.0); the same bootstrap approach as capnpc-c, which reads its own
 !> request with its own runtime instead of generated code.
-module capnpc_schema
+module capnp_schema
    use capnp
    implicit none
    private
@@ -428,4 +428,4 @@ contains
       v = int(capnp_get_u16(p, 2_int64))
    end function value_enum
 
-end module capnpc_schema
+end module capnp_schema

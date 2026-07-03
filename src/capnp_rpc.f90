@@ -10,7 +10,7 @@
 module capnp_rpc
    use capnp
    use rpc_capnp
-   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr
+   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
    implicit none
    private
@@ -20,7 +20,8 @@ module capnp_rpc
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
    public :: rpc_finish_send, rpc_release_send
-   public :: rpc_pump_once, rpc_ctx_export_cap, rpc_make_cap_ptr
+   public :: rpc_pump_once, rpc_pump_poll, rpc_serve
+   public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
@@ -578,6 +579,42 @@ contains
       end select
       call capnp_message_free(m)
    end subroutine rpc_pump_once
+
+   !> Poll-then-pump: handle at most one message if one is readable
+   !> within timeout_ms. handled=.false. on timeout. The multiplexing
+   !> building block: a single thread can round-robin several
+   !> connections without blocking on any one of them.
+   subroutine rpc_pump_poll(conn, timeout_ms, handled, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: timeout_ms
+      logical, intent(out) :: handled
+      integer, intent(out) :: err
+      logical :: readable
+      err = CAPNP_OK
+      handled = .false.
+      if (conn%dead) then
+         err = RPC_ERR_DEAD
+         return
+      end if
+      call px_poll_in(conn%fd, timeout_ms, readable, err)
+      if (err /= CAPNP_OK .or. .not. readable) return
+      call rpc_pump_once(conn, err)
+      handled = err == CAPNP_OK
+   end subroutine rpc_pump_poll
+
+   !> Blocking server loop: pump until the peer disconnects. A clean
+   !> peer shutdown returns CAPNP_OK; aborts surface their reason via
+   !> rpc_conn_reason.
+   subroutine rpc_serve(conn, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      do
+         call rpc_pump_once(conn, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      if (err == RPC_ERR_DEAD .and. .not. allocated(conn%abort_reason)) err = CAPNP_OK
+   end subroutine rpc_serve
 
    subroutine handle_bootstrap(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn

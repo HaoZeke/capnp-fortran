@@ -30,6 +30,7 @@ program test_rpc
    call t_persistent_save()
    call t_resolve_and_tail_calls()
    call t_sender_promise_import()
+   call t_pump_poll()
 
    call rpc_conn_close(cli)
    call rpc_conn_close(srv)
@@ -366,5 +367,19 @@ contains
       call check_(err == CAPNP_OK .and. cap%kind == RPC_CAP_IMPORT .and. &
                   cap%id == 5_int64, 'rpc: senderPromise settles as import')
    end subroutine t_sender_promise_import
+
+   !> Poll-driven pumping: a quiet connection times out with
+   !> handled=.false.; a pending message is handled within the window.
+   subroutine t_pump_poll()
+      type(rpc_cap_t) :: bootcap
+      logical :: handled
+      call rpc_pump_poll(srv, 10, handled, err)
+      call check_(err == CAPNP_OK .and. .not. handled, 'poll: quiet times out')
+      call rpc_bootstrap_send(cli, bootcap, err)
+      call rpc_pump_poll(srv, 1000, handled, err)
+      call check_(err == CAPNP_OK .and. handled, 'poll: pending message handled')
+      call rpc_wait(cli, bootcap%id, err)
+      call check_(err == CAPNP_OK, 'poll: answer arrived')
+   end subroutine t_pump_poll
 
 end program test_rpc
