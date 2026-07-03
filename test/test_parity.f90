@@ -19,6 +19,7 @@ program test_parity
    call t_incremental_pack()
    call t_views_and_lengths()
    call t_stream_unit()
+   call t_packed_stream_unit()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -407,5 +408,51 @@ contains
       call capnp_message_free(r1)
       call capnp_message_free(r2)
    end subroutine t_stream_unit
+
+   !> Two packed messages back-to-back on one stream unit; the packed
+   !> reader must stop at each message's exact last byte. The second
+   !> message carries text so the packed stream mixes zero runs, partial
+   !> tags, and literal runs across the boundary.
+   subroutine t_packed_stream_unit()
+      type(capnp_message_t), target :: a, b, r1, r2
+      type(capnp_ptr_t) :: root, q
+      integer(int8), allocatable :: pa(:), pb(:)
+      character(len=:), allocatable :: s
+      integer :: err, unit, ios
+      character(len=*), parameter :: path = 'build/two_messages.packed.bin'
+      call capnp_message_init_builder(a, err)
+      root = capnp_new_struct(a, 1, 0, err)
+      call capnp_set_i64(root, 0_int64, 333_int64, err)
+      call capnp_set_root(a, root, err)
+      call capnp_serialize_packed_bytes(a, pa, err)
+      call capnp_message_init_builder(b, err)
+      root = capnp_new_struct(b, 1, 1, err)
+      call capnp_set_i64(root, 0_int64, 444_int64, err)
+      call capnp_set_text(root, 0, 'packed across the stream', err)
+      call capnp_set_root(b, root, err)
+      call capnp_serialize_packed_bytes(b, pb, err)
+      call check_(err == CAPNP_OK, 'packed stream: built')
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='readwrite', iostat=ios)
+      call check_(ios == 0, 'packed stream: scratch file opens')
+      write (unit) pa, pb
+      rewind (unit)
+      call capnp_read_message_packed_unit(unit, r1, err)
+      call check_(err == CAPNP_OK, 'packed stream: first message reads')
+      q = capnp_root(r1, err)
+      call check_(capnp_get_i64(q, 0_int64) == 333_int64, 'packed stream: first value')
+      call capnp_read_message_packed_unit(unit, r2, err)
+      call check_(err == CAPNP_OK, 'packed stream: second message reads')
+      q = capnp_root(r2, err)
+      call check_(capnp_get_i64(q, 0_int64) == 444_int64, 'packed stream: second value')
+      call capnp_get_text(q, 0, s, err)
+      call check_(err == CAPNP_OK .and. s == 'packed across the stream', &
+                  'packed stream: second text')
+      close (unit, status='delete')
+      call capnp_message_free(a)
+      call capnp_message_free(b)
+      call capnp_message_free(r1)
+      call capnp_message_free(r2)
+   end subroutine t_packed_stream_unit
 
 end program test_parity
