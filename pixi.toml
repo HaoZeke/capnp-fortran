@@ -16,6 +16,8 @@ ninja = "*"
 cmocka = "*"
 pkg-config = "*"
 c-compiler = "*"
+cxx-compiler = "*"
+capnproto = ">=1.0"
 
 [environments]
 default = []
