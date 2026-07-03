@@ -30,6 +30,15 @@ jobs:
           diff addressbook_capnp.f90 "$GITHUB_WORKSPACE/test/generated/addressbook_capnp.f90"
           diff kitchen_capnp.f90 "$GITHUB_WORKSPACE/test/generated/kitchen_capnp.f90"
           diff common_capnp.f90 "$GITHUB_WORKSPACE/test/generated/common_capnp.f90"
+      - name: self-hosting smoke, the plugin digests schema.capnp itself
+        run: |
+          BIN=$(find build -name capnpc-fortran -type f | head -1)
+          MODDIR=$(dirname "$(find build -name capnp.mod | head -1)")
+          mkdir -p /tmp/selfhost && cd /tmp/selfhost
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/schema.cgr.bin"
+          test -s schema_capnp.f90
+          pixi run --manifest-path "$GITHUB_WORKSPACE/pixi.toml" \
+            gfortran -fsyntax-only -I "$GITHUB_WORKSPACE/$MODDIR" schema_capnp.f90
 
   interop:
     runs-on: ubuntu-latest
