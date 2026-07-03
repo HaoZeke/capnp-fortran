@@ -2,10 +2,12 @@
 Library architecture
 ====================
 
+
 .. contents::
 
+
 1 Module layers
-----------------
+---------------
 
 ``use capnp`` is the umbrella module for the serialization API. It
 re-exports the wire-format and message-I/O layer; RPC and the C ABI
@@ -43,14 +45,16 @@ streaming, canonicalization, unions -- builds on that object model,
 not on the wire bytes directly.
 
 2 Wire format mapping
-----------------------
+---------------------
 
 2.1 Pointer words
 ~~~~~~~~~~~~~~~~~
 
 Every pointer is one 64-bit little-endian word. ``capnp_pointer``
 encodes and decodes the four kinds (bit 0 is the least significant
-bit)::
+bit):
+
+::
 
     struct: kind(0-1)=0 | offset(2-31, signed) | dwords(32-47) | pwords(48-63)
     list:   kind(0-1)=1 | offset(2-31, signed) | esize(32-34)  | count(35-63)
@@ -60,14 +64,14 @@ bit)::
 ``capnp_ptr_t`` (in ``capnp_message``) is the value-type handle built
 from a resolved pointer word: kind, segment/word position, and
 struct/list geometry. A null struct or list pointer
-(``p%kind == CAPNP_PK_NULL``) reads as empty/all-defaults, matching
+(``p%kind =`` CAPNP\ :sub:`PK`\ \ :sub:`NULL`\=) reads as empty/all-defaults, matching
 the C++ implementation. Far and double-far pointers are followed
 transparently during resolution (``capnp_getp`` / ``capnp_root``); a
 handle returned to the caller always describes the resolved object,
 never a far-pointer landing pad.
 
 2.2 Segments and the arena
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A message (``capnp_message_t``) owns an array of ``capnp_segment_t``:
 a flat ``integer(int8)`` buffer, a used-length prefix, and an
@@ -94,7 +98,7 @@ Fortran has no reference-counted or garbage-collected heap: a
 indexes into.
 
 2.3 Schema evolution
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~
 
 Reads past the end of a struct's data or pointer section return the
 declared default (zero, empty, or the field's default value) rather
@@ -104,13 +108,13 @@ fields it never had. A primitive list read where a struct list is
 expected upgrades to a struct view (the primitive occupies field
 ``@0`` of a one-word data section); a composite list read where a
 primitive list is expected downgrades the same way. This matches
-capnp-C++'s evolution rules exactly (see the reference's `capnp_getp`
-/ `capnp_list_get_struct` / `capnp_list_getp` entries), which is what
-lets messages produced by either implementation round-trip through
-the other.
+capnp-C++'s evolution rules exactly (see the reference's
+``capnp_getp`` / ``capnp_list_get_struct`` / ``capnp_list_getp`` entries),
+which is what lets messages produced by either implementation
+round-trip through the other.
 
 3 Code generator: two-pass emission
-------------------------------------
+-----------------------------------
 
 ``capnpc-fortran`` (``app/capnpc_emit.f90``, driven by
 ``app/capnpc_schema.f90``) is a ``capnp compile -o`` plugin: it reads
@@ -122,11 +126,12 @@ generated code to read the generator's own input schema).
 Emission for each requested file walks the node graph twice:
 
 - **Pass 1** walks without writing any Fortran source. It collects
-  cross-file type references (so `use` statements can be emitted
+  cross-file type references (so ``use`` statements can be emitted
   once, deduplicated, before the first line of module body) and
   serializes every non-null field default into a standalone
   ``capnp`` message, registering it as a named byte blob
   (``<CONST>_DEFAULT``-style parameter arrays).
+
 - **Pass 2** walks the same graph again and writes: the handle type
   per struct, ``<STRUCT>_DWORDS`` / ``<STRUCT>_PWORDS`` size
   constants, ``_new`` / ``_new_root`` / ``_read_root`` constructors,
@@ -135,7 +140,7 @@ Emission for each requested file walks the node graph twice:
   and ``_WHICH`` constants, group ``_select`` setters, enum
   constants, and ``interface`` client/server pairs.
 
-Names are snake_cased from capnp's camelCase, with nested scopes
+Names are snake\ :sub:`cased`\ from capnp's camelCase, with nested scopes
 joined by underscores (``Person.PhoneNumber`` becomes
 ``person_phone_number``). Deeply nested schemas can overflow
 Fortran's 63-character identifier limit once accessor suffixes are
@@ -150,10 +155,10 @@ procedure pair per method that fills parameters through
 base extending ``rpc_server_t`` whose generated ``dispatch``
 decodes the interface and method ordinals and routes to a
 deferred, per-method procedure the application implements (see
-:doc:`tutorial`, part 2).
+:doc:\`tutorial\`, part 2).
 
 4 RPC vat: message-driven dispatch
-------------------------------------
+----------------------------------
 
 ``capnp_rpc`` implements two-party RPC level 1 over a connected
 stream socket. The vat is single-threaded and message-driven:
@@ -168,8 +173,10 @@ plus liveness flags:
 - ``questions(0:63)`` -- calls this vat issued, tracked by id until
   a ``Return`` settles them (``rpc_wait`` pumps until the matching
   slot is marked ``returned``).
+
 - ``answers(0:63)`` -- calls this vat received and is (or already
   did) answer, tracked until the peer sends ``Finish``.
+
 - ``exports(0:63)`` -- capabilities this vat has handed out,
   refcounted; a ``Release`` message decrements and frees at zero.
 
@@ -216,7 +223,7 @@ pipeline reference into a plain import once the dependency returns.
 
 Level 2 persistence is an opt-in hook, not a separate code path: a
 capability's ``dispatch`` recognizes
-``ctx%interface_id == RPC_PERSISTENT_IFACE`` (capnp's
+``ctx%interface_id =`` RPC\ :sub:`PERSISTENT`\ \ :sub:`IFACE`\= (capnp's
 ``Persistent`` interface, id ``0xc8cb212fcd9f5691``) and answers
 ``save()`` with an application-defined SturdyRef. Level 3 and 4
 messages (``Provide``, ``Accept``, ``Join`` -- three-party handoff)
@@ -226,7 +233,7 @@ levels.
 
 ``capnp_rpc_transport`` is the byte layer underneath all of this: it
 frames each RPC message with the same segment-table framing as
-plain serialization (:doc:`reference`, "Serialization") over a file
+plain serialization (:doc:\`reference\`, "Serialization") over a file
 descriptor from ``capnp_posix``, which wraps just enough POSIX
 socket surface (socketpair, TCP listen/accept/connect, poll) as
 ``iso_c_binding`` interfaces to carry those frames -- no C sources,
