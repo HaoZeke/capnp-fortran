@@ -59,8 +59,91 @@ module capnp_schema
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
    public :: value_text, value_enum, value_pointer, value_data
+   public :: type_brand, type_anyptr_which, type_param_scope_id, type_param_index
+   public :: brand_scopes, scope_scope_id, scope_which, scope_bindings
+   public :: binding_which, binding_type
+
+   integer, parameter, public :: ANYPTR_UNCONSTRAINED = 0
+   integer, parameter, public :: ANYPTR_PARAMETER = 1
+   integer, parameter, public :: SCOPE_BIND = 0
+   integer, parameter, public :: SCOPE_INHERIT = 1
+   integer, parameter, public :: BINDING_UNBOUND = 0
+   integer, parameter, public :: BINDING_TYPE = 1
 
 contains
+
+   !> Brand of a struct/enum/interface Type variant: ptr 0 of Type.
+   function type_brand(p, err) result(b)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: b
+      b = capnp_getp(p, 0, err)
+   end function type_brand
+
+   !> Type.anyPointer inner union tag (u16 at byte 8): unconstrained=0,
+   !> parameter=1, implicitMethodParameter=2.
+   function type_anyptr_which(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 8_int64))
+   end function type_anyptr_which
+
+   !> Type.anyPointer.parameter: scopeId u64 at byte 16, parameterIndex
+   !> u16 at byte 10.
+   function type_param_scope_id(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 16_int64)
+   end function type_param_scope_id
+
+   function type_param_index(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: v
+      v = int(capnp_get_u16(p, 10_int64))
+   end function type_param_index
+
+   !> Brand.scopes: List(Scope) at ptr 0.
+   function brand_scopes(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 0, err)
+   end function brand_scopes
+
+   !> Scope: scopeId u64 at byte 0, union tag u16 at byte 8 (bind=0,
+   !> inherit=1), bind list at ptr 0.
+   function scope_scope_id(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 0_int64)
+   end function scope_scope_id
+
+   function scope_which(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 8_int64))
+   end function scope_which
+
+   function scope_bindings(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 0, err)
+   end function scope_bindings
+
+   !> Binding: union tag u16 at byte 0 (unbound=0, type=1), type at ptr 0.
+   function binding_which(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 0_int64))
+   end function binding_which
+
+   function binding_type(p, err) result(t)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: t
+      t = capnp_getp(p, 0, err)
+   end function binding_type
 
    ! --- CodeGeneratorRequest: 0 data words, 4 ptrs ---------------------
 

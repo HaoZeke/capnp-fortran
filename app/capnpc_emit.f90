@@ -32,6 +32,21 @@ module capnpc_emit
    !> Whether this file declares interfaces (adds `use capnp_rpc`).
    logical :: g_has_iface = .false.
 
+   !> Brand instantiations: one per distinct (generic node, bindings)
+   !> use, e.g. Box(Text) -> box_text. Collected in pass 1 from branded
+   !> struct fields; each gets a handle type plus accessors with the
+   !> generic parameters substituted.
+   type :: inst_t
+      integer :: gidx = 0
+      character(len=:), allocatable :: name
+      type(capnp_ptr_t) :: bindings(0:3)
+      integer :: nbind = 0
+   end type inst_t
+   type(inst_t) :: g_insts(64)
+   integer :: g_ninsts = 0
+   !> Nonzero while emitting an instantiation's accessors.
+   integer :: g_cur_inst = 0
+
 contains
 
    ! --- node table ------------------------------------------------------
@@ -293,6 +308,8 @@ contains
       g_nimports = 0
       g_nblobs = 0
       g_has_iface = .false.
+      g_ninsts = 0
+      g_cur_inst = 0
 
       ! Pass 1 (dry): walk the procedures to discover cross-file imports and
       ! explicit pointer-default blobs before the header is written.
@@ -320,6 +337,14 @@ contains
             call emit_interface_procs(g_nodes(i)%p, err)
             if (err /= CAPNP_OK) return
          end select
+      end do
+      ! Converge the instantiation worklist: emitting an instantiation's
+      ! accessors can register further instantiations.
+      i = 1
+      do while (i <= g_ninsts)
+         call emit_inst_procs(i, err)
+         if (err /= CAPNP_OK) return
+         i = i + 1
       end do
       g_suppress = .false.
 
@@ -362,6 +387,7 @@ contains
       end do
 
       call emit_blob_params()
+      if (err == CAPNP_OK) call emit_inst_decls(err)
 
       ! Interface declarations follow every struct declaration: their
       ! abstract method interfaces IMPORT the param/result handle types,
@@ -403,6 +429,12 @@ contains
                if (err /= CAPNP_OK) exit
             end select
          end do
+         if (err == CAPNP_OK) then
+            do i = 1, g_ninsts
+               call emit_inst_procs(i, err)
+               if (err /= CAPNP_OK) exit
+            end do
+         end if
       end if
 
       call w('end module '//modname)
@@ -719,6 +751,23 @@ contains
 
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      ! Inside a brand instantiation, generic parameters of the current
+      ! generic scope resolve to their bound types.
+      if (g_cur_inst > 0) then
+         if (type_which(t) == TYPE_ANY_POINTER) then
+            if (type_anyptr_which(t) == ANYPTR_PARAMETER) then
+               if (type_param_scope_id(t) == &
+                   g_nodes(g_insts(g_cur_inst)%gidx)%id) then
+                  if (type_param_index(t) < g_insts(g_cur_inst)%nbind) then
+                     ! Unbound parameters keep their AnyPointer accessors.
+                     if (g_insts(g_cur_inst)%bindings(type_param_index(t))%kind &
+                         /= CAPNP_PK_NULL) &
+                        t = g_insts(g_cur_inst)%bindings(type_param_index(t))
+                  end if
+               end if
+            end if
+         end if
+      end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
@@ -747,7 +796,7 @@ contains
       case (TYPE_DATA)
          call emit_data_field(an, ht, int(off), dv, gset, err)
       case (TYPE_STRUCT)
-         call emit_struct_field(an, ht, int(off), type_type_id(t), &
+         call emit_struct_field(an, ht, int(off), t, &
                                 field_slot_had_default(f), dv, gset, err)
       case (TYPE_LIST)
          call emit_list_field(an, ht, int(off), t, &
@@ -1023,18 +1072,18 @@ contains
       call w('')
    end subroutine emit_data_field
 
-   subroutine emit_struct_field(an, ht, pidx, tid, had_default, dv, gset, err)
+   subroutine emit_struct_field(an, ht, pidx, t, had_default, dv, gset, err)
       character(len=*), intent(in) :: an, ht, gset
       integer, intent(in) :: pidx
-      integer(int64), intent(in) :: tid
+      type(capnp_ptr_t), intent(in) :: t
       logical, intent(in) :: had_default
       type(capnp_ptr_t), intent(in) :: dv
       integer, intent(out) :: err
-      character(len=:), allocatable :: st
+      character(len=:), allocatable :: st, iname
       integer :: idx
       logical :: hasdef
       err = CAPNP_OK
-      idx = find_node(tid)
+      idx = find_node(type_type_id(t))
       if (idx == 0) then
          err = CAPNP_ERR_ARG
          return
@@ -1043,6 +1092,10 @@ contains
       if (err /= CAPNP_OK) return
       call node_fname(g_nodes(idx)%p, st, err)
       if (err /= CAPNP_OK) return
+      ! A branded generic use gets the instantiation's handle type.
+      call inst_name_for(t, idx, iname, err)
+      if (err /= CAPNP_OK) return
+      if (len(iname) > 0) st = iname
       hasdef = .false.
       if (had_default) hasdef = register_default_blob(an, dv)
       call w('   function '//an//'_get(h, err) result(o)')
@@ -1197,6 +1250,153 @@ contains
       call w('   end function '//an//'_init')
       call w('')
    end subroutine emit_list_field
+
+   ! --- brand instantiations ---------------------------------------------------
+
+   !> Instantiation handle name for a branded struct Type, registering
+   !> the instantiation on first sight. '' when the use is unbranded.
+   subroutine inst_name_for(t, gidx, o, err)
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(in) :: gidx
+      character(len=:), allocatable, intent(out) :: o
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: b, scopes, sc, binds, bd
+      type(capnp_ptr_t) :: btypes(0:3)
+      character(len=:), allocatable :: gname, part
+      integer(int64) :: i, j
+      integer :: n, k, bidx
+      err = CAPNP_OK
+      o = ''
+      b = type_brand(t, err)
+      if (err /= CAPNP_OK) return
+      if (b%kind == CAPNP_PK_NULL) return
+      scopes = brand_scopes(b, err)
+      if (err /= CAPNP_OK) return
+      n = 0
+      do i = 0_int64, capnp_list_len(scopes) - 1_int64
+         sc = capnp_list_get_struct(scopes, int(i), err)
+         if (err /= CAPNP_OK) return
+         if (scope_scope_id(sc) /= g_nodes(gidx)%id) cycle
+         if (scope_which(sc) /= SCOPE_BIND) cycle
+         binds = scope_bindings(sc, err)
+         if (err /= CAPNP_OK) return
+         do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
+            bd = capnp_list_get_struct(binds, int(j), err)
+            if (err /= CAPNP_OK) return
+            if (binding_which(bd) == BINDING_TYPE) then
+               btypes(n) = binding_type(bd, err)
+               if (err /= CAPNP_OK) return
+            else
+               btypes(n) = capnp_ptr_t() ! unbound: stays AnyPointer
+            end if
+            n = n + 1
+         end do
+      end do
+      if (n == 0) return
+      call node_fname(g_nodes(gidx)%p, gname, err)
+      if (err /= CAPNP_OK) return
+      o = gname
+      do k = 0, n - 1
+         call inst_suffix(btypes(k), part, err)
+         if (err /= CAPNP_OK) return
+         o = o//'_'//part
+      end do
+      if (len(o) > 32) o = o(1:28)//'_'//itoa(int(g_ninsts + 1, int64))
+      do k = 1, g_ninsts
+         if (g_insts(k)%name == o) return
+      end do
+      if (g_ninsts >= size(g_insts)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      g_ninsts = g_ninsts + 1
+      g_insts(g_ninsts)%gidx = gidx
+      g_insts(g_ninsts)%name = o
+      g_insts(g_ninsts)%nbind = n
+      do k = 0, n - 1
+         g_insts(g_ninsts)%bindings(k) = btypes(k)
+      end do
+   end subroutine inst_name_for
+
+   !> Name fragment for one binding type.
+   subroutine inst_suffix(bt, part, err)
+      type(capnp_ptr_t), intent(in) :: bt
+      character(len=:), allocatable, intent(out) :: part
+      integer, intent(out) :: err
+      integer :: idx
+      err = CAPNP_OK
+      if (bt%kind == CAPNP_PK_NULL) then
+         part = 'any'
+         return
+      end if
+      select case (type_which(bt))
+      case (TYPE_TEXT)
+         part = 'text'
+      case (TYPE_DATA)
+         part = 'data'
+      case (TYPE_LIST)
+         part = 'list'
+      case (TYPE_STRUCT, TYPE_ENUM)
+         idx = find_node(type_type_id(bt))
+         if (idx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call note_import(idx, err)
+         if (err /= CAPNP_OK) return
+         call node_fname(g_nodes(idx)%p, part, err)
+      case default
+         part = 'any'
+      end select
+   end subroutine inst_suffix
+
+   !> Handle types and size parameters for every instantiation.
+   subroutine emit_inst_decls(err)
+      integer, intent(out) :: err
+      integer :: k
+      type(capnp_ptr_t) :: np
+      err = CAPNP_OK
+      do k = 1, g_ninsts
+         np = g_nodes(g_insts(k)%gidx)%p
+         call w('   integer, parameter :: '//upcase(g_insts(k)%name)//'_DWORDS = '// &
+                itoa(int(node_struct_data_words(np), int64)))
+         call w('   integer, parameter :: '//upcase(g_insts(k)%name)//'_PWORDS = '// &
+                itoa(int(node_struct_pointer_count(np), int64)))
+         call w('   type :: '//g_insts(k)%name//'_t')
+         call w('      type(capnp_ptr_t) :: p')
+         call w('   end type '//g_insts(k)%name//'_t')
+         call w('')
+      end do
+   end subroutine emit_inst_decls
+
+   !> Accessors for one instantiation: the generic node's fields with
+   !> its parameters substituted by the bindings.
+   subroutine emit_inst_procs(k, err)
+      integer, intent(in) :: k
+      integer, intent(out) :: err
+      character(len=:), allocatable :: tn
+      integer :: prev
+      tn = g_insts(k)%name
+      call w('   function '//tn//'_new(msg, err) result(h)')
+      call w('      type(capnp_message_t), intent(inout), target :: msg')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//tn//'_t) :: h')
+      call w('      h%p = capnp_new_struct(msg, '//upcase(tn)//'_DWORDS, '// &
+             upcase(tn)//'_PWORDS, err)')
+      call w('   end function '//tn//'_new')
+      call w('')
+      call w('   function '//tn//'_read_root(msg, err) result(h)')
+      call w('      type(capnp_message_t), intent(inout), target :: msg')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//tn//'_t) :: h')
+      call w('      h%p = capnp_root(msg, err)')
+      call w('   end function '//tn//'_read_root')
+      call w('')
+      prev = g_cur_inst
+      g_cur_inst = k
+      call emit_fields_of(g_nodes(g_insts(k)%gidx)%p, tn, tn, err)
+      g_cur_inst = prev
+   end subroutine emit_inst_procs
 
    ! --- interfaces -----------------------------------------------------------
 

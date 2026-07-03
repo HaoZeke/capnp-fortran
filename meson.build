@@ -29,6 +29,7 @@ capnp_fsrc = files(
   'src/capnp_rpc.f90',
   'src/capnp_schema.f90',
   'src/capnp_dynamic.f90',
+  'src/stream_capnp.f90',
 )
 
 capnp_flib = static_library('capnp_f', capnp_fsrc)
