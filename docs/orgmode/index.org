@@ -118,8 +118,10 @@ and capnp-C++:
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no    | yes           | yes (~capnp_rpc~, two-party)                                  |
 | RPC level 2 (persistence hooks)                                 | no      | partial       | hooks (~RPC_PERSISTENT_IFACE~, app-defined SturdyRefs)        |
 | RPC level 3/4 (three-party, joins)                              | no      | no (replies ~unimplemented~) | no (replies ~unimplemented~, same as C++)         |
-| Generics in generated code                                     | no      | yes           | no                                                            |
-| Dynamic reflection API                                          | no      | yes           | no                                                            |
+| ~-> stream~ flow control                                        | no      | yes           | yes (~rpc_stream_t~, windowed)                                |
+| Typed interface stubs in generated code                         | no      | yes           | yes (client helpers + abstract server base)                   |
+| Generics in generated code                                     | no      | yes           | brand-resolved instantiations (direct bindings)               |
+| Dynamic reflection API                                          | no      | yes           | yes (~capnp_dynamic~, by-name read/write)                     |
 
 The full table, including generated-code coverage (unions, groups,
 defaults, imports, constants), lives in the project
