@@ -87,12 +87,16 @@ contains
 
    !> Fortran identifier for a node: displayName past the file prefix, dots
    !> to underscores, snake_cased. Avoids scopeId walks (groups have odd
-   !> scope ids).
+   !> scope ids). Deeply nested nodes overflow Fortran's 63-char identifier
+   !> limit once accessor suffixes are appended, so long names compress to
+   !> a 15-char head plus the node's unique 16-hex id (32 chars total,
+   !> leaving room for `_<field>_set_elem`-class suffixes).
    subroutine node_fname(np, o, err)
       type(capnp_ptr_t), intent(in) :: np
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
       character(len=:), allocatable :: dn
+      character(len=16) :: hexid
       integer :: i
       call node_display_name(np, dn, err)
       if (err /= CAPNP_OK) return
@@ -107,6 +111,16 @@ contains
          end if
       end do
       o = snake(o)
+      if (len(o) > 32) then
+         write (hexid, '(z16.16)') node_id(np)
+         do i = 1, 16
+            if (hexid(i:i) >= 'A' .and. hexid(i:i) <= 'F') &
+               hexid(i:i) = achar(iachar(hexid(i:i)) + 32)
+         end do
+         o = o(1:15)
+         if (o(15:15) == '_') o = o(1:14)
+         o = o//'_'//hexid
+      end if
    end subroutine node_fname
 
    pure function upcase(s) result(o)
@@ -207,6 +221,8 @@ contains
       g_blobs(g_nblobs)%bytes = bytes
    end subroutine note_blob
 
+   !> Typed constructor with bare default-kind values: -128 stays legal
+   !> (a bare -128_int8 literal is unary minus on out-of-range 128_int8).
    subroutine emit_blob_params()
       integer :: i
       integer(int64) :: j, n
@@ -214,12 +230,12 @@ contains
       do i = 1, g_nblobs
          n = size(g_blobs(i)%bytes, kind=int64)
          call w('   integer(int8), parameter :: '//g_blobs(i)%name//'(0:'// &
-                itoa(n - 1)//') = [ &')
+                itoa(n - 1)//') = [integer(int8) :: &')
          line = '      '
          do j = 1_int64, n
-            line = line//itoa(int(g_blobs(i)%bytes(j), int64))//'_int8'
+            line = line//itoa(int(g_blobs(i)%bytes(j), int64))
             if (j < n) line = line//', '
-            if (mod(j, 10_int64) == 0_int64 .and. j < n) then
+            if (mod(j, 16_int64) == 0_int64 .and. j < n) then
                call w(line//' &')
                line = '      '
             end if
