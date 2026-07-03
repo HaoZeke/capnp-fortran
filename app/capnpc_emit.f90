@@ -177,6 +177,9 @@ contains
       if (i > 0) dn = dn(i + 1:)
       i = index(dn, '.')
       if (i > 0) dn = dn(1:i - 1)
+      do i = 1, len(dn)
+         if (dn(i:i) == '-') dn(i:i) = '_'
+      end do
       o = snake(dn)//'_capnp'
    end subroutine node_module
 
@@ -265,6 +268,9 @@ contains
       if (i > 0) base = base(i + 1:)
       i = index(base, '.')
       if (i > 0) base = base(1:i - 1)
+      do i = 1, len(base)
+         if (base(i:i) == '-') base(i:i) = '_'
+      end do
       modname = snake(base)//'_capnp'
 
       fidx = find_node(file_id)
