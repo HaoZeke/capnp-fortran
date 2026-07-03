@@ -31,10 +31,23 @@ contains
    end subroutine check_
 
    subroutine t_consts()
+      type(capnp_ptr_t) :: l
+      type(vec3_t) :: v
+      integer :: err
       call check_(ANSWER == 42_int64, 'const: answer')
       call check_(abs(TAU - 6.283185307179586_real64) < 1.0e-15_real64, 'const: tau')
       call check_(GREETING == 'hey there', 'const: greeting')
       call check_(STATUS_BUSY == 1, 'const: imported enum')
+      call check_(size(MAGIC) == 4 .and. MAGIC(0) == -54_int8 .and. &
+                  MAGIC(3) == 13_int8, 'const: data bytes')
+      l = primes(err)
+      call check_(err == CAPNP_OK .and. capnp_list_len(l) == 4_int64, 'const: list len')
+      call check_(capnp_list_get_i32(l, 0_int64, err) == 2_int32 .and. &
+                  capnp_list_get_i32(l, 3_int64, err) == 7_int32, 'const: list values')
+      v = home(err)
+      call check_(err == CAPNP_OK, 'const: struct resolves')
+      call check_(vec3_x_get(v) == -1.0_real64 .and. vec3_y_get(v) == 0.5_real64 &
+                  .and. vec3_z_get(v) == 9.25_real64, 'const: struct values')
    end subroutine t_consts
 
    !> A fresh struct must read every default: scalars, text, data blob,

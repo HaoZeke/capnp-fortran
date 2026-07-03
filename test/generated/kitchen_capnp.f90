@@ -14,6 +14,18 @@ module kitchen_capnp
       type(capnp_ptr_t) :: p
    end type sink_t
 
+   integer(int8), parameter :: MAGIC(0:3) = [ &
+      -54_int8, -2_int8, -16_int8, 13_int8]
+   integer(int8), parameter :: PRIMES_DEFAULT(0:31) = [ &
+      0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8,  &
+      0_int8, 0_int8, 36_int8, 0_int8, 0_int8, 0_int8, 2_int8, 0_int8, 0_int8, 0_int8,  &
+      3_int8, 0_int8, 0_int8, 0_int8, 5_int8, 0_int8, 0_int8, 0_int8, 7_int8, 0_int8,  &
+      0_int8, 0_int8]
+   integer(int8), parameter :: HOME_DEFAULT(0:39) = [ &
+      0_int8, 0_int8, 0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
+      0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
+      0_int8, 0_int8, -16_int8, -65_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
+      -32_int8, 63_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, -128_int8, 34_int8, 64_int8]
    integer(int8), parameter :: SINK_PAYLOAD_DEFAULT(0:3) = [ &
       -34_int8, -83_int8, -66_int8, -17_int8]
    integer(int8), parameter :: SINK_ORIGIN_DEFAULT(0:39) = [ &
@@ -28,6 +40,34 @@ module kitchen_capnp
       0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8]
 
 contains
+
+   function primes(err) result(o)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: o
+      type(capnp_message_t), save, target :: cmsg
+      logical, save :: loaded = .false.
+      err = CAPNP_OK
+      if (.not. loaded) then
+         call capnp_deserialize_bytes(PRIMES_DEFAULT, cmsg, err)
+         if (err /= CAPNP_OK) return
+         loaded = .true.
+      end if
+      o = capnp_root(cmsg, err)
+   end function primes
+
+   function home(err) result(o)
+      integer, intent(out) :: err
+      type(vec3_t) :: o
+      type(capnp_message_t), save, target :: cmsg
+      logical, save :: loaded = .false.
+      err = CAPNP_OK
+      if (.not. loaded) then
+         call capnp_deserialize_bytes(HOME_DEFAULT, cmsg, err)
+         if (err /= CAPNP_OK) return
+         loaded = .true.
+      end if
+      o%p = capnp_root(cmsg, err)
+   end function home
 
    function sink_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg

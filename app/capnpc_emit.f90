@@ -258,12 +258,18 @@ contains
          if (err /= CAPNP_OK) return
          mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
          if (.not. mine) cycle
-         if (node_which(g_nodes(i)%p) == NODE_STRUCT) then
+         select case (node_which(g_nodes(i)%p))
+         case (NODE_STRUCT)
             if (.not. node_struct_is_group(g_nodes(i)%p)) then
                call emit_struct_procs(g_nodes(i)%p, err)
                if (err /= CAPNP_OK) return
             end if
-         end if
+         case (NODE_CONST)
+            call emit_const_decl(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
+            call emit_const_proc(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
+         end select
       end do
       g_suppress = .false.
 
@@ -313,12 +319,16 @@ contains
             if (err /= CAPNP_OK) exit
             mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
             if (.not. mine) cycle
-            if (node_which(g_nodes(i)%p) == NODE_STRUCT) then
+            select case (node_which(g_nodes(i)%p))
+            case (NODE_STRUCT)
                if (.not. node_struct_is_group(g_nodes(i)%p)) then
                   call emit_struct_procs(g_nodes(i)%p, err)
                   if (err /= CAPNP_OK) exit
                end if
-            end if
+            case (NODE_CONST)
+               call emit_const_proc(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) exit
+            end select
          end do
       end if
 
@@ -354,6 +364,8 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: v
       character(len=:), allocatable :: cn, s
+      integer(int8), allocatable :: db(:)
+      logical :: has
       call node_fname(np, cn, err)
       if (err /= CAPNP_OK) return
       v = node_const_value(np, err)
@@ -379,11 +391,86 @@ contains
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
          call w('   character(len=*), parameter :: '//upcase(cn)//" = '"//s//"'")
+      case (TYPE_DATA)
+         call value_data(v, db, err)
+         if (err /= CAPNP_OK) return
+         if (size(db) == 0) then
+            call w('   integer(int8), parameter :: '//upcase(cn)// &
+                   '(0:-1) = [integer(int8) ::]')
+         else
+            ! Pass 1 collects the bytes; emit_blob_params writes the parameter.
+            call note_blob(upcase(cn), db)
+         end if
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+         ! Pass 1 serializes the value into a <CN>_DEFAULT blob; the accessor
+         ! function lands in the procedures section (emit_const_proc).
+         has = register_default_blob(cn, v)
       case default
          call w('   ! const '//cn//': unsupported value kind '// &
                 itoa(int(value_which(v), int64)))
       end select
    end subroutine emit_const_decl
+
+   !> Pointer-valued constant accessor: materialise the blob message once
+   !> (saved across calls) and hand out its root, so repeated reads alias
+   !> one object as capnp-c and capnp-C++ const globals do.
+   subroutine emit_const_proc(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v, t, dobj
+      character(len=:), allocatable :: cn, st, lhs
+      integer :: idx
+      err = CAPNP_OK
+      v = node_const_value(np, err)
+      if (err /= CAPNP_OK) return
+      select case (value_which(v))
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+      case default
+         return
+      end select
+      call node_fname(np, cn, err)
+      if (err /= CAPNP_OK) return
+      st = ''
+      lhs = 'o'
+      if (value_which(v) == TYPE_STRUCT) then
+         t = node_const_type(np, err)
+         if (err /= CAPNP_OK) return
+         idx = find_node(type_type_id(t))
+         if (idx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call note_import(idx, err)
+         if (err /= CAPNP_OK) return
+         call node_fname(g_nodes(idx)%p, st, err)
+         if (err /= CAPNP_OK) return
+         lhs = 'o%p'
+      end if
+      dobj = value_pointer(v, err)
+      if (err /= CAPNP_OK) return
+      call w('   function '//cn//'(err) result(o)')
+      call w('      integer, intent(out) :: err')
+      if (len(st) > 0) then
+         call w('      type('//st//'_t) :: o')
+      else
+         call w('      type(capnp_ptr_t) :: o')
+      end if
+      if (dobj%kind == CAPNP_PK_NULL) then
+         call w('      err = CAPNP_OK')
+      else
+         call w('      type(capnp_message_t), save, target :: cmsg')
+         call w('      logical, save :: loaded = .false.')
+         call w('      err = CAPNP_OK')
+         call w('      if (.not. loaded) then')
+         call w('         call capnp_deserialize_bytes('//upcase(cn)//'_DEFAULT, cmsg, err)')
+         call w('         if (err /= CAPNP_OK) return')
+         call w('         loaded = .true.')
+         call w('      end if')
+         call w('      '//lhs//' = capnp_root(cmsg, err)')
+      end if
+      call w('   end function '//cn)
+      call w('')
+   end subroutine emit_const_proc
 
    function const_int_value(v) result(x)
       type(capnp_ptr_t), intent(in) :: v

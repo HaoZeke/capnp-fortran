@@ -5,6 +5,9 @@ using Common = import "common.capnp";
 const answer :Int32 = 42;
 const tau :Float64 = 6.283185307179586;
 const greeting :Text = "hey there";
+const magic :Data = 0x"ca fe f0 0d";
+const primes :List(Int32) = [2, 3, 5, 7];
+const home :Common.Vec3 = (x = -1.0, y = 0.5, z = 9.25);
 
 struct Sink {
   flag @0 :Bool = true;
