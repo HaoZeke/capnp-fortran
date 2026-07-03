@@ -37,6 +37,19 @@ contains
       character(len=:), allocatable :: txt
       integer :: idx
       err = CAPNP_OK
+      if (ctx%interface_id == RPC_PERSISTENT_IFACE) then
+         ! Level 2 persistence hook: save() answers an app-defined
+         ! SturdyRef (here a text token) in results ptr 0.
+         if (ctx%method_id /= RPC_PERSISTENT_SAVE) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_text(s, 0, 'sturdy:echo-main', err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+         return
+      end if
       if (ctx%interface_id /= ECHO_IFACE) then
          err = CAPNP_ERR_ARG
          return

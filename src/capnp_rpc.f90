@@ -23,10 +23,18 @@ module capnp_rpc
    public :: rpc_pump_once, rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
+   public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
 
    integer, parameter :: RPC_CAP_NONE = 0
    integer, parameter :: RPC_CAP_IMPORT = 1
    integer, parameter :: RPC_CAP_PIPELINE = 2
+
+   !> Level 2 persistence: capnp/persistent.capnp's Persistent interface
+   !> (id 0xc8cb212fcd9f5691) as a signed container, and its save method.
+   !> A capability opts in by answering this interface id in dispatch;
+   !> SturdyRef contents are application-defined, per the spec.
+   integer(int64), parameter :: RPC_PERSISTENT_IFACE = -3978049356654750063_int64
+   integer, parameter :: RPC_PERSISTENT_SAVE = 0
 
    !> Remote raised an exception; reason text is on the connection.
    integer, parameter :: RPC_ERR_EXCEPTION = 100

@@ -51,15 +51,21 @@ and capnp-C++:
 | Canonical form | no | yes | yes (byte-parity tested) |
 | Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
-| Capability pointers on the wire | yes | yes | yes (stored, not invoked) |
-| RPC | no | yes | no |
+| Capability pointers on the wire | yes | yes | yes |
+| RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
+| RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
+| RPC level 3/4 (three-party, joins) | no | no (replies `unimplemented`) | no (replies `unimplemented`, same as C++) |
 | Generics in generated code | no | yes | no |
 | Dynamic reflection API | no | yes | no |
 
-RPC, generics, and reflection sit outside the serialization core; capnpc-c
-draws the same line. The wire format carries generic types and capabilities
-either way, so messages produced by C++ users of those features still read
-correctly here.
+The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
+peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
+over TCP and calls it, pipelined and settled. No implementation of any
+language reaches RPC levels 3-4; like C++, this vat answers those
+messages with `Message.unimplemented` as the spec requires. Generics and
+reflection sit outside both this project's and capnpc-c's generated-code
+scope; the wire format carries generic types either way, so messages
+produced by C++ users of those features still read correctly here.
 
 ## Install
 

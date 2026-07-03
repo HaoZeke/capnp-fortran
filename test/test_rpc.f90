@@ -27,6 +27,7 @@ program test_rpc
    call t_cap_result_and_pipeline()
    call t_exception()
    call t_unimplemented()
+   call t_persistent_save()
 
    call rpc_conn_close(cli)
    call rpc_conn_close(srv)
@@ -229,5 +230,31 @@ contains
       call rpc_pump_once(cli, err)
       call check_(err == CAPNP_OK, 'rpc: client absorbed unimplemented')
    end subroutine t_unimplemented
+
+   !> Level 2 persistence hook: Persistent.save on the bootstrap cap
+   !> answers an application-defined SturdyRef.
+   subroutine t_persistent_save()
+      type(rpc_cap_t) :: bootcap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qb, qs
+      character(len=:), allocatable :: ref
+      call rpc_bootstrap_send(cli, bootcap, err)
+      qb = bootcap%id
+      call rpc_pump_once(srv, err)
+      call rpc_call_begin(cli, bootcap, RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE, &
+                          m, params, qs, err)
+      s = capnp_new_struct(m, 0, 0, err)
+      call payload_content_set(params, s, err)
+      call rpc_call_send(cli, m, err)
+      call rpc_pump_once(srv, err)
+      call rpc_wait(cli, qb, err)
+      call rpc_wait(cli, qs, err)
+      call rpc_result_content(cli, qs, content, err)
+      call check_(err == CAPNP_OK, 'rpc: save returned')
+      call capnp_get_text(content, 0, ref, err)
+      call check_(err == CAPNP_OK .and. ref == 'sturdy:echo-main', 'rpc: sturdy ref')
+   end subroutine t_persistent_save
 
 end program test_rpc
