@@ -417,4 +417,284 @@ contains
       cabi_list_len = int(capnp_list_len(g_obj(h, list_id)), c_int64_t)
    end function cabi_list_len
 
+   ! ------------------------------------------------------------------
+   ! Primitive lists (capn_new_list*/capn_setv/capn_getv counterparts)
+   ! ------------------------------------------------------------------
+
+   !> esize takes the wire element-size code (CAPNP_SZ_*: 1 bit .. 5 eight).
+   integer(c_int) function cabi_new_list(h, esize, count) &
+      bind(c, name='cabi_new_list')
+      integer(c_int), value :: h, esize
+      integer(c_int64_t), value :: count
+      type(capnp_ptr_t) :: p
+      integer :: err
+      cabi_new_list = -1
+      if (.not. msg_ok(int(h))) return
+      p = capnp_new_list(g_pool(h), int(esize), int(count, int64), err)
+      if (err /= CAPNP_OK) return
+      cabi_new_list = push_obj(int(h), p)
+   end function cabi_new_list
+
+   integer(c_int) function cabi_list_set_i8(h, list_id, i, value) &
+      bind(c, name='cabi_list_set_i8')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer(c_int8_t), value :: value
+      integer :: err
+      cabi_list_set_i8 = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(list_id))) return
+      call capnp_list_set_i8(g_obj(h, list_id), int(i, int64), int(value, int8), err)
+      cabi_list_set_i8 = err
+   end function cabi_list_set_i8
+
+   integer(c_int8_t) function cabi_list_get_i8(h, list_id, i) &
+      bind(c, name='cabi_list_get_i8')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer :: err
+      cabi_list_get_i8 = 0_c_int8_t
+      if (.not. obj_ok(int(h), int(list_id))) return
+      cabi_list_get_i8 = int(capnp_list_get_i8(g_obj(h, list_id), int(i, int64), err), c_int8_t)
+   end function cabi_list_get_i8
+
+   integer(c_int) function cabi_list_set_i16(h, list_id, i, value) &
+      bind(c, name='cabi_list_set_i16')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer(c_int16_t), value :: value
+      integer :: err
+      cabi_list_set_i16 = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(list_id))) return
+      call capnp_list_set_i16(g_obj(h, list_id), int(i, int64), int(value, int16), err)
+      cabi_list_set_i16 = err
+   end function cabi_list_set_i16
+
+   integer(c_int16_t) function cabi_list_get_i16(h, list_id, i) &
+      bind(c, name='cabi_list_get_i16')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer :: err
+      cabi_list_get_i16 = 0_c_int16_t
+      if (.not. obj_ok(int(h), int(list_id))) return
+      cabi_list_get_i16 = int(capnp_list_get_i16(g_obj(h, list_id), int(i, int64), err), c_int16_t)
+   end function cabi_list_get_i16
+
+   integer(c_int) function cabi_list_set_i32(h, list_id, i, value) &
+      bind(c, name='cabi_list_set_i32')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer(c_int32_t), value :: value
+      integer :: err
+      cabi_list_set_i32 = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(list_id))) return
+      call capnp_list_set_i32(g_obj(h, list_id), int(i, int64), int(value, int32), err)
+      cabi_list_set_i32 = err
+   end function cabi_list_set_i32
+
+   integer(c_int32_t) function cabi_list_get_i32(h, list_id, i) &
+      bind(c, name='cabi_list_get_i32')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer :: err
+      cabi_list_get_i32 = 0_c_int32_t
+      if (.not. obj_ok(int(h), int(list_id))) return
+      cabi_list_get_i32 = int(capnp_list_get_i32(g_obj(h, list_id), int(i, int64), err), c_int32_t)
+   end function cabi_list_get_i32
+
+   integer(c_int) function cabi_list_set_i64(h, list_id, i, value) &
+      bind(c, name='cabi_list_set_i64')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i, value
+      integer :: err
+      cabi_list_set_i64 = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(list_id))) return
+      call capnp_list_set_i64(g_obj(h, list_id), int(i, int64), int(value, int64), err)
+      cabi_list_set_i64 = err
+   end function cabi_list_set_i64
+
+   integer(c_int64_t) function cabi_list_get_i64(h, list_id, i) &
+      bind(c, name='cabi_list_get_i64')
+      integer(c_int), value :: h, list_id
+      integer(c_int64_t), value :: i
+      integer :: err
+      cabi_list_get_i64 = 0_c_int64_t
+      if (.not. obj_ok(int(h), int(list_id))) return
+      cabi_list_get_i64 = int(capnp_list_get_i64(g_obj(h, list_id), int(i, int64), err), c_int64_t)
+   end function cabi_list_get_i64
+
+   integer(c_int) function cabi_list_set_text(h, list_id, i, str) &
+      bind(c, name='cabi_list_set_text')
+      integer(c_int), value :: h, list_id, i
+      character(kind=c_char), intent(in) :: str(*)
+      integer :: err
+      cabi_list_set_text = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(list_id))) return
+      call capnp_list_set_text(g_obj(h, list_id), int(i), c_to_f(str), err)
+      cabi_list_set_text = err
+   end function cabi_list_set_text
+
+   ! ------------------------------------------------------------------
+   ! Data blobs
+   ! ------------------------------------------------------------------
+
+   integer(c_int) function cabi_set_data(h, obj_id, slot, buf, length) &
+      bind(c, name='cabi_set_data')
+      integer(c_int), value :: h, obj_id, slot
+      type(c_ptr), value :: buf
+      integer(c_int64_t), value :: length
+      integer(int8), pointer :: fb(:)
+      integer(int8), allocatable :: b(:)
+      integer :: err
+      cabi_set_data = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(obj_id))) return
+      allocate (b(0:max(length, 1_c_int64_t) - 1))
+      if (length > 0_c_int64_t) then
+         call c_f_pointer(buf, fb, [int(length)])
+         b(0:length - 1) = fb(1:length)
+      end if
+      call capnp_set_data(g_obj(h, obj_id), int(slot), b(0:length - 1), err)
+      cabi_set_data = err
+   end function cabi_set_data
+
+   !> Read the data blob at pointer slot into the caller buffer (cap bytes).
+   !> written receives the full blob length even when it exceeds cap.
+   integer(c_int) function cabi_get_data(h, obj_id, slot, buf, cap, written) &
+      bind(c, name='cabi_get_data')
+      integer(c_int), value :: h, obj_id, slot
+      type(c_ptr), value :: buf
+      integer(c_int64_t), value :: cap
+      integer(c_int64_t), intent(out) :: written
+      integer(int8), allocatable :: b(:)
+      integer(int8), pointer :: fb(:)
+      integer(int64) :: n, m
+      integer :: err
+      written = 0_c_int64_t
+      cabi_get_data = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(obj_id))) return
+      call capnp_get_data(g_obj(h, obj_id), int(slot), b, err)
+      if (err /= CAPNP_OK) then
+         cabi_get_data = err
+         return
+      end if
+      n = size(b, kind=int64)
+      written = int(n, c_int64_t)
+      m = min(n, cap)
+      if (m > 0_int64) then
+         call c_f_pointer(buf, fb, [int(m)])
+         fb(1:m) = b(lbound(b, 1):lbound(b, 1) + m - 1)
+      end if
+      cabi_get_data = CAPNP_OK
+   end function cabi_get_data
+
+   ! ------------------------------------------------------------------
+   ! Union discriminants
+   ! ------------------------------------------------------------------
+
+   integer(c_int32_t) function cabi_which(h, obj_id, disc_off16) &
+      bind(c, name='cabi_which')
+      integer(c_int), value :: h, obj_id, disc_off16
+      cabi_which = -1_c_int32_t
+      if (.not. obj_ok(int(h), int(obj_id))) return
+      cabi_which = int(capnp_which(g_obj(h, obj_id), int(disc_off16)), c_int32_t)
+   end function cabi_which
+
+   integer(c_int) function cabi_set_which(h, obj_id, disc_off16, tag) &
+      bind(c, name='cabi_set_which')
+      integer(c_int), value :: h, obj_id, disc_off16, tag
+      integer :: err
+      cabi_set_which = CAPNP_ERR_ARG
+      if (.not. obj_ok(int(h), int(obj_id))) return
+      call capnp_set_which(g_obj(h, obj_id), int(disc_off16), int(tag), err)
+      cabi_set_which = err
+   end function cabi_set_which
+
+   ! ------------------------------------------------------------------
+   ! Packed and canonical serialization
+   ! ------------------------------------------------------------------
+
+   integer(c_int) function cabi_serialize_packed(h, buf, cap, written) &
+      bind(c, name='cabi_serialize_packed')
+      integer(c_int), value :: h
+      type(c_ptr), value :: buf
+      integer(c_int64_t), value :: cap
+      integer(c_int64_t), intent(out) :: written
+      integer(int8), allocatable :: b(:)
+      integer(int8), pointer :: fb(:)
+      integer(int64) :: total
+      integer :: err
+      written = 0_c_int64_t
+      cabi_serialize_packed = CAPNP_ERR_ARG
+      if (.not. msg_ok(int(h))) return
+      call capnp_serialize_packed_bytes(g_pool(h), b, err)
+      if (err /= CAPNP_OK) then
+         cabi_serialize_packed = err
+         return
+      end if
+      total = size(b, kind=int64)
+      written = int(total, c_int64_t)
+      if (total > cap) then
+         cabi_serialize_packed = CAPNP_ERR_ARG
+         return
+      end if
+      if (total > 0_int64) then
+         call c_f_pointer(buf, fb, [int(total)])
+         fb(1:total) = b(lbound(b, 1):lbound(b, 1) + total - 1)
+      end if
+      cabi_serialize_packed = CAPNP_OK
+   end function cabi_serialize_packed
+
+   integer(c_int) function cabi_deserialize_packed(buf, length) &
+      bind(c, name='cabi_deserialize_packed')
+      type(c_ptr), value :: buf
+      integer(c_int64_t), value :: length
+      integer(int8), pointer :: fb(:)
+      integer(int8), allocatable :: b(:)
+      integer :: h, err
+      cabi_deserialize_packed = -1
+      if (length < 1_c_int64_t) return
+      h = alloc_slot()
+      if (h < 0) return
+      call c_f_pointer(buf, fb, [int(length)])
+      allocate (b(0:length - 1))
+      b = fb(1:length)
+      call capnp_deserialize_packed_bytes(b, g_pool(h), err)
+      if (err /= CAPNP_OK) return
+      g_used(h) = .true.
+      g_nobj(h) = 0
+      cabi_deserialize_packed = h
+   end function cabi_deserialize_packed
+
+   !> Canonical single-segment bytes (no segment table), matching
+   !> `capnp convert binary:canonical`.
+   integer(c_int) function cabi_canonicalize(h, buf, cap, written) &
+      bind(c, name='cabi_canonicalize')
+      integer(c_int), value :: h
+      type(c_ptr), value :: buf
+      integer(c_int64_t), value :: cap
+      integer(c_int64_t), intent(out) :: written
+      integer(int8), allocatable :: b(:)
+      integer(int8), pointer :: fb(:)
+      integer(int64) :: total
+      integer :: err
+      written = 0_c_int64_t
+      cabi_canonicalize = CAPNP_ERR_ARG
+      if (.not. msg_ok(int(h))) return
+      call capnp_canonicalize(g_pool(h), b, err)
+      if (err /= CAPNP_OK) then
+         cabi_canonicalize = err
+         return
+      end if
+      total = size(b, kind=int64)
+      written = int(total, c_int64_t)
+      if (total > cap) then
+         cabi_canonicalize = CAPNP_ERR_ARG
+         return
+      end if
+      if (total > 0_int64) then
+         call c_f_pointer(buf, fb, [int(total)])
+         fb(1:total) = b(lbound(b, 1):lbound(b, 1) + total - 1)
+      end if
+      cabi_canonicalize = CAPNP_OK
+   end function cabi_canonicalize
+
 end module capnp_cabi

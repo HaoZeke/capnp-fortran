@@ -53,6 +53,12 @@ extern int32_t cabi_get_u32(int h, int obj_id, int byte_off);
 extern int cabi_getp(int h, int obj_id, int slot);
 extern int cabi_get_text(int h, int obj_id, int slot, void *buf, int64_t cap, int64_t *written);
 extern int64_t cabi_list_len(int h, int list_id);
+extern int cabi_new_list(int h, int esize, int64_t count);
+extern int cabi_list_set_i32(int h, int list_id, int64_t i, int32_t value);
+extern int32_t cabi_list_get_i32(int h, int list_id, int64_t i);
+extern int cabi_serialize_packed(int h, void *buf, int64_t cap, int64_t *written);
+extern int cabi_deserialize_packed(const void *buf, int64_t len);
+extern int cabi_canonicalize(int h, void *buf, int64_t cap, int64_t *written);
 
 #define VAL_ROOT 42u
 #define VAL_E0 100u
@@ -237,12 +243,138 @@ static void test_packed_vector(void **state)
 	assert_memory_equal(out, expected, sizeof expected);
 }
 
+/* Packed golden: our packed serialization must equal the reference deflate
+ * (validated against the spec vector above) applied to the shared golden
+ * flat bytes; and the reference's packed output must round-trip through our
+ * packed decoder. */
+static void test_packed_golden(void **state)
+{
+	uint8_t fflat[512], fpacked[512], cpacked[512];
+	int64_t fn, pn;
+	struct capn_stream s;
+	size_t cn_packed;
+	int h, root;
+	(void)state;
+
+	fn = build_cabi(fflat, sizeof fflat);
+	assert_true(fn > 0);
+
+	memset(&s, 0, sizeof s);
+	s.next_in = fflat;
+	s.avail_in = (size_t)fn;
+	s.next_out = cpacked;
+	s.avail_out = sizeof cpacked;
+	assert_int_equal(capn_deflate(&s), 0);
+	cn_packed = sizeof cpacked - s.avail_out;
+
+	{
+		int bh = cabi_builder_new();
+		int rs, lst, e0, e1;
+		int64_t w = 0;
+
+		assert_true(bh >= 1);
+		rs = cabi_new_struct(bh, 1, 2);
+		cabi_set_u32(bh, rs, 0, (int32_t)VAL_ROOT);
+		cabi_set_text(bh, rs, 0, NAME);
+		lst = cabi_new_composite_list(bh, 2, 1, 1);
+		e0 = cabi_list_get_struct(bh, lst, 0);
+		cabi_set_u32(bh, e0, 0, (int32_t)VAL_E0);
+		e1 = cabi_list_get_struct(bh, lst, 1);
+		cabi_set_u32(bh, e1, 0, (int32_t)VAL_E1);
+		cabi_setp(bh, rs, 1, lst);
+		cabi_set_root(bh, rs);
+		assert_int_equal(cabi_serialize_packed(bh, fpacked, sizeof fpacked, &pn), 0);
+		cabi_builder_free(bh);
+	}
+
+	assert_int_equal((size_t)pn, cn_packed);
+	assert_memory_equal(fpacked, cpacked, cn_packed);
+
+	h = cabi_deserialize_packed(cpacked, (int64_t)cn_packed);
+	assert_true(h >= 1);
+	root = cabi_root(h);
+	assert_int_equal((uint32_t)cabi_get_u32(h, root, 0), VAL_ROOT);
+	cabi_builder_free(h);
+}
+
+/* Primitive List(Int32) golden: capn_new_list32 on the reference side,
+ * cabi_new_list with the FOUR element-size code (4) on ours. */
+static void test_primitive_list_golden(void **state)
+{
+	uint8_t fbuf[256], cbuf[256];
+	int64_t fn = 0, cn;
+	int i;
+	(void)state;
+
+	{
+		int h = cabi_builder_new();
+		int rs, lst;
+
+		assert_true(h >= 1);
+		rs = cabi_new_struct(h, 0, 1);
+		lst = cabi_new_list(h, 4, 3); /* CAPNP_SZ_FOUR, 3 elements */
+		for (i = 0; i < 3; i++)
+			cabi_list_set_i32(h, lst, i, 10 * (i + 1));
+		cabi_setp(h, rs, 0, lst);
+		cabi_set_root(h, rs);
+		assert_int_equal(cabi_serialize(h, fbuf, sizeof fbuf, &fn), 0);
+		cabi_builder_free(h);
+	}
+
+	{
+		struct capn c;
+		capn_ptr root, rs;
+		capn_list32 lst;
+
+		capn_init_malloc(&c);
+		root = capn_root(&c);
+		rs = capn_new_struct(root.seg, 0, 1);
+		lst = capn_new_list32(root.seg, 3);
+		for (i = 0; i < 3; i++)
+			capn_set32(lst, i, (uint32_t)(10 * (i + 1)));
+		capn_setp(rs, 0, lst.p);
+		capn_setp(root, 0, rs);
+		cn = capn_write_mem(&c, cbuf, sizeof cbuf, 0);
+		capn_free(&c);
+	}
+
+	assert_true(fn > 0);
+	assert_int_equal(fn, cn);
+	assert_memory_equal(fbuf, cbuf, (size_t)cn);
+}
+
+/* Canonical form of the golden message: single segment, no table, preorder,
+ * with the composite list's null pointer section trimmed uniformly. Layout:
+ * root pointer word + root struct (1+2) + "hi" text (1) + list tag word +
+ * 2 x 1-word elements = 8 words. */
+static void test_canonical_form(void **state)
+{
+	uint8_t fflat[512], canon[512];
+	const uint8_t root_ptr[8] = {0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00};
+	int64_t fn, wn = 0;
+	int h;
+	(void)state;
+
+	fn = build_cabi(fflat, sizeof fflat);
+	assert_true(fn > 0);
+	h = cabi_deserialize(fflat, fn);
+	assert_true(h >= 1);
+	assert_int_equal(cabi_canonicalize(h, canon, sizeof canon, &wn), 0);
+	cabi_builder_free(h);
+
+	assert_int_equal(wn, 64);
+	assert_memory_equal(canon, root_ptr, sizeof root_ptr);
+}
+
 int main(void)
 {
 	const struct CMUnitTest tests[] = {
 	    cmocka_unit_test(test_golden_bytes),
 	    cmocka_unit_test(test_cross_decode),
 	    cmocka_unit_test(test_packed_vector),
+	    cmocka_unit_test(test_packed_golden),
+	    cmocka_unit_test(test_primitive_list_golden),
+	    cmocka_unit_test(test_canonical_form),
 	};
 	return cmocka_run_group_tests(tests, NULL, NULL);
 }
