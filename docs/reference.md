@@ -59,6 +59,7 @@ does.
 | `capnp_list_get_struct` | `(l, i, err) result(q)` | composite element; upgrades primitive lists to struct views |
 | `capnp_copy` | `(dstmsg, src, err) result(q)` | recursive deep copy into another message |
 | `capnp_disown` | `(p, i, err) result(q)` | orphan: zero the slot, return the object; re-link with `capnp_setp` |
+| `capnp_total_size` | `(p, err) result(int64)` | words reachable from `p` (C++ `totalSize()`); the size a deep copy occupies |
 
 ## Field accessors (`capnp_message`)
 
