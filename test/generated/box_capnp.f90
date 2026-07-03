@@ -16,6 +16,12 @@ module box_capnp
       type(capnp_ptr_t) :: p
    end type box_use_t
 
+   integer, parameter :: BOX_TEXT_DWORDS = 0
+   integer, parameter :: BOX_TEXT_PWORDS = 2
+   type :: box_text_t
+      type(capnp_ptr_t) :: p
+   end type box_text_t
+
 contains
 
    function box_new(msg, err) result(h)
@@ -93,15 +99,15 @@ contains
    function box_use_text_box_get(h, err) result(o)
       type(box_use_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_t) :: o
+      type(box_text_t) :: o
       o%p = capnp_getp(h%p, 0, err)
    end function box_use_text_box_get
 
    function box_use_text_box_init(h, err) result(o)
       type(box_use_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_t) :: o
-      o%p = capnp_new_struct(h%p%msg, BOX_DWORDS, BOX_PWORDS, err)
+      type(box_text_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
    end function box_use_text_box_init
 
@@ -119,5 +125,47 @@ contains
       o%p = capnp_new_struct(h%p%msg, BOX_DWORDS, BOX_PWORDS, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 1, o%p, err)
    end function box_use_any_box_init
+
+   function box_text_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_text_t) :: h
+      h%p = capnp_new_struct(msg, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
+   end function box_text_new
+
+   function box_text_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_text_t) :: h
+      h%p = capnp_root(msg, err)
+   end function box_text_read_root
+
+   subroutine box_text_value_get(h, s, err)
+      type(box_text_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 0, s, err)
+   end subroutine box_text_value_get
+
+   subroutine box_text_value_set(h, s, err)
+      type(box_text_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 0, s, err)
+   end subroutine box_text_value_set
+
+   subroutine box_text_label_get(h, s, err)
+      type(box_text_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 1, s, err)
+   end subroutine box_text_label_get
+
+   subroutine box_text_label_set(h, s, err)
+      type(box_text_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 1, s, err)
+   end subroutine box_text_label_set
 
 end module box_capnp

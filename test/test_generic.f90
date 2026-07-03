@@ -1,7 +1,6 @@
-!> Generic (parameterized) schemas: type parameters bind to pointer
-!> types, so generic fields are AnyPointer slots and the generated code
-!> exposes them as pointer accessors (the capnp-c degradation, wire
-!> compatible with branded C++ readers).
+!> Generic (parameterized) schemas: branded uses (Box(Text)) get a
+!> brand-resolved instantiation with typed accessors; unbound uses keep
+!> the AnyPointer degradation, wire compatible either way.
 program test_generic
    use capnp
    use box_capnp
@@ -10,8 +9,8 @@ program test_generic
    integer :: nfail = 0
    type(capnp_message_t), target :: msg, rmsg
    type(box_use_t) :: use_
-   type(box_t) :: tb
-   type(capnp_ptr_t) :: q
+   type(box_text_t) :: tb
+   type(box_t) :: ab
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
    integer :: err
@@ -22,26 +21,24 @@ program test_generic
 
    tb = box_use_text_box_init(use_, err)
    call check_(err == CAPNP_OK, 'generic: branded box init')
-   call box_label_set(tb, 'greeting box', err)
-   ! T = Text: the generic slot is pointer 0; write a text object there.
-   call capnp_set_text(tb%p, 0, 'boxed hello', err)
-   call check_(err == CAPNP_OK, 'generic: value written through AnyPointer slot')
+   call box_text_label_set(tb, 'greeting box', err)
+   ! T = Text resolved by the brand: a typed accessor, no raw pointers.
+   call box_text_value_set(tb, 'boxed hello', err)
+   call check_(err == CAPNP_OK, 'generic: typed value set')
 
    call capnp_serialize_bytes(msg, bytes, err)
    call capnp_deserialize_bytes(bytes, rmsg, err)
    use_ = box_use_read_root(rmsg, err)
    tb = box_use_text_box_get(use_, err)
-   call box_label_get(tb, s, err)
+   call box_text_label_get(tb, s, err)
    call check_(s == 'greeting box', 'generic: label round trip')
-   q = box_value_get(tb, err)
-   call check_(err == CAPNP_OK .and. q%kind == CAPNP_PK_LIST, &
-               'generic: AnyPointer accessor resolves')
-   call capnp_get_text(tb%p, 0, s, err)
-   call check_(s == 'boxed hello', 'generic: value round trip')
+   call box_text_value_get(tb, s, err)
+   call check_(err == CAPNP_OK .and. s == 'boxed hello', &
+               'generic: typed value round trip')
 
-   ! Unbound Box: same accessors, value stays null until set.
-   tb = box_use_any_box_get(use_, err)
-   call check_(err == CAPNP_OK .and. capnp_ptr_is_null(tb%p), &
+   ! Unbound Box keeps the generic handle and AnyPointer accessors.
+   ab = box_use_any_box_get(use_, err)
+   call check_(err == CAPNP_OK .and. capnp_ptr_is_null(ab%p), &
                'generic: unbound box absent reads null')
 
    call capnp_message_free(msg)
