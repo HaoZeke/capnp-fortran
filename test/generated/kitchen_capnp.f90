@@ -14,30 +14,25 @@ module kitchen_capnp
       type(capnp_ptr_t) :: p
    end type sink_t
 
-   integer(int8), parameter :: MAGIC(0:3) = [ &
-      -54_int8, -2_int8, -16_int8, 13_int8]
-   integer(int8), parameter :: PRIMES_DEFAULT(0:31) = [ &
-      0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8,  &
-      0_int8, 0_int8, 36_int8, 0_int8, 0_int8, 0_int8, 2_int8, 0_int8, 0_int8, 0_int8,  &
-      3_int8, 0_int8, 0_int8, 0_int8, 5_int8, 0_int8, 0_int8, 0_int8, 7_int8, 0_int8,  &
-      0_int8, 0_int8]
-   integer(int8), parameter :: HOME_DEFAULT(0:39) = [ &
-      0_int8, 0_int8, 0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, -16_int8, -65_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      -32_int8, 63_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, -128_int8, 34_int8, 64_int8]
-   integer(int8), parameter :: SINK_PAYLOAD_DEFAULT(0:3) = [ &
-      -34_int8, -83_int8, -66_int8, -17_int8]
-   integer(int8), parameter :: SINK_ORIGIN_DEFAULT(0:39) = [ &
-      0_int8, 0_int8, 0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, -8_int8, 63_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      4_int8, 64_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 12_int8, -64_int8]
-   integer(int8), parameter :: SINK_SCORES_DEFAULT(0:39) = [ &
-      0_int8, 0_int8, 0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8,  &
-      0_int8, 0_int8, 29_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8,  &
-      0_int8, 0_int8, 4_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8]
+   integer(int8), parameter :: MAGIC(0:3) = [integer(int8) :: &
+      -54, -2, -16, 13]
+   integer(int8), parameter :: PRIMES_DEFAULT(0:31) = [integer(int8) :: &
+      0, 0, 0, 0, 3, 0, 0, 0, 1, 0, 0, 0, 36, 0, 0, 0,  &
+      2, 0, 0, 0, 3, 0, 0, 0, 5, 0, 0, 0, 7, 0, 0, 0]
+   integer(int8), parameter :: HOME_DEFAULT(0:39) = [integer(int8) :: &
+      0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,  &
+      0, 0, 0, 0, 0, 0, -16, -65, 0, 0, 0, 0, 0, 0, -32, 63,  &
+      0, 0, 0, 0, 0, -128, 34, 64]
+   integer(int8), parameter :: SINK_PAYLOAD_DEFAULT(0:3) = [integer(int8) :: &
+      -34, -83, -66, -17]
+   integer(int8), parameter :: SINK_ORIGIN_DEFAULT(0:39) = [integer(int8) :: &
+      0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,  &
+      0, 0, 0, 0, 0, 0, -8, 63, 0, 0, 0, 0, 0, 0, 4, 64,  &
+      0, 0, 0, 0, 0, 0, 12, -64]
+   integer(int8), parameter :: SINK_SCORES_DEFAULT(0:39) = [integer(int8) :: &
+      0, 0, 0, 0, 4, 0, 0, 0, 1, 0, 0, 0, 29, 0, 0, 0,  &
+      3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,  &
+      4, 0, 0, 0, 0, 0, 0, 0]
 
 contains
 
