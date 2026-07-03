@@ -536,7 +536,7 @@ contains
       call w('')
    end subroutine emit_struct_decl
 
-   !> Named tag constants for union members: <PREFIX>_<FIELD>_WHICH, the
+   !> Named tag constants for union members: <PREFIX>_<FIELD>_TAG, the
    !> value <prefix>_which(h) returns when that member is active.
    recursive subroutine emit_union_tag_decls(np, pfx, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -556,7 +556,7 @@ contains
          disc = field_discriminant(f)
          if (disc /= NO_DISCRIMINANT) then
             call w('   integer, parameter :: '//upcase(pfx)//'_'// &
-                   upcase(snake(fn))//'_WHICH = '//itoa(int(disc, int64)))
+                   upcase(snake(fn))//'_TAG = '//itoa(int(disc, int64)))
          end if
          if (field_which(f) == FIELD_GROUP) then
             gidx = find_node(field_group_type_id(f))

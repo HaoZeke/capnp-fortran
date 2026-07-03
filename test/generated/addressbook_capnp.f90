@@ -9,10 +9,10 @@ module addressbook_capnp
    type :: person_t
       type(capnp_ptr_t) :: p
    end type person_t
-   integer, parameter :: PERSON_EMPLOYMENT_UNEMPLOYED_WHICH = 0
-   integer, parameter :: PERSON_EMPLOYMENT_EMPLOYER_WHICH = 1
-   integer, parameter :: PERSON_EMPLOYMENT_SCHOOL_WHICH = 2
-   integer, parameter :: PERSON_EMPLOYMENT_SELF_EMPLOYED_WHICH = 3
+   integer, parameter :: PERSON_EMPLOYMENT_UNEMPLOYED_TAG = 0
+   integer, parameter :: PERSON_EMPLOYMENT_EMPLOYER_TAG = 1
+   integer, parameter :: PERSON_EMPLOYMENT_SCHOOL_TAG = 2
+   integer, parameter :: PERSON_EMPLOYMENT_SELF_EMPLOYED_TAG = 3
 
    integer, parameter :: PERSON_PHONE_NUMBER_DWORDS = 1
    integer, parameter :: PERSON_PHONE_NUMBER_PWORDS = 1

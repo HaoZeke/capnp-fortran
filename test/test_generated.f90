@@ -116,7 +116,7 @@ contains
       call check_(s == '555-1212', label//': alice number')
       call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_MOBILE, &
                   label//': alice type')
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                   label//': alice school tag')
       call person_employment_school_get(pe, s, err)
       call check_(s == 'MIT', label//': alice school')
@@ -128,7 +128,7 @@ contains
       ph%p = capnp_list_get_struct(phones, 1, err)
       call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_WORK, &
                   label//': bob work type')
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_TAG, &
                   label//': bob unemployed tag')
    end subroutine verify
 
@@ -147,18 +147,18 @@ contains
       people = address_book_people_init(book, 1_int64, err)
       pe%p = capnp_list_get_struct(people, 0, err)
 
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_TAG, &
                   'union: fresh struct reads tag 0')
       call person_employment_school_set(pe, 'ETH', err)
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                   'union: school selected')
       call person_employment_employer_set(pe, 'ACME', err)
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_EMPLOYER_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_EMPLOYER_TAG, &
                   'union: employer reselected')
       call person_employment_employer_get(pe, s, err)
       call check_(err == CAPNP_OK .and. s == 'ACME', 'union: employer value')
       call person_employment_self_employed_set(pe, err)
-      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SELF_EMPLOYED_WHICH, &
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SELF_EMPLOYED_TAG, &
                   'union: void variant reselected')
       call capnp_message_free(bmsg)
    end subroutine union_reselect
