@@ -59,8 +59,10 @@ and capnp-C++:
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
 | RPC level 3/4 (three-party, joins) | no | no (replies `unimplemented`) | no (replies `unimplemented`, same as C++) |
-| Generics in generated code | no | yes | no |
-| Dynamic reflection API | no | yes | no |
+| `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
+| Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
+| Generics in generated code | no | yes | brand-resolved instantiations (direct bindings; list-element params degrade) |
+| Dynamic reflection API | no | yes | yes (`capnp_dynamic`, by-name read/write) |
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
