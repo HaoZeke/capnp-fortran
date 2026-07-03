@@ -68,7 +68,7 @@ module capnp_schema
    integer, parameter, public :: SCOPE_BIND = 0
    integer, parameter, public :: SCOPE_INHERIT = 1
    integer, parameter, public :: BINDING_UNBOUND = 0
-   integer, parameter, public :: BINDING_TYPE = 1
+   integer, parameter, public :: BINDING_BOUND_TYPE = 1
 
 contains
 

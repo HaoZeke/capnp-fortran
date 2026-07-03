@@ -1283,7 +1283,7 @@ contains
          do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)
             if (err /= CAPNP_OK) return
-            if (binding_which(bd) == BINDING_TYPE) then
+            if (binding_which(bd) == BINDING_BOUND_TYPE) then
                btypes(n) = binding_type(bd, err)
                if (err /= CAPNP_OK) return
             else
