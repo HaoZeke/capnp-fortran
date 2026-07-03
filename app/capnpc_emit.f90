@@ -119,6 +119,18 @@ contains
       end do
    end function upcase
 
+   !> Fortran character-literal body: single quotes doubled.
+   pure function fquote(s) result(o)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: o
+      integer :: i
+      o = ''
+      do i = 1, len(s)
+         o = o//s(i:i)
+         if (s(i:i) == "'") o = o//"'"
+      end do
+   end function fquote
+
    pure function itoa(v) result(o)
       integer(int64), intent(in) :: v
       character(len=:), allocatable :: o
@@ -390,7 +402,7 @@ contains
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
-         call w('   character(len=*), parameter :: '//upcase(cn)//" = '"//s//"'")
+         call w('   character(len=*), parameter :: '//upcase(cn)//" = '"//fquote(s)//"'")
       case (TYPE_DATA)
          call value_data(v, db, err)
          if (err /= CAPNP_OK) return
@@ -894,7 +906,7 @@ contains
          call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
-         call w("         s = '"//dtext//"'")
+         call w("         s = '"//fquote(dtext)//"'")
          call w('         return')
          call w('      end if')
       end if
