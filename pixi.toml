@@ -20,7 +20,7 @@ cxx-compiler = "*"
 capnproto = ">=1.0"
 
 [feature.docs]
-dependencies = { python = ">=3.10", sphinx = ">=7,<9", graphviz = "*" }
+dependencies = { python = ">=3.10", sphinx = ">=7,<9", graphviz = "*", emacs = "*" }
 [feature.docs.pypi-dependencies]
 shibuya = ">=2026.1.9, <2027"
 sphinxcontrib-bibtex = ">=2.6, <3"
@@ -29,7 +29,8 @@ sphinx-design = ">=0.6, <1"
 myst-parser = ">=4.0, <5"
 sphinxcontrib-mermaid = ">=1.0, <2"
 [feature.docs.tasks]
-docs = { cmd = "sphinx-build docs/source docs/build -b html", description = "Build the Sphinx HTML docs" }
+orgbld = { cmd = "emacs --batch -l docs/export.el", description = "Export docs/orgmode/*.org to docs/source/*.rst" }
+docs = { cmd = "sphinx-build docs/source docs/build -b html", depends-on = ["orgbld"], description = "Build the Sphinx HTML docs" }
 docs-clean = { cmd = "rm -rf docs/build", description = "Remove the built docs" }
 
 [environments]
