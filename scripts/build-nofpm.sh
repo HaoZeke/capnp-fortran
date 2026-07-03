@@ -24,6 +24,11 @@ LIB_SOURCES=(
   src/capnp_canonical.f90
   src/capnp.f90
   src/capnp_cabi.f90
+  src/capnp_posix.f90
+  src/capnp_rpc_transport.f90
+  src/rpc_capnp.f90
+  src/rpc_twoparty_capnp.f90
+  src/capnp_rpc.f90
 )
 
 # Support modules used by test programs, in dependency order.
@@ -32,6 +37,7 @@ TEST_MODULES=(
   test/generated/common_capnp.f90
   test/generated/addressbook_capnp.f90
   test/generated/kitchen_capnp.f90
+  test/rpc_servers.f90
 )
 
 TEST_PROGRAMS=(
@@ -42,6 +48,7 @@ TEST_PROGRAMS=(
   test/test_kitchen.f90
   test/test_parity.f90
   test/test_canonical.f90
+  test/test_rpc.f90
 )
 
 OBJS=()
