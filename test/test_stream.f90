@@ -35,7 +35,10 @@ program test_stream
    call rpc_pump_once(srv, err)
    call check_(err == CAPNP_OK, 'stream: bootstrap')
 
-   ! Five chunks of growing size through a window of 2.
+   ! Five chunks of growing size through a window of 2. The server
+   ! drains until quiet after each client action: retiring a window
+   ! slot emits a Finish alongside the next Call, so fixed one-pump
+   ! accounting would starve.
    call rpc_stream_init(stream, window=2)
    sent = 0_int64
    do i = 1, 5
@@ -47,15 +50,15 @@ program test_stream
       call check_(err == CAPNP_OK, 'stream: send accepted')
       sent = sent + size(chunk, kind=int64)
       deallocate (chunk)
-      call rpc_pump_once(srv, err)
-      call check_(err == CAPNP_OK, 'stream: server consumed chunk')
+      call drain(srv)
    end do
    call rpc_stream_finish(cli, stream, err)
    call check_(err == CAPNP_OK, 'stream: window drains clean')
+   call drain(srv)
 
    call writer_done_begin(cli, client, m, dparams, qid, err)
    call rpc_call_send(cli, m, err)
-   call rpc_pump_once(srv, err)
+   call drain(srv)
    call writer_done_wait(cli, qid, dresults, err)
    call check_(err == CAPNP_OK, 'stream: done returns')
    call check_(writer_done_results_total_get(dresults) == sent, &
@@ -69,9 +72,10 @@ program test_stream
    call payload_content_set(rawpl, s, err)
    call rpc_stream_send(cli, stream, m, qid, err)
    call check_(err == CAPNP_OK, 'stream: bad call sent')
-   call rpc_pump_once(srv, err)
+   call drain(srv)
    call rpc_stream_finish(cli, stream, err)
    call check_(err == RPC_ERR_EXCEPTION, 'stream: failure surfaces at finish')
+   call drain(srv)
    call writer_write_begin(cli, client, m, wparams, qid, err)
    call rpc_stream_send(cli, stream, m, qid, err)
    call check_(err == RPC_ERR_EXCEPTION, 'stream: post-failure send fails fast')
@@ -95,5 +99,16 @@ contains
          print '(a,a)', 'FAIL: ', name
       end if
    end subroutine check_
+
+   !> Handle every message already on the wire, then stop.
+   subroutine drain(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      logical :: handled
+      integer :: derr
+      do
+         call rpc_pump_poll(conn, 50, handled, derr)
+         if (derr /= CAPNP_OK .or. .not. handled) exit
+      end do
+   end subroutine drain
 
 end program test_stream
