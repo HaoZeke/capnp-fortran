@@ -28,6 +28,7 @@ module capnp_message
    public :: capnp_list_get_text, capnp_list_set_text
    public :: capnp_list_get_all_bool, capnp_list_set_all_bool
    public :: capnp_get_data_view, capnp_text_len
+   public :: capnp_total_size
    public :: capnp_get_i8, capnp_set_i8
    public :: capnp_list_get_i8, capnp_list_set_i8
    public :: capnp_list_get_all_i8, capnp_list_set_all_i8
@@ -1576,6 +1577,80 @@ contains
       end select
       call cp_put_i64(p%msg%segs(p%seg)%bytes, slot, 0_int64)
    end function capnp_disown
+
+   !> Words consumed by an object and everything it references: data and
+   !> pointer sections, list bodies, composite tag words (C++ totalSize()).
+   !> Far-pointer landing pads are not counted; the total is the size a
+   !> deep copy of the object would occupy.
+   function capnp_total_size(p, err) result(words)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      integer(int64) :: words
+      words = size_depth(p, 0, err)
+   end function capnp_total_size
+
+   recursive function size_depth(p, depth, err) result(words)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      integer(int64) :: words
+      type(capnp_ptr_t) :: r
+      integer(int64) :: i
+      err = CAPNP_OK
+      words = 0_int64
+      if (p%kind == CAPNP_PK_NULL .or. p%kind == CAPNP_PK_CAP) return
+      if (associated(p%msg)) then
+         if (depth > p%msg%depth_limit) then
+            err = CAPNP_ERR_DEPTH
+            return
+         end if
+      end if
+      select case (p%kind)
+      case (CAPNP_PK_STRUCT)
+         words = int(p%dwords, int64) + int(p%pwords, int64) + &
+                 size_children(p, depth, err)
+      case (CAPNP_PK_LIST)
+         select case (p%esize)
+         case (CAPNP_SZ_COMPOSITE)
+            words = 1_int64 + p%nelem*(int(p%dwords, int64) + int(p%pwords, int64))
+            do i = 0_int64, p%nelem - 1_int64
+               r = capnp_list_get_struct(p, int(i), err)
+               if (err /= CAPNP_OK) return
+               words = words + size_children(r, depth, err)
+               if (err /= CAPNP_OK) return
+            end do
+         case (CAPNP_SZ_PTR)
+            words = p%nelem
+            do i = 0_int64, p%nelem - 1_int64
+               r = capnp_getp(p, int(i), err)
+               if (err /= CAPNP_OK) return
+               words = words + size_depth(r, depth + 1, err)
+               if (err /= CAPNP_OK) return
+            end do
+         case default
+            words = (p%nelem*int(capnp_list_step_bits(p%esize), int64) + &
+                     63_int64)/64_int64
+         end select
+      end select
+   end function size_depth
+
+   !> Sum of size_depth over a struct's pointer slots.
+   recursive function size_children(p, depth, err) result(words)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      integer(int64) :: words
+      type(capnp_ptr_t) :: r
+      integer :: j
+      err = CAPNP_OK
+      words = 0_int64
+      do j = 0, p%pwords - 1
+         r = capnp_getp(p, j, err)
+         if (err /= CAPNP_OK) return
+         words = words + size_depth(r, depth + 1, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end function size_children
 
    ! ------------------------------------------------------------------
    ! Deep copy: clone an object (from any message) into a builder message.

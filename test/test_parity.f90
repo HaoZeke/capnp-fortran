@@ -20,6 +20,7 @@ program test_parity
    call t_views_and_lengths()
    call t_stream_unit()
    call t_packed_stream_unit()
+   call t_total_size()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -454,5 +455,37 @@ contains
       call capnp_message_free(r1)
       call capnp_message_free(r2)
    end subroutine t_packed_stream_unit
+
+   !> totalSize accounting: root (1+3) + 'copy me' text (1 word incl NUL)
+   !> + kid struct (1+0) + List(Int32) x3 (2 words) = 8 words.
+   subroutine t_total_size()
+      type(capnp_message_t), target :: a
+      type(capnp_ptr_t) :: root, kid, lst
+      integer(int64) :: words
+      integer :: err, i
+
+      call capnp_message_init_builder(a, err)
+      root = capnp_new_struct(a, 1, 3, err)
+      call capnp_set_i64(root, 0_int64, 41_int64, err)
+      call capnp_set_text(root, 0, 'copy me', err)
+      kid = capnp_new_struct(a, 1, 0, err)
+      call capnp_set_i32(kid, 0_int64, 7_int32, err)
+      call capnp_setp(root, 1, kid, err)
+      lst = capnp_new_list(a, CAPNP_SZ_FOUR, 3_int64, err)
+      do i = 0, 2
+         call capnp_list_set_i32(lst, int(i, int64), int(i*11, int32), err)
+      end do
+      call capnp_setp(root, 2, lst, err)
+      call capnp_set_root(a, root, err)
+      call check_(err == CAPNP_OK, 'total size: built')
+
+      words = capnp_total_size(root, err)
+      call check_(err == CAPNP_OK .and. words == 8_int64, 'total size: 8 words')
+      words = capnp_total_size(kid, err)
+      call check_(words == 1_int64, 'total size: leaf struct')
+      words = capnp_total_size(lst, err)
+      call check_(words == 2_int64, 'total size: primitive list')
+      call capnp_message_free(a)
+   end subroutine t_total_size
 
 end program test_parity
