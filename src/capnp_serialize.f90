@@ -8,7 +8,7 @@
 module capnp_serialize
    use capnp_kinds
    use capnp_endian, only: cp_get_i32, cp_put_i32
-   use capnp_arena, only: capnp_message_t, capnp_segment_t
+   use capnp_arena, only: capnp_message_t, capnp_segment_t, capnp_message_free
    implicit none
    private
 
