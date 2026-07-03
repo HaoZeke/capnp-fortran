@@ -366,6 +366,10 @@ contains
       blob = [1_int8, 2_int8, 3_int8, 4_int8]
       call capnp_set_data(root, 1, blob, err)
       call check_(capnp_text_len(root, 0, err) == 5_int64, 'view: text_len')
+      call capnp_get_text_view(root, 0, view, err)
+      call check_(err == CAPNP_OK .and. associated(view), 'view: text view exists')
+      call check_(size(view) == 5 .and. view(0) == int(iachar('h'), int8) .and. &
+                  view(4) == int(iachar('o'), int8), 'view: text view chars')
       call capnp_get_data_view(root, 1, view, err)
       call check_(err == CAPNP_OK .and. associated(view), 'view: data view exists')
       call check_(size(view) == 4 .and. all(view == blob), 'view: data view bytes')

@@ -94,6 +94,7 @@ as primitive via field `@0`).
 | `capnp_get_data` | `(p, slot, b, err)` | allocates and copies |
 | `capnp_set_data` | `(p, slot, b, err)` | |
 | `capnp_get_data_view` | `(p, slot, view, err)` | zero-copy pointer slice into the message segment |
+| `capnp_get_text_view` | `(p, slot, view, err)` | zero-copy character bytes, NUL excluded |
 
 ## Unions (`capnp_union`)
 

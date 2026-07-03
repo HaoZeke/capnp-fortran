@@ -27,7 +27,7 @@ module capnp_message
    public :: capnp_get_u64, capnp_set_u64
    public :: capnp_list_get_text, capnp_list_set_text
    public :: capnp_list_get_all_bool, capnp_list_set_all_bool
-   public :: capnp_get_data_view, capnp_text_len
+   public :: capnp_get_data_view, capnp_get_text_view, capnp_text_len
    public :: capnp_total_size
    public :: capnp_get_i8, capnp_set_i8
    public :: capnp_list_get_i8, capnp_list_set_i8
@@ -1532,6 +1532,26 @@ contains
       n = q%nelem
       if (n > 0_int64) view(0:n - 1) => q%msg%segs(q%seg)%bytes(q%off:q%off + n - 1)
    end subroutine capnp_get_data_view
+
+   !> Zero-copy view of a Text field's characters, trailing NUL excluded.
+   !> Same aliasing contract as capnp_get_data_view.
+   subroutine capnp_get_text_view(p, i, view, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      integer(int8), pointer, intent(out) :: view(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      integer(int64) :: n
+      view => null()
+      q = capnp_getp(p, i, err)
+      if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      n = max(0_int64, q%nelem - 1_int64)
+      if (n > 0_int64) view(0:n - 1) => q%msg%segs(q%seg)%bytes(q%off:q%off + n - 1)
+   end subroutine capnp_get_text_view
 
    !> Length of a Text field in characters (NUL excluded), without copying.
    function capnp_text_len(p, i, err) result(n)
