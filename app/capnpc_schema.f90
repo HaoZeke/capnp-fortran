@@ -49,6 +49,8 @@ module capnpc_schema
    public :: node_struct_data_words, node_struct_pointer_count, node_struct_is_group
    public :: node_struct_discriminant_count, node_struct_discriminant_offset
    public :: node_struct_fields, node_enumerants, node_const_type, node_const_value
+   public :: node_interface_methods, method_name
+   public :: method_param_struct_type, method_result_struct_type
    public :: field_name, field_code_order, field_discriminant, field_which
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
    public :: field_slot_had_default
@@ -187,6 +189,35 @@ contains
       type(capnp_ptr_t) :: l
       l = capnp_getp(p, 3, err)
    end function node_enumerants
+
+   !> Node.interface.methods: List(Method) at ptr 3.
+   function node_interface_methods(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 3, err)
+   end function node_interface_methods
+
+   !> Method: name ptr 0, paramStructType u64 at byte 8, resultStructType
+   !> u64 at byte 16 (per `capnp compile -ocapnp schema.capnp`).
+   subroutine method_name(p, s, err)
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(p, 0, s, err)
+   end subroutine method_name
+
+   function method_param_struct_type(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 8_int64)
+   end function method_param_struct_type
+
+   function method_result_struct_type(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 16_int64)
+   end function method_result_struct_type
 
    function node_const_type(p, err) result(t)
       type(capnp_ptr_t), intent(in) :: p
