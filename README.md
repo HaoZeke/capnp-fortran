@@ -32,6 +32,35 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
   [c-capnproto](https://github.com/opensourcerouting/c-capnproto), comparing
   wire bytes (see `interop/README.md`).
 
+## Parity
+
+Feature coverage against the two reference serialization implementations,
+capnp-c ([c-capnproto](https://github.com/opensourcerouting/c-capnproto))
+and capnp-C++:
+
+| Feature | capnp-c | capnp-C++ | capnp-fortran |
+|---------|---------|-----------|---------------|
+| Wire format read/write (all pointer kinds) | yes | yes | yes |
+| Stream framing | yes | yes | yes |
+| Packed codec | yes | yes | yes, plus incremental pack/unpack |
+| Zero-copy reads from a caller buffer | yes | yes | yes (`capnp_deserialize_view`, `capnp_get_data_view`) |
+| Traversal and depth limits | no | yes | yes |
+| Schema-evolution reads (defaults past end, list up/downgrades) | partial | yes | yes |
+| Deep copy / cross-message set | no | yes | yes |
+| Orphans (disown/adopt) | no | yes | yes |
+| Canonical form | no | yes | yes (byte-parity tested) |
+| Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
+| Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
+| Capability pointers on the wire | yes | yes | yes (stored, not invoked) |
+| RPC | no | yes | no |
+| Generics in generated code | no | yes | no |
+| Dynamic reflection API | no | yes | no |
+
+RPC, generics, and reflection sit outside the serialization core; capnpc-c
+draws the same line. The wire format carries generic types and capabilities
+either way, so messages produced by C++ users of those features still read
+correctly here.
+
 ## Install
 
 With [fpm](https://fpm.fortran-lang.org):
