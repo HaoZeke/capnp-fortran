@@ -17,6 +17,8 @@ jobs:
         run: |
           pixi run gen
           git diff --exit-code -- src/
+      - name: strict f2018 conformance
+        run: pixi run -- bash scripts/std-check.sh
       - name: build
         run: pixi run build
       - name: test
