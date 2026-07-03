@@ -23,6 +23,7 @@ module capnp_rpc
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
+   public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
@@ -108,6 +109,19 @@ module capnp_rpc
       integer :: nexp = 0
       integer :: exports(0:MAXCAPS - 1) = -1
    end type rpc_answer_slot_t
+
+   !> Client-side flow control for `-> stream` methods: a bounded window
+   !> of unacknowledged stream calls. The wire carries ordinary
+   !> Call/Return pairs (StreamResult results); the window is policy, as
+   !> in capnp-C++. After any stream call fails, subsequent sends fail
+   !> immediately and the failure surfaces at finish, per the streaming
+   !> error-propagation rule.
+   type :: rpc_stream_t
+      integer :: window = 16
+      integer :: nout = 0
+      integer(int64) :: qids(0:63) = -1_int64
+      logical :: failed = .false.
+   end type rpc_stream_t
 
    type :: rpc_conn_t
       integer :: fd = PX_BAD_FD
@@ -463,6 +477,105 @@ contains
       if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
       call capnp_message_free(m)
    end subroutine rpc_release_send
+
+   ! ------------------------------------------------------------------
+   ! Streaming (client side)
+   ! ------------------------------------------------------------------
+
+   subroutine rpc_stream_init(stream, window)
+      type(rpc_stream_t), intent(out) :: stream
+      integer, intent(in), optional :: window
+      if (present(window)) stream%window = max(1, min(window, 64))
+   end subroutine rpc_stream_init
+
+   !> Send a prepared stream call (from a generated _begin) without
+   !> waiting for its return. Blocks only when the window is full, and
+   !> then just long enough to retire the oldest outstanding call.
+   subroutine rpc_stream_send(conn, stream, m, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      type(capnp_message_t), intent(inout) :: m
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      if (stream%failed) then
+         call capnp_message_free(m)
+         call release_question(conn, qid)
+         err = RPC_ERR_EXCEPTION
+         return
+      end if
+      if (stream%nout >= stream%window) then
+         call retire_oldest(conn, stream, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(m)
+            call release_question(conn, qid)
+            return
+         end if
+      end if
+      call rpc_call_send(conn, m, err)
+      if (err /= CAPNP_OK) return
+      stream%qids(stream%nout) = qid
+      stream%nout = stream%nout + 1
+   end subroutine rpc_stream_send
+
+   !> Wait for every outstanding stream call. Call-level failures mark
+   !> the stream failed but the window still drains fully; the first
+   !> failure is what finish reports. Only a dead connection aborts the
+   !> drain.
+   subroutine rpc_stream_finish(conn, stream, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      integer, intent(out) :: err
+      integer :: first_err
+      err = CAPNP_OK
+      first_err = CAPNP_OK
+      do while (stream%nout > 0)
+         call retire_oldest(conn, stream, err)
+         if (err == RPC_ERR_DEAD) return
+         if (err /= CAPNP_OK .and. first_err == CAPNP_OK) first_err = err
+      end do
+      err = first_err
+      if (stream%failed .and. err == CAPNP_OK) err = RPC_ERR_EXCEPTION
+   end subroutine rpc_stream_finish
+
+   subroutine retire_oldest(conn, stream, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: content
+      integer(int64) :: qid
+      integer :: i, werr
+      err = CAPNP_OK
+      if (stream%nout == 0) return
+      qid = stream%qids(0)
+      do i = 0, stream%nout - 2
+         stream%qids(i) = stream%qids(i + 1)
+      end do
+      stream%nout = stream%nout - 1
+      call rpc_wait(conn, qid, err)
+      if (err /= CAPNP_OK) return
+      call rpc_result_content(conn, qid, content, werr)
+      if (werr == RPC_ERR_EXCEPTION) then
+         stream%failed = .true.
+         err = RPC_ERR_EXCEPTION
+      else if (werr /= CAPNP_OK) then
+         err = werr
+      end if
+      call rpc_finish_send(conn, qid, .false., werr)
+   end subroutine retire_oldest
+
+   !> Return an unused question slot allocated by a _begin whose message
+   !> was never sent.
+   subroutine release_question(conn, qid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: qid
+      integer :: q
+      q = int(qid)
+      if (q >= 0 .and. q < MAXQ) then
+         if (conn%questions(q)%used .and. .not. conn%questions(q)%returned) &
+            conn%questions(q) = rpc_question_slot_t()
+      end if
+   end subroutine release_question
 
    ! ------------------------------------------------------------------
    ! Server-side helpers
