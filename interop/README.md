@@ -45,6 +45,16 @@ $ pixi run -e interop meson test -C build-interop
 - **`test_packed_vector`** -- run `capn_deflate` on the two-word packing example
   from the [encoding spec][packing] and assert the output is
   `51 08 03 02 31 19 aa 01`.
+- **`test_packed_golden`** -- pack the golden message with
+  `cabi_serialize_packed` and with `capn_deflate` over the shared flat bytes,
+  `memcmp` the two, then round-trip the reference's packed output through
+  `cabi_deserialize_packed`.
+- **`test_primitive_list_golden`** -- a `List(Int32)` built with
+  `capn_new_list32`/`capn_set32` on the reference side and
+  `cabi_new_list`/`cabi_list_set_i32` on ours; framed bytes must match.
+- **`test_canonical_form`** -- `cabi_canonicalize` of the golden message:
+  8-word preorder single segment with the composite elements' null pointer
+  sections trimmed uniformly, root pointer word checked byte for byte.
 
 ## Schema and the composite-list gate
 
