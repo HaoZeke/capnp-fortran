@@ -28,6 +28,8 @@ program test_rpc
    call t_exception()
    call t_unimplemented()
    call t_persistent_save()
+   call t_resolve_and_tail_calls()
+   call t_sender_promise_import()
 
    call rpc_conn_close(cli)
    call rpc_conn_close(srv)
@@ -256,5 +258,113 @@ contains
       call capnp_get_text(content, 0, ref, err)
       call check_(err == CAPNP_OK .and. ref == 'sturdy:echo-main', 'rpc: sturdy ref')
    end subroutine t_persistent_save
+
+   !> Resolve messages come back as unimplemented (the vat keeps using
+   !> promise paths); sendResultsTo.yourself calls fail cleanly; a
+   !> takeFromOtherQuestion Return surfaces as an exception, not a
+   !> kind error.
+   subroutine t_resolve_and_tail_calls()
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(return_t) :: r
+      type(rpc_cap_t) :: bootcap
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qb, qy
+
+      ! Resolve -> unimplemented reply, absorbed by the sender.
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      rv = message_resolve_init(msg, err)
+      call resolve_promise_id_set(rv, 7_int64, err)
+      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_free(m)
+      call rpc_pump_once(srv, err)
+      call check_(err == CAPNP_OK, 'rpc: resolve answered')
+      call rpc_pump_once(cli, err)
+      call check_(err == CAPNP_OK, 'rpc: resolve unimplemented absorbed')
+
+      ! sendResultsTo.yourself -> clean exception return.
+      call rpc_bootstrap_send(cli, bootcap, err)
+      qb = bootcap%id
+      call rpc_pump_once(srv, err)
+      call rpc_call_begin(cli, bootcap, ECHO_IFACE, 0, m, params, qy, err)
+      msg = message_read_root(m, err)
+      c = message_call_get(msg, err)
+      call call_send_results_to_yourself_set(c, err)
+      s = capnp_new_struct(m, 1, 1, err)
+      call capnp_set_i64(s, 0_int64, 1_int64, err)
+      call capnp_set_text(s, 0, 'x', err)
+      call payload_content_set(params, s, err)
+      call rpc_call_send(cli, m, err)
+      call rpc_pump_once(srv, err)
+      call rpc_wait(cli, qb, err)
+      call rpc_wait(cli, qy, err)
+      call rpc_result_content(cli, qy, content, err)
+      call check_(err == RPC_ERR_EXCEPTION, 'rpc: sendResultsTo.yourself raises')
+
+      ! takeFromOtherQuestion Return -> exception with reason, not
+      ! ERR_KIND. The peer (impersonated on the raw fd) redirects a live
+      ! question.
+      call rpc_call_begin(cli, bootcap, ECHO_IFACE, 0, m, params, qy, err)
+      s = capnp_new_struct(m, 1, 1, err)
+      call capnp_set_i64(s, 0_int64, 1_int64, err)
+      call capnp_set_text(s, 0, 'x', err)
+      call payload_content_set(params, s, err)
+      call capnp_message_free(m) ! never sent; hand-craft the Return instead
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      r = message_return_init(msg, err)
+      call return_answer_id_set(r, qy, err)
+      call return_take_from_other_question_set(r, 0_int64, err)
+      call rpc_send_message(srv%fd, m, err)
+      call capnp_message_free(m)
+      call rpc_wait(cli, qy, err)
+      call check_(err == CAPNP_OK, 'rpc: tail-call return received')
+      call rpc_result_content(cli, qy, content, err)
+      call check_(err == RPC_ERR_EXCEPTION, 'rpc: tail-call return raises cleanly')
+      call check_(index(rpc_conn_reason(cli), 'tail-call') > 0, 'rpc: tail-call reason')
+   end subroutine t_resolve_and_tail_calls
+
+   !> A senderPromise capTable entry settles into a usable import, per
+   !> the continue-using-the-promise allowance.
+   subroutine t_sender_promise_import()
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      type(rpc_cap_t) :: bootcap, cap
+      integer(int64) :: qb
+
+      ! Impersonate the peer: swallow the bootstrap off the raw fd and
+      ! answer it with a senderPromise capability.
+      call rpc_bootstrap_send(cli, bootcap, err)
+      qb = bootcap%id
+      block
+         type(capnp_message_t), target :: drain
+         call rpc_recv_message(srv%fd, drain, err)
+         call capnp_message_free(drain)
+      end block
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      r = message_return_init(msg, err)
+      call return_answer_id_set(r, qb, err)
+      pl = return_results_init(r, err)
+      call payload_content_set(pl, rpc_make_cap_ptr(m, 0), err)
+      ctab = payload_cap_table_init(pl, 1_int64, err)
+      cd%p = capnp_list_get_struct(ctab, 0, err)
+      call cap_descriptor_sender_promise_set(cd, 5_int64, err)
+      call rpc_send_message(srv%fd, m, err)
+      call capnp_message_free(m)
+      call rpc_wait(cli, qb, err)
+      call rpc_result_cap(cli, qb, [integer ::], cap, err)
+      call check_(err == CAPNP_OK .and. cap%kind == RPC_CAP_IMPORT .and. &
+                  cap%id == 5_int64, 'rpc: senderPromise settles as import')
+   end subroutine t_sender_promise_import
 
 end program test_rpc

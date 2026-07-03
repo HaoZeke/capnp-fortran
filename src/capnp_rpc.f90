@@ -349,6 +349,19 @@ contains
          ex = return_exception_get(r, err)
          call exception_reason_get(ex, conn%abort_reason, err)
          err = RPC_ERR_EXCEPTION
+      case (RETURN_CANCELED_TAG)
+         conn%abort_reason = 'call canceled'
+         err = RPC_ERR_EXCEPTION
+      case (RETURN_RESULTS_SENT_ELSEWHERE_TAG)
+         ! Only meaningful for sendResultsTo.yourself, which this vat
+         ! never requests.
+         conn%abort_reason = 'results sent elsewhere (unrequested tail call)'
+         err = RPC_ERR_EXCEPTION
+      case (RETURN_TAKE_FROM_OTHER_QUESTION_TAG)
+         ! Tail-call redirection; requires a sendResultsTo.yourself call
+         ! from us, which we never issue.
+         conn%abort_reason = 'tail-call return for a sendResultsTo.caller question'
+         err = RPC_ERR_EXCEPTION
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -391,12 +404,19 @@ contains
       end if
       cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
       if (err /= CAPNP_OK) return
-      if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_hosted_get(cd)
+      case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         ! A promise import: the spec permits continuing to address the
+         ! promise id after (or without) a Resolve; the exporter keeps
+         ! forwarding until we Release it.
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_promise_get(cd)
+      case default
          err = CAPNP_ERR_KIND
-         return
-      end if
-      cap%kind = RPC_CAP_IMPORT
-      cap%id = cap_descriptor_sender_hosted_get(cd)
+      end select
    end subroutine rpc_result_cap
 
    !> Tell the peer we are done with a question. retain_caps=.true. keeps
@@ -545,6 +565,12 @@ contains
       case (MESSAGE_UNIMPLEMENTED_TAG)
          ! Peer did not understand something we sent; nothing to do at
          ! level 1 (we only send level 1 messages).
+      case (MESSAGE_RESOLVE_TAG)
+         ! Promise resolution. Replying unimplemented is the
+         ! spec-defined signal that this vat does not adopt
+         ! resolutions: the sender must keep forwarding calls
+         ! addressed to the promise, which it does until Release.
+         call send_unimplemented(conn, msg, err)
       case default
          ! Level 3+ (provide/accept/join) and obsolete messages: reply
          ! unimplemented, echoing the message, per the spec.
@@ -606,6 +632,13 @@ contains
       rmsg = message_new_root(rm, err)
       r = message_return_init(rmsg, err)
       call return_answer_id_set(r, qid, err)
+      if (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG) then
+         ! Tail calls (yourself/thirdParty) redirect results; failing the
+         ! call is legal, silently answering the caller instead is not.
+         call fill_exception(r, 'sendResultsTo mode unsupported (caller only)', err)
+         call finish_answer(conn, qid, rm, ctx, err)
+         return
+      end if
       call resolve_target(conn, c, eid, err)
       if (err /= CAPNP_OK .or. eid < 0) then
          call fill_exception(r, 'no such capability', err)
