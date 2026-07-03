@@ -16,6 +16,9 @@ program test_parity
    call t_incremental_unpack()
    call t_zero_copy_view()
    call t_disown_adopt()
+   call t_incremental_pack()
+   call t_views_and_lengths()
+   call t_stream_unit()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -310,5 +313,99 @@ contains
       end do
       call check_(.true., 'inc: all splits reproduce source')
    end subroutine t_incremental_unpack
+
+   !> The incremental packer must equal whole-buffer capnp_pack for every
+   !> split position over mixed content (zero runs, literal runs, sparse).
+   subroutine t_incremental_pack()
+      type(capnp_packer_t) :: pk
+      integer(int8) :: src(0:47)
+      integer(int8), allocatable :: whole(:), inc(:)
+      integer(int64) :: outn, cut
+      integer :: err, i
+      src = 0_int8
+      src(0) = 8_int8
+      src(4) = 3_int8 ! sparse word
+      do i = 16, 31
+         src(i) = int(mod(i*5, 126) + 1, int8) ! two fully nonzero words
+      end do
+      ! words 4-5 stay zero (zero run at the tail)
+      call capnp_pack(src, whole, err)
+      call check_(err == CAPNP_OK, 'ipack: whole reference')
+      do cut = 1_int64, 47_int64
+         pk = capnp_packer_t()
+         if (allocated(inc)) deallocate (inc)
+         outn = 0_int64
+         call capnp_pack_push(pk, src(0:cut - 1), inc, outn, err)
+         call capnp_pack_push(pk, src(cut:), inc, outn, err)
+         call capnp_pack_finish(pk, inc, outn, err)
+         if (err /= CAPNP_OK .or. outn /= size(whole, kind=int64)) then
+            call check_(.false., 'ipack: split size equals whole')
+            print '(a,i0)', '  failing split at ', cut
+            return
+         end if
+         if (.not. all(inc(0:outn - 1) == whole)) then
+            call check_(.false., 'ipack: split bytes equal whole')
+            print '(a,i0)', '  failing split at ', cut
+            return
+         end if
+      end do
+      call check_(.true., 'ipack: all splits byte-identical')
+   end subroutine t_incremental_pack
+
+   subroutine t_views_and_lengths()
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), pointer :: view(:)
+      integer(int8) :: blob(0:3)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      call capnp_set_text(root, 0, 'hello', err)
+      blob = [1_int8, 2_int8, 3_int8, 4_int8]
+      call capnp_set_data(root, 1, blob, err)
+      call check_(capnp_text_len(root, 0, err) == 5_int64, 'view: text_len')
+      call capnp_get_data_view(root, 1, view, err)
+      call check_(err == CAPNP_OK .and. associated(view), 'view: data view exists')
+      call check_(size(view) == 4 .and. all(view == blob), 'view: data view bytes')
+      call capnp_message_free(msg)
+   end subroutine t_views_and_lengths
+
+   !> Two messages written back-to-back on one stream unit read in sequence
+   !> without over-consuming.
+   subroutine t_stream_unit()
+      type(capnp_message_t), target :: a, b, r1, r2
+      type(capnp_ptr_t) :: root, q
+      integer(int8), allocatable :: ba(:), bb(:)
+      integer :: err, unit, ios
+      character(len=*), parameter :: path = 'build/two_messages.bin'
+      call capnp_message_init_builder(a, err)
+      root = capnp_new_struct(a, 1, 0, err)
+      call capnp_set_i64(root, 0_int64, 111_int64, err)
+      call capnp_set_root(a, root, err)
+      call capnp_serialize_bytes(a, ba, err)
+      call capnp_message_init_builder(b, err)
+      root = capnp_new_struct(b, 1, 0, err)
+      call capnp_set_i64(root, 0_int64, 222_int64, err)
+      call capnp_set_root(b, root, err)
+      call capnp_serialize_bytes(b, bb, err)
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='readwrite', iostat=ios)
+      call check_(ios == 0, 'stream: scratch file opens')
+      write (unit) ba, bb
+      rewind (unit)
+      call capnp_read_message_unit(unit, r1, err)
+      call check_(err == CAPNP_OK, 'stream: first message reads')
+      q = capnp_root(r1, err)
+      call check_(capnp_get_i64(q, 0_int64) == 111_int64, 'stream: first value')
+      call capnp_read_message_unit(unit, r2, err)
+      call check_(err == CAPNP_OK, 'stream: second message reads')
+      q = capnp_root(r2, err)
+      call check_(capnp_get_i64(q, 0_int64) == 222_int64, 'stream: second value')
+      close (unit, status='delete')
+      call capnp_message_free(a)
+      call capnp_message_free(b)
+      call capnp_message_free(r1)
+      call capnp_message_free(r2)
+   end subroutine t_stream_unit
 
 end program test_parity

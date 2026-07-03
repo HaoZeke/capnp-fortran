@@ -13,6 +13,7 @@ module capnp_packed
 
    public :: capnp_pack, capnp_unpack
    public :: capnp_unpacker_t, capnp_unpack_push
+   public :: capnp_packer_t, capnp_pack_push, capnp_pack_finish
 
    !> Incremental unpacker (capn-stream parity): feed arbitrary chunk
    !> boundaries with capnp_unpack_push; decoded words accumulate on the
@@ -30,6 +31,21 @@ module capnp_packed
       integer(int8) :: word(0:7) = 0_int8
       integer(int64) :: raw_left = 0_int64 ! raw bytes still owed
    end type capnp_unpacker_t
+
+   !> Incremental packer: feed word-aligned chunks (splits anywhere) with
+   !> capnp_pack_push, terminate with capnp_pack_finish. Output is
+   !> byte-identical to whole-buffer capnp_pack.
+   integer, parameter :: PM_IDLE = 0
+   integer, parameter :: PM_ZERO_RUN = 1
+   integer, parameter :: PM_LIT_RUN = 2
+
+   type :: capnp_packer_t
+      integer :: mode = PM_IDLE
+      integer :: run = 0                     ! words in the current run
+      integer(int8) :: lit(0:2039) = 0_int8  ! buffered literal-run words (255 max)
+      integer(int8) :: partial(0:7) = 0_int8 ! carry of a split input word
+      integer :: npart = 0
+   end type capnp_packer_t
 
 contains
 
@@ -171,6 +187,138 @@ contains
          allocate (outb(0))
       end if
    end subroutine capnp_unpack
+
+   !> Feed one word-aligned-overall chunk into the incremental packer.
+   !> Packed bytes append to out at outn (grown/updated). Chunks may split
+   !> anywhere; call capnp_pack_finish to flush pending runs.
+   subroutine capnp_pack_push(pk, chunk, out, outn, err)
+      type(capnp_packer_t), intent(inout) :: pk
+      integer(int8), intent(in) :: chunk(0:)
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn
+      integer, intent(out) :: err
+      integer(int8) :: word(0:7)
+      integer(int64) :: ipos, n, cap
+      integer :: take
+      err = CAPNP_OK
+      n = size(chunk, kind=int64)
+      call out_init(out, outn, cap, n)
+      ipos = 0_int64
+      do while (ipos < n)
+         take = int(min(8_int64 - int(pk%npart, int64), n - ipos))
+         pk%partial(pk%npart:pk%npart + take - 1) = chunk(ipos:ipos + take - 1)
+         pk%npart = pk%npart + take
+         ipos = ipos + take
+         if (pk%npart < 8) return ! word continues in the next chunk
+         word = pk%partial
+         pk%npart = 0
+         call pack_word(pk, word, out, outn, cap)
+      end do
+   end subroutine capnp_pack_push
+
+   !> Flush pending run state. The total input fed must have been a whole
+   !> number of words.
+   subroutine capnp_pack_finish(pk, out, outn, err)
+      type(capnp_packer_t), intent(inout) :: pk
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn
+      integer, intent(out) :: err
+      integer(int64) :: cap
+      err = CAPNP_OK
+      call out_init(out, outn, cap, 1_int64)
+      if (pk%npart /= 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call flush_runs(pk, out, outn, cap)
+   end subroutine capnp_pack_finish
+
+   subroutine pack_word(pk, word, out, outn, cap)
+      type(capnp_packer_t), intent(inout) :: pk
+      integer(int8), intent(in) :: word(0:7)
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn, cap
+      integer :: tag, nz, k
+      tag = 0
+      nz = 0
+      do k = 0, 7
+         if (word(k) /= 0_int8) then
+            tag = ibset(tag, k)
+            nz = nz + 1
+         end if
+      end do
+      if (tag == 0) then
+         if (pk%mode == PM_LIT_RUN) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_ZERO_RUN .and. pk%run == 256) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_IDLE) then
+            pk%mode = PM_ZERO_RUN
+            pk%run = 1
+         else
+            pk%run = pk%run + 1
+         end if
+      else if (nz == 8) then
+         if (pk%mode == PM_ZERO_RUN) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_LIT_RUN .and. pk%run == 255) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_IDLE) then
+            call ensure(out, cap, outn + 9_int64)
+            out(outn) = -1_int8 ! 0xff
+            out(outn + 1:outn + 8) = word
+            outn = outn + 9
+            pk%mode = PM_LIT_RUN
+            pk%run = 0
+         else
+            pk%lit(pk%run*8:pk%run*8 + 7) = word
+            pk%run = pk%run + 1
+         end if
+      else
+         call flush_runs(pk, out, outn, cap)
+         call ensure(out, cap, outn + 9_int64)
+         out(outn) = cp_i8b(tag)
+         outn = outn + 1
+         do k = 0, 7
+            if (btest(tag, k)) then
+               out(outn) = word(k)
+               outn = outn + 1
+            end if
+         end do
+      end if
+   end subroutine pack_word
+
+   subroutine flush_runs(pk, out, outn, cap)
+      type(capnp_packer_t), intent(inout) :: pk
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn, cap
+      select case (pk%mode)
+      case (PM_ZERO_RUN)
+         call ensure(out, cap, outn + 2_int64)
+         out(outn) = 0_int8
+         out(outn + 1) = cp_i8b(pk%run - 1)
+         outn = outn + 2
+      case (PM_LIT_RUN)
+         call ensure(out, cap, outn + 1_int64 + int(pk%run, int64)*8_int64)
+         out(outn) = cp_i8b(pk%run)
+         outn = outn + 1
+         if (pk%run > 0) then
+            out(outn:outn + int(pk%run, int64)*8_int64 - 1) = pk%lit(0:pk%run*8 - 1)
+            outn = outn + int(pk%run, int64)*8_int64
+         end if
+      end select
+      pk%mode = PM_IDLE
+      pk%run = 0
+   end subroutine flush_runs
+
+   subroutine out_init(out, outn, cap, hint)
+      integer(int8), allocatable, intent(inout) :: out(:)
+      integer(int64), intent(inout) :: outn
+      integer(int64), intent(out) :: cap
+      integer(int64), intent(in) :: hint
+      if (.not. allocated(out)) then
+         allocate (out(0:max(2_int64*hint, 64_int64) - 1))
+         out = 0_int8
+         outn = 0_int64
+      end if
+      cap = size(out, kind=int64)
+   end subroutine out_init
 
    !> Feed one chunk into the incremental unpacker. Decoded bytes append to
    !> out at position outn (both grown/updated); chunks may split anywhere,
