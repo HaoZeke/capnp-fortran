@@ -21,6 +21,7 @@ module capnp_rpc
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
    public :: rpc_finish_send, rpc_release_send
    public :: rpc_pump_once, rpc_ctx_export_cap, rpc_make_cap_ptr
+   public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
@@ -147,6 +148,31 @@ contains
          conn%answers(i) = rpc_answer_slot_t()
       end do
    end subroutine rpc_conn_close
+
+   !> Inquiry getters over connection state, so callers need not touch
+   !> components.
+   pure function rpc_conn_alive(conn) result(alive)
+      type(rpc_conn_t), intent(in) :: conn
+      logical :: alive
+      alive = .not. conn%dead .and. conn%fd /= PX_BAD_FD
+   end function rpc_conn_alive
+
+   !> The abort/exception reason last recorded on the connection, or ''.
+   function rpc_conn_reason(conn) result(reason)
+      type(rpc_conn_t), intent(in) :: conn
+      character(len=:), allocatable :: reason
+      if (allocated(conn%abort_reason)) then
+         reason = conn%abort_reason
+      else
+         reason = ''
+      end if
+   end function rpc_conn_reason
+
+   pure function rpc_cap_is_settled(cap) result(settled)
+      type(rpc_cap_t), intent(in) :: cap
+      logical :: settled
+      settled = cap%kind == RPC_CAP_IMPORT
+   end function rpc_cap_is_settled
 
    ! ------------------------------------------------------------------
    ! Client side

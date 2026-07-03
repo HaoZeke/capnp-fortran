@@ -29,6 +29,7 @@ module capnp_message
    public :: capnp_list_get_all_bool, capnp_list_set_all_bool
    public :: capnp_get_data_view, capnp_get_text_view, capnp_text_len
    public :: capnp_total_size
+   public :: capnp_ptr_kind, capnp_ptr_is_null, capnp_ptr_list_len
    public :: capnp_get_i8, capnp_set_i8
    public :: capnp_list_get_i8, capnp_list_set_i8
    public :: capnp_list_get_all_i8, capnp_list_set_all_i8
@@ -1597,6 +1598,30 @@ contains
       end select
       call cp_put_i64(p%msg%segs(p%seg)%bytes, slot, 0_int64)
    end function capnp_disown
+
+   !> Inquiry getters: the handle's components are conventionally read
+   !> directly (generated code does), but these keep user code free of
+   !> component access where opacity is preferred.
+   pure function capnp_ptr_kind(p) result(k)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: k
+      k = p%kind
+   end function capnp_ptr_kind
+
+   pure function capnp_ptr_is_null(p) result(is_null)
+      type(capnp_ptr_t), intent(in) :: p
+      logical :: is_null
+      is_null = p%kind == CAPNP_PK_NULL
+   end function capnp_ptr_is_null
+
+   !> Element count of a list handle, 0 for anything else; mirrors
+   !> capnp_list_len but never errors.
+   pure function capnp_ptr_list_len(p) result(n)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: n
+      n = 0_int64
+      if (p%kind == CAPNP_PK_LIST) n = p%nelem
+   end function capnp_ptr_list_len
 
    !> Words consumed by an object and everything it references: data and
    !> pointer sections, list bodies, composite tag words (C++ totalSize()).
