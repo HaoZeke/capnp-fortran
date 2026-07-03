@@ -1,0 +1,23 @@
+name: big-endian
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  s390x:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: full suite on emulated s390x (big-endian)
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: s390x
+          distro: bookworm
+          githubToken: ${{ github.token }}
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y gfortran
+          run: |
+            ./scripts/build-nofpm.sh
