@@ -24,6 +24,7 @@ program test_generated
    call capnp_message_free(msg)
 
    call build_roundtrip()
+   call union_reselect()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -115,7 +116,8 @@ contains
       call check_(s == '555-1212', label//': alice number')
       call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_MOBILE, &
                   label//': alice type')
-      call check_(person_employment_which(pe) == 2, label//': alice school tag')
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_WHICH, &
+                  label//': alice school tag')
       call person_employment_school_get(pe, s, err)
       call check_(s == 'MIT', label//': alice school')
 
@@ -126,7 +128,39 @@ contains
       ph%p = capnp_list_get_struct(phones, 1, err)
       call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_WORK, &
                   label//': bob work type')
-      call check_(person_employment_which(pe) == 0, label//': bob unemployed tag')
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_WHICH, &
+                  label//': bob unemployed tag')
    end subroutine verify
+
+   !> Re-selecting a union variant must flip the discriminant; the C++
+   !> builder overwrite semantics.
+   subroutine union_reselect()
+      type(capnp_message_t), target :: bmsg
+      type(address_book_t) :: book
+      type(person_t) :: pe
+      type(capnp_ptr_t) :: people
+      character(len=:), allocatable :: s
+      integer :: err
+
+      call capnp_message_init_builder(bmsg, err)
+      book = address_book_new_root(bmsg, err)
+      people = address_book_people_init(book, 1_int64, err)
+      pe%p = capnp_list_get_struct(people, 0, err)
+
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_WHICH, &
+                  'union: fresh struct reads tag 0')
+      call person_employment_school_set(pe, 'ETH', err)
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_WHICH, &
+                  'union: school selected')
+      call person_employment_employer_set(pe, 'ACME', err)
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_EMPLOYER_WHICH, &
+                  'union: employer reselected')
+      call person_employment_employer_get(pe, s, err)
+      call check_(err == CAPNP_OK .and. s == 'ACME', 'union: employer value')
+      call person_employment_self_employed_set(pe, err)
+      call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SELF_EMPLOYED_WHICH, &
+                  'union: void variant reselected')
+      call capnp_message_free(bmsg)
+   end subroutine union_reselect
 
 end program test_generated
