@@ -196,7 +196,8 @@ surface per struct `Foo`: `foo_t` handle type, `FOO_DWORDS`/`FOO_PWORDS`,
 `foo_new`/`foo_new_root`/`foo_read_root`, per-field
 `<field>_get`/`<field>_set` (scalars carry declared defaults),
 `<field>_init` for pointer fields, `_get_elem`/`_set_elem` for
-`List(Text)`/`List(Data)`, `<union>_which` plus `<PFX>_<MEMBER>_TAG`
+`List(Text)`/`List(Data)`, a typed `_get_elem` handle accessor for
+struct lists, `<union>_which` plus `<PFX>_<MEMBER>_TAG`
 constants, group `_select` setters, enum `<TYPE>_<MEMBER>` constants, and
 constants (scalar parameters; Data as byte arrays; struct/list consts as
 accessor functions over embedded blobs).
@@ -210,5 +211,11 @@ deferred typed procedures. `-> stream` methods pair the generated
 Branded generic uses (`Box(Text)`) produce brand-resolved
 instantiations: a `box_text_t` handle plus the generic's accessors with
 type parameters substituted by their bindings (`box_text_value_get`
-takes text). Unbound parameters keep AnyPointer accessors; parameters
-inside `List(...)` element positions degrade to pointer lists.
+takes text). Substitution reaches list elements (`List(Box(Text))`
+elements come back as `box_text_t` via `_get_elem`), list bindings
+(`Box(List(Text))` gets the typed `List(Text)` surface including
+element helpers), and brands nested inside another generic (`Box(T)`
+fields of `Nest(T)` settle through the instantiation's own bindings).
+Unbound parameters keep AnyPointer accessors. Interface-typed struct
+fields emit capability-slot pointer accessors for use with
+`rpc_make_cap_ptr`/`rpc_result_cap`.
