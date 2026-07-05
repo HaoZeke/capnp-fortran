@@ -801,6 +801,10 @@ contains
       case (TYPE_LIST)
          call emit_list_field(an, ht, int(off), t, &
                               field_slot_had_default(f), dv, gset, err)
+      case (TYPE_INTERFACE)
+         ! Capability slot: raw pointer accessors; the cap index inside is
+         ! managed by capnp_rpc (rpc_make_cap_ptr / rpc_result_cap).
+         call emit_anyptr_field(an, ht, int(off), gset)
       case (TYPE_ANY_POINTER)
          call emit_anyptr_field(an, ht, int(off), gset)
       case default
@@ -1150,7 +1154,7 @@ contains
       logical, intent(in) :: had_default
       integer, intent(out) :: err
       type(capnp_ptr_t) :: et
-      character(len=:), allocatable :: newexpr, st
+      character(len=:), allocatable :: newexpr, st, iname
       integer :: idx
       logical :: hasdef
       et = type_list_element(t, err)
@@ -1166,6 +1170,10 @@ contains
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(idx)%p, st, err)
          if (err /= CAPNP_OK) return
+         ! A branded generic element gets the instantiation's handle type.
+         call inst_name_for(et, idx, iname, err)
+         if (err /= CAPNP_OK) return
+         if (len(iname) > 0) st = iname
          newexpr = 'capnp_new_composite_list(h%p%msg, n, '//upcase(st)// &
                    '_DWORDS, '//upcase(st)//'_PWORDS, err)'
       case default
@@ -1195,6 +1203,17 @@ contains
       call w('   end function '//an//'_get')
       call w('')
       select case (type_which(et))
+      case (TYPE_STRUCT)
+         call w('   function '//an//'_get_elem(h, i, err) result(o)')
+         call w('      type('//ht//'_t), intent(in) :: h')
+         call w('      integer, intent(in) :: i')
+         call w('      integer, intent(out) :: err')
+         call w('      type('//st//'_t) :: o')
+         call w('      type(capnp_ptr_t) :: l')
+         call w('      l = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
+         call w('      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)')
+         call w('   end function '//an//'_get_elem')
+         call w('')
       case (TYPE_TEXT)
          call w('   subroutine '//an//'_get_elem(h, i, s, err)')
          call w('      type('//ht//'_t), intent(in) :: h')
@@ -1286,6 +1305,19 @@ contains
             if (binding_which(bd) == BINDING_BOUND_TYPE) then
                btypes(n) = binding_type(bd, err)
                if (err /= CAPNP_OK) return
+               ! A binding that is itself a parameter of the generic being
+               ! instantiated resolves through the current instantiation,
+               ! so nested branded uses (Box(T) inside Nest(T)) settle.
+               if (g_cur_inst > 0) then
+                  if (type_which(btypes(n)) == TYPE_ANY_POINTER) then
+                     if (type_anyptr_which(btypes(n)) == ANYPTR_PARAMETER) then
+                        if (type_param_scope_id(btypes(n)) == &
+                            g_nodes(g_insts(g_cur_inst)%gidx)%id .and. &
+                            type_param_index(btypes(n)) < g_insts(g_cur_inst)%nbind) &
+                           btypes(n) = g_insts(g_cur_inst)%bindings(type_param_index(btypes(n)))
+                     end if
+                  end if
+               end if
             else
                btypes(n) = capnp_ptr_t() ! unbound: stays AnyPointer
             end if
@@ -1301,7 +1333,15 @@ contains
          if (err /= CAPNP_OK) return
          o = o//'_'//part
       end do
-      if (len(o) > 32) o = o(1:28)//'_'//itoa(int(g_ninsts + 1, int64))
+      ! Long names truncate deterministically (content checksum), so a
+      ! second sighting of the same instantiation dedups to one entry.
+      if (len(o) > 32) then
+         bidx = 0
+         do k = 1, len(o)
+            bidx = mod(bidx*31 + iachar(o(k:k)), 997)
+         end do
+         o = o(1:28)//'_'//itoa(int(bidx, int64))
+      end if
       do k = 1, g_ninsts
          if (g_insts(k)%name == o) return
       end do
@@ -1318,11 +1358,14 @@ contains
       end do
    end subroutine inst_name_for
 
-   !> Name fragment for one binding type.
-   subroutine inst_suffix(bt, part, err)
+   !> Name fragment for one binding type. Lists recurse into their
+   !> element so distinct list bindings get distinct instantiations.
+   recursive subroutine inst_suffix(bt, part, err)
       type(capnp_ptr_t), intent(in) :: bt
       character(len=:), allocatable, intent(out) :: part
       integer, intent(out) :: err
+      type(capnp_ptr_t) :: et
+      character(len=:), allocatable :: ep
       integer :: idx
       err = CAPNP_OK
       if (bt%kind == CAPNP_PK_NULL) then
@@ -1330,13 +1373,27 @@ contains
          return
       end if
       select case (type_which(bt))
+      case (TYPE_BOOL)
+         part = 'bool'
+      case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64)
+         part = 'i'//itoa(int(8*2**(type_which(bt) - TYPE_INT8), int64))
+      case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
+         part = 'u'//itoa(int(8*2**(type_which(bt) - TYPE_UINT8), int64))
+      case (TYPE_FLOAT32)
+         part = 'f32'
+      case (TYPE_FLOAT64)
+         part = 'f64'
       case (TYPE_TEXT)
          part = 'text'
       case (TYPE_DATA)
          part = 'data'
       case (TYPE_LIST)
-         part = 'list'
-      case (TYPE_STRUCT, TYPE_ENUM)
+         et = type_list_element(bt, err)
+         if (err /= CAPNP_OK) return
+         call inst_suffix(et, ep, err)
+         if (err /= CAPNP_OK) return
+         part = 'list_'//ep
+      case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
          idx = find_node(type_type_id(bt))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
