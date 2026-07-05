@@ -1413,6 +1413,16 @@ contains
       l = capnp_getp(h%p, 1, err)
    end function payload_cap_table_get
 
+   function payload_cap_table_get_elem(h, i, err) result(o)
+      type(payload_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(cap_descriptor_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 1, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function payload_cap_table_get_elem
+
    function payload_cap_table_init(h, n, err) result(l)
       type(payload_t), intent(in) :: h
       integer(int64), intent(in) :: n
@@ -1463,6 +1473,16 @@ contains
       type(capnp_ptr_t) :: l
       l = capnp_getp(h%p, 0, err)
    end function promised_answer_transform_get
+
+   function promised_answer_transform_get_elem(h, i, err) result(o)
+      type(promised_answer_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(promised_answer_op_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function promised_answer_transform_get_elem
 
    function promised_answer_transform_init(h, n, err) result(l)
       type(promised_answer_t), intent(in) :: h

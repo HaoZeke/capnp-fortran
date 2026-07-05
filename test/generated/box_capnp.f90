@@ -10,17 +10,41 @@ module box_capnp
       type(capnp_ptr_t) :: p
    end type box_t
 
+   integer, parameter :: NEST_DWORDS = 0
+   integer, parameter :: NEST_PWORDS = 2
+   type :: nest_t
+      type(capnp_ptr_t) :: p
+   end type nest_t
+
    integer, parameter :: BOX_USE_DWORDS = 0
-   integer, parameter :: BOX_USE_PWORDS = 2
+   integer, parameter :: BOX_USE_PWORDS = 5
    type :: box_use_t
       type(capnp_ptr_t) :: p
    end type box_use_t
+
+   integer, parameter :: BOX_ANY_DWORDS = 0
+   integer, parameter :: BOX_ANY_PWORDS = 2
+   type :: box_any_t
+      type(capnp_ptr_t) :: p
+   end type box_any_t
 
    integer, parameter :: BOX_TEXT_DWORDS = 0
    integer, parameter :: BOX_TEXT_PWORDS = 2
    type :: box_text_t
       type(capnp_ptr_t) :: p
    end type box_text_t
+
+   integer, parameter :: BOX_LIST_TEXT_DWORDS = 0
+   integer, parameter :: BOX_LIST_TEXT_PWORDS = 2
+   type :: box_list_text_t
+      type(capnp_ptr_t) :: p
+   end type box_list_text_t
+
+   integer, parameter :: NEST_TEXT_DWORDS = 0
+   integer, parameter :: NEST_TEXT_PWORDS = 2
+   type :: nest_text_t
+      type(capnp_ptr_t) :: p
+   end type nest_text_t
 
 contains
 
@@ -74,6 +98,69 @@ contains
       call capnp_set_text(h%p, 1, s, err)
    end subroutine box_label_set
 
+   function nest_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nest_t) :: h
+      h%p = capnp_new_struct(msg, NEST_DWORDS, NEST_PWORDS, err)
+   end function nest_new
+
+   function nest_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nest_t) :: h
+      h = nest_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function nest_new_root
+
+   function nest_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nest_t) :: h
+      h%p = capnp_root(msg, err)
+   end function nest_read_root
+
+   function nest_inner_get(h, err) result(o)
+      type(nest_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_any_t) :: o
+      o%p = capnp_getp(h%p, 0, err)
+   end function nest_inner_get
+
+   function nest_inner_init(h, err) result(o)
+      type(nest_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_any_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
+   end function nest_inner_init
+
+   function nest_boxes_get(h, err) result(l)
+      type(nest_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 1, err)
+   end function nest_boxes_get
+
+   function nest_boxes_get_elem(h, i, err) result(o)
+      type(nest_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(box_any_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 1, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function nest_boxes_get_elem
+
+   function nest_boxes_init(h, n, err) result(l)
+      type(nest_t), intent(in) :: h
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_new_composite_list(h%p%msg, n, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 1, l, err)
+   end function nest_boxes_init
+
    function box_use_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
@@ -126,6 +213,104 @@ contains
       if (err == CAPNP_OK) call capnp_setp(h%p, 1, o%p, err)
    end function box_use_any_box_init
 
+   function box_use_boxes_get(h, err) result(l)
+      type(box_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 2, err)
+   end function box_use_boxes_get
+
+   function box_use_boxes_get_elem(h, i, err) result(o)
+      type(box_use_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(box_text_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 2, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function box_use_boxes_get_elem
+
+   function box_use_boxes_init(h, n, err) result(l)
+      type(box_use_t), intent(in) :: h
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_new_composite_list(h%p%msg, n, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 2, l, err)
+   end function box_use_boxes_init
+
+   function box_use_list_box_get(h, err) result(o)
+      type(box_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_list_text_t) :: o
+      o%p = capnp_getp(h%p, 3, err)
+   end function box_use_list_box_get
+
+   function box_use_list_box_init(h, err) result(o)
+      type(box_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_list_text_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_LIST_TEXT_DWORDS, BOX_LIST_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 3, o%p, err)
+   end function box_use_list_box_init
+
+   function box_use_nest_get(h, err) result(o)
+      type(box_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(nest_text_t) :: o
+      o%p = capnp_getp(h%p, 4, err)
+   end function box_use_nest_get
+
+   function box_use_nest_init(h, err) result(o)
+      type(box_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(nest_text_t) :: o
+      o%p = capnp_new_struct(h%p%msg, NEST_TEXT_DWORDS, NEST_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 4, o%p, err)
+   end function box_use_nest_init
+
+   function box_any_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_any_t) :: h
+      h%p = capnp_new_struct(msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
+   end function box_any_new
+
+   function box_any_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_any_t) :: h
+      h%p = capnp_root(msg, err)
+   end function box_any_read_root
+
+   function box_any_value_get(h, err) result(q)
+      type(box_any_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      q = capnp_getp(h%p, 0, err)
+   end function box_any_value_get
+
+   subroutine box_any_value_set(h, q, err)
+      type(box_any_t), intent(in) :: h
+      type(capnp_ptr_t), intent(in) :: q
+      integer, intent(out) :: err
+      call capnp_setp(h%p, 0, q, err)
+   end subroutine box_any_value_set
+
+   subroutine box_any_label_get(h, s, err)
+      type(box_any_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 1, s, err)
+   end subroutine box_any_label_get
+
+   subroutine box_any_label_set(h, s, err)
+      type(box_any_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 1, s, err)
+   end subroutine box_any_label_set
+
    function box_text_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
@@ -167,5 +352,124 @@ contains
       integer, intent(out) :: err
       call capnp_set_text(h%p, 1, s, err)
    end subroutine box_text_label_set
+
+   function box_list_text_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_list_text_t) :: h
+      h%p = capnp_new_struct(msg, BOX_LIST_TEXT_DWORDS, BOX_LIST_TEXT_PWORDS, err)
+   end function box_list_text_new
+
+   function box_list_text_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_list_text_t) :: h
+      h%p = capnp_root(msg, err)
+   end function box_list_text_read_root
+
+   function box_list_text_value_get(h, err) result(l)
+      type(box_list_text_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+   end function box_list_text_value_get
+
+   subroutine box_list_text_value_get_elem(h, i, s, err)
+      type(box_list_text_t), intent(in) :: h
+      integer, intent(in) :: i
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+      if (err == CAPNP_OK) call capnp_list_get_text(l, i, s, err)
+   end subroutine box_list_text_value_get_elem
+
+   subroutine box_list_text_value_set_elem(h, i, s, err)
+      type(box_list_text_t), intent(in) :: h
+      integer, intent(in) :: i
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+      if (err == CAPNP_OK) call capnp_list_set_text(l, i, s, err)
+   end subroutine box_list_text_value_set_elem
+
+   function box_list_text_value_init(h, n, err) result(l)
+      type(box_list_text_t), intent(in) :: h
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_new_list(h%p%msg, 6, n, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, l, err)
+   end function box_list_text_value_init
+
+   subroutine box_list_text_label_get(h, s, err)
+      type(box_list_text_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 1, s, err)
+   end subroutine box_list_text_label_get
+
+   subroutine box_list_text_label_set(h, s, err)
+      type(box_list_text_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 1, s, err)
+   end subroutine box_list_text_label_set
+
+   function nest_text_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nest_text_t) :: h
+      h%p = capnp_new_struct(msg, NEST_TEXT_DWORDS, NEST_TEXT_PWORDS, err)
+   end function nest_text_new
+
+   function nest_text_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nest_text_t) :: h
+      h%p = capnp_root(msg, err)
+   end function nest_text_read_root
+
+   function nest_text_inner_get(h, err) result(o)
+      type(nest_text_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_text_t) :: o
+      o%p = capnp_getp(h%p, 0, err)
+   end function nest_text_inner_get
+
+   function nest_text_inner_init(h, err) result(o)
+      type(nest_text_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_text_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
+   end function nest_text_inner_init
+
+   function nest_text_boxes_get(h, err) result(l)
+      type(nest_text_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 1, err)
+   end function nest_text_boxes_get
+
+   function nest_text_boxes_get_elem(h, i, err) result(o)
+      type(nest_text_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(box_text_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 1, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function nest_text_boxes_get_elem
+
+   function nest_text_boxes_init(h, n, err) result(l)
+      type(nest_text_t), intent(in) :: h
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_new_composite_list(h%p%msg, n, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 1, l, err)
+   end function nest_text_boxes_init
 
 end module box_capnp

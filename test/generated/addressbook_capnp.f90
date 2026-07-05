@@ -102,6 +102,16 @@ contains
       l = capnp_getp(h%p, 2, err)
    end function person_phones_get
 
+   function person_phones_get_elem(h, i, err) result(o)
+      type(person_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(person_phone_number_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 2, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function person_phones_get_elem
+
    function person_phones_init(h, n, err) result(l)
       type(person_t), intent(in) :: h
       integer(int64), intent(in) :: n
@@ -236,6 +246,16 @@ contains
       type(capnp_ptr_t) :: l
       l = capnp_getp(h%p, 0, err)
    end function address_book_people_get
+
+   function address_book_people_get_elem(h, i, err) result(o)
+      type(address_book_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(person_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function address_book_people_get_elem
 
    function address_book_people_init(h, n, err) result(l)
       type(address_book_t), intent(in) :: h

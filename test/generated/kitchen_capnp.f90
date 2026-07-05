@@ -322,6 +322,16 @@ contains
       l = capnp_getp(h%p, 7, err)
    end function sink_spots_get
 
+   function sink_spots_get_elem(h, i, err) result(o)
+      type(sink_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(vec3_t) :: o
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 7, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function sink_spots_get_elem
+
    function sink_spots_init(h, n, err) result(l)
       type(sink_t), intent(in) :: h
       integer(int64), intent(in) :: n
