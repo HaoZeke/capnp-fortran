@@ -106,6 +106,14 @@ program test_dynamic
       ' field_dwords=', node_struct_data_words(schema%nodes(person_idx)), &
       ' field_pwords=', node_struct_pointer_count(schema%nodes(person_idx)), &
       ' disc_count=', disc_count, ' disc_off=', int(disc_off)
+   block
+      integer :: b
+      integer(int8) :: raw(0:39)
+      associate (nd => schema%nodes(person_idx))
+         raw = nd%msg%segs(nd%seg)%bytes(nd%off:nd%off + 39)
+      end associate
+      print '(a,40(1x,z2.2))', 'Person node raw[0:39]=', (raw(b), b=0, 39)
+   end block
    tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
