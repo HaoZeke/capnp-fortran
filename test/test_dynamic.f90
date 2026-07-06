@@ -99,18 +99,17 @@ program test_dynamic
    disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
    disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
    call node_display_name(schema%nodes(person_idx), dn, err)
-   if (disc_count == 0) then
-      print '(a,a,a,i0,a,i0)', 'Person disc missing: name=', trim(dn), &
-         ' disc_count=', disc_count, ' disc_off=', int(disc_off)
-   end if
-   call check_(disc_count > 0, 'dyn: Person has a union discriminant')
+   print '(a,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)', &
+      'Person node: name=', trim(dn), &
+      ' handle_dwords=', schema%nodes(person_idx)%dwords, &
+      ' handle_pwords=', schema%nodes(person_idx)%pwords, &
+      ' field_dwords=', node_struct_data_words(schema%nodes(person_idx)), &
+      ' field_pwords=', node_struct_pointer_count(schema%nodes(person_idx)), &
+      ' disc_count=', disc_count, ' disc_off=', int(disc_off)
    tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
-   call check_(capnp_which(person, int(disc_off)) == want .or. &
-               capnp_which(person, 2) == want, &
-               'dyn: capnp_which agrees with disc offset')
-
+   call check_(capnp_which(person, 2) == want, 'dyn: capnp_which(disc=2) agrees')
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
    call capnp_dyn_get_text(schema, phone_idx, phone, 'number', s, err)
