@@ -113,15 +113,47 @@ program test_dynamic
    call check_(err == CAPNP_OK, 'dyn: kitchen seed ok')
    flag = capnp_dyn_get_bool(kschema, sink_idx, sink%p, 'flag', err)
    call check_(err == CAPNP_OK .and. .not. flag, 'dyn: get_bool flag')
+   ! Default-true seed path: flip back to true and re-read.
+   call sink_flag_set(sink, .true., err)
+   flag = capnp_dyn_get_bool(kschema, sink_idx, sink%p, 'flag', err)
+   call check_(err == CAPNP_OK .and. flag, 'dyn: get_bool true')
    ratio = capnp_dyn_get_f64(kschema, sink_idx, sink%p, 'ratio', err)
    call check_(err == CAPNP_OK .and. abs(ratio - 3.5_real64) < 1.0e-15_real64, &
                'dyn: get_f64 ratio')
 
+   ! Multi-union Dual: ambiguous which without group= must error; named
+   ! groups match the generated dual_*_which helpers.
+   call capnp_read_file('test/fixtures/dual.cgr.bin', bytes, err)
+   call check_(err == CAPNP_OK, 'dyn: dual cgr reads')
+   call capnp_dyn_load(dschema, bytes, err)
+   call check_(err == CAPNP_OK, 'dyn: dual schema loads')
+   dual_idx = capnp_dyn_find(dschema, 'Dual', err)
+   call check_(dual_idx > 0, 'dyn: Dual node found')
+   call capnp_message_init_builder(dmsg, err)
+   dual = dual_new_root(dmsg, err)
+   call dual_primary_text_a_set(dual, 'alpha', err)
+   call dual_secondary_int_b_set(dual, 17_int32, err)
+   call check_(err == CAPNP_OK, 'dyn: dual unions set')
+   call check_(dual_primary_which(dual) == DUAL_PRIMARY_TEXT_A_TAG, &
+               'dyn: generated primary which')
+   call check_(dual_secondary_which(dual) == DUAL_SECONDARY_INT_B_TAG, &
+               'dyn: generated secondary which')
+   tag = capnp_dyn_which(dschema, dual_idx, dual%p, err)
+   call check_(err == CAPNP_ERR_ARG, 'dyn: ambiguous multi-union without group')
+   tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='primary')
+   call check_(err == CAPNP_OK .and. tag == dual_primary_which(dual), &
+               'dyn: primary group which')
+   tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='secondary')
+   call check_(err == CAPNP_OK .and. tag == dual_secondary_which(dual), &
+               'dyn: secondary group which')
+
    call capnp_message_free(msg)
    call capnp_message_free(bmsg)
    call capnp_message_free(kmsg)
+   call capnp_message_free(dmsg)
    call capnp_dyn_free(schema)
    call capnp_dyn_free(kschema)
+   call capnp_dyn_free(dschema)
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
