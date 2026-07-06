@@ -5,10 +5,11 @@
 program test_dynamic
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT
+   use capnp_schema, only: TYPE_TEXT, node_struct_discriminant_count, &
+                           node_struct_discriminant_offset
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
-   use addressbook_capnp, only: person_t, person_employment_school_set, &
-                                person_employment_which
+   use addressbook_capnp, only: person_t, person_employment_which, &
+                                PERSON_EMPLOYMENT_SCHOOL_TAG
    implicit none
 
    integer :: nfail = 0
@@ -20,6 +21,8 @@ program test_dynamic
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
    integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
+   integer :: disc_count
+   integer(int64) :: disc_off
    logical :: flag
    real(real64) :: ratio
 
@@ -58,9 +61,24 @@ program test_dynamic
    call capnp_dyn_get_text(schema, person_idx, person, 'email', s, err)
    call check_(s == 'alice@example.com', 'dyn: alice email by name')
 
-   ! Alice's employment is school (discriminant 2) in the classic fixture.
+   ! Union which on fixture Alice (school in the classic addressbook sample).
+   ! Oracle is the generated which; dyn_which must match it via the schema node.
+   pe%p = person
+   want = person_employment_which(pe)
+   call check_(want == PERSON_EMPLOYMENT_SCHOOL_TAG, &
+               'fixture: alice employment is school (generated which)')
+   disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
+   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
+   call check_(disc_count > 0, 'dyn: Person has a union discriminant')
+   call check_(disc_off*2_int64 == 4_int64, &
+               'dyn: Person discriminant byte offset is 4')
    tag = capnp_dyn_which(schema, person_idx, person, err)
-   call check_(err == CAPNP_OK .and. tag == 2, 'dyn: which employment school')
+   if (err /= CAPNP_OK .or. tag /= want) then
+      print '(a,i0,a,i0,a,i0,a,i0)', 'dyn_which debug: err=', err, &
+         ' tag=', tag, ' want=', want, ' disc_off=', int(disc_off)
+   end if
+   call check_(err == CAPNP_OK .and. tag == want, &
+               'dyn: which matches generated on fixture alice')
 
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
