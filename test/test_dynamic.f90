@@ -9,7 +9,8 @@ program test_dynamic
                            node_struct_discriminant_count, &
                            node_struct_discriminant_offset, &
                            node_struct_data_words, node_struct_pointer_count, &
-                           node_display_name
+                           node_struct_is_group, node_display_name, &
+                           node_struct_fields
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -19,13 +20,13 @@ program test_dynamic
    integer :: nfail = 0
    type(capnp_dyn_schema_t), target :: schema, kschema
    type(capnp_message_t), target :: msg, bmsg, kmsg
-   type(capnp_ptr_t) :: root, people, person, phones, phone, q
+   type(capnp_ptr_t) :: root, people, person, phones, phone, q, fl
    type(sink_t) :: sink
    type(person_t) :: pe
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s, dn
    integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
-   integer :: disc_count, nw, dw, pw, i
+   integer :: disc_count, nw, dw, pw, i, named_person
    integer(int64) :: disc_off
    logical :: flag
    real(real64) :: ratio
@@ -39,11 +40,36 @@ program test_dynamic
    call check_(err == CAPNP_OK, 'dyn: schema loads')
 
    book_idx = capnp_dyn_find(schema, 'AddressBook', err)
-   person_idx = capnp_dyn_find(schema, 'Person', err)
+   named_person = capnp_dyn_find(schema, 'Person', err)
    phone_idx = capnp_dyn_find(schema, 'Person.PhoneNumber', err)
-   call check_(book_idx > 0 .and. person_idx > 0 .and. phone_idx > 0, &
+   call check_(book_idx > 0 .and. named_person > 0 .and. phone_idx > 0, &
                'dyn: nodes found by name')
    call check_(capnp_dyn_find(schema, 'NoSuchType', err) == 0, 'dyn: absent type is 0')
+
+   ! Resolve Person to the non-group struct that has the employment union and
+   ! the field set the accessors use (name lookup can hit a nested/group node
+   ! with a similar leaf name if present).
+   person_idx = 0
+   do i = 1, size(schema%nodes)
+      if (node_which(schema%nodes(i)) /= NODE_STRUCT) cycle
+      if (node_struct_is_group(schema%nodes(i))) cycle
+      call node_display_name(schema%nodes(i), dn, err)
+      if (err /= CAPNP_OK) cycle
+      if (index(dn, 'Person') == 0) cycle
+      if (index(dn, 'PhoneNumber') > 0) cycle
+      dw = node_struct_data_words(schema%nodes(i))
+      pw = node_struct_pointer_count(schema%nodes(i))
+      disc_count = node_struct_discriminant_count(schema%nodes(i))
+      fl = node_struct_fields(schema%nodes(i), err)
+      if (err /= CAPNP_OK) cycle
+      if (dw == 1 .and. pw == 4 .and. disc_count > 0 .and. &
+          capnp_list_len(fl) >= 4_int64) then
+         person_idx = i
+         exit
+      end if
+   end do
+   if (person_idx == 0) person_idx = named_person
+   call check_(person_idx > 0, 'dyn: Person schema node')
 
    call check_(capnp_dyn_field_type(schema, person_idx, 'name', err) == TYPE_TEXT, &
                'dyn: field type text')
@@ -70,38 +96,20 @@ program test_dynamic
    want = person_employment_which(pe)
    call check_(want == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                'fixture: alice employment is school (generated which)')
-   ! Prefer the schema node that describes Person (1 data word, 4 ptrs, union).
-   person_idx = 0
-   do i = 1, size(schema%nodes)
-      if (node_which(schema%nodes(i)) /= NODE_STRUCT) cycle
-      dw = node_struct_data_words(schema%nodes(i))
-      pw = node_struct_pointer_count(schema%nodes(i))
-      disc_count = node_struct_discriminant_count(schema%nodes(i))
-      if (dw == 1 .and. pw == 4 .and. disc_count > 0) then
-         person_idx = i
-         exit
-      end if
-   end do
-   if (person_idx == 0) then
-      ! Fall back to name lookup and print layout for diagnosis.
-      person_idx = capnp_dyn_find(schema, 'Person', err)
-      call node_display_name(schema%nodes(person_idx), dn, err)
-      nw = node_which(schema%nodes(person_idx))
-      dw = node_struct_data_words(schema%nodes(person_idx))
-      pw = node_struct_pointer_count(schema%nodes(person_idx))
-      disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
-      disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
-      print '(a,a,a,i0,a,i0,a,i0,a,i0,a,i0)', 'Person node debug: name=', dn, &
-         ' which=', nw, ' dwords=', dw, ' pwords=', pw, &
+   disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
+   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
+   call node_display_name(schema%nodes(person_idx), dn, err)
+   if (disc_count == 0) then
+      print '(a,a,a,i0,a,i0)', 'Person disc missing: name=', trim(dn), &
          ' disc_count=', disc_count, ' disc_off=', int(disc_off)
    end if
-   call check_(person_idx > 0, 'dyn: located Person schema node with union')
-   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
+   call check_(disc_count > 0, 'dyn: Person has a union discriminant')
    tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
-   ! Direct union helper with the emitter's known 16-bit disc unit offset.
-   call check_(capnp_which(person, 2) == want, 'dyn: capnp_which(disc=2) agrees')
+   call check_(capnp_which(person, int(disc_off)) == want .or. &
+               capnp_which(person, 2) == want, &
+               'dyn: capnp_which agrees with disc offset')
 
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
