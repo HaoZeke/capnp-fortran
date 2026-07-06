@@ -19,6 +19,7 @@ program check
    call t_packed_roundtrip()
    call t_framing_errors()
    call t_traversal_limit()
+   call t_depth_limit()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -383,5 +384,29 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine t_traversal_limit
+
+   !> Pointer resolution charges nesting depth; a zero depth_limit still
+   !> allows the root (depth 0) but fails the first capnp_getp (depth 1).
+   subroutine t_depth_limit()
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, kid, q
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      kid = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(kid, 0_int64, 7_int32, err)
+      call capnp_setp(root, 0, kid, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=0)
+      root = capnp_root(rmsg, err)
+      call check_(err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
+                  'guards: root at depth 0 allowed')
+      q = capnp_getp(root, 0, err)
+      call check_(err == CAPNP_ERR_DEPTH, 'guards: depth limit on getp')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine t_depth_limit
 
 end program check

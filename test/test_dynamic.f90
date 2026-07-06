@@ -1,19 +1,24 @@
-!> Dynamic reflection: load the compiled addressbook schema at runtime
-!> and read the reference `capnp encode` fixture purely by type and
-!> field names -- no generated code involved.
+!> Dynamic reflection: load compiled schemas at runtime and read/write
+!> fields by name -- no generated accessors on the read path for
+!> addressbook; kitchen is used only to seed bool/f64 wire values that
+!> capnp_dyn_get_bool / capnp_dyn_get_f64 then re-read by name.
 program test_dynamic
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT
+   use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    implicit none
 
    integer :: nfail = 0
-   type(capnp_dyn_schema_t), target :: schema
-   type(capnp_message_t), target :: msg, bmsg
+   type(capnp_dyn_schema_t), target :: schema, kschema
+   type(capnp_message_t), target :: msg, bmsg, kmsg
    type(capnp_ptr_t) :: root, people, person, phones, phone, q
+   type(sink_t) :: sink
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
-   integer :: err, book_idx, person_idx, phone_idx
+   integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag
+   logical :: flag
+   real(real64) :: ratio
 
    call capnp_read_file('test/fixtures/addressbook.cgr.bin', bytes, err)
    if (err /= CAPNP_OK) then
@@ -50,6 +55,10 @@ program test_dynamic
    call capnp_dyn_get_text(schema, person_idx, person, 'email', s, err)
    call check_(s == 'alice@example.com', 'dyn: alice email by name')
 
+   ! Alice's employment is school (discriminant 2) in the classic fixture.
+   tag = capnp_dyn_which(schema, person_idx, person, err)
+   call check_(err == CAPNP_OK .and. tag == 2, 'dyn: which employment school')
+
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
    call capnp_dyn_get_text(schema, phone_idx, phone, 'number', s, err)
@@ -57,11 +66,9 @@ program test_dynamic
    call check_(capnp_dyn_get_int(schema, phone_idx, phone, 'type', err) == 0_int64, &
                'dyn: phone type enum by name')
 
-   ! Unknown field errors cleanly.
    q = capnp_dyn_getp(schema, person_idx, person, 'nonexistent', err)
    call check_(err /= CAPNP_OK, 'dyn: unknown field errors')
 
-   ! Dynamic write: build a person by name and read it back.
    call capnp_message_init_builder(bmsg, err)
    person = capnp_new_struct(bmsg, 1, 4, err)
    call capnp_set_root(bmsg, person, err)
@@ -74,9 +81,29 @@ program test_dynamic
    call capnp_dyn_get_text(schema, person_idx, person, 'name', s, err)
    call check_(s == 'Dyn', 'dyn: write/read text round trip')
 
+   ! Kitchen CGR + generated seeders: prove dyn bool/f64 read the same wire.
+   call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+   call check_(err == CAPNP_OK, 'dyn: kitchen cgr reads')
+   call capnp_dyn_load(kschema, bytes, err)
+   call check_(err == CAPNP_OK, 'dyn: kitchen schema loads')
+   sink_idx = capnp_dyn_find(kschema, 'Sink', err)
+   call check_(sink_idx > 0, 'dyn: Sink node found')
+   call capnp_message_init_builder(kmsg, err)
+   sink = sink_new_root(kmsg, err)
+   call sink_flag_set(sink, .false., err)
+   call sink_ratio_set(sink, 3.5_real64, err)
+   call check_(err == CAPNP_OK, 'dyn: kitchen seed ok')
+   flag = capnp_dyn_get_bool(kschema, sink_idx, sink%p, 'flag', err)
+   call check_(err == CAPNP_OK .and. .not. flag, 'dyn: get_bool flag')
+   ratio = capnp_dyn_get_f64(kschema, sink_idx, sink%p, 'ratio', err)
+   call check_(err == CAPNP_OK .and. abs(ratio - 3.5_real64) < 1.0e-15_real64, &
+               'dyn: get_f64 ratio')
+
    call capnp_message_free(msg)
    call capnp_message_free(bmsg)
+   call capnp_message_free(kmsg)
    call capnp_dyn_free(schema)
+   call capnp_dyn_free(kschema)
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'

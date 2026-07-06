@@ -17,8 +17,9 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
   pointer views.
 - Deep copy between messages; cross-message `capnp_setp` clones, as C++
   `set()` does.
-- Serialization: stream segment table, whole-buffer packed codec, an
-  incremental unpacker for chunked input, file helpers.
+- Serialization: stream segment table, whole-buffer packed codec,
+  incremental pack and unpack for chunked I/O, zero-copy segment and
+  Text/Data views, orphans (disown/adopt), file helpers.
 - Canonical form (`capnp convert binary:canonical` byte-parity, verified in
   the test suite).
 - `capnpc-fortran`: a `capnp compile -o` plugin, self-hosted on this runtime

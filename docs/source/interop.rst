@@ -143,6 +143,8 @@ runs alongside the golden-master test:
     $ pixi run -e interop meson test -C build-interop rpc_interop_cpp -v
 
 This is the only tier that exercises the vat against an independent
-Cap'n Proto RPC implementation rather than against itself, so it is
-the check that catches protocol-level mismatches (pipelining,
-embargoes, disembargo timing) that a same-process test cannot.
+Cap'n Proto RPC implementation rather than against itself. The client
+covers bootstrap plus pipelined and settled ``add()`` calls. Level 1
+embargo echo (senderLoopback Disembargo answered as receiverLoopback)
+is covered in the same-process fpm suite (``test/test_rpc.f90``), not by
+this peer client.

@@ -30,6 +30,7 @@ program test_rpc
    call t_persistent_save()
    call t_resolve_and_tail_calls()
    call t_sender_promise_import()
+   call t_disembargo_echo()
    call t_pump_poll()
 
    call rpc_conn_close(cli)
@@ -367,6 +368,46 @@ contains
       call check_(err == CAPNP_OK .and. cap%kind == RPC_CAP_IMPORT .and. &
                   cap%id == 5_int64, 'rpc: senderPromise settles as import')
    end subroutine t_sender_promise_import
+
+   !> Level 1 embargo: a senderLoopback Disembargo is answered by the
+   !> peer as receiverLoopback with the same id and importedCap target
+   !> (handle_disembargo on the pumped vat).
+   subroutine t_disembargo_echo()
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(disembargo_t) :: d, rd
+      type(message_target_t) :: tgt, rtgt
+      integer(int64), parameter :: emb_id = 99_int64
+      integer(int64), parameter :: import_id = 3_int64
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      d = message_disembargo_init(msg, err)
+      call disembargo_context_sender_loopback_set(d, emb_id, err)
+      tgt = disembargo_target_init(d, err)
+      call message_target_imported_cap_set(tgt, import_id, err)
+      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_free(m)
+      call check_(err == CAPNP_OK, 'rpc: disembargo sent')
+      call rpc_pump_once(srv, err)
+      call check_(err == CAPNP_OK, 'rpc: server handled disembargo')
+      call rpc_recv_message(cli%fd, reply, err)
+      call check_(err == CAPNP_OK, 'rpc: disembargo echo received')
+      rmsg = message_read_root(reply, err)
+      call check_(message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                  'rpc: echo is Disembargo')
+      rd = message_disembargo_get(rmsg, err)
+      call check_(disembargo_context_which(rd) == &
+                  DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG, &
+                  'rpc: receiverLoopback context')
+      call check_(disembargo_context_receiver_loopback_get(rd) == emb_id, &
+                  'rpc: embago id echoed')
+      rtgt = disembargo_target_get(rd, err)
+      call check_(message_target_which(rtgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG, &
+                  'rpc: echo target is importedCap')
+      call check_(message_target_imported_cap_get(rtgt) == import_id, &
+                  'rpc: import id echoed')
+      call capnp_message_free(reply)
+   end subroutine t_disembargo_echo
 
    !> Poll-driven pumping: a quiet connection times out with
    !> handled=.false.; a pending message is handled within the window.
