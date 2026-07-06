@@ -7,6 +7,8 @@ program test_dynamic
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
+   use addressbook_capnp, only: person_t, person_employment_school_set, &
+                                person_employment_which
    implicit none
 
    integer :: nfail = 0
@@ -14,9 +16,10 @@ program test_dynamic
    type(capnp_message_t), target :: msg, bmsg, kmsg
    type(capnp_ptr_t) :: root, people, person, phones, phone, q
    type(sink_t) :: sink
+   type(person_t) :: pe
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
-   integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag
+   integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
    logical :: flag
    real(real64) :: ratio
 
