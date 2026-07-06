@@ -5,12 +5,7 @@
 program test_dynamic
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, NODE_STRUCT, node_which, &
-                           node_struct_discriminant_count, &
-                           node_struct_discriminant_offset, &
-                           node_struct_data_words, node_struct_pointer_count, &
-                           node_struct_is_group, node_display_name, &
-                           node_struct_fields
+   use capnp_schema, only: TYPE_TEXT
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -20,14 +15,12 @@ program test_dynamic
    integer :: nfail = 0
    type(capnp_dyn_schema_t), target :: schema, kschema
    type(capnp_message_t), target :: msg, bmsg, kmsg
-   type(capnp_ptr_t) :: root, people, person, phones, phone, q, fl
+   type(capnp_ptr_t) :: root, people, person, phones, phone, q
    type(sink_t) :: sink
    type(person_t) :: pe
    integer(int8), allocatable :: bytes(:)
-   character(len=:), allocatable :: s, dn
+   character(len=:), allocatable :: s
    integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
-   integer :: disc_count, nw, dw, pw, i, named_person
-   integer(int64) :: disc_off
    logical :: flag
    real(real64) :: ratio
 
@@ -40,36 +33,11 @@ program test_dynamic
    call check_(err == CAPNP_OK, 'dyn: schema loads')
 
    book_idx = capnp_dyn_find(schema, 'AddressBook', err)
-   named_person = capnp_dyn_find(schema, 'Person', err)
+   person_idx = capnp_dyn_find(schema, 'Person', err)
    phone_idx = capnp_dyn_find(schema, 'Person.PhoneNumber', err)
-   call check_(book_idx > 0 .and. named_person > 0 .and. phone_idx > 0, &
+   call check_(book_idx > 0 .and. person_idx > 0 .and. phone_idx > 0, &
                'dyn: nodes found by name')
    call check_(capnp_dyn_find(schema, 'NoSuchType', err) == 0, 'dyn: absent type is 0')
-
-   ! Resolve Person to the non-group struct that has the employment union and
-   ! the field set the accessors use (name lookup can hit a nested/group node
-   ! with a similar leaf name if present).
-   person_idx = 0
-   do i = 1, size(schema%nodes)
-      if (node_which(schema%nodes(i)) /= NODE_STRUCT) cycle
-      if (node_struct_is_group(schema%nodes(i))) cycle
-      call node_display_name(schema%nodes(i), dn, err)
-      if (err /= CAPNP_OK) cycle
-      if (index(dn, 'Person') == 0) cycle
-      if (index(dn, 'PhoneNumber') > 0) cycle
-      dw = node_struct_data_words(schema%nodes(i))
-      pw = node_struct_pointer_count(schema%nodes(i))
-      disc_count = node_struct_discriminant_count(schema%nodes(i))
-      fl = node_struct_fields(schema%nodes(i), err)
-      if (err /= CAPNP_OK) cycle
-      if (dw == 1 .and. pw == 4 .and. disc_count > 0 .and. &
-          capnp_list_len(fl) >= 4_int64) then
-         person_idx = i
-         exit
-      end if
-   end do
-   if (person_idx == 0) person_idx = named_person
-   call check_(person_idx > 0, 'dyn: Person schema node')
 
    call check_(capnp_dyn_field_type(schema, person_idx, 'name', err) == TYPE_TEXT, &
                'dyn: field type text')
@@ -91,33 +59,17 @@ program test_dynamic
    call capnp_dyn_get_text(schema, person_idx, person, 'email', s, err)
    call check_(s == 'alice@example.com', 'dyn: alice email by name')
 
-   ! Union which on fixture Alice (school in the classic addressbook sample).
+   ! Union which: Person reports disc_count=0 on the parent node; the
+   ! employment group carries the discriminant. dyn_which must follow groups.
    pe%p = person
    want = person_employment_which(pe)
    call check_(want == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                'fixture: alice employment is school (generated which)')
-   disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
-   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
-   call node_display_name(schema%nodes(person_idx), dn, err)
-   print '(a,a,a,i0,a,i0,a,i0,a,i0,a,i0,a,i0)', &
-      'Person node: name=', trim(dn), &
-      ' handle_dwords=', schema%nodes(person_idx)%dwords, &
-      ' handle_pwords=', schema%nodes(person_idx)%pwords, &
-      ' field_dwords=', node_struct_data_words(schema%nodes(person_idx)), &
-      ' field_pwords=', node_struct_pointer_count(schema%nodes(person_idx)), &
-      ' disc_count=', disc_count, ' disc_off=', int(disc_off)
-   block
-      integer :: b
-      integer(int8) :: raw(0:39)
-      associate (nd => schema%nodes(person_idx))
-         raw = nd%msg%segs(nd%seg)%bytes(nd%off:nd%off + 39)
-      end associate
-      print '(a,40(1x,z2.2))', 'Person node raw[0:39]=', (raw(b), b=0, 39)
-   end block
    tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
    call check_(capnp_which(person, 2) == want, 'dyn: capnp_which(disc=2) agrees')
+
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
    call capnp_dyn_get_text(schema, phone_idx, phone, 'number', s, err)
@@ -140,7 +92,6 @@ program test_dynamic
    call capnp_dyn_get_text(schema, person_idx, person, 'name', s, err)
    call check_(s == 'Dyn', 'dyn: write/read text round trip')
 
-   ! Kitchen CGR + generated seeders: prove dyn bool/f64 read the same wire.
    call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
    call check_(err == CAPNP_OK, 'dyn: kitchen cgr reads')
    call capnp_dyn_load(kschema, bytes, err)

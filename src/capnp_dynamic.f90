@@ -272,23 +272,56 @@ contains
    end function capnp_dyn_getp
 
    !> Union discriminant of struct node idx read from p.
+   !>
+   !> Cap'n Proto may report discriminantCount on the struct itself, or only
+   !> on an anonymous-union group node that shares the parent's data section
+   !> (addressbook Person.employment). When the parent count is zero, scan
+   !> group fields for a child with a non-zero count and use that offset.
    function capnp_dyn_which(schema, idx, p, err) result(tag)
+      use capnp_union, only: capnp_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       integer :: tag
+      type(capnp_ptr_t) :: fl, f, g
+      integer(int64) :: i, disc_off
+      integer :: gidx, disc_count
       err = CAPNP_OK
       tag = -1
+      disc_off = -1_int64
       if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
-      if (node_struct_discriminant_count(schema%nodes(idx)) == 0) then
+      disc_count = node_struct_discriminant_count(schema%nodes(idx))
+      if (disc_count > 0) then
+         disc_off = node_struct_discriminant_offset(schema%nodes(idx))
+      else
+         fl = node_struct_fields(schema%nodes(idx), err)
+         if (err /= CAPNP_OK) return
+         do i = 0_int64, capnp_list_len(fl) - 1_int64
+            f = capnp_list_get_struct(fl, int(i), err)
+            if (err /= CAPNP_OK) return
+            if (field_which(f) /= FIELD_GROUP) cycle
+            gidx = 0
+            do gidx = 1, size(schema%nodes)
+               if (node_id(schema%nodes(gidx)) == field_group_type_id(f)) exit
+            end do
+            if (gidx < 1 .or. gidx > size(schema%nodes)) cycle
+            if (node_id(schema%nodes(gidx)) /= field_group_type_id(f)) cycle
+            disc_count = node_struct_discriminant_count(schema%nodes(gidx))
+            if (disc_count > 0) then
+               disc_off = node_struct_discriminant_offset(schema%nodes(gidx))
+               exit
+            end if
+         end do
+      end if
+      if (disc_off < 0_int64) then
          err = CAPNP_ERR_KIND
          return
       end if
-      tag = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+      tag = capnp_which(p, int(disc_off))
    end function capnp_dyn_which
 
    subroutine capnp_dyn_set_int(schema, idx, p, fname, v, err)
