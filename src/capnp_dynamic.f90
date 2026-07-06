@@ -284,7 +284,7 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       integer :: tag
-      type(capnp_ptr_t) :: fl, f, g
+      type(capnp_ptr_t) :: fl, f
       integer(int64) :: i, disc_off
       integer :: gidx, disc_count
       err = CAPNP_OK

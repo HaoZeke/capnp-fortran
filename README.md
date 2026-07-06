@@ -34,8 +34,9 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
   wire bytes (see `interop/README.md`).
 - RPC level 1: two-party vat over a POSIX socket transport
   (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
-  promise pipelining, embargo echo, and level 2 persistence hooks;
-  protocol-tested against a live capnp-C++ peer.
+  promise pipelining, embargo echo (same-process fpm suite), and level 2
+  persistence hooks; bootstrap and pipelined/settled calls are also
+  protocol-tested against a live capnp-C++ peer when that interop tier is built.
 
 ## Parity
 

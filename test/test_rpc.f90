@@ -400,7 +400,7 @@ contains
                   DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG, &
                   'rpc: receiverLoopback context')
       call check_(disembargo_context_receiver_loopback_get(rd) == emb_id, &
-                  'rpc: embago id echoed')
+                  'rpc: embargo id echoed')
       rtgt = disembargo_target_get(rd, err)
       call check_(message_target_which(rtgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG, &
                   'rpc: echo target is importedCap')
