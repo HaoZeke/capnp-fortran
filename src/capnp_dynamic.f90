@@ -36,7 +36,9 @@ contains
       type(capnp_ptr_t) :: root, l
       integer(int64) :: n, i
       call capnp_dyn_free(schema)
-      call capnp_deserialize_bytes(bytes, schema%cgr, err)
+      ! Schema graphs are deep; match the plugin's generous reader guards.
+      call capnp_deserialize_bytes(bytes, schema%cgr, err, &
+                                   traversal_words=1073741824_int64, depth_limit=256)
       if (err /= CAPNP_OK) return
       root = capnp_root(schema%cgr, err)
       if (err /= CAPNP_OK) return
@@ -60,16 +62,18 @@ contains
 
    !> Node index for a type name: an exact displayName match, or the
    !> part after the file prefix ('Person' finds
-   !> 'schema/addressbook.capnp:Person'). 0 when absent.
+   !> 'schema/addressbook.capnp:Person'). Prefers NODE_STRUCT over other
+   !> kinds when several names collide. 0 when absent.
    function capnp_dyn_find(schema, name, err) result(idx)
       type(capnp_dyn_schema_t), intent(in) :: schema
       character(len=*), intent(in) :: name
       integer, intent(out) :: err
-      integer :: idx
-      character(len=:), allocatable :: dn
+      integer :: idx, fallback
+      character(len=:), allocatable :: dn, leaf
       integer :: i, colon
       err = CAPNP_OK
       idx = 0
+      fallback = 0
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -77,18 +81,18 @@ contains
       do i = 1, size(schema%nodes)
          call node_display_name(schema%nodes(i), dn, err)
          if (err /= CAPNP_OK) return
-         if (dn == name) then
+         leaf = dn
+         colon = index(dn, ':')
+         if (colon > 0) leaf = dn(colon + 1:)
+         if (dn /= name .and. leaf /= name) cycle
+         ! Prefer a struct node (the usual type lookup target).
+         if (node_which(schema%nodes(i)) == NODE_STRUCT) then
             idx = i
             return
          end if
-         colon = index(dn, ':')
-         if (colon > 0) then
-            if (dn(colon + 1:) == name) then
-               idx = i
-               return
-            end if
-         end if
+         if (fallback == 0) fallback = i
       end do
+      idx = fallback
    end function capnp_dyn_find
 
    !> The named field's schema entry within struct node idx; searches

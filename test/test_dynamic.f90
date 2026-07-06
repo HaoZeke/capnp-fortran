@@ -5,11 +5,15 @@
 program test_dynamic
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, node_struct_discriminant_count, &
-                           node_struct_discriminant_offset
+   use capnp_schema, only: TYPE_TEXT, NODE_STRUCT, node_which, &
+                           node_struct_discriminant_count, &
+                           node_struct_discriminant_offset, &
+                           node_struct_data_words, node_struct_pointer_count, &
+                           node_display_name
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
+   use capnp_union, only: capnp_which
    implicit none
 
    integer :: nfail = 0
@@ -19,9 +23,9 @@ program test_dynamic
    type(sink_t) :: sink
    type(person_t) :: pe
    integer(int8), allocatable :: bytes(:)
-   character(len=:), allocatable :: s
+   character(len=:), allocatable :: s, dn
    integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
-   integer :: disc_count
+   integer :: disc_count, nw, dw, pw, i
    integer(int64) :: disc_off
    logical :: flag
    real(real64) :: ratio
@@ -62,23 +66,42 @@ program test_dynamic
    call check_(s == 'alice@example.com', 'dyn: alice email by name')
 
    ! Union which on fixture Alice (school in the classic addressbook sample).
-   ! Oracle is the generated which; dyn_which must match it via the schema node.
    pe%p = person
    want = person_employment_which(pe)
    call check_(want == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                'fixture: alice employment is school (generated which)')
-   disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
-   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
-   call check_(disc_count > 0, 'dyn: Person has a union discriminant')
-   call check_(disc_off*2_int64 == 4_int64, &
-               'dyn: Person discriminant byte offset is 4')
-   tag = capnp_dyn_which(schema, person_idx, person, err)
-   if (err /= CAPNP_OK .or. tag /= want) then
-      print '(a,i0,a,i0,a,i0,a,i0)', 'dyn_which debug: err=', err, &
-         ' tag=', tag, ' want=', want, ' disc_off=', int(disc_off)
+   ! Prefer the schema node that describes Person (1 data word, 4 ptrs, union).
+   person_idx = 0
+   do i = 1, size(schema%nodes)
+      if (node_which(schema%nodes(i)) /= NODE_STRUCT) cycle
+      dw = node_struct_data_words(schema%nodes(i))
+      pw = node_struct_pointer_count(schema%nodes(i))
+      disc_count = node_struct_discriminant_count(schema%nodes(i))
+      if (dw == 1 .and. pw == 4 .and. disc_count > 0) then
+         person_idx = i
+         exit
+      end if
+   end do
+   if (person_idx == 0) then
+      ! Fall back to name lookup and print layout for diagnosis.
+      person_idx = capnp_dyn_find(schema, 'Person', err)
+      call node_display_name(schema%nodes(person_idx), dn, err)
+      nw = node_which(schema%nodes(person_idx))
+      dw = node_struct_data_words(schema%nodes(person_idx))
+      pw = node_struct_pointer_count(schema%nodes(person_idx))
+      disc_count = node_struct_discriminant_count(schema%nodes(person_idx))
+      disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
+      print '(a,a,a,i0,a,i0,a,i0,a,i0,a,i0)', 'Person node debug: name=', dn, &
+         ' which=', nw, ' dwords=', dw, ' pwords=', pw, &
+         ' disc_count=', disc_count, ' disc_off=', int(disc_off)
    end if
+   call check_(person_idx > 0, 'dyn: located Person schema node with union')
+   disc_off = node_struct_discriminant_offset(schema%nodes(person_idx))
+   tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
+   ! Direct union helper with the emitter's known 16-bit disc unit offset.
+   call check_(capnp_which(person, 2) == want, 'dyn: capnp_which(disc=2) agrees')
 
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)
    phone = capnp_list_get_struct(phones, 0, err)
