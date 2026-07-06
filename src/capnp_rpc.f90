@@ -1038,9 +1038,30 @@ contains
          rd, disembargo_context_sender_loopback_get(d), err)
       tgt = disembargo_target_get(d, err)
       rtgt = disembargo_target_init(rd, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
       if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
          call message_target_imported_cap_set(rtgt, &
                                               message_target_imported_cap_get(tgt), err)
+      else if (message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+         ! Echo the promisedAnswer target (question id + empty transform).
+         block
+            type(promised_answer_t) :: pa, rpa
+            pa = message_target_promised_answer_get(tgt, err)
+            if (err /= CAPNP_OK) then
+               call capnp_message_free(rm)
+               return
+            end if
+            rpa = message_target_promised_answer_init(rtgt, err)
+            if (err /= CAPNP_OK) then
+               call capnp_message_free(rm)
+               return
+            end if
+            call promised_answer_question_id_set(rpa, &
+                                                 promised_answer_question_id_get(pa), err)
+         end block
       end if
       if (err == CAPNP_OK) call rpc_send_message(conn%fd, rm, err)
       call capnp_message_free(rm)

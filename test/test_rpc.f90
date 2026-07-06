@@ -31,6 +31,8 @@ program test_rpc
    call t_resolve_and_tail_calls()
    call t_sender_promise_import()
    call t_disembargo_echo()
+   call t_disembargo_promised_answer()
+   call t_disembargo_receiver_loopback_absorbed()
    call t_pump_poll()
 
    call rpc_conn_close(cli)
@@ -408,6 +410,81 @@ contains
                   'rpc: import id echoed')
       call capnp_message_free(reply)
    end subroutine t_disembargo_echo
+
+   !> senderLoopback with a promisedAnswer target is echoed the same way
+   !> (question id preserved on the reply target).
+   subroutine t_disembargo_promised_answer()
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(disembargo_t) :: d, rd
+      type(message_target_t) :: tgt, rtgt
+      type(promised_answer_t) :: pa, rpa
+      integer(int64), parameter :: emb_id = 77_int64
+      integer(int64), parameter :: qid = 42_int64
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      d = message_disembargo_init(msg, err)
+      call disembargo_context_sender_loopback_set(d, emb_id, err)
+      tgt = disembargo_target_init(d, err)
+      pa = message_target_promised_answer_init(tgt, err)
+      call promised_answer_question_id_set(pa, qid, err)
+      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_free(m)
+      call check_(err == CAPNP_OK, 'rpc: pa disembargo sent')
+      call rpc_pump_once(srv, err)
+      call check_(err == CAPNP_OK, 'rpc: server handled pa disembargo')
+      call rpc_recv_message(cli%fd, reply, err)
+      call check_(err == CAPNP_OK, 'rpc: pa disembargo echo received')
+      rmsg = message_read_root(reply, err)
+      call check_(message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                  'rpc: pa echo is Disembargo')
+      rd = message_disembargo_get(rmsg, err)
+      call check_(disembargo_context_which(rd) == &
+                  DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG, &
+                  'rpc: pa receiverLoopback')
+      call check_(disembargo_context_receiver_loopback_get(rd) == emb_id, &
+                  'rpc: pa embargo id echoed')
+      rtgt = disembargo_target_get(rd, err)
+      call check_(message_target_which(rtgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG, &
+                  'rpc: pa echo target kind')
+      rpa = message_target_promised_answer_get(rtgt, err)
+      call check_(promised_answer_question_id_get(rpa) == qid, &
+                  'rpc: pa question id echoed')
+      call capnp_message_free(reply)
+   end subroutine t_disembargo_promised_answer
+
+   !> A receiverLoopback Disembargo is accepted (no error) and does not
+   !> produce a further echo; the vat stays usable for a later bootstrap.
+   subroutine t_disembargo_receiver_loopback_absorbed()
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(rpc_cap_t) :: bootcap
+      integer(int64) :: qb
+      logical :: handled
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      d = message_disembargo_init(msg, err)
+      call disembargo_context_receiver_loopback_set(d, 1_int64, err)
+      tgt = disembargo_target_init(d, err)
+      call message_target_imported_cap_set(tgt, 0_int64, err)
+      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_free(m)
+      call check_(err == CAPNP_OK, 'rpc: receiverLoopback sent')
+      call rpc_pump_once(srv, err)
+      call check_(err == CAPNP_OK, 'rpc: receiverLoopback absorbed')
+      ! No echo should be pending: a short poll on the client stays quiet.
+      call rpc_pump_poll(cli, 20, handled, err)
+      call check_(err == CAPNP_OK .and. .not. handled, &
+                  'rpc: no echo after receiverLoopback')
+      ! Connection still works.
+      call rpc_bootstrap_send(cli, bootcap, err)
+      qb = bootcap%id
+      call rpc_pump_once(srv, err)
+      call rpc_wait(cli, qb, err)
+      call check_(err == CAPNP_OK, 'rpc: bootstrap after receiverLoopback')
+   end subroutine t_disembargo_receiver_loopback_absorbed
 
    !> Poll-driven pumping: a quiet connection times out with
    !> handled=.false.; a pending message is handled within the window.

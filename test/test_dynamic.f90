@@ -68,6 +68,9 @@ program test_dynamic
    tag = capnp_dyn_which(schema, person_idx, person, err)
    call check_(err == CAPNP_OK .and. tag == want, &
                'dyn: which matches generated on fixture alice')
+   tag = capnp_dyn_which(schema, person_idx, person, err, group='employment')
+   call check_(err == CAPNP_OK .and. tag == want, &
+               'dyn: which group=employment matches')
    call check_(capnp_which(person, 2) == want, 'dyn: capnp_which(disc=2) agrees')
 
    phones = capnp_dyn_getp(schema, person_idx, person, 'phones', err)

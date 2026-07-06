@@ -20,6 +20,7 @@ program check
    call t_framing_errors()
    call t_traversal_limit()
    call t_depth_limit()
+   call t_depth_limit_nested()
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
@@ -408,5 +409,34 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine t_depth_limit
+
+   !> Nested walks accumulate depth on the handle: with depth_limit=1 a
+   !> two-hop chain (root -> a -> b) allows the first getp and fails the second.
+   subroutine t_depth_limit_nested()
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, a, b, q
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      a = capnp_new_struct(msg, 0, 1, err)
+      b = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(b, 0_int64, 99_int32, err)
+      call capnp_setp(a, 0, b, err)
+      call capnp_setp(root, 0, a, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=1)
+      root = capnp_root(rmsg, err)
+      call check_(err == CAPNP_OK, 'guards: nested root ok')
+      a = capnp_getp(root, 0, err)
+      call check_(err == CAPNP_OK .and. a%kind == CAPNP_PK_STRUCT, &
+                  'guards: first hop within limit')
+      call check_(a%depth == 1, 'guards: first hop depth is 1')
+      q = capnp_getp(a, 0, err)
+      call check_(err == CAPNP_ERR_DEPTH, 'guards: second hop exceeds limit')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine t_depth_limit_nested
 
 end program check

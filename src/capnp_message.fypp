@@ -51,6 +51,8 @@ module capnp_message
    !> dbits >= 0 marks a synthetic struct view over a primitive list element
    !> (schema-evolution upgrade); reads beyond dbits yield defaults and
    !> writes beyond it are bounds errors.
+   !> depth is the nesting level at which this handle was resolved (root = 0);
+   !> subsequent getp/list pointer walks use depth+1 against msg%depth_limit.
    type :: capnp_ptr_t
       integer :: kind = CAPNP_PK_NULL
       integer :: seg = 0
@@ -61,6 +63,7 @@ module capnp_message
       integer(int64) :: nelem = 0_int64
       integer(int64) :: capidx = 0_int64
       integer(int64) :: dbits = -1_int64
+      integer :: depth = 0
       type(capnp_message_t), pointer :: msg => null()
    end type capnp_ptr_t
 
@@ -118,10 +121,12 @@ contains
          p%off = base
          p%dwords = wp_struct_dwords(w)
          p%pwords = wp_struct_pwords(w)
+         p%depth = depth
 
       case (CAPNP_WK_LIST)
          base = byte_off + 8_int64 + int(wp_offset(w), int64)*8_int64
          call fill_list(msg, seg, base, w, p, err)
+         if (err == CAPNP_OK) p%depth = depth
 
       case (CAPNP_WK_FAR)
          tseg64 = wp_far_seg(w)
@@ -141,6 +146,7 @@ contains
       case (CAPNP_WK_CAP)
          p%kind = CAPNP_PK_CAP
          p%capidx = wp_cap_index(w)
+         p%depth = depth
       end select
    end subroutine resolve_at
 
@@ -194,8 +200,10 @@ contains
          p%off = obase
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
+         p%depth = depth + 1
       case (CAPNP_WK_LIST)
          call fill_list(msg, oseg, obase, tag, p, err)
+         if (err == CAPNP_OK) p%depth = depth + 1
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -350,7 +358,7 @@ contains
          err = CAPNP_ERR_KIND
          return
       end select
-      call resolve_at(p%msg, p%seg, slot, 1, q, err)
+      call resolve_at(p%msg, p%seg, slot, p%depth + 1, q, err)
    end function capnp_getp
 
    !> Struct element i of a struct list. Composite lists give the real
@@ -382,6 +390,7 @@ contains
          q%off = p%off + int(i, int64)*int(p%dwords + p%pwords, int64)*8_int64
          q%dwords = p%dwords
          q%pwords = p%pwords
+         q%depth = p%depth
       case (CAPNP_SZ_BYTE, CAPNP_SZ_TWO, CAPNP_SZ_FOUR, CAPNP_SZ_EIGHT)
          sb = capnp_list_step_bits(p%esize)
          q%kind = CAPNP_PK_STRUCT
@@ -390,6 +399,7 @@ contains
          q%dwords = 1
          q%pwords = 0
          q%dbits = int(sb, int64)
+         q%depth = p%depth
       case (CAPNP_SZ_PTR)
          q%kind = CAPNP_PK_STRUCT
          q%seg = p%seg
@@ -397,6 +407,7 @@ contains
          q%dwords = 0
          q%pwords = 1
          q%dbits = 0_int64
+         q%depth = p%depth
       case default
          err = CAPNP_ERR_KIND
       end select

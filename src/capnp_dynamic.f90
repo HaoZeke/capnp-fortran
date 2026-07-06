@@ -277,25 +277,35 @@ contains
    !> on an anonymous-union group node that shares the parent's data section
    !> (addressbook Person.employment). When the parent count is zero, scan
    !> group fields for a child with a non-zero count and use that offset.
-   function capnp_dyn_which(schema, idx, p, err) result(tag)
+   !>
+   !> Optional group names a union field (e.g. 'employment', 'primary') so
+   !> multi-union structs are unambiguous. When omitted and several union
+   !> groups exist, CAPNP_ERR_ARG is returned unless the parent itself has
+   !> a non-zero discriminantCount.
+   function capnp_dyn_which(schema, idx, p, err, group) result(tag)
       use capnp_union, only: capnp_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
+      character(len=*), intent(in), optional :: group
       integer :: tag
       type(capnp_ptr_t) :: fl, f
-      integer(int64) :: i, disc_off
-      integer :: gidx, disc_count
+      character(len=:), allocatable :: fn
+      integer(int64) :: i, disc_off, want_id
+      integer :: gidx, disc_count, n_union
+      logical :: named
       err = CAPNP_OK
       tag = -1
       disc_off = -1_int64
+      n_union = 0
+      named = present(group)
       if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
       disc_count = node_struct_discriminant_count(schema%nodes(idx))
-      if (disc_count > 0) then
+      if (disc_count > 0 .and. .not. named) then
          disc_off = node_struct_discriminant_offset(schema%nodes(idx))
       else
          fl = node_struct_fields(schema%nodes(idx), err)
@@ -304,18 +314,31 @@ contains
             f = capnp_list_get_struct(fl, int(i), err)
             if (err /= CAPNP_OK) return
             if (field_which(f) /= FIELD_GROUP) cycle
+            call field_name(f, fn, err)
+            if (err /= CAPNP_OK) return
+            if (named) then
+               if (fn /= group) cycle
+            end if
+            want_id = field_group_type_id(f)
             gidx = 0
             do gidx = 1, size(schema%nodes)
-               if (node_id(schema%nodes(gidx)) == field_group_type_id(f)) exit
+               if (node_id(schema%nodes(gidx)) == want_id) exit
             end do
             if (gidx < 1 .or. gidx > size(schema%nodes)) cycle
-            if (node_id(schema%nodes(gidx)) /= field_group_type_id(f)) cycle
+            if (node_id(schema%nodes(gidx)) /= want_id) cycle
             disc_count = node_struct_discriminant_count(schema%nodes(gidx))
-            if (disc_count > 0) then
+            if (disc_count <= 0) cycle
+            n_union = n_union + 1
+            if (named .or. n_union == 1) then
                disc_off = node_struct_discriminant_offset(schema%nodes(gidx))
-               exit
             end if
+            if (named) exit
          end do
+         if (.not. named .and. n_union > 1) then
+            err = CAPNP_ERR_ARG
+            tag = -1
+            return
+         end if
       end if
       if (disc_off < 0_int64) then
          err = CAPNP_ERR_KIND
