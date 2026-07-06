@@ -63,6 +63,7 @@ TEST_PROGRAMS=(
   test/test_dynamic.f90
   test/test_generic.f90
   test/test_stream.f90
+  test/test_holder.f90
 )
 
 OBJS=()
