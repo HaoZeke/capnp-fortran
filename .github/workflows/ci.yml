@@ -34,6 +34,8 @@ jobs:
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/box.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/stream.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/streamer.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/dual.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/holder.cgr.bin"
           diff stream_capnp.f90 "$GITHUB_WORKSPACE/src/stream_capnp.f90"
           diff streamer_capnp.f90 "$GITHUB_WORKSPACE/test/generated/streamer_capnp.f90"
           diff adder_capnp.f90 "$GITHUB_WORKSPACE/test/generated/adder_capnp.f90"
@@ -41,6 +43,8 @@ jobs:
           diff addressbook_capnp.f90 "$GITHUB_WORKSPACE/test/generated/addressbook_capnp.f90"
           diff kitchen_capnp.f90 "$GITHUB_WORKSPACE/test/generated/kitchen_capnp.f90"
           diff common_capnp.f90 "$GITHUB_WORKSPACE/test/generated/common_capnp.f90"
+          diff dual_capnp.f90 "$GITHUB_WORKSPACE/test/generated/dual_capnp.f90"
+          diff holder_capnp.f90 "$GITHUB_WORKSPACE/test/generated/holder_capnp.f90"
           diff rpc_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_capnp.f90"
           diff rpc_twoparty_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_twoparty_capnp.f90"
       - name: self-hosting smoke, the plugin digests schema.capnp itself

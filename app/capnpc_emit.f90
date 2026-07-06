@@ -802,9 +802,7 @@ contains
          call emit_list_field(an, ht, int(off), t, &
                               field_slot_had_default(f), dv, gset, err)
       case (TYPE_INTERFACE)
-         ! Capability slot: raw pointer accessors; the cap index inside is
-         ! managed by capnp_rpc (rpc_make_cap_ptr / rpc_result_cap).
-         call emit_anyptr_field(an, ht, int(off), gset)
+         call emit_interface_field(an, ht, int(off), t, gset, err)
       case (TYPE_ANY_POINTER)
          call emit_anyptr_field(an, ht, int(off), gset)
       case default
@@ -865,6 +863,57 @@ contains
       call w('   end subroutine '//an//'_set')
       call w('')
    end subroutine emit_anyptr_field
+
+   !> Interface-typed struct field: get/set the wire capability as a
+   !> <iface>_client_t (cap index in/out). Uses the same client type the
+   !> method stubs generate for that interface.
+   subroutine emit_interface_field(an, ht, pidx, t, gset, err)
+      character(len=*), intent(in) :: an, ht, gset
+      integer, intent(in) :: pidx
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(out) :: err
+      character(len=:), allocatable :: st
+      integer :: idx
+      err = CAPNP_OK
+      idx = find_node(type_type_id(t))
+      if (idx == 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call note_import(idx, err)
+      if (err /= CAPNP_OK) return
+      call node_fname(g_nodes(idx)%p, st, err)
+      if (err /= CAPNP_OK) return
+      g_has_iface = .true.
+      call w('   function '//an//'_get(h, err) result(c)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//st//'_client_t) :: c')
+      call w('      type(capnp_ptr_t) :: q')
+      call w('      c%cap%kind = RPC_CAP_NONE')
+      call w('      c%cap%id = 0_int64')
+      call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
+      call w('      if (err /= CAPNP_OK) return')
+      call w('      if (q%kind == CAPNP_PK_CAP) then')
+      call w('         c%cap%kind = RPC_CAP_IMPORT')
+      call w('         c%cap%id = q%capidx')
+      call w('      end if')
+      call w('   end function '//an//'_get')
+      call w('')
+      call w('   subroutine '//an//'_set(h, c, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      type('//st//'_client_t), intent(in) :: c')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: q')
+      if (len(gset) > 0) call w(gset)
+      call w('      q = capnp_ptr_t()')
+      call w('      if (associated(h%p%msg)) q%msg => h%p%msg')
+      call w('      q%kind = CAPNP_PK_CAP')
+      call w('      q%capidx = c%cap%id')
+      call w('      call capnp_setp(h%p, '//itoa(int(pidx, int64))//', q, err)')
+      call w('   end subroutine '//an//'_set')
+      call w('')
+   end subroutine emit_interface_field
 
    ! --- field emitters ------------------------------------------------------
 

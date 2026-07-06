@@ -15,6 +15,8 @@ program check
    call t_composite_list()
    call t_nested_struct()
    call t_far_pointer()
+   call t_double_far_e2e()
+   call t_wire_capability()
    call t_packed_spec_vectors()
    call t_packed_roundtrip()
    call t_framing_errors()
@@ -296,6 +298,83 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine t_far_pointer
+
+   !> Multi-segment double-far: pointer on seg A, landing pad (single far +
+   !> tag) on seg B, object on seg C. Serialize, deserialize, resolve through
+   !> resolve_double_far and read the object's data word.
+   subroutine t_double_far_e2e()
+      use capnp_endian, only: cp_put_i64
+      use capnp_arena, only: capnp_arena_alloc_in
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, obj, junk, r, rk
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, i
+      integer(int64) :: pad_off, slot, far_w, tag_w
+      call capnp_message_init_builder(msg, err, first_words=2_int64)
+      ! Root on seg 1: empty data, one pointer slot.
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      ! Force at least three segments: fill remaining capacity, then allocate.
+      do i = 1, 8
+         junk = capnp_new_struct(msg, 4, 0, err)
+         if (msg%nsegs >= 3) exit
+      end do
+      call check_(msg%nsegs >= 3, 'dfar: three segments available')
+      ! Object on the last segment: one data word.
+      obj = capnp_new_struct(msg, 1, 0, err)
+      call check_(obj%seg == msg%nsegs, 'dfar: object on last segment')
+      call capnp_set_i64(obj, 0_int64, 4242_int64, err)
+      ! Landing pad (2 words) on segment 2, not the object's segment.
+      call check_(obj%seg /= 2, 'dfar: pad and object on different segs')
+      call capnp_arena_alloc_in(msg, 2, 2_int64, pad_off, err)
+      call check_(err == CAPNP_OK, 'dfar: pad allocated on seg 2')
+      ! Pad word 0: single far to object. Word 1: struct tag, offset 0.
+      far_w = wp_make_far(.false., obj%off/8_int64, int(obj%seg - 1, int64))
+      tag_w = wp_make_struct(0_int32, 1_int32, 0_int32)
+      call cp_put_i64(msg%segs(2)%bytes, pad_off, far_w)
+      call cp_put_i64(msg%segs(2)%bytes, pad_off + 8_int64, tag_w)
+      ! Root pointer slot: double-far to the pad (segment id 1 = seg 2).
+      slot = root%off + int(root%dwords, int64)*8_int64
+      call cp_put_i64(msg%segs(root%seg)%bytes, slot, &
+                      wp_make_far(.true., pad_off/8_int64, 1_int64))
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check_(err == CAPNP_OK, 'dfar: serializes')
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      call check_(err == CAPNP_OK, 'dfar: deserializes')
+      r = capnp_root(rmsg, err)
+      rk = capnp_getp(r, 0, err)
+      call check_(err == CAPNP_OK .and. rk%kind == CAPNP_PK_STRUCT, &
+                  'dfar: resolves through double-far')
+      call check_(capnp_get_i64(rk, 0_int64) == 4242_int64, 'dfar: data intact')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine t_double_far_e2e
+
+   !> Pure-wire capability pointer: set a CAP pointer by index, serialize,
+   !> deserialize, and read the same index back (no RPC connection).
+   subroutine t_wire_capability()
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, cap, r, q
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      cap%kind = CAPNP_PK_CAP
+      cap%capidx = 7_int64
+      cap%msg => msg
+      call capnp_setp(root, 0, cap, err)
+      call check_(err == CAPNP_OK, 'capwire: setp cap')
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check_(err == CAPNP_OK, 'capwire: serializes')
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      r = capnp_root(rmsg, err)
+      q = capnp_getp(r, 0, err)
+      call check_(err == CAPNP_OK .and. q%kind == CAPNP_PK_CAP, 'capwire: kind CAP')
+      call check_(q%capidx == 7_int64, 'capwire: index 7 round-trips')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine t_wire_capability
 
    !> Vectors from https://capnproto.org/encoding.html#packing
    subroutine t_packed_spec_vectors()

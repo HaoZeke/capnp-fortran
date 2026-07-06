@@ -43,6 +43,8 @@ TEST_MODULES=(
   test/generated/adder_capnp.f90
   test/generated/box_capnp.f90
   test/generated/streamer_capnp.f90
+  test/generated/dual_capnp.f90
+  test/generated/holder_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
