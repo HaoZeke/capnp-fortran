@@ -9,9 +9,11 @@ program test_dynamic
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
-   use dual_capnp, only: dual_t, dual_new_root, dual_primary_text_a_set, &
+   use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
+                         dual_primary_text_a_set, dual_secondary_void_b_set, &
                          dual_secondary_int_b_set, dual_primary_which, &
-                         dual_secondary_which, DUAL_PRIMARY_TEXT_A_TAG, &
+                         dual_secondary_which, DUAL_PRIMARY_VOID_A_TAG, &
+                         DUAL_PRIMARY_TEXT_A_TAG, DUAL_SECONDARY_VOID_B_TAG, &
                          DUAL_SECONDARY_INT_B_TAG
    use capnp_union, only: capnp_which
    implicit none
@@ -26,6 +28,7 @@ program test_dynamic
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
    integer :: err, book_idx, person_idx, phone_idx, sink_idx, dual_idx, tag, want
+   integer :: tag_pri, tag_sec
    logical :: flag
    real(real64) :: ratio
 
@@ -121,8 +124,9 @@ program test_dynamic
    call check_(err == CAPNP_OK .and. abs(ratio - 3.5_real64) < 1.0e-15_real64, &
                'dyn: get_f64 ratio')
 
-   ! Multi-union Dual: ambiguous which without group= must error; named
-   ! groups match the generated dual_*_which helpers.
+   ! Multi-union Dual: set *divergent* tags (primary voidA=0, secondary
+   ! intB=1) so a first-union-only dyn_which cannot satisfy both named
+   ! asserts. Ambiguous which without group= must error.
    call capnp_read_file('test/fixtures/dual.cgr.bin', bytes, err)
    call check_(err == CAPNP_OK, 'dyn: dual cgr reads')
    call capnp_dyn_load(dschema, bytes, err)
@@ -131,21 +135,35 @@ program test_dynamic
    call check_(dual_idx > 0, 'dyn: Dual node found')
    call capnp_message_init_builder(dmsg, err)
    dual = dual_new_root(dmsg, err)
-   call dual_primary_text_a_set(dual, 'alpha', err)
+   call dual_primary_void_a_set(dual, err)
    call dual_secondary_int_b_set(dual, 17_int32, err)
    call check_(err == CAPNP_OK, 'dyn: dual unions set')
-   call check_(dual_primary_which(dual) == DUAL_PRIMARY_TEXT_A_TAG, &
-               'dyn: generated primary which')
-   call check_(dual_secondary_which(dual) == DUAL_SECONDARY_INT_B_TAG, &
-               'dyn: generated secondary which')
+   tag_pri = dual_primary_which(dual)
+   tag_sec = dual_secondary_which(dual)
+   call check_(tag_pri == DUAL_PRIMARY_VOID_A_TAG, 'dyn: generated primary is voidA/0')
+   call check_(tag_sec == DUAL_SECONDARY_INT_B_TAG, 'dyn: generated secondary is intB/1')
+   call check_(tag_pri /= tag_sec, 'dyn: dual tags are divergent (not theater)')
    tag = capnp_dyn_which(dschema, dual_idx, dual%p, err)
    call check_(err == CAPNP_ERR_ARG, 'dyn: ambiguous multi-union without group')
    tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='primary')
-   call check_(err == CAPNP_OK .and. tag == dual_primary_which(dual), &
-               'dyn: primary group which')
+   call check_(err == CAPNP_OK .and. tag == tag_pri .and. tag == 0, &
+               'dyn: primary group which is 0 (voidA)')
    tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='secondary')
-   call check_(err == CAPNP_OK .and. tag == dual_secondary_which(dual), &
-               'dyn: secondary group which')
+   call check_(err == CAPNP_OK .and. tag == tag_sec .and. tag == 1, &
+               'dyn: secondary group which is 1 (intB)')
+   ! Flip primary to textA (1) and secondary to voidB (0); re-assert swap.
+   call dual_primary_text_a_set(dual, 'alpha', err)
+   call dual_secondary_void_b_set(dual, err)
+   call check_(err == CAPNP_OK, 'dyn: dual unions flipped')
+   tag_pri = dual_primary_which(dual)
+   tag_sec = dual_secondary_which(dual)
+   call check_(tag_pri == DUAL_PRIMARY_TEXT_A_TAG .and. tag_sec == DUAL_SECONDARY_VOID_B_TAG, &
+               'dyn: flipped generated tags 1 and 0')
+   call check_(tag_pri /= tag_sec, 'dyn: flipped tags still divergent')
+   tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='primary')
+   call check_(err == CAPNP_OK .and. tag == 1, 'dyn: primary group which is 1 (textA)')
+   tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='secondary')
+   call check_(err == CAPNP_OK .and. tag == 0, 'dyn: secondary group which is 0 (voidB)')
 
    call capnp_message_free(msg)
    call capnp_message_free(bmsg)
