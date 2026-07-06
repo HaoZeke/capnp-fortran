@@ -9,18 +9,23 @@ program test_dynamic
    use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
+   use dual_capnp, only: dual_t, dual_new_root, dual_primary_text_a_set, &
+                         dual_secondary_int_b_set, dual_primary_which, &
+                         dual_secondary_which, DUAL_PRIMARY_TEXT_A_TAG, &
+                         DUAL_SECONDARY_INT_B_TAG
    use capnp_union, only: capnp_which
    implicit none
 
    integer :: nfail = 0
-   type(capnp_dyn_schema_t), target :: schema, kschema
-   type(capnp_message_t), target :: msg, bmsg, kmsg
+   type(capnp_dyn_schema_t), target :: schema, kschema, dschema
+   type(capnp_message_t), target :: msg, bmsg, kmsg, dmsg
    type(capnp_ptr_t) :: root, people, person, phones, phone, q
    type(sink_t) :: sink
    type(person_t) :: pe
+   type(dual_t) :: dual
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: s
-   integer :: err, book_idx, person_idx, phone_idx, sink_idx, tag, want
+   integer :: err, book_idx, person_idx, phone_idx, sink_idx, dual_idx, tag, want
    logical :: flag
    real(real64) :: ratio
 
