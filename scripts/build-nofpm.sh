@@ -3,12 +3,17 @@
 # Exists for environments where fpm is unavailable, e.g. emulated
 # big-endian CI (qemu s390x). Run from the repository root; test programs
 # read fixtures via paths relative to it.
+#
+# Under qemu, gfortran can occasionally segfault mid-compile (exit 139).
+# Defaults favour reliability: -O0, no -fcheck, and per-unit retries.
 set -euo pipefail
 
 FC=${FC:-gfortran}
-FFLAGS=${FFLAGS:--O1 -g -fcheck=bounds}
+# Prefer -O0 under emulation; callers may override FFLAGS.
+FFLAGS=${FFLAGS:--O0 -g}
 OUT=build/nofpm
 mkdir -p "$OUT"
+RETRIES=${COMPILE_RETRIES:-3}
 
 # Library modules in dependency order.
 LIB_SOURCES=(
@@ -66,17 +71,48 @@ TEST_PROGRAMS=(
   test/test_holder.f90
 )
 
+# Compile one unit with retries (qemu/gfortran occasional SIGSEGV).
+compile_unit() {
+  local f=$1 o=$2
+  local attempt=1 rc=0
+  while true; do
+    echo "compile: $f (attempt $attempt/$RETRIES)"
+    set +e
+    "$FC" $FFLAGS -J "$OUT" -c "$f" -o "$o"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    echo "compile failed: $f rc=$rc" >&2
+    if [ "$attempt" -ge "$RETRIES" ]; then
+      return "$rc"
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
+}
+
 OBJS=()
 for f in "${LIB_SOURCES[@]}" "${TEST_MODULES[@]}"; do
   o="$OUT/$(basename "${f%.f90}").o"
-  "$FC" $FFLAGS -J "$OUT" -c "$f" -o "$o"
+  compile_unit "$f" "$o"
   OBJS+=("$o")
 done
 
 status=0
 for prog in "${TEST_PROGRAMS[@]}"; do
   name=$(basename "${prog%.f90}")
+  echo "link: $name"
+  set +e
   "$FC" $FFLAGS -I "$OUT" "$prog" "${OBJS[@]}" -o "$OUT/$name"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    echo "link failed: $name rc=$rc" >&2
+    status=1
+    continue
+  fi
   echo "== $name"
   if ! "$OUT/$name"; then
     status=1

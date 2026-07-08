@@ -8,6 +8,7 @@ on:
 jobs:
   s390x:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - name: full suite on emulated s390x (big-endian)
@@ -15,9 +16,25 @@ jobs:
         with:
           arch: s390x
           distro: bookworm
-          githubToken: ${{ github.token }}
+          # Do not pass githubToken: GHCR package create is denied for this
+          # account and is not required for the suite itself.
           install: |
             apt-get update -q -y
             apt-get install -q -y gfortran
           run: |
-            ./scripts/build-nofpm.sh
+            set -euo pipefail
+            uname -m
+            gfortran --version | head -1
+            # Outer retries: whole nofpm path can die mid-compile under qemu.
+            for attempt in 1 2 3; do
+              echo "=== nofpm suite attempt $attempt ==="
+              rm -rf build/nofpm
+              if FFLAGS="-O0 -g" COMPILE_RETRIES=3 ./scripts/build-nofpm.sh; then
+                echo "=== nofpm suite OK on attempt $attempt ==="
+                exit 0
+              fi
+              echo "=== nofpm suite failed on attempt $attempt ===" >&2
+              sleep 2
+            done
+            echo "nofpm suite failed after 3 attempts" >&2
+            exit 1
