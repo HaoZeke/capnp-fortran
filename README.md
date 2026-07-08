@@ -7,7 +7,7 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
 `iso_c_binding`.
 
 Documentation: **https://capnp-fortran.rgoswami.me** (Sphinx site; sources under `docs/`).
-Local docs: `pixi run -e docs docs`. Linkcheck: `pixi run -e docs linkcheck` (needs `lychee` on PATH). Hooks: `prek install` then `prek run -a` (config in `prek.toml`; version bumps via `cog bump`).
+Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURITY.md). Linkcheck: `pixi run -e docs linkcheck` (needs `lychee` on PATH). Hooks: `prek install` then `prek run -a` (config in `prek.toml`; version bumps via `cog bump`).
 
 ## Features
 
