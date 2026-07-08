@@ -23,7 +23,8 @@ jobs:
       - name: Install prek and lychee
         uses: taiki-e/install-action@v2
         with:
-          tool: prek@0.3.0,lychee@0.24.2
+          # prek >= 0.4 discovers prek.toml; 0.3 looked only for .pre-commit-config.yaml
+          tool: prek@0.4.4,lychee@0.24.2
 
       - name: Run prek
-        run: prek run -a
+        run: prek run -a --refresh
