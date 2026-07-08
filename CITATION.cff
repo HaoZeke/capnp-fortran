@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "capnp-fortran: a native Fortran Cap'n Proto implementation"
+abstract: >-
+  Native modern-Fortran (F2018) implementation of Cap'n Proto serialization:
+  wire-format runtime, packed and canonical codecs, capnpc-fortran schema
+  compiler backend, optional C ABI, and two-party RPC.
+authors:
+  - family-names: Goswami
+    given-names: Rohit
+    email: rgoswami@ieee.org
+    orcid: "https://orcid.org/0000-0002-2393-8056"
+license: MIT
+version: 0.1.0
+date-released: "2026-07-08"
+repository-code: "https://github.com/HaoZeke/capnp-fortran"
+url: "https://github.com/HaoZeke/capnp-fortran"
+keywords:
+  - Cap'n Proto
+  - Fortran
+  - serialization
+  - RPC
+  - schema

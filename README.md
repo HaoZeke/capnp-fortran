@@ -75,6 +75,10 @@ reflection sit outside both this project's and capnpc-c's generated-code
 scope; the wire format carries generic types either way, so messages
 produced by C++ users of those features still read correctly here.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
+
 ## Install
 
 With [fpm](https://fpm.fortran-lang.org):
@@ -150,7 +154,8 @@ never crash on malformed input, they return errors and defaults.
 ## Citation
 
 Cite as: Rohit Goswami, *capnp-fortran: a native Fortran Cap'n Proto
-implementation*, 2026.
+implementation*, 2026. Machine-readable metadata is in
+[`CITATION.cff`](CITATION.cff).
 
 ## License
 
