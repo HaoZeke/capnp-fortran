@@ -100,11 +100,13 @@ stays zero on the wire.
 
 * capnp-C++ RPC peer
 
+#+begin_export rst
 A second Meson target protocol-tests the RPC vat (:doc:`rpc`) against
 a live capnp-C++ peer, rather than comparing static bytes. It only
-configures when a C++ toolchain, =libcapnp-rpc=, the =capnp= tool,
-and =capnpc-c++= are all found; otherwise Meson prints a skip
+configures when a C++ toolchain, ``libcapnp-rpc``, the ``capnp`` tool,
+and ``capnpc-c++`` are all found; otherwise Meson prints a skip
 message and continues.
+#+end_export
 
 - =interop/rpc_peer_server.c++= -- a capnp-C++ =EzRpcServer=
   hosting the =Adder= interface (=schema/adder.capnp=), listening

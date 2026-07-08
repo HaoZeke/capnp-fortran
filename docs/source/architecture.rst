@@ -64,7 +64,7 @@ bit):
 ``capnp_ptr_t`` (in ``capnp_message``) is the value-type handle built
 from a resolved pointer word: kind, segment/word position, and
 struct/list geometry. A null struct or list pointer
-(``p%kind =`` CAPNP\ :sub:`PK`\ \ :sub:`NULL`\=) reads as empty/all-defaults, matching
+(``p%kind == CAPNP_PK_NULL``) reads as empty/all-defaults, matching
 the C++ implementation. Far and double-far pointers are followed
 transparently during resolution (``capnp_getp`` / ``capnp_root``); a
 handle returned to the caller always describes the resolved object,
@@ -140,7 +140,7 @@ Emission for each requested file walks the node graph twice:
   and ``_WHICH`` constants, group ``_select`` setters, enum
   constants, and ``interface`` client/server pairs.
 
-Names are snake\ :sub:`cased`\ from capnp's camelCase, with nested scopes
+Names are snake_cased from capnp's camelCase, with nested scopes
 joined by underscores (``Person.PhoneNumber`` becomes
 ``person_phone_number``). Deeply nested schemas can overflow
 Fortran's 63-character identifier limit once accessor suffixes are
@@ -154,8 +154,9 @@ procedure pair per method that fills parameters through
 ``rpc_call_begin`` and blocks on ``rpc_wait``, and an abstract server
 base extending ``rpc_server_t`` whose generated ``dispatch``
 decodes the interface and method ordinals and routes to a
+
 deferred, per-method procedure the application implements (see
-:doc:\`tutorial\`, part 2).
+:doc:`tutorial`, part 2).
 
 4 RPC vat: message-driven dispatch
 ----------------------------------
@@ -223,7 +224,7 @@ pipeline reference into a plain import once the dependency returns.
 
 Level 2 persistence is an opt-in hook, not a separate code path: a
 capability's ``dispatch`` recognizes
-``ctx%interface_id =`` RPC\ :sub:`PERSISTENT`\ \ :sub:`IFACE`\= (capnp's
+``ctx%interface_id == RPC_PERSISTENT_IFACE`` (capnp's
 ``Persistent`` interface, id ``0xc8cb212fcd9f5691``) and answers
 ``save()`` with an application-defined SturdyRef. Level 3 and 4
 messages (``Provide``, ``Accept``, ``Join`` -- three-party handoff)
@@ -233,7 +234,7 @@ levels.
 
 ``capnp_rpc_transport`` is the byte layer underneath all of this: it
 frames each RPC message with the same segment-table framing as
-plain serialization (:doc:\`reference\`, "Serialization") over a file
+plain serialization (:doc:`reference`, "Serialization") over a file
 descriptor from ``capnp_posix``, which wraps just enough POSIX
 socket surface (socketpair, TCP listen/accept/connect, poll) as
 ``iso_c_binding`` interfaces to carry those frames -- no C sources,

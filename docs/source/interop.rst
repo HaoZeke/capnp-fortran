@@ -115,7 +115,7 @@ stays zero on the wire.
 3 capnp-C++ RPC peer
 --------------------
 
-A second Meson target protocol-tests the RPC vat (:doc:\`rpc\`) against
+A second Meson target protocol-tests the RPC vat (:doc:`rpc`) against
 a live capnp-C++ peer, rather than comparing static bytes. It only
 configures when a C++ toolchain, ``libcapnp-rpc``, the ``capnp`` tool,
 and ``capnpc-c++`` are all found; otherwise Meson prints a skip

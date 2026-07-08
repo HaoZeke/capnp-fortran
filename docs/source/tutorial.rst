@@ -210,5 +210,6 @@ for a real client and server on separate hosts, and
 (``do while (ok); call rpc_pump_once(conn, err); end do``) rather than
 being called once per exchange as above. The full working version,
 including a second call issued against the settled import capability,
-is ``test/test_rpc_typed.f90``; :doc:\`rpc\` covers the call lifecycle
+
+is ``test/test_rpc_typed.f90``; :doc:`rpc` covers the call lifecycle
 (bootstrap, pipelining, finish/release) in more detail.

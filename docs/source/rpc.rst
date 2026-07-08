@@ -9,7 +9,7 @@ Two-party Cap'n Proto RPC, level 1: bootstrap, calls on imported and
 promised (pipelined) capabilities, returns with capability tables,
 finish/release bookkeeping, disembargo echo, abort, and the
 spec-mandated ``unimplemented`` reply for level 3+ messages. The vat
-is single-threaded and message-driven -- see :doc:\`architecture\`
+is single-threaded and message-driven -- see :doc:`architecture`
 section 4 for how ``rpc_pump_once`` dispatches one message at a time
 and what state it updates.
 
@@ -32,12 +32,12 @@ and what state it updates.
       C->>C: rpc_wait / rpc_result_content settle the answer
       Note over C: rpc_result_cap later turns the pipeline<br/>reference into a settled RPC_CAP_IMPORT
 
-A **pipeline** capability (``RPC_CAP_PIPELINE``) references a
+A *pipeline* capability (``RPC_CAP_PIPELINE``) references a
 question that has not returned yet, plus a chain of pointer-field
 hops into its eventual results (``rpc_pipeline_cap``). Calls on it go
 out immediately; the peer resolves the hop chain against its own
 in-flight answer when the dependency completes. Generated client code
-(:doc:\`tutorial\`, part 2) always returns a pipeline-capable cap from
+(:doc:`tutorial`, part 2) always returns a pipeline-capable cap from
 a bootstrap or a call that yields a capability result, so pipelining
 needs no separate opt-in.
 
@@ -47,14 +47,14 @@ needs no separate opt-in.
 Extend ``rpc_server_t`` and implement ``dispatch``, or -- for
 schema-generated interfaces -- extend the generated
 ``<interface>_server_t`` base and implement its one deferred
-per-method procedure (:doc:\`tutorial\`, part 2.1). A capability object
+per-method procedure (:doc:`tutorial`, part 2.1). A capability object
 stays alive as long as it has a nonzero refcount in some vat's export
 table; ``rpc_ctx_export_cap`` stages a freshly minted capability
 (e.g. one method's result is itself a capability) into the current
 call's results.
 
 To opt a capability into level 2 persistence, recognize
-``ctx%interface_id =`` RPC\ :sub:`PERSISTENT`\ \ :sub:`IFACE`\= in ``dispatch`` and
+``ctx%interface_id == RPC_PERSISTENT_IFACE`` in ``dispatch`` and
 answer ``RPC_PERSISTENT_SAVE`` with an application-defined SturdyRef
 (any content the application chooses to write into the results
 struct). Level 3/4 messages (``Provide``, ``Accept``, ``Join``) need
@@ -76,14 +76,14 @@ no application code; the vat answers them with
 Schema-generated client procedures (``<method>_begin`` /
 ``<method>_wait``) wrap exactly this sequence with typed parameter
 and result handles; use them instead of the untyped calls above
-whenever a schema is available (:doc:\`tutorial\`, part 2.2).
+whenever a schema is available (:doc:`tutorial`, part 2.2).
 
 4 Transport
 -----------
 
 ``capnp_rpc_transport`` frames each RPC message with the same
 segment-table framing plain serialization uses
-(:doc:\`reference\`, "Serialization"), over a file descriptor from
+(:doc:`reference`, "Serialization"), over a file descriptor from
 ``capnp_posix``. ``capnp_posix`` is a thin ``bind(c)`` surface over
 POSIX sockets -- no C sources, only ``iso_c_binding`` interfaces into
 libc -- covering stream sockets (TCP and Unix-domain), socketpair
@@ -127,4 +127,4 @@ loopbacks for tests, and poll-based readiness.
     +------------------------+------------------------------------------------------------------+-------------------------------------------------------------------+
 
 The full public surface, including the umbrella serialization API and
-the C ABI shim, is in :doc:\`reference\`.
+the C ABI shim, is in :doc:`reference`.
