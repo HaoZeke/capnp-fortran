@@ -23,11 +23,11 @@ and what state it updates.
       participant S as Server vat
       C->>S: Bootstrap
       Note over C: rpc_bootstrap_send returns a pipeline cap<br/>immediately, before any reply arrives
-      S->>S: rpc_pump_once: export bootstrap_srv
+      S->>S: rpc_pump_once - export bootstrap_srv
       S-->>C: Return (capability descriptor)
       C->>S: Call add(19, 23) on the pipeline cap
-      Note over C: sent right after bootstrap_send;<br/>does not wait for the Bootstrap Return
-      S->>S: rpc_pump_once: dispatch routes to adder_server_t%add
+      Note over C: sent right after bootstrap_send<br/>does not wait for the Bootstrap Return
+      S->>S: rpc_pump_once - dispatch routes to adder_server_t%add
       S-->>C: Return (sum = 42)
       C->>C: rpc_wait / rpc_result_content settle the answer
       Note over C: rpc_result_cap later turns the pipeline<br/>reference into a settled RPC_CAP_IMPORT
