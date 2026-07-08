@@ -6,6 +6,8 @@ canonicalization, and a `capnpc-fortran` schema compiler backend. No C
 library underneath; only `iso_fortran_env` kinds and, for the optional C API,
 `iso_c_binding`.
 
+Documentation: **https://capnp-fortran.rgoswami.me** (Sphinx site; sources under `docs/`).
+
 ## Features
 
 - Full wire-format runtime: struct/list/far/double-far/capability pointers,

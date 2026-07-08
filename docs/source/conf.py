@@ -28,7 +28,7 @@ myst_fence_as_directive = ["mermaid"]
 html_theme = "shibuya"
 html_static_path = ["_static"]
 html_title = "capnp-fortran documentation"
-html_baseurl = "https://haozeke.github.io/capnp-fortran/"
+html_baseurl = "https://capnp-fortran.rgoswami.me/"
 
 # Edit-this-page + repo-stats sidebars (Shibuya built-ins)
 html_context = {
