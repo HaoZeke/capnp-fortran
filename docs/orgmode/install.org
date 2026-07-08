@@ -52,7 +52,10 @@ $ pixi run -e interop meson compile -C build-interop
 $ pixi run -e interop meson test -C build-interop -v
 #+end_src
 
-When libcapnp-rpc is available, meson also builds the Fortran RPC client against a C++ =EzRpcServer= (schema =adder.capnp=). Details: [[file:interop.org][Interop]].
+#+begin_export rst
+When libcapnp-rpc is available, meson also builds the Fortran RPC client
+against a C++ ``EzRpcServer`` (schema ``adder.capnp``). Details: :doc:`interop`.
+#+end_export
 
 * Building documentation
 

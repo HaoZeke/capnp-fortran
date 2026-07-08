@@ -71,4 +71,5 @@ Branded uses such as ``Box(Text)`` produce brand-resolved instantiations (``box_
 
 3. Prefer ``pixi run gen`` after editing ``.fypp`` runtime sources so endian/message templates stay in sync.
 
-Worked end-to-end examples: `Tutorial <tutorial.rst>`_. Module architecture: `Architecture <architecture.rst>`_. Full procedure tables: `API reference <reference.rst>`_.
+Worked end-to-end examples: :doc:`tutorial`. Module architecture:
+:doc:`architecture`. Full procedure tables: :doc:`reference`.

@@ -47,4 +47,7 @@ Branded uses such as =Box(Text)= produce brand-resolved instantiations (=box_tex
 2. CI diffs plugin output against checked-in goldens under =test/generated/= and =src/= for vendored RPC schemas — regenerate those when the emitter changes.
 3. Prefer =pixi run gen= after editing =.fypp= runtime sources so endian/message templates stay in sync.
 
-Worked end-to-end examples: [[file:tutorial.org][Tutorial]]. Module architecture: [[file:architecture.org][Architecture]]. Full procedure tables: [[file:reference.org][API reference]].
+#+begin_export rst
+Worked end-to-end examples: :doc:`tutorial`. Module architecture:
+:doc:`architecture`. Full procedure tables: :doc:`reference`.
+#+end_export

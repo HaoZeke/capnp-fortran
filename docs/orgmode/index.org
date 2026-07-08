@@ -29,14 +29,26 @@
 
 * New here?
 
-| Goal | Go to |
-|------+-------|
-| Install fpm / pixi and build the suite | [[file:install.org][Install]] |
-| Write and read a message from a =.capnp= schema | [[file:tutorial.org][Tutorial]] |
-| Generate modules with =capnpc-fortran= | [[file:codegen.org][Code generation]] |
-| Call a capability over a socket | [[file:tutorial.org][Tutorial (RPC section)]] + [[file:rpc.org][RPC]] |
-| Byte-compatible with c-capnproto / C++ | [[file:interop.org][Interop]] |
-| Full procedure list | [[file:reference.org][API reference]] |
+#+begin_export rst
+.. list-table::
+   :header-rows: 1
+   :widths: 55 45
+
+   * - Goal
+     - Go to
+   * - Install fpm / pixi and build the suite
+     - :doc:`install`
+   * - Write and read a message from a ``.capnp`` schema
+     - :doc:`tutorial`
+   * - Generate modules with ``capnpc-fortran``
+     - :doc:`codegen`
+   * - Call a capability over a socket
+     - :doc:`tutorial` (RPC section) + :doc:`rpc`
+   * - Byte-compatible with c-capnproto / C++
+     - :doc:`interop`
+   * - Full procedure list
+     - :doc:`reference`
+#+end_export
 
 * Install (shortest path)
 
@@ -55,7 +67,10 @@ $ pixi install
 $ pixi run build && pixi run test
 #+end_src
 
-The plugin binary lands under =build/gfortran_*/app/capnpc-fortran=. Details, codegen, and interop builds: [[file:install.org][Install]].
+#+begin_export rst
+The plugin binary lands under ``build/gfortran_*/app/capnpc-fortran``.
+Details, codegen, and interop builds: :doc:`install`.
+#+end_export
 
 * What you get
 

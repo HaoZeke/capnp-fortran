@@ -26,23 +26,24 @@
 New here?
 ---------
 
-.. table::
+.. list-table::
+   :header-rows: 1
+   :widths: 55 45
 
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Goal                                              | Go to                                                       |
-    +===================================================+=============================================================+
-    | Install fpm / pixi and build the suite            | `Install <install.rst>`_                                    |
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Write and read a message from a ``.capnp`` schema | `Tutorial <tutorial.rst>`_                                  |
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Generate modules with ``capnpc-fortran``          | `Code generation <codegen.rst>`_                            |
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Call a capability over a socket                   | `Tutorial (RPC section) <tutorial.rst>`_ + `RPC <rpc.rst>`_ |
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Byte-compatible with c-capnproto / C++            | `Interop <interop.rst>`_                                    |
-    +---------------------------------------------------+-------------------------------------------------------------+
-    | Full procedure list                               | `API reference <reference.rst>`_                            |
-    +---------------------------------------------------+-------------------------------------------------------------+
+   * - Goal
+     - Go to
+   * - Install fpm / pixi and build the suite
+     - :doc:`install`
+   * - Write and read a message from a ``.capnp`` schema
+     - :doc:`tutorial`
+   * - Generate modules with ``capnpc-fortran``
+     - :doc:`codegen`
+   * - Call a capability over a socket
+     - :doc:`tutorial` (RPC section) + :doc:`rpc`
+   * - Byte-compatible with c-capnproto / C++
+     - :doc:`interop`
+   * - Full procedure list
+     - :doc:`reference`
 
 Install (shortest path)
 -----------------------
@@ -62,7 +63,8 @@ Pinned toolchain (gfortran, fpm, fypp, ``capnp``):
     $ pixi install
     $ pixi run build && pixi run test
 
-The plugin binary lands under ``build/gfortran_*/app/capnpc-fortran``. Details, codegen, and interop builds: `Install <install.rst>`_.
+The plugin binary lands under ``build/gfortran_*/app/capnpc-fortran``.
+Details, codegen, and interop builds: :doc:`install`.
 
 What you get
 ------------

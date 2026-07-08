@@ -9,19 +9,36 @@ an integer =err=; =CAPNP_OK= (0) is success. Byte buffers are
 
 * Modules at a glance
 
-| Module | Role |
-|--------+------|
-| =capnp= | Umbrella: re-exports serialization API |
-| =capnp_kinds= | Kinds, error codes, size/kind constants |
-| =capnp_message= / =capnp_arena= | Messages, pointers, field accessors |
-| =capnp_union= | Discriminants |
-| =capnp_serialize= / =capnp_stream= | Framed I/O |
-| =capnp_packed= | Packed codec |
-| =capnp_canonical= | Canonical single-segment form |
-| =capnp_cabi= | =bind(c)= shim (separate =use=) |
-| =capnp_rpc= + =capnp_posix= + =capnp_rpc_transport= | Two-party RPC (separate =use=) |
-| =capnp_dynamic= / =capnp_schema= | Dynamic reflection over CGR |
-| Generated =<file>_capnp= | Schema-specific handles (see [[file:codegen.org][Code generation]]) |
+#+begin_export rst
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Module
+     - Role
+   * - ``capnp``
+     - Umbrella: re-exports serialization API
+   * - ``capnp_kinds``
+     - Kinds, error codes, size/kind constants
+   * - ``capnp_message`` / ``capnp_arena``
+     - Messages, pointers, field accessors
+   * - ``capnp_union``
+     - Discriminants
+   * - ``capnp_serialize`` / ``capnp_stream``
+     - Framed I/O
+   * - ``capnp_packed``
+     - Packed codec
+   * - ``capnp_canonical``
+     - Canonical single-segment form
+   * - ``capnp_cabi``
+     - ``bind(c)`` shim (separate ``use``)
+   * - ``capnp_rpc`` + ``capnp_posix`` + ``capnp_rpc_transport``
+     - Two-party RPC (separate ``use``)
+   * - ``capnp_dynamic`` / ``capnp_schema``
+     - Dynamic reflection over CGR
+   * - Generated ``<file>_capnp``
+     - Schema-specific handles (see :doc:`codegen`)
+#+end_export
 
 * Conventions
 
@@ -42,7 +59,9 @@ Markdown for dense tables and included here:
 
 * Related pages
 
-- [[file:tutorial.org][Tutorial]] — first message and typed RPC
-- [[file:codegen.org][Code generation]] — plugin usage and generated shapes
-- [[file:architecture.org][Architecture]] — layers and wire mapping
-- [[file:rpc.org][RPC]] — vat behaviour and levels
+#+begin_export rst
+- :doc:`tutorial` — first message and typed RPC
+- :doc:`codegen` — plugin usage and generated shapes
+- :doc:`architecture` — layers and wire mapping
+- :doc:`rpc` — vat behaviour and levels
+#+end_export

@@ -14,33 +14,34 @@ an integer ``err``; ``CAPNP_OK`` (0) is success. Byte buffers are
 1 Modules at a glance
 ---------------------
 
-.. table::
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
 
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | Module                                                    | Role                                                           |
-    +===========================================================+================================================================+
-    | ``capnp``                                                 | Umbrella: re-exports serialization API                         |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_kinds``                                           | Kinds, error codes, size/kind constants                        |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_message`` / ``capnp_arena``                       | Messages, pointers, field accessors                            |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_union``                                           | Discriminants                                                  |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_serialize`` / ``capnp_stream``                    | Framed I/O                                                     |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_packed``                                          | Packed codec                                                   |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_canonical``                                       | Canonical single-segment form                                  |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_cabi``                                            | ``bind(c)`` shim (separate ``use``)                            |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_rpc`` + ``capnp_posix`` + ``capnp_rpc_transport`` | Two-party RPC (separate ``use``)                               |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | ``capnp_dynamic`` / ``capnp_schema``                      | Dynamic reflection over CGR                                    |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
-    | Generated ``<file>_capnp``                                | Schema-specific handles (see `Code generation <codegen.rst>`_) |
-    +-----------------------------------------------------------+----------------------------------------------------------------+
+   * - Module
+     - Role
+   * - ``capnp``
+     - Umbrella: re-exports serialization API
+   * - ``capnp_kinds``
+     - Kinds, error codes, size/kind constants
+   * - ``capnp_message`` / ``capnp_arena``
+     - Messages, pointers, field accessors
+   * - ``capnp_union``
+     - Discriminants
+   * - ``capnp_serialize`` / ``capnp_stream``
+     - Framed I/O
+   * - ``capnp_packed``
+     - Packed codec
+   * - ``capnp_canonical``
+     - Canonical single-segment form
+   * - ``capnp_cabi``
+     - ``bind(c)`` shim (separate ``use``)
+   * - ``capnp_rpc`` + ``capnp_posix`` + ``capnp_rpc_transport``
+     - Two-party RPC (separate ``use``)
+   * - ``capnp_dynamic`` / ``capnp_schema``
+     - Dynamic reflection over CGR
+   * - Generated ``<file>_capnp``
+     - Schema-specific handles (see :doc:`codegen`)
 
 2 Conventions
 -------------
@@ -64,10 +65,7 @@ Markdown for dense tables and included here:
 4 Related pages
 ---------------
 
-- `Tutorial <tutorial.rst>`_ — first message and typed RPC
-
-- `Code generation <codegen.rst>`_ — plugin usage and generated shapes
-
-- `Architecture <architecture.rst>`_ — layers and wire mapping
-
-- `RPC <rpc.rst>`_ — vat behaviour and levels
+- :doc:`tutorial` — first message and typed RPC
+- :doc:`codegen` — plugin usage and generated shapes
+- :doc:`architecture` — layers and wire mapping
+- :doc:`rpc` — vat behaviour and levels
