@@ -37,6 +37,8 @@ SOURCES=(
   test/generated/adder_capnp.f90
   test/generated/box_capnp.f90
   test/generated/streamer_capnp.f90
+  test/generated/dual_capnp.f90
+  test/generated/holder_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
@@ -52,6 +54,7 @@ SOURCES=(
   test/test_dynamic.f90
   test/test_generic.f90
   test/test_stream.f90
+  test/test_holder.f90
   interop/rpc_client.f90
 )
 
