@@ -57,3 +57,6 @@ Testing/
 # vcpkg
 vcpkg_installed/
 third_party/
+
+# Sphinx output
+docs/build/

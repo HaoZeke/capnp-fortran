@@ -32,6 +32,7 @@ sphinxcontrib-mermaid = ">=1.0, <2"
 orgbld = { cmd = "emacs --batch -l docs/export.el", description = "Export docs/orgmode/*.org to docs/source/*.rst" }
 docs = { cmd = "sphinx-build docs/source docs/build -b html", depends-on = ["orgbld"], description = "Build the Sphinx HTML docs" }
 docs-clean = { cmd = "rm -rf docs/build", description = "Remove the built docs" }
+linkcheck = { cmd = "lychee --config lychee.toml --no-progress 'docs/build/**/*.html' README.md", depends-on = ["docs"], description = "Lychee on built HTML (same as Documentation workflow)" }
 
 [environments]
 default = []
@@ -42,3 +43,4 @@ docs = ["docs"]
 gen = { cmd = "bash scripts/fypp-gen.sh" }
 build = { cmd = "fpm build" }
 test = { cmd = "fpm test" }
+prek = { cmd = "prek run -a", description = "Run all prek hooks" }

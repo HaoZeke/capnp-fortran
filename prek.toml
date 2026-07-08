@@ -1,0 +1,72 @@
+# Git hooks via `prek` (https://prek.j178.dev) — Rust drop-in for pre-commit.
+# Install: `prek install`
+# Run all: `prek run -a`
+#:schema https://www.schemastore.org/prek.json
+
+minimum_prek_version = "0.3.0"
+
+exclude = """(?x)(
+    ^\\.pixi/|
+    ^build/|
+    ^build-.*/|
+    ^docs/build/|
+    ^test/fixtures/.*\\.bin$|
+    ^pixi\\.lock$
+)"""
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [{ id = "check-case-conflict" }]
+
+[[repos]]
+repo = "https://github.com/codespell-project/codespell"
+rev = "v2.4.1"
+hooks = [
+  { id = "codespell", args = [
+    "--skip=*.lock,*.bin,*.cgr,CHANGELOG.md,docs/build/*,schema/rpc.capnp,schema/rpc-twoparty.capnp",
+    "-L",
+    "crate,nd,te,inout,thirdParty,embargos,Embargos,capTable",
+  ] },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "fpm-conf-version-lockstep",
+    name = "fpm.toml version matches docs conf.py release",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = "^(fpm\\.toml|docs/source/conf\\.py)$",
+    args = [
+      "-c",
+      "v=$(rg -n '^version\\s*=' fpm.toml | head -1 | sed -E 's/.*\"([^\"]+)\".*/\\1/'); r=$(rg -n '^release\\s*=' docs/source/conf.py | head -1 | sed -E 's/.*\"([^\"]+)\".*/\\1/'); if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: fpm.toml=$v conf.py release=$r\"; exit 1; fi",
+    ],
+  },
+  {
+    id = "lychee-docs-sources",
+    name = "lychee link check (README + docs sources)",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = "^(README\\.md|docs/orgmode/.*\\.org|docs/source/.*\\.rst|lychee\\.toml)$",
+    args = [
+      "-c",
+      "if ! command -v lychee >/dev/null 2>&1; then echo 'lychee not on PATH (cargo install lychee)'; exit 1; fi; exec lychee --config lychee.toml --no-progress README.md CHANGELOG.md $(find docs/orgmode docs/source -type f \\( -name '*.org' -o -name '*.rst' -o -name '*.md' \\) 2>/dev/null)",
+    ],
+  },
+]

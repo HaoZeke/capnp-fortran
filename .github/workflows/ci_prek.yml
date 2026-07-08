@@ -1,0 +1,29 @@
+name: prek
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: prek-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  prek:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install prek and lychee
+        uses: taiki-e/install-action@v2
+        with:
+          tool: prek@0.3.0,lychee@0.24.2
+
+      - name: Run prek
+        run: prek run -a
