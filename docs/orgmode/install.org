@@ -1,0 +1,74 @@
+#+title: Install
+#+options: toc:2 num:t
+
+* Requirements
+
+- A Fortran 2018 compiler (gfortran 13+ is what CI and =pixi= pin)
+- [[https://fpm.fortran-lang.org][fpm]] for the library and tests
+- [[https://fypp.readthedocs.io][fypp]] to regenerate =capnp_endian= / =capnp_message= from =.fypp= sources
+- The Cap'n Proto =capnp= tool when compiling schemas or regenerating fixtures
+
+Optional interop tier:
+
+- meson, ninja, a C/C++ toolchain, cmocka
+- libcapnp / libcapnp-rpc for the live C++ RPC peer test
+
+* fpm
+
+#+begin_src console
+$ git clone https://github.com/HaoZeke/capnp-fortran.git
+$ cd capnp-fortran
+$ fpm build
+$ fpm test
+#+end_src
+
+The package name in =fpm.toml= is =capnp=; the executable is =capnpc-fortran=.
+
+* pixi (recommended)
+
+=pixi.toml= pins gfortran, fpm, fypp, and capnproto on =linux-64=:
+
+#+begin_src console
+$ pixi install
+$ pixi run gen      # fypp → src/*.f90 (commit if templates change)
+$ pixi run build
+$ pixi run test
+#+end_src
+
+Environments:
+
+| Feature | Purpose |
+|---------+---------|
+| default | library + tests |
+| interop | meson + cmocka + C++ for golden master / C++ peer |
+| docs | Sphinx + emacs ox-rst export |
+
+* Interop suite
+
+#+begin_src console
+$ git clone --depth 1 https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+$ pixi run -e interop meson setup build-interop .
+$ pixi run -e interop meson compile -C build-interop
+$ pixi run -e interop meson test -C build-interop -v
+#+end_src
+
+When libcapnp-rpc is available, meson also builds the Fortran RPC client against a C++ =EzRpcServer= (schema =adder.capnp=). Details: [[file:interop.org][Interop]].
+
+* Building documentation
+
+#+begin_src console
+$ pixi run -e docs docs
+# HTML under docs/build/
+#+end_src
+
+Live site: https://capnp-fortran.rgoswami.me (Cloudflare Pages via the Documentation workflow).
+
+* Using the library from another fpm project
+
+Add a dependency on this repository (or the fpm registry package =capnp= once published), then:
+
+#+begin_src fortran
+use capnp
+#+end_src
+
+Generated schema modules are ordinary Fortran sources you compile alongside your program after running =capnpc-fortran=.

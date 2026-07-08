@@ -152,7 +152,7 @@ never crash on malformed input, they return errors and defaults.
 | `schema/`, `test/fixtures/` | Fixture schemas and `capnp`-tool golden bytes |
 | `test/` | fpm test programs, including generated-code and interop decoding tests |
 | `interop/`, `meson.build` | cmocka golden-master tier against c-capnproto |
-| `docs/reference.md` | full public API reference |
+| `docs/` | Sphinx site (org → rst); live at https://capnp-fortran.rgoswami.me |
 
 ## Citation
 

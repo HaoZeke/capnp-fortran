@@ -1,7 +1,48 @@
 #+title: API reference
-#+options: toc:nil num:nil title:nil
+#+options: toc:2 num:t
+
+This page documents the *public* surface an application programmer calls.
+Private helpers inside a module are omitted. Fallible operations return
+an integer =err=; =CAPNP_OK= (0) is success. Byte buffers are
+=integer(int8)= arrays (0-based). Word offsets and lengths use
+=integer(int64)=.
+
+* Modules at a glance
+
+| Module | Role |
+|--------+------|
+| =capnp= | Umbrella: re-exports serialization API |
+| =capnp_kinds= | Kinds, error codes, size/kind constants |
+| =capnp_message= / =capnp_arena= | Messages, pointers, field accessors |
+| =capnp_union= | Discriminants |
+| =capnp_serialize= / =capnp_stream= | Framed I/O |
+| =capnp_packed= | Packed codec |
+| =capnp_canonical= | Canonical single-segment form |
+| =capnp_cabi= | =bind(c)= shim (separate =use=) |
+| =capnp_rpc= + =capnp_posix= + =capnp_rpc_transport= | Two-party RPC (separate =use=) |
+| =capnp_dynamic= / =capnp_schema= | Dynamic reflection over CGR |
+| Generated =<file>_capnp= | Schema-specific handles (see [[file:codegen.org][Code generation]]) |
+
+* Conventions
+
+1. Declare messages with the =target= attribute; handles store a pointer to the owning message.
+2. Check =err= after every fallible call in production code.
+3. Readers return errors and defaults on malformed input — they do not abort.
+
+* Full procedure tables
+
+The complete tables (errors, messages, pointers, fields, text/data, unions,
+serialize, packed, canonical, C ABI, RPC, codegen naming) are maintained as
+Markdown for dense tables and included here:
 
 #+begin_export rst
 .. include:: ../reference.md
    :parser: myst_parser.sphinx_
 #+end_export
+
+* Related pages
+
+- [[file:tutorial.org][Tutorial]] — first message and typed RPC
+- [[file:codegen.org][Code generation]] — plugin usage and generated shapes
+- [[file:architecture.org][Architecture]] — layers and wire mapping
+- [[file:rpc.org][RPC]] — vat behaviour and levels

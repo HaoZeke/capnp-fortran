@@ -1,0 +1,50 @@
+#+title: Code generation
+#+options: toc:2 num:t
+
+* Plugin entry
+
+=capnpc-fortran= is a standard =capnp compile -o= plugin. After =fpm build= (or =pixi run build=):
+
+#+begin_src console
+$ capnp compile -o build/gfortran_*/app/capnpc-fortran schema/addressbook.capnp
+#+end_src
+
+One Fortran module is written per schema file: =addressbook_capnp.f90= next to the schema (or in the working directory, depending on how =capnp= invokes the plugin). The plugin is self-hosted: it reads =CodeGeneratorRequest= with hand-rolled accessors on this runtime, the same bootstrap pattern as capnpc-c.
+
+* Struct modules
+
+For a struct =Person= in file =addressbook.capnp= the generator emits (names are illustrative):
+
+| Symbol | Role |
+|--------+------|
+| =person_t= | handle wrapping =capnp_ptr_t= |
+| =PERSON_DWORDS= / =PERSON_PWORDS= | layout constants |
+| =person_new= / =person_new_root= / =person_read_root= | allocate / attach root / open root |
+| =person_<field>_get= / =_set= | scalar fields with declared defaults XOR'd on the wire |
+| =person_<field>_init= | pointer fields (struct, list, text, data) |
+| =person_<field>_get_elem= / =_set_elem= | =List(Text)= / =List(Data)= helpers |
+| typed =_get_elem= for struct lists | element as =<type>_t= |
+
+Unions get =which= helpers and =<PFX>_<MEMBER>_TAG= constants. Groups expose =_select= setters. Enums become integer parameters. Constants become parameters or blob-backed accessors for pointer-valued consts.
+
+* Interfaces
+
+An =interface Adder= yields:
+
+- =ADDER_INTERFACE_ID= (and method ordinals as needed)
+- =adder_client_t= with per-method =_begin= / wait helpers over the vat
+- abstract =adder_server_t= whose dispatch routes method ordinals to deferred typed procedures
+
+=-> stream= methods pair generated =_begin= with =rpc_stream_send= / =rpc_stream_finish=. Interface-typed *struct* fields emit capability-slot accessors for =rpc_make_cap_ptr= / =rpc_result_cap=.
+
+* Generics
+
+Branded uses such as =Box(Text)= produce brand-resolved instantiations (=box_text_t= and substituted accessors). Substitution reaches list elements, list bindings, and nested brands. Unbound parameters keep AnyPointer-style accessors.
+
+* Workflow tips
+
+1. Keep schemas under =schema/= (or your project tree) and regenerate modules into a known directory.
+2. CI diffs plugin output against checked-in goldens under =test/generated/= and =src/= for vendored RPC schemas — regenerate those when the emitter changes.
+3. Prefer =pixi run gen= after editing =.fypp= runtime sources so endian/message templates stay in sync.
+
+Worked end-to-end examples: [[file:tutorial.org][Tutorial]]. Module architecture: [[file:architecture.org][Architecture]]. Full procedure tables: [[file:reference.org][API reference]].

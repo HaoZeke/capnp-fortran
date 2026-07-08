@@ -1,173 +1,162 @@
 
-=================
-``capnp-fortran``
-=================
+.. raw:: html
 
-Native modern-Fortran (F2018) implementation of `Cap'n Proto
-<https://capnproto.org>`_ serialization: the wire format runtime, stream
-framing, the packed codec, canonicalization, and a ``capnpc-fortran``
-schema compiler backend. No C library underneath; only
-``iso_fortran_env`` kinds and, for the optional C API, ``iso_c_binding``.
+   <div class="cf-hero">
+     <div class="cf-hero-brand">
+       <img class="cf-hero-mark" src="_static/mark.svg" width="56" height="56" alt="" />
+       <div>
+         <p class="cf-hero-name">capnp-fortran</p>
+       </div>
+     </div>
+     <p class="cf-hero-tagline">Native modern-Fortran Cap&rsquo;n Proto: wire runtime, packed and canonical codecs, <code>capnpc-fortran</code> schema plugin, optional C ABI, and two-party RPC. No C library underneath.</p>
+     <div class="cf-hero-pills">
+       <span>F2018</span>
+       <span>wire format</span>
+       <span>capnpc plugin</span>
+       <span>RPC L1</span>
+       <span>fpm</span>
+     </div>
+     <p class="cf-hero-links">
+       <a href="install.html">Install</a>
+       <a href="tutorial.html">First message</a>
+       <a href="https://github.com/HaoZeke/capnp-fortran">GitHub</a>
+     </p>
+   </div>
 
-.. important::
+New here?
+---------
 
-   **New here?** -> :doc:`tutorial`
+.. table::
 
-   **Wire format, arena, code generator, RPC vat internals?** -> :doc:`architecture`
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Goal                                              | Go to                                                       |
+    +===================================================+=============================================================+
+    | Install fpm / pixi and build the suite            | `Install <install.rst>`_                                    |
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Write and read a message from a ``.capnp`` schema | `Tutorial <tutorial.rst>`_                                  |
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Generate modules with ``capnpc-fortran``          | `Code generation <codegen.rst>`_                            |
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Call a capability over a socket                   | `Tutorial (RPC section) <tutorial.rst>`_ + `RPC <rpc.rst>`_ |
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Byte-compatible with c-capnproto / C++            | `Interop <interop.rst>`_                                    |
+    +---------------------------------------------------+-------------------------------------------------------------+
+    | Full procedure list                               | `API reference <reference.rst>`_                            |
+    +---------------------------------------------------+-------------------------------------------------------------+
 
-   **Full procedure list?** -> :doc:`reference`
+Install (shortest path)
+-----------------------
 
-   **c-capnproto golden master, capnp-C++ RPC peer?** -> :doc:`interop`
-
-Quick example
--------------
-
-Compile a schema, then build and read back a message:
+With `fpm <https://fpm.fortran-lang.org>`_ and a recent gfortran:
 
 .. code:: console
 
-    $ capnp compile -o build/gfortran_*/app/capnpc-fortran schema/addressbook.capnp
+    $ git clone https://github.com/HaoZeke/capnp-fortran.git
+    $ cd capnp-fortran
+    $ fpm build && fpm test
 
-.. code:: fortran
+Pinned toolchain (gfortran, fpm, fypp, ``capnp``):
 
-    program tutorial
-       use capnp
-       use addressbook_capnp
-       implicit none
-       type(capnp_message_t), target :: msg, rmsg
-       type(address_book_t) :: book
-       type(person_t) :: alice
-       type(capnp_ptr_t) :: people
-       integer(int8), allocatable :: bytes(:)
-       character(len=:), allocatable :: name
-       integer :: err
+.. code:: console
 
-       call capnp_message_init_builder(msg, err)
-       book = address_book_new_root(msg, err)
-       people = address_book_people_init(book, 1_int64, err)
-       alice%p = capnp_list_get_struct(people, 0, err)
-       call person_id_set(alice, 123_int64, err)
-       call person_name_set(alice, 'Alice', err)
-       call capnp_serialize_bytes(msg, bytes, err)
+    $ pixi install
+    $ pixi run build && pixi run test
 
-       call capnp_deserialize_bytes(bytes, rmsg, err)
-       book = address_book_read_root(rmsg, err)
-       people = address_book_people_get(book, err)
-       alice%p = capnp_list_get_struct(people, 0, err)
-       call person_name_get(alice, name, err)
-       print '(a)', name   ! Alice
-    end program tutorial
+The plugin binary lands under ``build/gfortran_*/app/capnpc-fortran``. Details, codegen, and interop builds: `Install <install.rst>`_.
 
-Messages carry ``target`` because handles hold a pointer to their message.
-Every fallible call returns an ``err`` code (``CAPNP_OK`` on success);
-readers never crash on malformed input, they return errors and defaults.
+What you get
+------------
 
-.. grid:: 1 1 2 2
+- **Wire runtime**: struct / list / far / double-far / capability pointers, growable arena, default-XOR scalars, Text/Data, traversal and depth guards
+
+- **Serialization**: stream framing, packed (whole-buffer + incremental), file helpers, zero-copy views, orphans, deep copy
+
+- **Canonical form**: byte-parity with ``capnp convert binary:canonical``
+
+- **Codegen**: ``capnpc-fortran`` as a ``capnp compile -o`` plugin — structs, unions, groups, enums, constants, imports, branded generics, typed interface stubs
+
+- **C ABI**: ``capnp_cabi`` + cmocka golden master vs `c-capnproto <https://github.com/opensourcerouting/c-capnproto>`_
+
+- **RPC**: two-party level 1 vat (bootstrap, calls, pipelining, embargo), level 2 persistence hooks, optional live C++ peer test
+
+Parity table and honesty about L3/L4 (unimplemented, same as C++): see the project README.
+
+Documentation map
+-----------------
+
+.. grid:: 1 2 2 2
    :gutter: 2
+
+   .. grid-item-card:: Install
+      :link: install
+      :link-type: doc
+
+      fpm, pixi, building the plugin, and optional interop deps.
 
    .. grid-item-card:: Tutorial
       :link: tutorial
       :link-type: doc
 
-      Write and read a message, then run a typed RPC client/server.
+      First message round-trip, then a typed Adder RPC client and server.
+
+   .. grid-item-card:: Code generation
+      :link: codegen
+      :link-type: doc
+
+      ``capnp compile -o capnpc-fortran`` and the shape of generated modules.
 
    .. grid-item-card:: Architecture
       :link: architecture
       :link-type: doc
 
-      Wire format mapping, the growable segment arena, the two-pass
-      emitter, and the RPC vat state machine.
+      Module layers, wire mapping, arena, emitter, and the RPC vat.
 
    .. grid-item-card:: Interop
       :link: interop
       :link-type: doc
 
-      c-capnproto golden-master byte comparison and a live capnp-C++
-      RPC peer.
+      c-capnproto golden master and the capnp-C++ EzRpc peer.
 
    .. grid-item-card:: RPC
       :link: rpc
       :link-type: doc
 
-      Two-party level 1 RPC: bootstrap, calls, promise pipelining,
-      level 2 persistence hooks.
+      Two-party level 1: tables, pipeline, streams, persistence hooks.
 
-Parity
-------
+   .. grid-item-card:: API reference
+      :link: reference
+      :link-type: doc
 
-Feature coverage against the two reference serialization implementations,
-capnp-c (`c-capnproto <https://github.com/opensourcerouting/c-capnproto>`_)
-and capnp-C++:
-
-.. table::
-
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Feature                                                           | capnp-c | capnp-C++                      | capnp-fortran                                             |
-    +===================================================================+=========+================================+===========================================================+
-    | Wire format read/write (all pointer kinds)                        | yes     | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Stream framing                                                    | yes     | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Packed codec                                                      | yes     | yes                            | yes, plus incremental pack/unpack                         |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Zero-copy reads from a caller buffer                              | yes     | yes                            | yes (``capnp_deserialize_view``, ``capnp_get_data_view``) |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Traversal and depth limits                                        | no      | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Schema-evolution reads (defaults past end, list up/downgrades)    | partial | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Deep copy / cross-message set                                     | no      | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Orphans (disown/adopt)                                            | no      | yes                            | yes                                                       |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Canonical form                                                    | no      | yes                            | yes (byte-parity tested)                                  |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Code generator plugin (``capnp compile -o``)                      | yes     | yes                            | yes (``capnpc-fortran``)                                  |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no      | yes                            | yes (``capnp_rpc``, two-party)                            |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | RPC level 2 (persistence hooks)                                   | no      | partial                        | hooks (``RPC_PERSISTENT_IFACE``, app-defined SturdyRefs)  |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | RPC level 3/4 (three-party, joins)                                | no      | no (replies ``unimplemented``) | no (replies ``unimplemented``, same as C++)               |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | ``-> stream`` flow control                                        | no      | yes                            | yes (``rpc_stream_t``, windowed)                          |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Typed interface stubs in generated code                           | no      | yes                            | yes (client helpers + abstract server base)               |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Generics in generated code                                        | no      | yes                            | brand-resolved instantiations (direct, list, nested)      |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-    | Dynamic reflection API                                            | no      | yes                            | yes (``capnp_dynamic``, by-name read/write)               |
-    +-------------------------------------------------------------------+---------+--------------------------------+-----------------------------------------------------------+
-
-The full table, including generated-code coverage (unions, groups,
-defaults, imports, constants), lives in the project
-:footcite:\`goswami2026capnpfortran\` README.
-
-Site map
---------
+      Public procedures for messages, fields, pack, canonical, C ABI, RPC.
 
 .. toctree::
    :maxdepth: 1
-   :caption: Tutorial
+   :caption: Tutorials
+   :hidden:
 
    tutorial
 
 .. toctree::
    :maxdepth: 1
    :caption: How-to
+   :hidden:
 
+   install
+   codegen
    interop
    rpc
 
 .. toctree::
    :maxdepth: 1
    :caption: Explanation
+   :hidden:
 
    architecture
 
 .. toctree::
    :maxdepth: 1
    :caption: Reference
+   :hidden:
 
    reference
 

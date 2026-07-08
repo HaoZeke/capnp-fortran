@@ -27,6 +27,8 @@ myst_fence_as_directive = ["mermaid"]
 
 html_theme = "shibuya"
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
+html_favicon = "_static/favicon.svg"
 html_title = "capnp-fortran documentation"
 html_baseurl = "https://capnp-fortran.rgoswami.me/"
 
@@ -53,23 +55,11 @@ html_theme_options = {
     "dark_code": True,
     "globaltoc_expand_depth": 1,
     "nav_links": [
-        {
-            "title": "Tutorial",
-            "url": "tutorial",
-            "summary": "Write/read a message; typed RPC client and server",
-        },
-        {
-            "title": "Architecture",
-            "url": "architecture",
-            "summary": "Wire format, arena, two-pass emitter, vat state machine",
-        },
-        {
-            "title": "Interop",
-            "url": "interop",
-            "summary": "c-capnproto golden master, capnp-C++ RPC peer",
-        },
-        {"title": "RPC", "url": "rpc", "summary": "Two-party RPC tier"},
-        {"title": "Reference", "url": "reference", "summary": "Full public API"},
+        {"title": "Install", "url": "install", "summary": "fpm, pixi, plugin, interop"},
+        {"title": "Tutorial", "url": "tutorial", "summary": "First message and typed RPC"},
+        {"title": "Codegen", "url": "codegen", "summary": "capnpc-fortran plugin"},
+        {"title": "Architecture", "url": "architecture", "summary": "Wire, arena, emitter, vat"},
+        {"title": "Reference", "url": "reference", "summary": "Public API tables"},
         {"title": "GitHub", "url": "https://github.com/HaoZeke/capnp-fortran"},
     ],
 }
