@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Pre-1.0 minor releases may include breaking API changes.
 
+## [Unreleased]
+
+### Fixed
+
+- **capnpc-fortran**: full accessor identifiers (field path + suffix) are
+  clamped to Fortran's 63-character limit via deterministic `head_hash_tail`
+  compression (`ident_fit`). Previously only node names were shortened, so
+  long CPMD-style field paths failed to compile (e.g.
+  `..._couplings_finite_difference_displacement_get`).
+- **capnpc-fortran**: enum enumerant constants now end with `_E` so they
+  cannot collide with field accessors under case-insensitive Fortran
+  (e.g. nested `enum Kind { set @1; }` produced `…_KIND_SET` which clashed
+  with `…_kind_set`). Call sites of generated enum constants need the `_E`
+  suffix (breaking for generated code consumers).
+
 ## [0.1.0] — 2026-07-08
 
 First public release: a native modern-Fortran (F2018) Cap'n Proto stack

@@ -37,7 +37,7 @@ contains
       call check_(ANSWER == 42_int64, 'const: answer')
       call check_(abs(TAU - 6.283185307179586_real64) < 1.0e-15_real64, 'const: tau')
       call check_(GREETING == 'hey there', 'const: greeting')
-      call check_(STATUS_BUSY == 1, 'const: imported enum')
+      call check_(STATUS_BUSY_E == 1, 'const: imported enum')
       call check_(size(MAGIC) == 4 .and. MAGIC(0) == -54_int8 .and. &
                   MAGIC(3) == 13_int8, 'const: data bytes')
       l = primes(err)
@@ -72,7 +72,7 @@ contains
       call check_(str == 'unnamed', 'defaults: text')
       call sink_payload_get(s, b, err)
       call check_(size(b) == 4 .and. b(lbound(b, 1)) == -34_int8, 'defaults: data blob')
-      call check_(sink_state_get(s) == STATUS_BUSY, 'defaults: imported enum field')
+      call check_(sink_state_get(s) == STATUS_BUSY_E, 'defaults: imported enum field')
 
       v = sink_origin_get(s, err)
       call check_(err == CAPNP_OK, 'defaults: struct blob resolves')
@@ -112,7 +112,7 @@ contains
       call sink_count_set(s, 123456_int32, err)
       call sink_ratio_set(s, 0.25_real64, err)
       call sink_label_set(s, 'named after all', err)
-      call sink_state_set(s, STATUS_DOWN, err)
+      call sink_state_set(s, STATUS_DOWN_E, err)
 
       v = sink_origin_init(s, err)
       call vec3_x_set(v, 9.0_real64, err)
@@ -149,7 +149,7 @@ contains
       call check_(sink_ratio_get(s) == 0.25_real64, 'values: float')
       call sink_label_get(s, str, err)
       call check_(str == 'named after all', 'values: text')
-      call check_(sink_state_get(s) == STATUS_DOWN, 'values: enum')
+      call check_(sink_state_get(s) == STATUS_DOWN_E, 'values: enum')
       v = sink_origin_get(s, err)
       call check_(vec3_x_get(v) == 9.0_real64 .and. vec3_z_get(v) == 7.0_real64, &
                   'values: nested struct')

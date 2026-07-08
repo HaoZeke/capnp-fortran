@@ -47,6 +47,11 @@ module capnpc_emit
    !> Nonzero while emitting an instantiation's accessors.
    integer :: g_cur_inst = 0
 
+   ! Fortran 2003 max identifier length (gfortran / F2003).
+   integer, parameter :: F_IDENT_MAX = 63
+   ! Longest accessor suffix we append: `_set_elem` (9 chars).
+   integer, parameter :: F_IDENT_SUFFIX = 9
+
 contains
 
    ! --- node table ------------------------------------------------------
@@ -102,6 +107,63 @@ contains
       end do
    end function snake
 
+   !> Polynomial rolling hash -> lowercase 16-hex (deterministic, pure).
+   pure function ident_hash_hex(s) result(hex)
+      character(len=*), intent(in) :: s
+      character(len=16) :: hex
+      integer(int64) :: h
+      integer :: i, d
+      h = 0_int64
+      do i = 1, len(s)
+         h = h * 131_int64 + int(iachar(s(i:i)), int64)
+      end do
+      ! Manual hex (avoid internal write: not pure in F2003).
+      hex = '0000000000000000'
+      do i = 16, 1, -1
+         d = int(iand(h, 15_int64))
+         if (d < 10) then
+            hex(i:i) = achar(iachar('0') + d)
+         else
+            hex(i:i) = achar(iachar('a') + d - 10)
+         end if
+         h = h / 16_int64
+      end do
+   end function ident_hash_hex
+
+   !> Clamp an identifier to max_len (default F_IDENT_MAX). Over-long names
+   !> become head_hash_tail so every occurrence of the logical name maps to
+   !> the same token; hash covers the *original* full string.
+   pure function ident_fit(s, max_len) result(o)
+      character(len=*), intent(in) :: s
+      integer, intent(in), optional :: max_len
+      character(len=:), allocatable :: o
+      character(len=16) :: hex
+      integer :: lim, budget, left, right
+      lim = F_IDENT_MAX
+      if (present(max_len)) lim = max_len
+      if (lim < 20) lim = 20
+      if (len(s) <= lim) then
+         o = s
+         return
+      end if
+      hex = ident_hash_hex(s)
+      ! head + '_' + 16 hex + '_' + tail
+      budget = lim - 18
+      left = max(1, budget / 2)
+      right = max(1, budget - left)
+      o = s(1:left)
+      if (o(len(o):len(o)) == '_') o = o(1:max(1, len(o) - 1))
+      o = o//'_'//hex//'_'//s(len(s) - right + 1:len(s))
+      if (len(o) > lim) o = o(1:lim)
+   end function ident_fit
+
+   !> Field-path base (pfx_field): leave room for `_set_elem`.
+   pure function accessor_base(pfx, field) result(o)
+      character(len=*), intent(in) :: pfx, field
+      character(len=:), allocatable :: o
+      o = ident_fit(pfx//'_'//snake(field), F_IDENT_MAX - F_IDENT_SUFFIX)
+   end function accessor_base
+
    !> Fortran identifier for a node: displayName past the file prefix, dots
    !> to underscores, snake_cased. Avoids scopeId walks (groups have odd
    !> scope ids). Deeply nested nodes overflow Fortran's 63-char identifier
@@ -145,6 +207,8 @@ contains
          if (o(15:15) == '_') o = o(1:14)
          o = o//'_'//hexid
       end if
+      ! Final clamp in case the fixed form still grows via suffixes elsewhere.
+      o = ident_fit(o, F_IDENT_MAX - F_IDENT_SUFFIX)
    end subroutine node_fname
 
    pure function upcase(s) result(o)
@@ -458,8 +522,10 @@ contains
          if (err /= CAPNP_OK) return
          call enumerant_name(en, nm, err)
          if (err /= CAPNP_OK) return
-         call w('   integer, parameter :: '//upcase(tn)//'_'//upcase(snake(nm))// &
-                ' = '//itoa(i))
+         ! Trailing _E: Fortran is case-insensitive, so PREFIX_KIND_SET (enum
+         ! enumerant `set`) would collide with prefix_kind_set (field accessor).
+         call w('   integer, parameter :: '// &
+                ident_fit(upcase(tn)//'_'//upcase(snake(nm))//'_E')//' = '//itoa(i))
       end do
       call w('')
    end subroutine emit_enum_decl
@@ -632,8 +698,9 @@ contains
          if (err /= CAPNP_OK) return
          disc = field_discriminant(f)
          if (disc /= NO_DISCRIMINANT) then
-            call w('   integer, parameter :: '//upcase(pfx)//'_'// &
-                   upcase(snake(fn))//'_TAG = '//itoa(int(disc, int64)))
+            call w('   integer, parameter :: '// &
+                   ident_fit(upcase(pfx)//'_'//upcase(snake(fn))//'_TAG')// &
+                   ' = '//itoa(int(disc, int64)))
          end if
          if (field_which(f) == FIELD_GROUP) then
             gidx = find_node(field_group_type_id(f))
@@ -641,7 +708,8 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            call emit_union_tag_decls(g_nodes(gidx)%p, pfx//'_'//snake(fn), err)
+            call emit_union_tag_decls(g_nodes(gidx)%p, &
+                 accessor_base(pfx, fn), err)
             if (err /= CAPNP_OK) return
          end if
       end do
@@ -721,7 +789,7 @@ contains
 
       call field_name(f, fn, err)
       if (err /= CAPNP_OK) return
-      an = pfx//'_'//snake(fn)
+      an = accessor_base(pfx, fn)
       disc = field_discriminant(f)
       gset = ''
       if (disc /= NO_DISCRIMINANT) then

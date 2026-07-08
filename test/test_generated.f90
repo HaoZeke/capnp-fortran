@@ -64,7 +64,7 @@ contains
       phones = person_phones_init(pe, 1_int64, err)
       ph%p = capnp_list_get_struct(phones, 0, err)
       call person_phone_number_number_set(ph, '555-1212', err)
-      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_MOBILE, err)
+      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_MOBILE_E, err)
       call person_employment_school_set(pe, 'MIT', err)
 
       pe%p = capnp_list_get_struct(people, 1, err)
@@ -74,10 +74,10 @@ contains
       phones = person_phones_init(pe, 2_int64, err)
       ph%p = capnp_list_get_struct(phones, 0, err)
       call person_phone_number_number_set(ph, '555-4567', err)
-      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_HOME, err)
+      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_HOME_E, err)
       ph%p = capnp_list_get_struct(phones, 1, err)
       call person_phone_number_number_set(ph, '555-7654', err)
-      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_WORK, err)
+      call person_phone_number_type_set(ph, PERSON_PHONE_NUMBER_TYPE_WORK_E, err)
       call person_employment_unemployed_set(pe, err)
       call check_(err == CAPNP_OK, 'gen: built book')
 
@@ -114,7 +114,7 @@ contains
       ph%p = capnp_list_get_struct(phones, 0, err)
       call person_phone_number_number_get(ph, s, err)
       call check_(s == '555-1212', label//': alice number')
-      call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_MOBILE, &
+      call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_MOBILE_E, &
                   label//': alice type')
       call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_SCHOOL_TAG, &
                   label//': alice school tag')
@@ -126,7 +126,7 @@ contains
       phones = person_phones_get(pe, err)
       call check_(capnp_list_len(phones) == 2_int64, label//': bob two phones')
       ph%p = capnp_list_get_struct(phones, 1, err)
-      call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_WORK, &
+      call check_(person_phone_number_type_get(ph) == PERSON_PHONE_NUMBER_TYPE_WORK_E, &
                   label//': bob work type')
       call check_(person_employment_which(pe) == PERSON_EMPLOYMENT_UNEMPLOYED_TAG, &
                   label//': bob unemployed tag')
