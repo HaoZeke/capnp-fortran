@@ -1103,7 +1103,7 @@ contains
       type(exception_t) :: ex
       ex = return_exception_init(r, err)
       if (err /= CAPNP_OK) return
-      call exception_type_set(ex, EXCEPTION_TYPE_FAILED, err)
+      call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, err)
       call exception_reason_set(ex, reason, err)
    end subroutine fill_exception
 
