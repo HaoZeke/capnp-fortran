@@ -1,5 +1,5 @@
-# Instrumented fpm suite + gcov report for src/ only. Isolated from the main
-# `ci` test job so report tooling cannot block green test merges.
+# Instrumented fpm suite + gcov report for src/, upload to Codecov.
+# Isolated from the main `ci` test job.
 name: coverage
 
 on:
@@ -15,9 +15,9 @@ jobs:
       - uses: prefix-dev/setup-pixi@v0.8.8
         with:
           environments: coverage
-      - name: instrumented tests + gcov summary
+      - name: instrumented tests + gcov report
         run: pixi run -e coverage coverage
-      - name: upload coverage report
+      - name: upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -25,10 +25,24 @@ jobs:
             coverage-report/summary.txt
             coverage-report/console.txt
             coverage-report/coverage.xml
+            coverage-report/coverage.lcov
             coverage-report/index.html
           if-no-files-found: error
       - name: print summary
         run: |
           test -s coverage-report/summary.txt
+          test -s coverage-report/coverage.lcov
+          grep -q '^DA:' coverage-report/coverage.lcov
           grep -q '^src/' coverage-report/summary.txt
           cat coverage-report/summary.txt
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-report/coverage.lcov
+          flags: unittests
+          name: capnp-fortran-src
+          # Public OSS: set repo secret CODECOV_TOKEN (Codecov → project settings).
+          # Without the token, this step fails soft so artifact coverage still ships.
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: true

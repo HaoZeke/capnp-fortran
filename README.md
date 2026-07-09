@@ -123,6 +123,17 @@ Standalone: `cmake -S . -B build-cmake && cmake --build build-cmake`. Options:
 `CAPNP_FORTRAN_BUILD_PLUGIN`, `CAPNP_FORTRAN_BUILD_SHARED`, `CAPNP_FORTRAN_INSTALL`.
 Details: [Install docs](https://capnp-fortran.rgoswami.me/install).
 
+### Coverage
+
+```console
+$ pixi run -e coverage coverage   # gfortran --coverage → coverage-report/
+```
+
+CI runs the same path in `.github/workflows/coverage.yml` and uploads **LCOV**
+to [Codecov](https://codecov.io) (plus a GitHub Actions artifact). For uploads
+to succeed, add a repo secret `CODECOV_TOKEN` from the Codecov project settings.
+Coveralls is a reasonable alternative; this repo standardizes on Codecov.
+
 ## Tutorial: write and read a message
 
 Compile a schema:
