@@ -94,3 +94,31 @@ Add a dependency on this repository (or the fpm registry package ``capnp`` once 
     use capnp
 
 Generated schema modules are ordinary Fortran sources you compile alongside your program after running ``capnpc-fortran``.
+
+7 CMake / FetchContent
+----------------------
+
+Top-level ``CMakeLists.txt`` builds the same checked-in ``src/*.f90`` set as the meson interop tier and exports the ``capnp::capnp`` target (Fortran ``.mod`` files on the target include path). Optional plugin: ``CAPNP_BUILD_PLUGIN`` (default ON when this tree is the top-level project, OFF under ``FetchContent`` / ``add_subdirectory``).
+
+.. code:: cmake
+
+    include(FetchContent)
+    FetchContent_Declare(
+      capnp
+      GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
+      GIT_TAG        v0.1.0
+    )
+    # Optional: set(CAPNP_BUILD_PLUGIN ON CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(capnp)
+    target_link_libraries(myapp PRIVATE capnp::capnp)
+
+Standalone:
+
+.. code:: console
+
+    $ cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release
+    $ cmake --build build-cmake
+    # library: build-cmake/libcapnp.a  (or .so if CAPNP_BUILD_SHARED=ON)
+    # plugin:  build-cmake/capnpc-fortran   when CAPNP_BUILD_PLUGIN=ON
+
+Installable package config (``find_package(capnp)``) is generated when ``CAPNP_INSTALL`` is ON (default for top-level builds).

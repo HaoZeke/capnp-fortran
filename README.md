@@ -99,6 +99,21 @@ $ pixi run build
 $ pixi run test
 ```
 
+### CMake / FetchContent
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  capnp
+  GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
+  GIT_TAG        v0.1.0
+)
+FetchContent_MakeAvailable(capnp)
+target_link_libraries(myapp PRIVATE capnp::capnp)
+```
+
+Standalone: `cmake -S . -B build-cmake && cmake --build build-cmake`. Options: `CAPNP_BUILD_PLUGIN`, `CAPNP_BUILD_SHARED`, `CAPNP_INSTALL`. Details: [Install docs](https://capnp-fortran.rgoswami.me/install).
+
 ## Tutorial: write and read a message
 
 Compile a schema:
@@ -153,6 +168,7 @@ never crash on malformed input, they return errors and defaults.
 | `test/` | fpm test programs, including generated-code and interop decoding tests |
 | `interop/`, `meson.build` | cmocka golden-master tier against c-capnproto |
 | `docs/` | Sphinx site (org → rst); live at https://capnp-fortran.rgoswami.me |
+| `CMakeLists.txt`, `cmake/` | FetchContent / `capnp::capnp` CMake target; install config |
 
 ## Citation
 

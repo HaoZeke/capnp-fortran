@@ -8,6 +8,14 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- **CMake**: top-level `CMakeLists.txt` builds the runtime as `capnp::capnp`
+  (static by default) for `FetchContent` / `add_subdirectory` consumers, with
+  optional `capnpc-fortran` (`CAPNP_BUILD_PLUGIN`), shared library
+  (`CAPNP_BUILD_SHARED`), and install/package config (`CAPNP_INSTALL`).
+  Smoke tree under `cmake/fetchcontent_smoke/`.
+
 ### Fixed
 
 - **capnpc-fortran**: full accessor identifiers (field path + suffix) are

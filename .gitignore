@@ -60,3 +60,7 @@ third_party/
 
 # Sphinx output
 docs/build/
+
+# CMake local builds
+build-cmake/
+build-smoke/
