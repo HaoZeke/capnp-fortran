@@ -1,11 +1,16 @@
-# Instrumented fpm suite + gcov report for src/, upload to Codecov.
-# Isolated from the main `ci` test job.
+# Instrumented fpm suite + gcov for src/. FOSS-friendly by default:
+# GitHub artifact + job summary + sticky PR comment (no third-party account).
+# Optional Codecov only when CODECOV_TOKEN is present.
 name: coverage
 
 on:
   push:
     branches: [main]
   pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   coverage:
@@ -28,21 +33,34 @@ jobs:
             coverage-report/coverage.lcov
             coverage-report/index.html
           if-no-files-found: error
-      - name: print summary
+      - name: job summary
         run: |
           test -s coverage-report/summary.txt
           test -s coverage-report/coverage.lcov
           grep -q '^DA:' coverage-report/coverage.lcov
-          grep -q '^src/' coverage-report/summary.txt
-          cat coverage-report/summary.txt
-      - name: Upload to Codecov
+          {
+            echo '## Coverage (src/)'
+            echo
+            echo '```'
+            cat coverage-report/summary.txt
+            echo '```'
+            echo
+            echo 'Download the **coverage-report** artifact for LCOV/HTML.'
+            echo 'Local: `pixi run -e coverage coverage`.'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: sticky PR coverage comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: capnp-fortran-coverage
+          path: coverage-report/summary.txt
+      - name: optional Codecov
+        if: ${{ secrets.CODECOV_TOKEN != '' }}
         uses: codecov/codecov-action@v5
         with:
           files: coverage-report/coverage.lcov
           flags: unittests
           name: capnp-fortran-src
-          # Public OSS: set repo secret CODECOV_TOKEN (Codecov → project settings).
-          # Without the token, this step fails soft so artifact coverage still ships.
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
           verbose: true

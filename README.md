@@ -129,10 +129,15 @@ Details: [Install docs](https://capnp-fortran.rgoswami.me/install).
 $ pixi run -e coverage coverage   # gfortran --coverage → coverage-report/
 ```
 
-CI runs the same path in `.github/workflows/coverage.yml` and uploads **LCOV**
-to [Codecov](https://codecov.io) (plus a GitHub Actions artifact). For uploads
-to succeed, add a repo secret `CODECOV_TOKEN` from the Codecov project settings.
-Coveralls is a reasonable alternative; this repo standardizes on Codecov.
+CI (`.github/workflows/coverage.yml`) is **FOSS-friendly by default** — no third-party
+account:
+
+- GitHub Actions **artifact** (`coverage-report/`: LCOV, Cobertura, HTML)
+- Job summary on the workflow run
+- Sticky **PR comment** with the `src/` table (open-source action)
+
+Optional: set secret `CODECOV_TOKEN` to also push LCOV to Codecov; omit it and
+CI stays green without that step.
 
 ## Tutorial: write and read a message
 

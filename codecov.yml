@@ -1,3 +1,4 @@
+# Optional: only used when CODECOV_TOKEN is set in CI.
 # https://docs.codecov.com/docs/codecov-yaml
 codecov:
   require_ci_to_pass: false
