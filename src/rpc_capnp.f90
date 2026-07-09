@@ -105,10 +105,10 @@ module rpc_capnp
    integer, parameter :: DISEMBARGO_CONTEXT_ACCEPT_TAG = 2
    integer, parameter :: DISEMBARGO_CONTEXT_PROVIDE_TAG = 3
 
-   integer, parameter :: EXCEPTION_TYPE_FAILED = 0
-   integer, parameter :: EXCEPTION_TYPE_OVERLOADED = 1
-   integer, parameter :: EXCEPTION_TYPE_DISCONNECTED = 2
-   integer, parameter :: EXCEPTION_TYPE_UNIMPLEMENTED = 3
+   integer, parameter :: EXCEPTION_TYPE_FAILED_E = 0
+   integer, parameter :: EXCEPTION_TYPE_OVERLOADED_E = 1
+   integer, parameter :: EXCEPTION_TYPE_DISCONNECTED_E = 2
+   integer, parameter :: EXCEPTION_TYPE_UNIMPLEMENTED_E = 3
 
    integer, parameter :: MESSAGE_TARGET_DWORDS = 1
    integer, parameter :: MESSAGE_TARGET_PWORDS = 1

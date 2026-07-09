@@ -4,8 +4,8 @@ module rpc_twoparty_capnp
    implicit none
    public
 
-   integer, parameter :: SIDE_SERVER = 0
-   integer, parameter :: SIDE_CLIENT = 1
+   integer, parameter :: SIDE_SERVER_E = 0
+   integer, parameter :: SIDE_CLIENT_E = 1
 
    integer, parameter :: VAT_ID_DWORDS = 1
    integer, parameter :: VAT_ID_PWORDS = 0
