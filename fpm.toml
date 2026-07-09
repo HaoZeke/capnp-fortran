@@ -23,3 +23,7 @@ main = "main.f90"
 implicit-typing = false
 implicit-external = false
 source-form = "free"
+
+# Available to all fpm tests (not shipped as package dependency).
+[dev-dependencies]
+test-drive = { git = "https://github.com/fortran-lang/test-drive.git", tag = "v0.6.1" }

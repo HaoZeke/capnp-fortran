@@ -10,6 +10,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- **Testing**: [test-drive](https://github.com/fortran-lang/test-drive) (fortran-lang)
+  as an fpm `dev-dependency`; wire/codec suite migrated from hand-rolled
+  `check.f90` to `test/test_wire.f90` + `test/tester.f90`. cmocka remains for
+  the C interop golden-master tier only.
 - **Coverage**: `scripts/coverage.sh` and `pixi run -e coverage coverage`
   (gfortran `--coverage` + matching `gcov`; LCOV/Cobertura/HTML under
   `coverage-report/`). CI posts artifact + job summary + sticky PR comment
