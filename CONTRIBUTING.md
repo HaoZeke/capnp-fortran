@@ -43,8 +43,7 @@ Docs: `pixi run -e docs docs`. Hooks: `prek install` then `prek run -a`
 | Interop tier (see `interop/README.md`) | Golden wire vs c-capnproto; optional C++ RPC peer |
 | `scripts/std-check.sh` | `-std=f2018` compile gate |
 | `pixi run -e coverage coverage` | gfortran `--coverage` + gcov → `coverage-report/` (LCOV/HTML) |
-| Coverage in CI | Artifact + job summary + sticky PR comment (no SaaS required) |
-| Optional host | Codecov if `CODECOV_TOKEN` is set; otherwise skipped |
+| Coverage in CI | Artifact + job summary + sticky PR comment (no SaaS account) |
 
 
 A change that touches wire layout or codegen must keep `fpm test` green. If

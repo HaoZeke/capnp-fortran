@@ -1,27 +1,15 @@
-# Optional: only used when CODECOV_TOKEN is set in CI.
-# https://docs.codecov.com/docs/codecov-yaml
+# Unused by default CI (FOSS path uses GitHub artifact + PR comment).
+# Keep if you later opt into Codecov with CODECOV_TOKEN.
 codecov:
   require_ci_to_pass: false
-
 coverage:
   status:
     project:
       default:
-        # Informational: do not fail CI on overall % drift.
-        target: auto
-        threshold: 2%
-        if_ci_failed: success
+        informational: true
     patch:
       default:
-        target: auto
-        threshold: 2%
-        if_ci_failed: success
-
-comment:
-  layout: "reach,diff,flags,files"
-  behavior: default
-  require_changes: false
-
+        informational: true
 ignore:
   - "test/**"
   - "app/**"

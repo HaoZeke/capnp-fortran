@@ -1,6 +1,5 @@
-# Instrumented fpm suite + gcov for src/. FOSS-friendly by default:
-# GitHub artifact + job summary + sticky PR comment (no third-party account).
-# Optional Codecov only when CODECOV_TOKEN is present.
+# Instrumented fpm suite + gcov for src/. FOSS-friendly:
+# GitHub artifact + job summary + sticky PR comment. No third-party account.
 name: coverage
 
 on:
@@ -54,13 +53,3 @@ jobs:
         with:
           header: capnp-fortran-coverage
           path: coverage-report/summary.txt
-      - name: optional Codecov
-        if: ${{ secrets.CODECOV_TOKEN != '' }}
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage-report/coverage.lcov
-          flags: unittests
-          name: capnp-fortran-src
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
-          verbose: true
