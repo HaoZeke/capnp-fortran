@@ -1,5 +1,7 @@
 # capnp-fortran
 
+[![codecov](https://codecov.io/gh/HaoZeke/capnp-fortran/graph/badge.svg)](https://codecov.io/gh/HaoZeke/capnp-fortran)
+
 A native modern-Fortran (F2018) implementation of [Cap'n Proto](https://capnproto.org)
 serialization: the wire format runtime, stream framing, the packed codec,
 canonicalization, and a `capnpc-fortran` schema compiler backend. No C
