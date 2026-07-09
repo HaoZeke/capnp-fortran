@@ -101,18 +101,27 @@ $ pixi run test
 
 ### CMake / FetchContent
 
+Official Cap'n Proto C++ uses `find_package(CapnProto)` and `CapnProto::capnp`.
+This Fortran port uses a **different** CMake project/namespace so the two can
+coexist:
+
 ```cmake
 include(FetchContent)
 FetchContent_Declare(
-  capnp
+  capnp_fortran
   GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
   GIT_TAG        v0.1.0
 )
-FetchContent_MakeAvailable(capnp)
-target_link_libraries(myapp PRIVATE capnp::capnp)
+FetchContent_MakeAvailable(capnp_fortran)
+target_link_libraries(myapp PRIVATE capnp_fortran::capnp_fortran)
 ```
 
-Standalone: `cmake -S . -B build-cmake && cmake --build build-cmake`. Options: `CAPNP_BUILD_PLUGIN`, `CAPNP_BUILD_SHARED`, `CAPNP_INSTALL`. Details: [Install docs](https://capnp-fortran.rgoswami.me/install).
+Fortran code still does `use capnp` (module API). CMake target is
+`capnp_fortran::capnp_fortran`; package config is `find_package(capnp_fortran)`.
+
+Standalone: `cmake -S . -B build-cmake && cmake --build build-cmake`. Options:
+`CAPNP_FORTRAN_BUILD_PLUGIN`, `CAPNP_FORTRAN_BUILD_SHARED`, `CAPNP_FORTRAN_INSTALL`.
+Details: [Install docs](https://capnp-fortran.rgoswami.me/install).
 
 ## Tutorial: write and read a message
 
@@ -168,7 +177,7 @@ never crash on malformed input, they return errors and defaults.
 | `test/` | fpm test programs, including generated-code and interop decoding tests |
 | `interop/`, `meson.build` | cmocka golden-master tier against c-capnproto |
 | `docs/` | Sphinx site (org → rst); live at https://capnp-fortran.rgoswami.me |
-| `CMakeLists.txt`, `cmake/` | FetchContent / `capnp::capnp` CMake target; install config |
+| `CMakeLists.txt`, `cmake/` | FetchContent / `capnp_fortran::capnp_fortran` (not CapnProto::) |
 
 ## Citation
 

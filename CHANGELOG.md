@@ -10,11 +10,13 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
-- **CMake**: top-level `CMakeLists.txt` builds the runtime as `capnp::capnp`
-  (static by default) for `FetchContent` / `add_subdirectory` consumers, with
-  optional `capnpc-fortran` (`CAPNP_BUILD_PLUGIN`), shared library
-  (`CAPNP_BUILD_SHARED`), and install/package config (`CAPNP_INSTALL`).
-  Smoke tree under `cmake/fetchcontent_smoke/`.
+- **CMake**: top-level `CMakeLists.txt` builds the runtime as
+  `capnp_fortran::capnp_fortran` (static by default) for `FetchContent` /
+  `add_subdirectory` consumers — deliberately *not* `CapnProto::capnp` /
+  `find_package(CapnProto)`, which belong to Cap'n Proto C++. Options use
+  `CAPNP_FORTRAN_*` (not `CAPNP_*`). Optional `capnpc-fortran` plugin, shared
+  library, and `find_package(capnp_fortran)` install config. Smoke tree under
+  `cmake/fetchcontent_smoke/`. Fortran modules remain `use capnp`.
 
 ### Fixed
 

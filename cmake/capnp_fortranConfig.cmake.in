@@ -1,0 +1,5 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/capnp_fortranTargets.cmake")
+
+check_required_components(capnp_fortran)
