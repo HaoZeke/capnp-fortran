@@ -112,7 +112,7 @@ include(FetchContent)
 FetchContent_Declare(
   capnp_fortran
   GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
-  GIT_TAG        v0.1.0
+  GIT_TAG        v0.1.1
 )
 FetchContent_MakeAvailable(capnp_fortran)
 target_link_libraries(myapp PRIVATE capnp_fortran::capnp_fortran)

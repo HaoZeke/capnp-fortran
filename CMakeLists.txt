@@ -7,7 +7,7 @@
 #   FetchContent_Declare(
 #     capnp_fortran
 #     GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
-#     GIT_TAG        v0.1.0
+#     GIT_TAG        v0.1.1
 #   )
 #   FetchContent_MakeAvailable(capnp_fortran)
 #   target_link_libraries(myapp PRIVATE capnp_fortran::capnp_fortran)
@@ -20,7 +20,7 @@ cmake_minimum_required(VERSION 3.16)
 
 project(
   capnp_fortran
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "Native modern-Fortran Cap'n Proto (wire, packed, canonical, RPC, capnpc-fortran)"
   LANGUAGES Fortran
 )

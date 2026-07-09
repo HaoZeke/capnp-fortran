@@ -126,7 +126,7 @@ collide with Cap'n Proto's ``CAPNP_*`` variables.
     FetchContent_Declare(
       capnp_fortran
       GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
-      GIT_TAG        v0.1.0
+      GIT_TAG        v0.1.1
     )
     # Optional: set(CAPNP_FORTRAN_BUILD_PLUGIN ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(capnp_fortran)

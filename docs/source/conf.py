@@ -1,7 +1,7 @@
 project = "capnp-fortran"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.1.0"
+release = "0.1.1"
 
 extensions = [
     "sphinx.ext.graphviz",

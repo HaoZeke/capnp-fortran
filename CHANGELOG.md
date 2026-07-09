@@ -8,6 +8,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-09
+
+Quality and packaging track after the first public release.
+
 ### Added
 
 - **Testing**: [test-drive](https://github.com/fortran-lang/test-drive) (fortran-lang)
@@ -104,4 +108,5 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.1.1]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.1
 [0.1.0]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.0
