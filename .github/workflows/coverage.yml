@@ -1,5 +1,7 @@
-# Instrumented fpm suite + gcov for src/. FOSS-friendly:
-# GitHub artifact + job summary + sticky PR comment. No third-party account.
+# Instrumented fpm suite + gcov for src/.
+# FOSS path always: artifact + job summary + sticky PR comment.
+# Codecov is free for public repos; upload when CODECOV_TOKEN is set
+# (fail soft so missing token never reds the job).
 name: coverage
 
 on:
@@ -44,8 +46,8 @@ jobs:
             cat coverage-report/summary.txt
             echo '```'
             echo
-            echo 'Download the **coverage-report** artifact for LCOV/HTML.'
-            echo 'Local: `pixi run -e coverage coverage`.'
+            echo 'Artifact: **coverage-report**. Local: `pixi run -e coverage coverage`.'
+            echo 'Codecov (free for public repos): set secret `CODECOV_TOKEN`.'
           } | tee -a "$GITHUB_STEP_SUMMARY"
       - name: sticky PR coverage comment
         if: github.event_name == 'pull_request'
@@ -53,3 +55,14 @@ jobs:
         with:
           header: capnp-fortran-coverage
           path: coverage-report/summary.txt
+      # Do not gate this step with `if: secrets.*` — that can fail workflow load.
+      # Empty token → soft failure (fail_ci_if_error: false).
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-report/coverage.lcov
+          flags: unittests
+          name: capnp-fortran-src
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+          verbose: true

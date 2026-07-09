@@ -13,7 +13,7 @@ Pre-1.0 minor releases may include breaking API changes.
 - **Coverage**: `scripts/coverage.sh` and `pixi run -e coverage coverage`
   (gfortran `--coverage` + matching `gcov`; LCOV/Cobertura/HTML under
   `coverage-report/`). CI posts artifact + job summary + sticky PR comment
-  (FOSS-friendly; no SaaS account).
+  (artifact + PR comment; Codecov free for public repos when `CODECOV_TOKEN` is set).
   Incremental pack/unpack unit tests in `test/check.f90`.
 - **CMake**: top-level `CMakeLists.txt` builds the runtime as
   `capnp_fortran::capnp_fortran` (static by default) for `FetchContent` /
