@@ -10,6 +10,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- **Coverage**: `scripts/coverage.sh` and `pixi run -e coverage coverage`
+  (gfortran `--coverage` + matching `gcov`; HTML/XML/summary under
+  `coverage-report/`); GitHub Actions workflow uploads the report.
+  Incremental pack/unpack unit tests in `test/check.f90`.
 - **CMake**: top-level `CMakeLists.txt` builds the runtime as
   `capnp_fortran::capnp_fortran` (static by default) for `FetchContent` /
   `add_subdirectory` consumers — deliberately *not* `CapnProto::capnp` /

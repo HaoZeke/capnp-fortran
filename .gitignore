@@ -64,3 +64,9 @@ docs/build/
 # CMake local builds
 build-cmake/
 build-smoke/
+
+# gcov / gcovr
+coverage-report/
+*.gcda
+*.gcno
+*.gcov

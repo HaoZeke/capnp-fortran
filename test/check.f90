@@ -19,6 +19,7 @@ program check
    call t_wire_capability()
    call t_packed_spec_vectors()
    call t_packed_roundtrip()
+   call t_packed_incremental()
    call t_framing_errors()
    call t_traversal_limit()
    call t_depth_limit()
@@ -434,6 +435,88 @@ contains
                   'packed: message round trip')
       call capnp_message_free(msg)
    end subroutine t_packed_roundtrip
+
+   !> Incremental packer/unpacker must match whole-buffer pack across chunk
+   !> sizes, and reject unfinished partial words on finish.
+   subroutine t_packed_incremental()
+      integer(int8) :: plain(0:39)
+      integer(int8), allocatable :: whole(:), incr(:), out(:), back(:)
+      type(capnp_packer_t) :: pk
+      type(capnp_unpacker_t) :: un
+      integer(int64) :: outn, i, n, chunk
+      integer :: err, csz
+      ! Mix zero runs, sparse tags, and full-literal words.
+      plain = 0_int8
+      plain(0) = 7_int8
+      plain(8:15) = 1_int8
+      plain(16) = int(z'aa', int8)
+      plain(24:31) = 0_int8
+      plain(32) = 3_int8
+      plain(39) = 9_int8
+      call capnp_pack(plain, whole, err)
+      call check_(err == CAPNP_OK, 'packed-incr: whole pack ok')
+
+      ! Pack in 1-byte chunks (stress partial-word carry).
+      pk = capnp_packer_t()
+      if (allocated(incr)) deallocate (incr)
+      outn = 0_int64
+      n = size(plain, kind=int64)
+      do i = 0_int64, n - 1_int64
+         call capnp_pack_push(pk, plain(i:i), incr, outn, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check_(err == CAPNP_OK, 'packed-incr: 1-byte push ok')
+      call capnp_pack_finish(pk, incr, outn, err)
+      call check_(err == CAPNP_OK, 'packed-incr: finish after 1-byte chunks')
+      call check_(outn == size(whole, kind=int64) .and. all(incr(0:outn - 1) == whole), &
+                  'packed-incr: 1-byte chunks match whole pack')
+
+      ! Pack in 3-byte chunks (cross word boundaries).
+      pk = capnp_packer_t()
+      if (allocated(incr)) deallocate (incr)
+      outn = 0_int64
+      i = 0_int64
+      do while (i < n)
+         chunk = min(3_int64, n - i)
+         call capnp_pack_push(pk, plain(i:i + chunk - 1), incr, outn, err)
+         if (err /= CAPNP_OK) exit
+         i = i + chunk
+      end do
+      call check_(err == CAPNP_OK, 'packed-incr: 3-byte push ok')
+      call capnp_pack_finish(pk, incr, outn, err)
+      call check_(err == CAPNP_OK .and. outn == size(whole, kind=int64) .and. &
+                  all(incr(0:outn - 1) == whole), &
+                  'packed-incr: 3-byte chunks match whole pack')
+
+      ! Unpack the packed stream in 2-byte chunks.
+      un = capnp_unpacker_t()
+      if (allocated(back)) deallocate (back)
+      outn = 0_int64
+      n = size(whole, kind=int64)
+      i = 0_int64
+      do while (i < n)
+         chunk = min(2_int64, n - i)
+         call capnp_unpack_push(un, whole(i:i + chunk - 1), back, outn, err)
+         if (err /= CAPNP_OK) exit
+         i = i + chunk
+      end do
+      call check_(err == CAPNP_OK, 'packed-incr: unpack_push ok')
+      call check_(outn == size(plain, kind=int64) .and. all(back(0:outn - 1) == plain), &
+                  'packed-incr: chunked unpack recovers plain')
+
+      ! Whole pack rejects non-word-aligned length.
+      call capnp_pack(plain(0:4), out, err)
+      call check_(err == CAPNP_ERR_ARG, 'packed-incr: non-aligned pack rejected')
+
+      ! Finish with a hanging partial word is an error.
+      pk = capnp_packer_t()
+      if (allocated(incr)) deallocate (incr)
+      outn = 0_int64
+      call capnp_pack_push(pk, plain(0:2), incr, outn, err)
+      call check_(err == CAPNP_OK, 'packed-incr: partial push ok')
+      call capnp_pack_finish(pk, incr, outn, err)
+      call check_(err == CAPNP_ERR_ARG, 'packed-incr: finish partial word rejected')
+   end subroutine t_packed_incremental
 
    subroutine t_framing_errors()
       type(capnp_message_t), target :: rmsg

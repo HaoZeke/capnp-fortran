@@ -42,6 +42,8 @@ Docs: `pixi run -e docs docs`. Hooks: `prek install` then `prek run -a`
 | `fpm test` | Core runtime, codegen fixtures, RPC unit suite |
 | Interop tier (see `interop/README.md`) | Golden wire vs c-capnproto; optional C++ RPC peer |
 | `scripts/std-check.sh` | `-std=f2018` compile gate |
+| `pixi run -e coverage coverage` | gfortran `--coverage` + gcov report under `coverage-report/` (CI artifact) |
+
 
 A change that touches wire layout or codegen must keep `fpm test` green. If
 you change the plugin, regenerate checked-in fixtures the same way CI does.
