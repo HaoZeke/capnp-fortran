@@ -42,7 +42,7 @@ SOURCES=(
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
-  test/check.f90
+  # wire suite (test/tester.f90, test/test_wire.f90) needs test-drive; fpm only
   test/test_addressbook.f90
   test/test_interop.f90
   test/test_generated.f90

@@ -56,7 +56,7 @@ TEST_MODULES=(
 )
 
 TEST_PROGRAMS=(
-  test/check.f90
+  # wire suite (test/tester.f90 + test/test_wire.f90) needs test-drive; fpm only
   test/test_addressbook.f90
   test/test_interop.f90
   test/test_generated.f90
