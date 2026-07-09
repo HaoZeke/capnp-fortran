@@ -4,6 +4,18 @@ program tester
    use testdrive, only: run_testsuite, new_testsuite, testsuite_type, &
         select_suite, run_selected, get_argument
    use test_wire, only: collect_wire
+   use test_addressbook, only: collect_addressbook
+   use test_canonical, only: collect_canonical
+   use test_dynamic, only: collect_dynamic
+   use test_generated, only: collect_generated
+   use test_generic, only: collect_generic
+   use test_holder, only: collect_holder
+   use test_interop, only: collect_interop
+   use test_kitchen, only: collect_kitchen
+   use test_parity, only: collect_parity
+   use test_rpc, only: collect_rpc
+   use test_rpc_typed, only: collect_rpc_typed
+   use test_stream, only: collect_stream
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -12,7 +24,19 @@ program tester
 
    stat = 0
    testsuites = [ &
-        new_testsuite("wire", collect_wire) &
+        new_testsuite("wire", collect_wire), &
+        new_testsuite("addressbook", collect_addressbook), &
+        new_testsuite("canonical", collect_canonical), &
+        new_testsuite("dynamic", collect_dynamic), &
+        new_testsuite("generated", collect_generated), &
+        new_testsuite("generic", collect_generic), &
+        new_testsuite("holder", collect_holder), &
+        new_testsuite("interop", collect_interop), &
+        new_testsuite("kitchen", collect_kitchen), &
+        new_testsuite("parity", collect_parity), &
+        new_testsuite("rpc", collect_rpc), &
+        new_testsuite("rpc_typed", collect_rpc_typed), &
+        new_testsuite("stream", collect_stream) &
         ]
 
    call get_argument(1, suite_name)

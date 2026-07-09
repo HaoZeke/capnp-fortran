@@ -11,14 +11,13 @@ Pre-1.0 minor releases may include breaking API changes.
 ### Added
 
 - **Testing**: [test-drive](https://github.com/fortran-lang/test-drive) (fortran-lang)
-  as an fpm `dev-dependency`; wire/codec suite migrated from hand-rolled
-  `check.f90` to `test/test_wire.f90` + `test/tester.f90`. cmocka remains for
+  as an fpm `dev-dependency`; all fpm unit suites under `test/test_*.f90` plus
+  `test/tester.f90` (wire, addressbook, parity, RPC, …). cmocka remains for
   the C interop golden-master tier only.
 - **Coverage**: `scripts/coverage.sh` and `pixi run -e coverage coverage`
   (gfortran `--coverage` + matching `gcov`; LCOV/Cobertura/HTML under
   `coverage-report/`). CI posts artifact + job summary + sticky PR comment
   (artifact + PR comment; Codecov free for public repos when `CODECOV_TOKEN` is set).
-  Incremental pack/unpack unit tests in `test/check.f90`.
 - **CMake**: top-level `CMakeLists.txt` builds the runtime as
   `capnp_fortran::capnp_fortran` (static by default) for `FetchContent` /
   `add_subdirectory` consumers — deliberately *not* `CapnProto::capnp` /

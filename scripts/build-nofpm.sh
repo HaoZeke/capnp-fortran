@@ -55,20 +55,9 @@ TEST_MODULES=(
   test/rpc_writer_impl.f90
 )
 
+# Unit suites live under test-drive (fpm test tester). nofpm builds library +
+# interop helpers only; run tests with fpm.
 TEST_PROGRAMS=(
-  # wire suite (test/tester.f90 + test/test_wire.f90) needs test-drive; fpm only
-  test/test_addressbook.f90
-  test/test_interop.f90
-  test/test_generated.f90
-  test/test_kitchen.f90
-  test/test_parity.f90
-  test/test_canonical.f90
-  test/test_rpc.f90
-  test/test_rpc_typed.f90
-  test/test_dynamic.f90
-  test/test_generic.f90
-  test/test_stream.f90
-  test/test_holder.f90
 )
 
 # Compile one unit with retries (qemu/gfortran occasional SIGSEGV).

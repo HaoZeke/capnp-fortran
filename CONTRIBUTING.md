@@ -39,8 +39,8 @@ Docs: `pixi run -e docs docs`. Hooks: `prek install` then `prek run -a`
 
 | Command | What it covers |
 | ------- | -------------- |
-| `fpm test` | Core runtime, codegen fixtures, RPC unit suite |
-| `fpm test tester` | [test-drive](https://github.com/fortran-lang/test-drive) suites (`wire`, …); `fpm test tester -- wire endian` selects one case |
+| `fpm test` | All unit suites via test-drive (`tester`) plus any other fpm test targets |
+| `fpm test tester` | [test-drive](https://github.com/fortran-lang/test-drive) suites (`wire`, `parity`, `rpc`, …); `fpm test tester -- wire endian` selects one case |
 | Interop tier (see `interop/README.md`) | Golden wire vs c-capnproto; optional C++ RPC peer |
 | `scripts/std-check.sh` | `-std=f2018` compile gate |
 | `pixi run -e coverage coverage` | gfortran `--coverage` + gcov → `coverage-report/` (LCOV/HTML) |
