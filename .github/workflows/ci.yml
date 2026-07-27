@@ -65,7 +65,7 @@ jobs:
         with:
           environments: interop
       - name: fetch c-capnproto
-        run: git clone --depth 1 https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+        run: git clone --depth 1 https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
       - name: build
         run: |
           pixi run -e interop meson setup build-interop .

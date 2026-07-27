@@ -1,7 +1,7 @@
 # C-interop golden-master tests
 
 This tier builds the same Cap'n Proto message two ways -- with the reference C
-encoder [`opensourcerouting/c-capnproto`][ccapnp] and with this project's
+encoder [`HaoZeke/c-capnproto`][ccapnp] and with this project's
 Fortran runtime through the `capnp_cabi` bind(c) shim (`src/capnp_cabi.f90`) --
 and asserts the framed wire bytes are identical, byte for byte. A second test
 decodes each encoder's output with the other decoder, and a third checks
@@ -17,7 +17,7 @@ compiles its three runtime `.c` files directly from a vendored clone
 (`third_party/`, untracked):
 
 ```console
-$ git clone https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+$ git clone https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
 ```
 
 The sources must end up under `third_party/c-capnproto/lib/` (`capn.c`,
@@ -79,7 +79,7 @@ one-data-word, zero-pointer struct would be down-encoded there to a primitive
 forces composite on both sides so the golden bytes match. The `UInt32` field at
 offset 0 is unchanged; the spare slot stays zero on the wire.
 
-[ccapnp]: https://github.com/opensourcerouting/c-capnproto
+[ccapnp]: https://github.com/HaoZeke/c-capnproto
 [meson]: https://mesonbuild.com/
 [cmocka]: https://cmocka.org/
 [packing]: https://capnproto.org/encoding.html#packing
