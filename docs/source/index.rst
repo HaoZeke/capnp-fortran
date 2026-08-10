@@ -77,7 +77,7 @@ What you get
 
 - **Codegen**: ``capnpc-fortran`` as a ``capnp compile -o`` plugin — structs, unions, groups, enums, constants, imports, branded generics, typed interface stubs
 
-- **C ABI**: ``capnp_cabi`` + cmocka golden master vs `c-capnproto <https://github.com/opensourcerouting/c-capnproto>`_
+- **C ABI**: ``capnp_cabi`` + cmocka golden master vs `c-capnproto <https://github.com/HaoZeke/c-capnproto>`_
 
 - **RPC**: two-party level 1 vat (bootstrap, calls, pipelining, embargo), level 2 persistence hooks, optional live C++ peer test
 

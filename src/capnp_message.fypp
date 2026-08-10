@@ -570,7 +570,12 @@ contains
       rel = int(object_start_word(q) - (loc_word + 1_int64), int32)
       select case (q%kind)
       case (CAPNP_PK_STRUCT)
-         w = wp_make_struct(rel, int(q%dwords, int32), int(q%pwords, int32))
+         if (q%dwords == 0 .and. q%pwords == 0) then
+            ! encoding.html: empty struct is A=0 B=-1, not offset 0 (null).
+            w = wp_make_struct(-1_int32, 0_int32, 0_int32)
+         else
+            w = wp_make_struct(rel, int(q%dwords, int32), int(q%pwords, int32))
+         end if
       case (CAPNP_PK_LIST)
          if (q%esize == CAPNP_SZ_COMPOSITE) then
             w = wp_make_list(rel, q%esize, q%nelem*int(q%dwords + q%pwords, int64))

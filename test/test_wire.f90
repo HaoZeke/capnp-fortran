@@ -14,6 +14,7 @@ contains
       testsuite = [ &
            new_unittest("endian", test_endian), &
            new_unittest("pointer-words", test_pointer_words), &
+           new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset), &
            new_unittest("golden-single-struct", test_golden_single_struct), &
            new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
            new_unittest("text-data", test_text_data), &
@@ -80,7 +81,35 @@ contains
       w = wp_make_cap(9_int64)
       call check(error, wp_kind(w) == CAPNP_WK_CAP .and. wp_cap_index(w) == 9_int64, 'ptr: cap decode')
       if (allocated(error)) return
+      w = wp_make_struct(-1_int32, 0_int32, 0_int32)
+      call check(error, wp_offset(w) == -1 .and. wp_struct_dwords(w) == 0 .and. &
+                  wp_struct_pwords(w) == 0, 'ptr: empty struct B=-1')
+      if (allocated(error)) return
    end subroutine test_pointer_words
+
+   subroutine test_empty_struct_offset(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, r
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 0, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, err == CAPNP_OK .and. size(bytes) >= 16, 'empty: framed')
+      if (allocated(error)) return
+      call check(error, bytes(8) == int(z'fc', int8) .and. bytes(9) == -1_int8 .and. &
+                  bytes(10) == -1_int8 .and. bytes(11) == -1_int8, 'empty: 0xFFFFFFFC')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      r = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. r%kind == CAPNP_PK_STRUCT .and. &
+                  r%dwords == 0 .and. r%pwords == 0, 'empty: read as struct not null')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_empty_struct_offset
    !> Golden bytes: root struct with one data word holding u32 0x12345678.
    subroutine test_golden_single_struct(error)
       type(error_type), allocatable, intent(out) :: error
