@@ -18,7 +18,7 @@ top of the default =capnproto= dependency.
 * c-capnproto golden master
 
 This tier builds the same Cap'n Proto message two ways -- with the
-reference C encoder [[https://github.com/opensourcerouting/c-capnproto][c-capnproto]]
+reference C encoder [[https://github.com/HaoZeke/c-capnproto][c-capnproto]]
 and with this project's Fortran runtime through the =capnp_cabi=
 =bind(c)= shim (=src/capnp_cabi.f90=) -- and asserts the framed wire
 bytes are identical, byte for byte. Further cases decode each
@@ -32,7 +32,7 @@ the Meson build compiles its three runtime =.c= files directly from
 a vendored clone (=third_party/=, untracked):
 
 #+begin_src console
-$ git clone https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+$ git clone https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
 #+end_src
 
 The sources must end up under =third_party/c-capnproto/lib/=

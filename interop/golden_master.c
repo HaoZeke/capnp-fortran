@@ -1,5 +1,5 @@
 /* Golden-master interop: build the same message two ways -- with the
- * reference C encoder (opensourcerouting/c-capnproto) and with our Fortran
+ * reference C encoder (HaoZeke/c-capnproto) and with our Fortran
  * runtime through the capnp_cabi shim -- and assert the framed wire bytes
  * are identical. A cross-decode test then reads each encoder's output with
  * the other decoder, and a packing test checks c-capnproto's deflate against

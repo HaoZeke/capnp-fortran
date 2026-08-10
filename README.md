@@ -35,7 +35,7 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   cross-file imports, `List(Text)`/`List(Data)` element helpers, anyPointer.
 - A `bind(c)` shim (`capnp_cabi`) and a cmocka golden-master tier that
   builds identical messages with this runtime and with
-  [c-capnproto](https://github.com/opensourcerouting/c-capnproto), comparing
+  [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
   wire bytes (see `interop/README.md`).
 - RPC level 1: two-party vat over a POSIX socket transport
   (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
@@ -46,7 +46,7 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
 ## Parity
 
 Feature coverage against the two reference serialization implementations,
-capnp-c ([c-capnproto](https://github.com/opensourcerouting/c-capnproto))
+capnp-c ([c-capnproto](https://github.com/HaoZeke/c-capnproto))
 and capnp-C++:
 
 | Feature | capnp-c | capnp-C++ | capnp-fortran |

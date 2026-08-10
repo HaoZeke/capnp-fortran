@@ -1,7 +1,7 @@
 !> Minimal C ABI over the Fortran runtime, enough to build, serialize, and
 !> read back an addressbook-style message from C. Exists to drive the
 !> golden-master interop tests (interop/golden_master.c) that compare our
-!> wire output against opensourcerouting/c-capnproto byte for byte.
+!> wire output against HaoZeke/c-capnproto byte for byte.
 !>
 !> Handles are small integers into module-level pools:
 !>   - a message pool (max 16 concurrent capnp_message_t targets), and

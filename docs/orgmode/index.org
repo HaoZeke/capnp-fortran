@@ -78,7 +78,7 @@ Details, codegen, and interop builds: :doc:`install`.
 - *Serialization*: stream framing, packed (whole-buffer + incremental), file helpers, zero-copy views, orphans, deep copy
 - *Canonical form*: byte-parity with =capnp convert binary:canonical=
 - *Codegen*: =capnpc-fortran= as a =capnp compile -o= plugin — structs, unions, groups, enums, constants, imports, branded generics, typed interface stubs
-- *C ABI*: =capnp_cabi= + cmocka golden master vs [[https://github.com/opensourcerouting/c-capnproto][c-capnproto]]
+- *C ABI*: =capnp_cabi= + cmocka golden master vs [[https://github.com/HaoZeke/c-capnproto][c-capnproto]]
 - *RPC*: two-party level 1 vat (bootstrap, calls, pipelining, embargo), level 2 persistence hooks, optional live C++ peer test
 
 Parity table and honesty about L3/L4 (unimplemented, same as C++): see the project README.

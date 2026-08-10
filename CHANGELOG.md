@@ -19,6 +19,7 @@ Pre-1.0 minor releases may include breaking API changes.
 - Schema-order AddressBook encode memcmp against
   `test/fixtures/addressbook.bin` and packed against
   `addressbook.packed.bin`.
+- Empty struct encodes as B=-1 (`0xFFFFFFFC`), not a null pointer.
 
 ## [0.1.1] — 2026-07-09
 

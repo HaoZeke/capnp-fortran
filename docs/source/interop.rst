@@ -24,7 +24,7 @@ top of the default ``capnproto`` dependency.
 ---------------------------
 
 This tier builds the same Cap'n Proto message two ways -- with the
-reference C encoder `c-capnproto <https://github.com/opensourcerouting/c-capnproto>`_
+reference C encoder `c-capnproto <https://github.com/HaoZeke/c-capnproto>`_
 and with this project's Fortran runtime through the ``capnp_cabi``
 ``bind(c)`` shim (``src/capnp_cabi.f90``) -- and asserts the framed wire
 bytes are identical, byte for byte. Further cases decode each
@@ -40,7 +40,7 @@ a vendored clone (``third_party/``, untracked):
 
 .. code:: console
 
-    $ git clone https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+    $ git clone https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
 
 The sources must end up under ``third_party/c-capnproto/lib/``
 (``capn.c``, ``capn-malloc.c``, ``capn-stream.c``, ``capnp_c.h``,

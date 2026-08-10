@@ -66,7 +66,7 @@ Environments:
 
 .. code:: console
 
-    $ git clone --depth 1 https://github.com/opensourcerouting/c-capnproto third_party/c-capnproto
+    $ git clone --depth 1 https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
     $ pixi run -e interop meson setup build-interop .
     $ pixi run -e interop meson compile -C build-interop
     $ pixi run -e interop meson test -C build-interop -v
