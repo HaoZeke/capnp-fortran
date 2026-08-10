@@ -20,7 +20,7 @@
 (setq org-rst-headline-underline ?-)
 
 (setq org-publish-project-alist
-      '(("sphinx-rst"
+      '(("capnp-fortran-rst"
          :base-directory "./docs/orgmode/"
          :base-extension "org"
          :publishing-directory "./docs/source/"
@@ -31,4 +31,4 @@
          :section-numbers nil
          :with-author nil)))
 
-(org-publish "sphinx-rst" t)
+(org-publish "capnp-fortran-rst" t)

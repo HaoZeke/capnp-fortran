@@ -31,7 +31,7 @@ sphinxcontrib-mermaid = ">=1.0, <2"
 [feature.docs.tasks]
 orgbld = { cmd = "emacs --batch -l docs/export.el", description = "Export docs/orgmode/*.org to docs/source/*.rst" }
 docs = { cmd = "sphinx-build docs/source docs/build -b html", depends-on = ["orgbld"], description = "Build the Sphinx HTML docs" }
-docs-clean = { cmd = "rm -rf docs/build", description = "Remove the built docs" }
+docs-clean = { cmd = "rm -rf docs/build docs/source/*.rst", description = "Remove built docs and ox-rst output" }
 linkcheck = { cmd = "lychee --config lychee.toml --no-progress 'docs/build/**/*.html' README.md", depends-on = ["docs"], description = "Lychee on built HTML (same as Documentation workflow)" }
 
 # Base toolchain repeated here: a named env only loads listed features, not

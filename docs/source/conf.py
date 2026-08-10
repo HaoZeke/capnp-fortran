@@ -38,7 +38,7 @@ html_context = {
     "source_user": "HaoZeke",
     "source_repo": "capnp-fortran",
     "source_version": "main",
-    "source_docs_path": "/docs/source/",
+    "source_docs_path": "/docs/orgmode/",
 }
 
 html_sidebars = {
@@ -60,6 +60,23 @@ html_theme_options = {
         {"title": "Codegen", "url": "codegen", "summary": "capnpc-fortran plugin"},
         {"title": "Architecture", "url": "architecture", "summary": "Wire, arena, emitter, vat"},
         {"title": "Reference", "url": "reference", "summary": "Public API tables"},
+        {
+            "title": "Ecosystem",
+            "children": [
+                {
+                    "title": "c-capnproto",
+                    "url": "https://c-capnproto.rgoswami.me",
+                    "summary": "Pure C runtime and capnpc-c",
+                    "external": True,
+                },
+                {
+                    "title": "capnp-janet",
+                    "url": "https://capnp-janet.rgoswami.me",
+                    "summary": "Janet / C wire runtime",
+                    "external": True,
+                },
+            ],
+        },
         {"title": "GitHub", "url": "https://github.com/HaoZeke/capnp-fortran"},
     ],
 }

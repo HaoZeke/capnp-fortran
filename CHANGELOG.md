@@ -8,6 +8,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Changed
+
+- Sphinx RST is generated from `docs/orgmode/` at build time and is no
+  longer tracked. Edit-this-page points at the org files.
+
 ### Fixed
 
 - Packed `0xff` extra words follow the C++ / c-capnproto 0.3.0 rule:
