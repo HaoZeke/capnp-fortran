@@ -49,9 +49,9 @@ module capnp_packed
 
 contains
 
-   !> Pack a word-aligned buffer. The literal-run heuristic after an 0xff tag
-   !> matches the C++ encoder: include following words that contain no zero
-   !> byte (capped at 255).
+   !> Pack a word-aligned buffer. After an 0xff tag the C++ encoder copies
+   !> following words that have fewer than two zero bytes (capped at 255).
+   !> One trailing null is not a pack win, so it stays in the literal run.
    subroutine capnp_pack(inb, outb, err)
       integer(int8), intent(in) :: inb(0:)
       integer(int8), allocatable, intent(out) :: outb(:)
@@ -99,7 +99,7 @@ contains
          else if (nz == 8) then
             run = 0_int64
             do while (w + run < nwords .and. run < 255_int64)
-               if (any(inb((w + run)*8:(w + run)*8 + 7) == 0_int8)) exit
+               if (word_zero_count(inb((w + run)*8:(w + run)*8 + 7)) >= 2) exit
                run = run + 1
             end do
             buf(opos) = cp_i8b(int(run, int32))
@@ -270,6 +270,10 @@ contains
             pk%lit(pk%run*8:pk%run*8 + 7) = word
             pk%run = pk%run + 1
          end if
+      else if (pk%mode == PM_LIT_RUN .and. (8 - nz) < 2 .and. pk%run < 255) then
+         ! One zero byte: C++ keeps this word in the uncompressed span.
+         pk%lit(pk%run*8:pk%run*8 + 7) = word
+         pk%run = pk%run + 1
       else
          call flush_runs(pk, out, outn, cap)
          call ensure(out, cap, outn + 9_int64)
@@ -396,6 +400,15 @@ contains
          end select
       end do
    end subroutine capnp_unpack_push
+
+   pure integer function word_zero_count(word) result(z)
+      integer(int8), intent(in) :: word(:)
+      integer :: k
+      z = 0
+      do k = lbound(word, 1), ubound(word, 1)
+         if (word(k) == 0_int8) z = z + 1
+      end do
+   end function word_zero_count
 
    subroutine ensure(buf, cap, need)
       integer(int8), allocatable, intent(inout) :: buf(:)
