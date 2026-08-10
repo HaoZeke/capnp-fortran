@@ -77,6 +77,9 @@ contains
          call check_(error, err == CAPNP_OK .and. size(flat) > 0, 'book: serialized')
          call capnp_serialize_packed_bytes(msg, packed, err)
          call check_(error, err == CAPNP_OK .and. size(packed) < size(flat), 'book: packed smaller')
+         call expect_fixture(flat, 'test/fixtures/addressbook.bin', 'book: flat==encode')
+         call expect_fixture(packed, 'test/fixtures/addressbook.packed.bin', &
+            'book: packed==convert')
 
          call capnp_deserialize_bytes(flat, rmsg, err)
          call verify_book(rmsg, 'flat')
@@ -88,6 +91,32 @@ contains
          call capnp_message_free(rmsg)
          call capnp_message_free(pmsg)
       end subroutine build_and_check
+
+      subroutine expect_fixture(got, path, label)
+         integer(int8), intent(in) :: got(:)
+         character(len=*), intent(in) :: path, label
+         integer(int8), allocatable :: ref(:)
+         integer :: err
+         integer(int64) :: i
+         call capnp_read_file(path, ref, err)
+         if (err /= CAPNP_OK) then
+            call skip_test(error, path//' missing')
+            return
+         end if
+         call check_(error, size(got) == size(ref), label//' size')
+         if (size(got) == size(ref)) then
+            call check_(error, all(got == ref), label//' bytes')
+            if (.not. all(got == ref)) then
+               do i = 0_int64, size(got, kind=int64) - 1_int64
+                  if (got(i) /= ref(i)) then
+                     print '(a,i0,a,i0,a,i0)', '  first differ ', i, ' got ', &
+                        got(i), ' want ', ref(i)
+                     exit
+                  end if
+               end do
+            end if
+         end if
+      end subroutine expect_fixture
 
       subroutine verify_book(rmsg, label)
          type(capnp_message_t), intent(inout), target :: rmsg

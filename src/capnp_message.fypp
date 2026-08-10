@@ -456,6 +456,9 @@ contains
    end function capnp_new_struct
 
    !> New list of a primitive/pointer element size (not composite).
+   !> List(Text)/List(Data)/List(AnyPointer) use esize=CAPNP_SZ_PTR (wire C=6),
+   !> matching Cap'n Proto C++ and encoding.html. Struct lists use
+   !> capnp_new_composite_list (wire C=7).
    function capnp_new_list(msg, esize, count, err) result(p)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: esize
@@ -1040,14 +1043,37 @@ contains
       call capnp_setp(p, i, q, err)
    end subroutine capnp_set_data
 
-   !> Text element i of a List(Text) (or any pointer/composite list whose
-   !> elements are text).
+   !> Text element i of a List(Text).
+   !> Normative encoding (capnproto.org/encoding.html): List(Text) is a pointer
+   !> list (element size C=6); each element points at Text (byte list + NUL).
+   !> Also accepts the composite upgrade view (C=7, 0 data words, 1 pointer)
+   !> used when a pointer list is read as a struct list.
    subroutine capnp_list_get_text(p, i, str, err)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: i
       character(len=:), allocatable, intent(out) :: str
       integer, intent(out) :: err
-      call capnp_get_text(p, i, str, err)
+      type(capnp_ptr_t) :: el
+      str = ''
+      err = CAPNP_OK
+      if (p%kind /= CAPNP_PK_LIST) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (p%esize == CAPNP_SZ_PTR) then
+         ! C=6: element is a Text pointer; capnp_get_text on the list uses
+         ! getp(list,i) then expects a byte list (see capnp_get_text).
+         call capnp_get_text(p, i, str, err)
+         return
+      end if
+      if (p%esize == CAPNP_SZ_COMPOSITE) then
+         ! C=7 upgrade: element is a 0-data/1-pointer struct; Text at ptr 0.
+         el = capnp_list_get_struct(p, i, err)
+         if (err /= CAPNP_OK) return
+         call capnp_get_text(el, 0, str, err)
+         return
+      end if
+      err = CAPNP_ERR_KIND
    end subroutine capnp_list_get_text
 
    subroutine capnp_list_set_text(p, i, str, err)
@@ -1055,7 +1081,22 @@ contains
       integer, intent(in) :: i
       character(len=*), intent(in) :: str
       integer, intent(out) :: err
-      call capnp_set_text(p, i, str, err)
+      type(capnp_ptr_t) :: el
+      if (p%kind /= CAPNP_PK_LIST) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (p%esize == CAPNP_SZ_PTR) then
+         call capnp_set_text(p, i, str, err)
+         return
+      end if
+      if (p%esize == CAPNP_SZ_COMPOSITE) then
+         el = capnp_list_get_struct(p, i, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_text(el, 0, str, err)
+         return
+      end if
+      err = CAPNP_ERR_KIND
    end subroutine capnp_list_set_text
 
    ! ------------------------------------------------------------------

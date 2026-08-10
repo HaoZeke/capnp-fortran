@@ -8,6 +8,18 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Packed `0xff` extra words follow the C++ / c-capnproto 0.3.0 rule:
+  keep a following word when it has fewer than two zero bytes. AddressBook
+  packed bytes match `capnp convert binary:packed`.
+
+### Added
+
+- Schema-order AddressBook encode memcmp against
+  `test/fixtures/addressbook.bin` and packed against
+  `addressbook.packed.bin`.
+
 ## [0.1.1] — 2026-07-09
 
 Quality and packaging track after the first public release.

@@ -55,11 +55,11 @@ and capnp-C++:
 | Stream framing | yes | yes | yes |
 | Packed codec | yes | yes | yes, plus incremental pack/unpack |
 | Zero-copy reads from a caller buffer | yes | yes | yes (`capnp_deserialize_view`, `capnp_get_data_view`) |
-| Traversal and depth limits | no | yes | yes |
+| Traversal and depth limits | yes (0.2+) | yes | yes |
 | Schema-evolution reads (defaults past end, list up/downgrades) | partial | yes | yes |
 | Deep copy / cross-message set | no | yes | yes |
 | Orphans (disown/adopt) | no | yes | yes |
-| Canonical form | no | yes | yes (byte-parity tested) |
+| Canonical form | yes (0.3.0) | yes | yes (byte-parity tested) |
 | Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
 | Capability pointers on the wire | yes | yes | yes |

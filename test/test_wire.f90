@@ -473,6 +473,25 @@ contains
       call capnp_unpack(packed, back, err)
       call check(error, size(back) == 16 .and. all(back == 1_int8), 'packed: literal-run inverts')
       if (allocated(error)) return
+      ! C++ 0xFF extra: word with one trailing zero stays uncompressed.
+      unpacked = 0_int8
+      unpacked(0:7) = int(z'61', int8)
+      unpacked(8:14) = int(z'62', int8)
+      unpacked(15) = 0_int8
+      call capnp_pack(unpacked, packed, err)
+      call check(error, err == CAPNP_OK .and. size(packed) == 18, 'packed: one-zero size')
+      if (allocated(error)) return
+      call check(error, packed(0) == -1_int8 .and. packed(9) == 1_int8, 'packed: one-zero N=1')
+      if (allocated(error)) return
+      call check(error, all(packed(1:8) == int(z'61', int8)), 'packed: one-zero word0')
+      if (allocated(error)) return
+      call check(error, all(packed(10:16) == int(z'62', int8)) .and. packed(17) == 0_int8, &
+                  'packed: one-zero word1 raw')
+      if (allocated(error)) return
+      call capnp_unpack(packed, back, err)
+      call check(error, err == CAPNP_OK .and. size(back) == 16 .and. all(back == unpacked), &
+                  'packed: one-zero inverts')
+      if (allocated(error)) return
    end subroutine test_packed_spec_vectors
    subroutine test_packed_roundtrip(error)
       type(error_type), allocatable, intent(out) :: error
