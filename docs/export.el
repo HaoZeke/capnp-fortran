@@ -12,6 +12,13 @@
 (require 'ox-rst)
 (require 'ox-publish)
 
+;; ox-rst 2025-04 needs org-element-type-p (Org 9.7+). Ubuntu emacs-nox is 29/9.6.
+(require 'org-element)
+(unless (fboundp 'org-element-type-p)
+  (defun org-element-type-p (node types)
+    (memq (org-element-type node)
+          (if (listp types) types (list types)))))
+
 ;; Prefer Sphinx-friendly RST (no auto section numbers; titles from #+title)
 (setq org-export-with-section-numbers nil)
 (setq org-export-with-toc nil)

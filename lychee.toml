@@ -19,6 +19,8 @@ exclude = [
   # Live site lags deploy; CI checks local HTML for internal links
   '^https://capnp-fortran\.rgoswami\.me/',
   '^https://capnp-fortran\.pages\.dev/',
+  '^https://c-capnproto\.rgoswami\.me/',
+  '^https://capnp-janet\.rgoswami\.me/',
   # Edit-this-page / blob links to main may 404 on PR branches
   '^https://github\.com/HaoZeke/capnp-fortran/blob/',
   # Theme / analytics vendor
