@@ -27,6 +27,7 @@ myst_fence_as_directive = ["mermaid"]
 
 html_theme = "shibuya"
 html_static_path = ["_static"]
+html_extra_path = ["llms.txt"]
 html_css_files = ["custom.css"]
 html_favicon = "_static/favicon.svg"
 html_title = "capnp-fortran documentation"

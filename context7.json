@@ -1,0 +1,27 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/haozeke/capnp-fortran",
+  "public_key": "pk_AJ7U5Y56IXKa8IgfEfaSl",
+  "projectTitle": "capnp-fortran",
+  "description": "Native modern-Fortran (F2018) Cap'n Proto: wire runtime, packed and canonical codecs, capnpc-fortran schema plugin, optional C ABI, and two-party RPC. No C library underneath.",
+  "excludeFolders": [
+    "build",
+    "test",
+    "src",
+    "app",
+    "schema",
+    "scripts",
+    "cmake"
+  ],
+  "excludeFiles": [
+    "CHANGELOG.md"
+  ],
+  "rules": [
+    "This is a native F2018 runtime. Do not wrap c-capnproto; only iso_fortran_env and optional iso_c_binding.",
+    "Generated handles need a TARGET message. Declare type(capnp_message_t), target :: msg.",
+    "Check the integer err argument after every call. Nonzero is failure.",
+    "Allocate and set fields in schema declaration order for official capnp encode byte parity.",
+    "capnpc-fortran is a capnp compile -o plugin. Plugin binary: build/gfortran_*/app/capnpc-fortran.",
+    "Sibling runtimes: HaoZeke/c-capnproto and HaoZeke/capnp-janet. Interop goldens live under interop/."
+  ]
+}

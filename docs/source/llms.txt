@@ -1,0 +1,63 @@
+# capnp-fortran
+
+> Native modern-Fortran Cap'n Proto: wire runtime, packed and canonical codecs, `capnpc-fortran`, optional C ABI, two-party RPC. No C library underneath.
+
+Docs: https://capnp-fortran.rgoswami.me/
+Repo: https://github.com/HaoZeke/capnp-fortran
+Context7: /haozeke/capnp-fortran
+
+Declare `type(capnp_message_t), target :: msg`. Check `err` after every call.
+
+## Docs
+
+- [Install](https://capnp-fortran.rgoswami.me/install.html): fpm, pixi, plugin path
+- [Tutorial](https://capnp-fortran.rgoswami.me/tutorial.html): first message and RPC
+- [Codegen](https://capnp-fortran.rgoswami.me/codegen.html): capnpc-fortran
+- [Interop](https://capnp-fortran.rgoswami.me/interop.html): c-capnproto / C++ bytes
+- [RPC](https://capnp-fortran.rgoswami.me/rpc.html): two-party vat
+- [Reference](https://capnp-fortran.rgoswami.me/reference.html): procedure list
+
+## Siblings
+
+- [c-capnproto](https://c-capnproto.rgoswami.me/): C runtime and capnpc-c
+- [capnp-janet](https://capnp-janet.rgoswami.me/): Janet / embed C wire runtime
+
+## Install
+
+```sh
+git clone https://github.com/HaoZeke/capnp-fortran.git
+cd capnp-fortran
+fpm build && fpm test
+```
+
+## First message
+
+```fortran
+program tutorial
+   use capnp
+   use addressbook_capnp
+   implicit none
+   type(capnp_message_t), target :: msg, rmsg
+   type(address_book_t) :: book
+   type(person_t) :: alice
+   type(capnp_ptr_t) :: people
+   integer(int8), allocatable :: bytes(:)
+   character(len=:), allocatable :: name
+   integer :: err
+
+   call capnp_message_init_builder(msg, err)
+   book = address_book_new_root(msg, err)
+   people = address_book_people_init(book, 1_int64, err)
+   alice%p = capnp_list_get_struct(people, 0, err)
+   call person_id_set(alice, 123_int64, err)
+   call person_name_set(alice, 'Alice', err)
+   call capnp_serialize_bytes(msg, bytes, err)
+
+   call capnp_deserialize_bytes(bytes, rmsg, err)
+   book = address_book_read_root(rmsg, err)
+   people = address_book_people_get(book, err)
+   alice%p = capnp_list_get_struct(people, 0, err)
+   call person_name_get(alice, name, err)
+   print '(a)', name
+end program tutorial
+```
