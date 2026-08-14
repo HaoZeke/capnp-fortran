@@ -76,6 +76,18 @@ html_theme_options = {
                     "summary": "Janet / C wire runtime",
                     "external": True,
                 },
+                {
+                    "title": "capnp-ts",
+                    "url": "https://capnp-ts.rgoswami.me",
+                    "summary": "TypeScript wire runtime and capnpc-ts",
+                    "external": True,
+                },
+                {
+                    "title": "Cap'n Proto",
+                    "url": "https://capnproto.org",
+                    "summary": "The reference C++ implementation and the wire spec",
+                    "external": True,
+                },
             ],
         },
         {"title": "GitHub", "url": "https://github.com/HaoZeke/capnp-fortran"},
