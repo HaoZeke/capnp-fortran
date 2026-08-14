@@ -38,6 +38,7 @@ jobs:
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/addressbook.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/kitchen.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/rpc.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/rpc-threeparty.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/adder.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/box.cgr.bin"
           "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/stream.cgr.bin"
@@ -55,6 +56,7 @@ jobs:
           diff holder_capnp.f90 "$GITHUB_WORKSPACE/test/generated/holder_capnp.f90"
           diff rpc_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_capnp.f90"
           diff rpc_twoparty_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_twoparty_capnp.f90"
+          diff rpc_threeparty_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_threeparty_capnp.f90"
       - name: self-hosting smoke, the plugin digests schema.capnp itself
         run: |
           BIN=$(find build -name capnpc-fortran -type f | head -1)
