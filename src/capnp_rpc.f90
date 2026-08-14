@@ -10,6 +10,14 @@
 module capnp_rpc
    use capnp
    use rpc_capnp
+   ! JoinKeyPart / JoinResult are defined by the network layer, not by
+   ! rpc.capnp; this vat speaks the two-party one.
+   use rpc_twoparty_capnp, only: join_key_part_t, join_result_t, &
+                                 join_key_part_join_id_get, &
+                                 join_key_part_part_count_get, &
+                                 join_key_part_part_num_get, &
+                                 join_result_new, join_result_join_id_set, &
+                                 join_result_succeeded_set, join_result_cap_set
    use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
    implicit none
@@ -48,6 +56,8 @@ module capnp_rpc
    integer, parameter :: MAXE = 64   ! live exports
    integer, parameter :: MAXOPS = 8  ! pipeline ops per capability
    integer, parameter :: MAXCAPS = 16 ! caps per payload
+   integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
+   integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
 
    !> Client-side reference to a remote capability.
    type :: rpc_cap_t
@@ -110,6 +120,23 @@ module capnp_rpc
       integer :: exports(0:MAXCAPS - 1) = -1
    end type rpc_answer_slot_t
 
+   !> One in-flight Join (level 4), keyed by the sender's joinId.
+   !>
+   !> A Join asks whether several capabilities are the same object. The
+   !> parts arrive as separate questions, so the answer to any one of them
+   !> is only known once all `part_count` have been seen: the receiver
+   !> waits for the whole set, compares, then answers every part
+   !> (rpc-twoparty.capnp, JoinResult).
+   type :: rpc_join_slot_t
+      logical :: used = .false.
+      integer(int64) :: join_id = -1_int64
+      integer :: part_count = 0
+      integer :: nseen = 0
+      logical :: seen(0:MAXJOINPARTS - 1) = .false.
+      integer(int64) :: qids(0:MAXJOINPARTS - 1) = -1_int64
+      integer :: eids(0:MAXJOINPARTS - 1) = -1
+   end type rpc_join_slot_t
+
    !> Client-side flow control for `-> stream` methods: a bounded window
    !> of unacknowledged stream calls. The wire carries ordinary
    !> Call/Return pairs (StreamResult results); the window is policy, as
@@ -131,6 +158,7 @@ module capnp_rpc
       type(rpc_export_slot_t) :: exports(0:MAXE - 1)
       type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
+      type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
    end type rpc_conn_t
 
@@ -679,6 +707,8 @@ contains
       case (MESSAGE_UNIMPLEMENTED_TAG)
          ! Peer did not understand something we sent; nothing to do at
          ! level 1 (we only send level 1 messages).
+      case (MESSAGE_JOIN_TAG)
+         call handle_join(conn, msg, err)
       case (MESSAGE_RESOLVE_TAG)
          ! Promise resolution. Replying unimplemented is the
          ! spec-defined signal that this vat does not adopt
@@ -686,7 +716,9 @@ contains
          ! addressed to the promise, which it does until Release.
          call send_unimplemented(conn, msg, err)
       case default
-         ! Level 3+ (provide/accept/join) and obsolete messages: reply
+         ! Provide and Accept introduce a capability to a third vat, which
+         ! a two-party connection has no way to name, and the obsolete
+         ! save/delete messages are gone from the protocol. Reply
          ! unimplemented, echoing the message, per the spec.
          call send_unimplemented(conn, msg, err)
       end select
@@ -826,6 +858,20 @@ contains
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
       type(message_target_t) :: tgt
+      out_eid = -1
+      tgt = call_target_get(c, err)
+      if (err /= CAPNP_OK) return
+      call resolve_message_target(conn, tgt, out_eid, err)
+   end subroutine resolve_target
+
+   !> Resolve a MessageTarget to a local export index, or -1 when it names
+   !> nothing this vat hosts. Shared by Call and Join, which address
+   !> capabilities the same way.
+   subroutine resolve_message_target(conn, tgt, out_eid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_target_t), intent(in) :: tgt
+      integer, intent(out) :: out_eid
+      integer, intent(out) :: err
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops, p, ctab
@@ -836,8 +882,7 @@ contains
       integer(int64) :: aqid, eid
       integer :: i, q
       out_eid = -1
-      tgt = call_target_get(c, err)
-      if (err /= CAPNP_OK) return
+      err = CAPNP_OK
       select case (message_target_which(tgt))
       case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
          eid = message_target_imported_cap_get(tgt)
@@ -882,7 +927,194 @@ contains
             if (conn%exports(int(eid))%used) out_eid = int(eid)
          end if
       end select
-   end subroutine resolve_target
+   end subroutine resolve_message_target
+
+   !> Join (level 4): does this set of capabilities name one object?
+   !>
+   !> Each part is its own question addressed to one of the candidates. A
+   !> part cannot be answered on arrival, because the answer depends on
+   !> the whole set, so parts accumulate against their joinId and every
+   !> question is answered once the last one lands.
+   !>
+   !> On a two-party network the comparison is decidable locally: both
+   !> ends of the connection can only name capabilities this vat exports,
+   !> so equal export ids mean the same object. A vat bridging to another
+   !> network would instead forward the join onward, which needs a
+   !> three-party layer this transport does not have (rpc-twoparty.capnp:
+   !> "Never used, because there is no third party").
+   subroutine handle_join(conn, msg, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_t), intent(in) :: msg
+      integer, intent(out) :: err
+      type(join_t) :: j
+      type(message_target_t) :: tgt
+      type(join_key_part_t) :: kp
+      type(capnp_ptr_t) :: kpp
+      integer(int64) :: qid, jid
+      integer :: slot, pnum, pcount, eid
+
+      j = message_join_get(msg, err)
+      if (err /= CAPNP_OK) return
+      qid = join_question_id_get(j)
+
+      kpp = join_key_part_get(j, err)
+      if (err /= CAPNP_OK) return
+      if (kpp%kind /= CAPNP_PK_STRUCT) then
+         ! No JoinKeyPart means we cannot tell which set this belongs to.
+         call send_join_failure(conn, qid, 0_int64, err)
+         return
+      end if
+      kp%p = kpp
+      jid = join_key_part_join_id_get(kp)
+      pcount = int(join_key_part_part_count_get(kp))
+      pnum = int(join_key_part_part_num_get(kp))
+
+      if (pcount <= 0 .or. pcount > MAXJOINPARTS .or. &
+          pnum < 0 .or. pnum >= pcount) then
+         call send_join_failure(conn, qid, jid, err)
+         return
+      end if
+
+      tgt = join_target_get(j, err)
+      if (err /= CAPNP_OK) return
+      call resolve_message_target(conn, tgt, eid, err)
+      if (err /= CAPNP_OK) return
+
+      call join_slot_find(conn, jid, pcount, slot)
+      if (slot < 0) then
+         ! Join table full, or a conflicting partCount for this joinId.
+         call send_join_failure(conn, qid, jid, err)
+         return
+      end if
+
+      if (conn%joins(slot)%seen(pnum)) then
+         ! Duplicate part: the sender must not reuse a partNum before the
+         ! set completes.
+         call send_join_failure(conn, qid, jid, err)
+         return
+      end if
+      conn%joins(slot)%seen(pnum) = .true.
+      conn%joins(slot)%qids(pnum) = qid
+      conn%joins(slot)%eids(pnum) = eid
+      conn%joins(slot)%nseen = conn%joins(slot)%nseen + 1
+
+      if (conn%joins(slot)%nseen == pcount) call join_complete(conn, slot, err)
+   end subroutine handle_join
+
+   !> Find the slot holding joinId, or claim a free one. Returns -1 when
+   !> the table is full or partCount disagrees with the parts already in.
+   subroutine join_slot_find(conn, jid, pcount, slot)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: jid
+      integer, intent(in) :: pcount
+      integer, intent(out) :: slot
+      integer :: i
+      slot = -1
+      do i = 0, MAXJOINS - 1
+         if (conn%joins(i)%used .and. conn%joins(i)%join_id == jid) then
+            if (conn%joins(i)%part_count /= pcount) return
+            slot = i
+            return
+         end if
+      end do
+      do i = 0, MAXJOINS - 1
+         if (.not. conn%joins(i)%used) then
+            conn%joins(i) = rpc_join_slot_t()
+            conn%joins(i)%used = .true.
+            conn%joins(i)%join_id = jid
+            conn%joins(i)%part_count = pcount
+            slot = i
+            return
+         end if
+      end do
+   end subroutine join_slot_find
+
+   !> The set is complete: compare the targets and answer every part.
+   subroutine join_complete(conn, slot, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: slot
+      integer, intent(out) :: err
+      logical :: same
+      integer :: i, first_eid
+      first_eid = conn%joins(slot)%eids(0)
+      ! An unresolved part names nothing we host, so the set cannot be
+      ! proven equal.
+      same = first_eid >= 0
+      if (same) then
+         do i = 1, conn%joins(slot)%part_count - 1
+            if (conn%joins(slot)%eids(i) /= first_eid) then
+               same = .false.
+               exit
+            end if
+         end do
+      end if
+      ! Exactly one result carries the joined capability, per JoinResult.
+      do i = 0, conn%joins(slot)%part_count - 1
+         call send_join_result(conn, conn%joins(slot)%qids(i), &
+                               conn%joins(slot)%join_id, same, &
+                               same .and. i == 0, first_eid, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      conn%joins(slot) = rpc_join_slot_t()
+   end subroutine join_complete
+
+   !> Answer one Join question with a JoinResult payload.
+   subroutine send_join_result(conn, qid, jid, succeeded, with_cap, eid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid, jid
+      logical, intent(in) :: succeeded, with_cap
+      integer, intent(in) :: eid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      type(rpc_call_ctx_t) :: ctx
+      type(join_result_t) :: jr
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) return
+      r = message_return_init(rmsg, err)
+      if (err /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, err)
+      if (err /= CAPNP_OK) return
+      ctx%results = return_results_init(r, err)
+      if (err /= CAPNP_OK) return
+      jr = join_result_new(rm, err)
+      if (err /= CAPNP_OK) return
+      call join_result_join_id_set(jr, jid, err)
+      if (err /= CAPNP_OK) return
+      call join_result_succeeded_set(jr, succeeded, err)
+      if (err /= CAPNP_OK) return
+      if (with_cap .and. eid >= 0) then
+         ! The export id is already known, so the capTable is written
+         ! directly rather than through the staging path, which exists to
+         ! turn server pointers into ids. The receiver gains a reference,
+         ! so the refcount rises with it.
+         ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+         if (err /= CAPNP_OK) return
+         cd%p = capnp_list_get_struct(ctab, 0, err)
+         if (err /= CAPNP_OK) return
+         call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
+         if (err /= CAPNP_OK) return
+         conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+         call join_result_cap_set(jr, rpc_make_cap_ptr(rm, 0), err)
+         if (err /= CAPNP_OK) return
+      end if
+      call payload_content_set(ctx%results, jr%p, err)
+      if (err /= CAPNP_OK) return
+      call finish_answer(conn, qid, rm, ctx, err)
+   end subroutine send_join_result
+
+   !> A join we cannot evaluate: answer this part with succeeded = false.
+   subroutine send_join_failure(conn, qid, jid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid, jid
+      integer, intent(out) :: err
+      call send_join_result(conn, qid, jid, .false., .false., -1, err)
+   end subroutine send_join_failure
 
    !> Allocate export ids for the staged servers and write the results
    !> capTable.

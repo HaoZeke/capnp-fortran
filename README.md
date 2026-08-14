@@ -42,6 +42,8 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   promise pipelining, embargo echo (same-process fpm suite), and level 2
   persistence hooks; bootstrap and pipelined/settled calls are also
   protocol-tested against a live capnp-C++ peer when that interop tier is built.
+- RPC level 4: `Join`, answering whether a set of capabilities names one
+  object, per the two-party rules in `rpc-twoparty.capnp`.
 
 ## Parity
 
@@ -66,7 +68,7 @@ and capnp-C++:
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
 | RPC level 3 (three-party: `Provide`/`Accept`) | no | no (replies `unimplemented`) | not yet (replies `unimplemented`) |
-| RPC level 4 (`Join`, reference equality) | no | no | no (nobody implements it, C++ included) |
+| RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
 | Generics in generated code | no | yes | brand-resolved instantiations (direct, list-element, list-binding, nested) |
@@ -74,12 +76,25 @@ and capnp-C++:
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
-over TCP and calls it, pipelined and settled. Level 3 landed upstream
-after the 1.4.0 release: `capnp` 1.4.0 has no `Provide`/`Accept` handling
-at all, while capnproto main carries a complete three-party
-implementation. Level 4 (`Join`) is implemented nowhere, C++ included --
-upstream lets it fall through to the default branch and replies
-`Message.unimplemented`, which is what this vat does for both. Generics and
+over TCP and calls it, pipelined and settled.
+
+Level 3 is three-party introduction, which a two-party connection cannot
+express: `rpc-twoparty.capnp` declares `ThirdPartyCapId` and `RecipientId`
+as empty structs, "never used, because there is no third party". So
+`Provide` and `Accept` get `Message.unimplemented` here, and will until
+this vat grows a network layer that can name a third vat. Upstream added
+level 3 after 1.4.0; `capnp` 1.4.0 has no `Provide`/`Accept` handling at
+all.
+
+Level 4 is `Join`: asking whether several capabilities are one object.
+The two-party network defines this fully, and it is implemented here.
+Parts accumulate against their `joinId`, and every part is answered only
+once the whole set has arrived, since no single part is answerable
+alone; equal export ids then mean the same object, and exactly one
+`JoinResult` carries the joined capability. Upstream C++ has no `Join`
+case at all -- it falls through to the default branch and replies
+`unimplemented` -- so this is the one place the family is ahead of the
+reference implementation rather than catching up to it. Generics and
 reflection sit outside both this project's and capnpc-c's generated-code
 scope; the wire format carries generic types either way, so messages
 produced by C++ users of those features still read correctly here.

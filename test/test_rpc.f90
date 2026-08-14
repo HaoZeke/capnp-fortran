@@ -5,6 +5,7 @@ module test_rpc
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use rpc_capnp
+   use rpc_twoparty_capnp
    use capnp_posix
    use capnp_rpc
    use capnp_rpc_transport
@@ -57,10 +58,217 @@ contains
       if (.not. allocated(error)) call t_disembargo_promised_answer(error)
       if (.not. allocated(error)) call t_disembargo_receiver_loopback_absorbed(error)
       if (.not. allocated(error)) call t_pump_poll(error)
+      if (.not. allocated(error)) call t_join_same_capability(error)
+      if (.not. allocated(error)) call t_join_unresolvable_part(error)
+      if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
    end subroutine run_rpc
+
+
+   !> Send one Join part: question `qid`, targeting export `eid`, carrying
+   !> a two-party JoinKeyPart naming the set.
+   subroutine send_join_part(qid, eid, jid, pcount, pnum, e)
+      integer(int64), intent(in) :: qid, jid
+      integer, intent(in) :: eid, pcount, pnum
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(join_key_part_t) :: kp
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      jn = message_join_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call join_question_id_set(jn, qid, e)
+      if (e /= CAPNP_OK) return
+      tgt = join_target_init(jn, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, int(eid, int64), e)
+      if (e /= CAPNP_OK) return
+      kp = join_key_part_new(m, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_join_id_set(kp, jid, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_part_count_set(kp, pcount, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_part_num_set(kp, pnum, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_set(jn, kp%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_join_part
+
+   !> Read one Return off the client socket and unpack its JoinResult.
+   subroutine recv_join_result(ansid, jid, succeeded, has_cap, e)
+      integer(int64), intent(out) :: ansid, jid
+      logical, intent(out) :: succeeded, has_cap
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: content, capp
+      type(join_result_t) :: jr
+      ansid = -1_int64
+      jid = -1_int64
+      succeeded = .false.
+      has_cap = .false.
+      call rpc_recv_message(cli%fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) then
+         e = CAPNP_ERR_KIND
+         call capnp_message_free(m)
+         return
+      end if
+      r = message_return_get(msg, e)
+      if (e /= CAPNP_OK) return
+      ansid = return_answer_id_get(r)
+      pl = return_results_get(r, e)
+      if (e /= CAPNP_OK) return
+      content = payload_content_get(pl, e)
+      if (e /= CAPNP_OK) return
+      jr%p = content
+      jid = join_result_join_id_get(jr)
+      succeeded = join_result_succeeded_get(jr)
+      capp = join_result_cap_get(jr, e)
+      if (e == CAPNP_OK) has_cap = capp%kind == CAPNP_PK_CAP
+      e = CAPNP_OK
+      call capnp_message_free(m)
+   end subroutine recv_join_result
+
+   !> Find up to two distinct live exports on the server.
+   subroutine two_live_exports(a, b, n)
+      integer, intent(out) :: a, b, n
+      integer :: i
+      a = -1
+      b = -1
+      n = 0
+      do i = 0, size(srv%exports) - 1
+         if (srv%exports(i)%used) then
+            if (a < 0) then
+               a = i
+            else if (b < 0) then
+               b = i
+               n = 2
+               return
+            end if
+         end if
+      end do
+      if (a >= 0) n = 1
+   end subroutine two_live_exports
+
+   !> Level 4: two parts naming one capability join successfully, and
+   !> exactly one result carries the joined cap.
+   subroutine t_join_same_capability(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n
+      integer(int64) :: ansid1, ansid2, jid1, jid2
+      logical :: ok1, ok2, cap1, cap2
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join: server has a live export')
+      if (allocated(error)) return
+
+      call send_join_part(700_int64, a, 9_int64, 2, 0, err)
+      call check_(error, err == CAPNP_OK, 'join: part 0 sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'join: server took part 0')
+      ! An incomplete set is not answerable yet, so nothing comes back.
+      call send_join_part(701_int64, a, 9_int64, 2, 1, err)
+      call check_(error, err == CAPNP_OK, 'join: part 1 sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'join: server took part 1')
+      if (allocated(error)) return
+
+      call recv_join_result(ansid1, jid1, ok1, cap1, err)
+      call check_(error, err == CAPNP_OK, 'join: first result read')
+      call recv_join_result(ansid2, jid2, ok2, cap2, err)
+      call check_(error, err == CAPNP_OK, 'join: second result read')
+      if (allocated(error)) return
+
+      call check_(error, jid1 == 9_int64 .and. jid2 == 9_int64, 'join: joinId echoed')
+      call check_(error, ok1 .and. ok2, 'join: same capability succeeds')
+      call check_(error, (ansid1 == 700_int64 .and. ansid2 == 701_int64) .or. &
+                  (ansid1 == 701_int64 .and. ansid2 == 700_int64), &
+                  'join: both questions answered')
+      ! JoinResult: one of the results carries the capability.
+      call check_(error, count([cap1, cap2]) == 1, 'join: exactly one result carries the cap')
+   end subroutine t_join_same_capability
+
+   !> A part naming a capability this vat does not host cannot be proven
+   !> equal to anything, so the whole set fails and no result carries a
+   !> capability. Uses an export id that is deliberately not live, which
+   !> is deterministic regardless of what earlier cases left exported.
+   subroutine t_join_unresolvable_part(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, dead
+      integer(int64) :: ansid1, ansid2, jid1, jid2
+      logical :: ok1, ok2, cap1, cap2
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join: server has a live export')
+      if (allocated(error)) return
+      dead = free_export_slot()
+      call check_(error, dead >= 0, 'join: found an unused export id')
+      if (allocated(error)) return
+
+      call send_join_part(710_int64, a, 11_int64, 2, 0, err)
+      call check_(error, err == CAPNP_OK, 'join: resolvable part sent')
+      call rpc_pump_once(srv, err)
+      call send_join_part(711_int64, dead, 11_int64, 2, 1, err)
+      call check_(error, err == CAPNP_OK, 'join: unresolvable part sent')
+      call rpc_pump_once(srv, err)
+      if (allocated(error)) return
+
+      call recv_join_result(ansid1, jid1, ok1, cap1, err)
+      call check_(error, err == CAPNP_OK, 'join: mixed first result')
+      call recv_join_result(ansid2, jid2, ok2, cap2, err)
+      call check_(error, err == CAPNP_OK, 'join: mixed second result')
+      if (allocated(error)) return
+
+      call check_(error, jid1 == 11_int64 .and. jid2 == 11_int64, 'join: mixed joinId echoed')
+      ! All JoinResults in a set carry the same verdict.
+      call check_(error, .not. ok1 .and. .not. ok2, 'join: unresolvable part fails the set')
+      call check_(error, .not. cap1 .and. .not. cap2, 'join: failed join carries no cap')
+   end subroutine t_join_unresolvable_part
+
+   !> An export id the server is not using.
+   function free_export_slot() result(idx)
+      integer :: idx, i
+      idx = -1
+      do i = size(srv%exports) - 1, 0, -1
+         if (.not. srv%exports(i)%used) then
+            idx = i
+            return
+         end if
+      end do
+   end function free_export_slot
+
+   !> A set that never completes is never answered: the receiver waits for
+   !> every part before it can compare them.
+   subroutine t_join_incomplete_set_is_silent(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n
+      logical :: readable
+      call two_live_exports(a, b, n)
+      if (allocated(error)) return
+
+      call send_join_part(720_int64, a, 13_int64, 3, 0, err)
+      call check_(error, err == CAPNP_OK, 'join: lone part sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'join: server took the lone part')
+      if (allocated(error)) return
+
+      call px_poll_in(cli%fd, 50, readable, err)
+      call check_(error, err == CAPNP_OK, 'join: poll for a premature reply')
+      call check_(error, .not. readable, 'join: incomplete set draws no reply')
+   end subroutine t_join_incomplete_set_is_silent
 
    !> Bootstrap, then a call on the still-promised bootstrap cap
    !> (pipelining), then settle the cap and call again.
