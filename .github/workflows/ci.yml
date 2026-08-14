@@ -21,6 +21,11 @@ jobs:
         run: pixi run -- bash scripts/std-check.sh
       - name: build
         run: pixi run build
+      # The wire goldens are only evidence of upstream parity while they are
+      # still what the capnp CLI emits; the suite cannot tell them apart from
+      # our own earlier output.
+      - name: wire goldens still match the capnp CLI
+        run: pixi run -- bash scripts/gen-fixtures.sh --check
       - name: test
         run: pixi run test
       - name: codegen output matches checked-in modules
