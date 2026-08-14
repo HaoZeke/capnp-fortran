@@ -65,7 +65,8 @@ and capnp-C++:
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3/4 (three-party, joins) | no | no (replies `unimplemented`) | no (replies `unimplemented`, same as C++) |
+| RPC level 3 (three-party: `Provide`/`Accept`) | no | no (replies `unimplemented`) | not yet (replies `unimplemented`) |
+| RPC level 4 (`Join`, reference equality) | no | no | no (nobody implements it, C++ included) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
 | Generics in generated code | no | yes | brand-resolved instantiations (direct, list-element, list-binding, nested) |
@@ -73,9 +74,12 @@ and capnp-C++:
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
-over TCP and calls it, pipelined and settled. No implementation of any
-language reaches RPC levels 3-4; like C++, this vat answers those
-messages with `Message.unimplemented` as the spec requires. Generics and
+over TCP and calls it, pipelined and settled. Level 3 landed upstream
+after the 1.4.0 release: `capnp` 1.4.0 has no `Provide`/`Accept` handling
+at all, while capnproto main carries a complete three-party
+implementation. Level 4 (`Join`) is implemented nowhere, C++ included --
+upstream lets it fall through to the default branch and replies
+`Message.unimplemented`, which is what this vat does for both. Generics and
 reflection sit outside both this project's and capnpc-c's generated-code
 scope; the wire format carries generic types either way, so messages
 produced by C++ users of those features still read correctly here.
