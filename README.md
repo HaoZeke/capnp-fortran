@@ -86,12 +86,23 @@ See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Install
 
-With [fpm](https://fpm.fortran-lang.org):
+With [fpm](https://fpm.fortran-lang.org), to build this repository:
 
 ```console
 $ fpm build
 $ fpm test
 ```
+
+To depend on it, name the git source and a tag in your own `fpm.toml`:
+
+```toml
+[dependencies]
+capnp = { git = "https://github.com/HaoZeke/capnp-fortran", tag = "v0.1.1" }
+```
+
+then `use capnp` and build as usual. This is the supported route:
+`fortran-lang/fpm-registry` has merged nothing since December 2021, so a
+registry name is not available to depend on.
 
 Toolchain (gfortran, fpm, fypp, the `capnp` tool) is pinned in `pixi.toml`:
 
