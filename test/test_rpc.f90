@@ -64,6 +64,7 @@ contains
       if (.not. allocated(error)) call t_accept_unknown_nonce(error)
       if (.not. allocated(error)) call t_provide_unhosted(error)
       if (.not. allocated(error)) call t_two_provisions_independent(error)
+      if (.not. allocated(error)) call t_accept_embargo(error)
       if (.not. allocated(error)) call t_third_party_introduction(error)
       if (.not. allocated(error)) call t_introduction_in_an_answer(error)
       if (.not. allocated(error)) call t_overlong_host_refused(error)
@@ -175,6 +176,106 @@ contains
       end do
       if (a >= 0) n = 1
    end subroutine two_live_exports
+
+   !> Carol -> us: claim the capability under `nonce`, but hold the
+   !> answer until the introducer lifts the embargo.
+   subroutine send_accept_embargoed(qid, nonce, e)
+      integer(int64), intent(in) :: qid, nonce
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(accept_t) :: ac
+      type(provision_id_t) :: pid
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      ac = message_accept_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call accept_question_id_set(ac, qid, e)
+      if (e /= CAPNP_OK) return
+      call accept_embargo_set(ac, .true., e)
+      if (e /= CAPNP_OK) return
+      pid = provision_id_new(m, e)
+      if (e /= CAPNP_OK) return
+      call provision_id_nonce_set(pid, nonce, e)
+      if (e /= CAPNP_OK) return
+      call accept_provision_set(ac, pid%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_accept_embargoed
+
+   !> Alice -> us: lift the embargo, naming her own Provide question.
+   subroutine send_disembargo_provide(provide_qid, e)
+      integer(int64), intent(in) :: provide_qid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      d = message_disembargo_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call disembargo_context_provide_set(d, provide_qid, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_disembargo_provide
+
+   !> An embargoed Accept claims the capability but is not answered until
+   !> the introducer says the recipient's earlier calls have all arrived.
+   !> Answering sooner would let a call sent straight to us overtake one
+   !> still in flight through the introducer.
+   subroutine t_accept_embargo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, kind, before
+      integer(int64) :: ansid
+      integer(int64), parameter :: nonce = 20816_int64
+      logical :: is_exc, readable
+      call two_live_exports(a, b, n)
+      if (allocated(error)) return
+      before = rpc_pending_provisions(srv)
+
+      call send_provide(70_int64, a, nonce, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. .not. is_exc, 'embargo: provide answered')
+
+      call send_accept_embargoed(71_int64, nonce, err)
+      call rpc_pump_once(srv, err)
+      call px_poll_in(cli%fd, 50, readable, err)
+      call check_(error, err == CAPNP_OK .and. .not. readable, &
+                  'embargo: an embargoed Accept is not answered yet')
+      call check_(error, rpc_embargoed_accepts(srv) == 1, 'embargo: one held')
+
+      ! The arrangement is claimed, so a second Accept finds nothing.
+      call send_accept(72_int64, nonce, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. is_exc, &
+                  'embargo: a claimed provision cannot be claimed again')
+
+      ! A Disembargo naming a Provide we never received changes nothing.
+      call send_disembargo_provide(999_int64, err)
+      call rpc_pump_once(srv, err)
+      call px_poll_in(cli%fd, 50, readable, err)
+      call check_(error, err == CAPNP_OK .and. .not. readable, &
+                  'embargo: unknown provide question ignored')
+      call check_(error, rpc_embargoed_accepts(srv) == 1, 'embargo: still held')
+
+      call send_disembargo_provide(70_int64, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 71_int64 .and. .not. is_exc, &
+                  'embargo: lifted, the Accept is answered')
+      call check_(error, kind == CAPNP_PK_CAP, 'embargo: capability handed over')
+      call check_(error, rpc_embargoed_accepts(srv) == 0, 'embargo: cleared')
+      call check_(error, rpc_pending_provisions(srv) == before, &
+                  'embargo: provision consumed')
+   end subroutine t_accept_embargo
 
    ! ------------------------------------------------------------------
    ! Level 3, receiving half: introductions and vines
@@ -849,6 +950,9 @@ contains
 
    !> Read one Return: its answerId, whether it is an exception, and the
    !> pointer kind of its content.
+   !> Polls first: a Return that never comes is the interesting failure
+   !> in these cases, and reading a socket that will never speak would
+   !> hang the suite instead of failing it.
    subroutine recv_answer(ansid, is_exc, kind, e)
       integer(int64), intent(out) :: ansid
       logical, intent(out) :: is_exc
@@ -858,9 +962,16 @@ contains
       type(return_t) :: r
       type(payload_t) :: pl
       type(capnp_ptr_t) :: content
+      logical :: readable
       ansid = -1_int64
       is_exc = .false.
       kind = CAPNP_PK_NULL
+      call px_poll_in(cli%fd, 200, readable, e)
+      if (e /= CAPNP_OK) return
+      if (.not. readable) then
+         e = CAPNP_ERR_IO
+         return
+      end if
       call rpc_recv_message(cli%fd, m, e)
       if (e /= CAPNP_OK) return
       msg = message_read_root(m, e)

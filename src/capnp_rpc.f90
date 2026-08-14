@@ -47,7 +47,7 @@ module capnp_rpc
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
-   public :: rpc_pending_provisions
+   public :: rpc_pending_provisions, rpc_embargoed_accepts
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
@@ -152,6 +152,15 @@ module capnp_rpc
       logical :: used = .false.
       integer(int64) :: nonce = 0_int64
       integer :: eid = -1
+      !> The introducer's Provide question, which is how a later
+      !> Disembargo names this arrangement (rpc.capnp,
+      !> Disembargo.context.provide).
+      integer(int64) :: qid = -1_int64
+      !> An embargoed Accept has claimed the capability but must not be
+      !> answered until the introducer lifts the embargo, so the slot
+      !> outlives the claim and carries the answer to send.
+      logical :: embargoed = .false.
+      integer(int64) :: accept_qid = -1_int64
    end type rpc_provision_slot_t
 
    !> An introduction we have been handed but not yet picked up.
@@ -1158,6 +1167,8 @@ contains
             conn%provisions(i)%used = .true.
             conn%provisions(i)%nonce = nonce
             conn%provisions(i)%eid = eid
+            conn%provisions(i)%qid = qid
+            conn%provisions(i)%embargoed = .false.
             ! The recipient holds a reference once it accepts.
             conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
             call send_empty_answer(conn, qid, err)
@@ -1201,9 +1212,19 @@ contains
 
       eid = -1
       do i = 0, MAXPROV - 1
-         if (conn%provisions(i)%used .and. conn%provisions(i)%nonce == nonce) then
+         if (conn%provisions(i)%used .and. .not. conn%provisions(i)%embargoed &
+             .and. conn%provisions(i)%nonce == nonce) then
             eid = conn%provisions(i)%eid
-            conn%provisions(i) = rpc_provision_slot_t()
+            if (accept_embargo_get(ac)) then
+               ! Claimed, but the Return waits: the recipient has calls
+               ! in flight through the introducer, and answering now
+               ! would let one sent straight to us overtake them. The
+               ! introducer lifts it with Disembargo.provide.
+               conn%provisions(i)%embargoed = .true.
+               conn%provisions(i)%accept_qid = qid
+            else
+               conn%provisions(i) = rpc_provision_slot_t()
+            end if
             exit
          end if
       end do
@@ -1211,7 +1232,25 @@ contains
          call send_answer_exception(conn, qid, 'accept: no such provision', err)
          return
       end if
+      if (accept_embargo_get(ac)) then
+         err = CAPNP_OK
+         return
+      end if
+      call send_accepted_cap(conn, qid, eid, err)
+   end subroutine handle_accept
 
+   !> Answer an Accept with the capability it claimed.
+   subroutine send_accepted_cap(conn, qid, eid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(in) :: eid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      type(rpc_call_ctx_t) :: ctx
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -1231,7 +1270,40 @@ contains
       call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, 0), err)
       if (err /= CAPNP_OK) return
       call finish_answer(conn, qid, rm, ctx, err)
-   end subroutine handle_accept
+   end subroutine send_accepted_cap
+
+   !> Disembargo.provide: the introducer lifts the embargo on the Accept
+   !> it arranged, naming its own Provide question.
+   subroutine release_provide_embargo(conn, provide_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: provide_qid
+      integer, intent(out) :: err
+      integer(int64) :: qid
+      integer :: i, eid
+      err = CAPNP_OK
+      do i = 0, MAXPROV - 1
+         if (.not. conn%provisions(i)%used) cycle
+         if (.not. conn%provisions(i)%embargoed) cycle
+         if (conn%provisions(i)%qid /= provide_qid) cycle
+         qid = conn%provisions(i)%accept_qid
+         eid = conn%provisions(i)%eid
+         conn%provisions(i) = rpc_provision_slot_t()
+         call send_accepted_cap(conn, qid, eid, err)
+         return
+      end do
+      ! A Disembargo naming nothing we hold is the sender's problem, not
+      ! a reason to disturb this connection.
+   end subroutine release_provide_embargo
+
+   !> Accepts claimed but still embargoed, awaiting Disembargo.provide.
+   function rpc_embargoed_accepts(conn) result(n)
+      type(rpc_conn_t), intent(in) :: conn
+      integer :: n, i
+      n = 0
+      do i = 0, MAXPROV - 1
+         if (conn%provisions(i)%used .and. conn%provisions(i)%embargoed) n = n + 1
+      end do
+   end function rpc_embargoed_accepts
 
    !> Answer a question with empty results.
    subroutine send_empty_answer(conn, qid, err)
@@ -1625,6 +1697,10 @@ contains
       type(message_t) :: rmsg
       d = message_disembargo_get(msg, err)
       if (err /= CAPNP_OK) return
+      if (disembargo_context_which(d) == DISEMBARGO_CONTEXT_PROVIDE_TAG) then
+         call release_provide_embargo(conn, disembargo_context_provide_get(d), err)
+         return
+      end if
       if (disembargo_context_which(d) /= DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG) then
          err = CAPNP_OK ! receiverLoopback handled by waiters; nothing here
          return
