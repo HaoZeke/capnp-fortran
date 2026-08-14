@@ -244,6 +244,17 @@ never crash on malformed input, they return errors and defaults.
 | `docs/` | Sphinx site (org → rst); live at https://capnp-fortran.rgoswami.me |
 | `CMakeLists.txt`, `cmake/` | FetchContent / `capnp_fortran::capnp_fortran` (not CapnProto::) |
 
+## Family
+
+| Tree | Product |
+|------|---------|
+| C | [c-capnproto](https://github.com/HaoZeke/c-capnproto) |
+| Janet | [capnp-janet](https://github.com/HaoZeke/capnp-janet) |
+| TypeScript | [capnp-ts](https://github.com/HaoZeke/capnp-ts) |
+
+All four share `schema/rpc-threeparty.capnp`, the level 3 network layer,
+and the reference frames encoded from it.
+
 ## Citation
 
 Cite as: Rohit Goswami, *capnp-fortran: a native Fortran Cap'n Proto
