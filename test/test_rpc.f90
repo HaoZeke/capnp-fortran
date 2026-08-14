@@ -64,6 +64,9 @@ contains
       if (.not. allocated(error)) call t_accept_unknown_nonce(error)
       if (.not. allocated(error)) call t_provide_unhosted(error)
       if (.not. allocated(error)) call t_two_provisions_independent(error)
+      if (.not. allocated(error)) call t_third_party_introduction(error)
+      if (.not. allocated(error)) call t_introduction_in_an_answer(error)
+      if (.not. allocated(error)) call t_overlong_host_refused(error)
       if (.not. allocated(error)) call t_reference_frames(error)
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
@@ -172,6 +175,213 @@ contains
       end do
       if (a >= 0) n = 1
    end subroutine two_live_exports
+
+   ! ------------------------------------------------------------------
+   ! Level 3, receiving half: introductions and vines
+   ! ------------------------------------------------------------------
+
+   !> Alice -> us: a Call whose params name a capability hosted by a
+   !> third vat, with a vine we can use in the meantime.
+   subroutine send_call_with_third_party_cap(qid, eid, host, port, nonce, vine, e)
+      integer(int64), intent(in) :: qid, nonce, vine
+      integer, intent(in) :: eid, port
+      character(len=*), intent(in) :: host
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: params
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      c = message_call_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call call_question_id_set(c, qid, e)
+      if (e /= CAPNP_OK) return
+      tgt = call_target_init(c, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, int(eid, int64), e)
+      if (e /= CAPNP_OK) return
+      call call_interface_id_set(c, 4660_int64, e)
+      if (e /= CAPNP_OK) return
+      call call_method_id_set(c, 0, e)
+      if (e /= CAPNP_OK) return
+      params = call_params_init(c, e)
+      if (e /= CAPNP_OK) return
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      if (e /= CAPNP_OK) return
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      if (e /= CAPNP_OK) return
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (e /= CAPNP_OK) return
+      call rpc_write_third_party_cap(cd, host, port, nonce, vine, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_call_with_third_party_cap
+
+   !> Whether the next frame on the client socket is a Release naming
+   !> `id`. Consumes one frame if there is one.
+   !>
+   !> Polls first: a missing frame is the interesting failure here, and
+   !> reading a socket that will never speak would hang the suite instead
+   !> of failing it.
+   function next_is_release_of(id, e) result(match)
+      integer(int64), intent(in) :: id
+      integer, intent(out) :: e
+      logical :: match, readable
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      match = .false.
+      call px_poll_in(cli%fd, 50, readable, e)
+      if (e /= CAPNP_OK .or. .not. readable) return
+      call rpc_recv_message(cli%fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) return
+      if (message_which(msg) == MESSAGE_RELEASE_TAG) then
+         rel = message_release_get(msg, e)
+         if (e == CAPNP_OK) match = release_id_get(rel) == id .and. &
+                                    release_reference_count_get(rel) == 1_int64
+      end if
+      e = CAPNP_OK
+      call capnp_message_free(m)
+   end function next_is_release_of
+
+   !> A payload naming a third party's capability is recorded as an
+   !> introduction, and the vine survives until the pickup is finished.
+   subroutine t_third_party_introduction(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_introduction_t) :: got(4)
+      integer :: kind, n
+      integer(int64) :: ansid
+      logical :: is_exc
+      call check_(error, rpc_pending_introductions(srv) == 0, &
+                  'intro: none held yet')
+      if (allocated(error)) return
+
+      call send_call_with_third_party_cap(60_int64, 0, '10.0.0.7', 5000, &
+                                          int(z'ABCDEF', int64), 77_int64, err)
+      call check_(error, err == CAPNP_OK, 'intro: call sent')
+      call rpc_pump_once(srv, err)
+      ! The call itself is answered; the introduction rides in its params.
+      call recv_answer(ansid, is_exc, kind, err)
+      n = rpc_pending_introductions(srv, got)
+      call check_(error, n == 1, 'intro: one held')
+      if (allocated(error)) return
+      call check_(error, got(1)%nonce == int(z'ABCDEF', int64), 'intro: nonce')
+      call check_(error, got(1)%vine_id == 77_int64, 'intro: vine')
+      call check_(error, got(1)%port == 5000, 'intro: port')
+      call check_(error, got(1)%host(1:got(1)%host_len) == '10.0.0.7', 'intro: host')
+
+      ! Nothing is released while the pickup is outstanding: the vine is
+      ! the only way to reach the capability until then.
+      call rpc_introduction_done(srv, int(z'ABCDEF', int64), err)
+      call check_(error, err == CAPNP_OK, 'intro: pickup finished')
+      call check_(error, next_is_release_of(77_int64, err) .and. err == CAPNP_OK, &
+                  'intro: vine released on pickup')
+      call check_(error, rpc_pending_introductions(srv) == 0, 'intro: cleared')
+
+      ! Finishing an introduction nobody handed us is refused, even while
+      ! another is outstanding: the nonce picks the arrangement, not the
+      ! fact that there is one.
+      call send_call_with_third_party_cap(61_int64, 0, '10.0.0.8', 5001, &
+                                          153_int64, 78_int64, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, rpc_pending_introductions(srv) == 1, 'intro: second held')
+      call rpc_introduction_done(srv, int(z'ABCDEF', int64), err)
+      call check_(error, err /= CAPNP_OK, 'intro: unknown nonce refused')
+      call check_(error, rpc_pending_introductions(srv) == 1, 'intro: other stands')
+      call rpc_introduction_done(srv, 153_int64, err)
+      call check_(error, err == CAPNP_OK, 'intro: arranged nonce finishes')
+      call check_(error, next_is_release_of(78_int64, err), 'intro: second vine released')
+   end subroutine t_third_party_introduction
+
+   !> The introducer can also hand us the descriptor in an answer, not
+   !> only in a call's params. Sent to the client vat, which asked the
+   !> question, so it lands in handle_return.
+   subroutine send_return_with_third_party_cap(qid, host, port, nonce, vine, e)
+      integer(int64), intent(in) :: qid, nonce, vine
+      integer, intent(in) :: port
+      character(len=*), intent(in) :: host
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      r = message_return_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, e)
+      if (e /= CAPNP_OK) return
+      results = return_results_init(r, e)
+      if (e /= CAPNP_OK) return
+      call payload_content_set(results, capnp_new_struct(m, 1, 0, e), e)
+      if (e /= CAPNP_OK) return
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      if (e /= CAPNP_OK) return
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (e /= CAPNP_OK) return
+      call rpc_write_third_party_cap(cd, host, port, nonce, vine, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(srv%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_return_with_third_party_cap
+
+   !> The same descriptor in an answer is recorded too.
+   subroutine t_introduction_in_an_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_introduction_t) :: got(4)
+      type(rpc_cap_t) :: bootcap
+      integer :: n, before
+      before = rpc_pending_introductions(cli)
+      call rpc_bootstrap_send(cli, bootcap, err)
+      ! Let the server answer, and take that answer off the wire, so the
+      ! hand-built Return below is what the client reads next and no
+      ! later case inherits a half-finished exchange.
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(cli, err)
+      call send_return_with_third_party_cap(bootcap%id, '10.0.0.9', 5002, &
+                                           119_int64, 80_int64, err)
+      call check_(error, err == CAPNP_OK, 'intro: answer sent')
+      call rpc_pump_once(cli, err)
+      n = rpc_pending_introductions(cli, got)
+      call check_(error, n == before + 1, 'intro: answer introduction held')
+      if (allocated(error)) return
+      call check_(error, got(n)%nonce == 119_int64, 'intro: answer nonce')
+      call check_(error, got(n)%vine_id == 80_int64, 'intro: answer vine')
+      call check_(error, got(n)%host(1:got(n)%host_len) == '10.0.0.9', &
+                  'intro: answer host')
+   end subroutine t_introduction_in_an_answer
+
+   !> A host too long to store is refused rather than truncated: a
+   !> truncated address names a different vat.
+   subroutine t_overlong_host_refused(error)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=MAXHOST + 8) :: host
+      integer :: kind, before
+      integer(int64) :: ansid
+      logical :: is_exc
+      host = repeat('h', len(host))
+      before = rpc_pending_introductions(srv)
+      call send_call_with_third_party_cap(62_int64, 0, host, 5000, &
+                                          65261_int64, 79_int64, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, rpc_pending_introductions(srv) == before, &
+                  'intro: overlong host refused')
+   end subroutine t_overlong_host_refused
 
    !> Level 3 driven by frames the reference `capnp` CLI encoded.
    !>

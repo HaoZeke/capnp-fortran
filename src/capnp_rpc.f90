@@ -25,7 +25,14 @@ module capnp_rpc
                                    join_key_part_part_count_get, &
                                    join_key_part_part_num_get, &
                                    join_result_new, join_result_join_id_set, &
-                                   join_result_succeeded_set, join_result_cap_set
+                                   join_result_succeeded_set, join_result_cap_set, &
+                                   third_party_cap_id_t, third_party_cap_id_new, &
+                                   third_party_cap_id_vat_get, &
+                                   third_party_cap_id_vat_init, &
+                                   third_party_cap_id_nonce_get, &
+                                   third_party_cap_id_nonce_set, &
+                                   vat_id_t, vat_id_host_get, vat_id_port_get, &
+                                   vat_id_host_set, vat_id_port_set
    use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
    implicit none
@@ -41,6 +48,8 @@ module capnp_rpc
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
    public :: rpc_pending_provisions
+   public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
+   public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
@@ -66,6 +75,9 @@ module capnp_rpc
    integer, parameter :: MAXOPS = 8  ! pipeline ops per capability
    integer, parameter :: MAXCAPS = 16 ! caps per payload
    integer, parameter :: MAXPROV = 32       ! capabilities held for a third vat
+   integer, parameter :: MAXINTRO = 8       ! introductions handed to us
+   !> Long enough for a hostname; a longer one is refused, not truncated.
+   integer, parameter :: MAXHOST = 64
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
    integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
 
@@ -142,6 +154,24 @@ module capnp_rpc
       integer :: eid = -1
    end type rpc_provision_slot_t
 
+   !> An introduction we have been handed but not yet picked up.
+   !>
+   !> Level 3: a payload can name a capability hosted by a third vat, as
+   !> a `thirdPartyHosted` CapDescriptor carrying where to go and a vine.
+   !> The vine is an ordinary import through the introducer, so calls
+   !> work before we ever reach the third party; that is the fallback the
+   !> spec gives level 1 and 2 receivers, and it is why the vine must not
+   !> be released until the pickup succeeds. Connecting is the network
+   !> layer's job, so the vat records the introduction and hands it over.
+   type :: rpc_introduction_t
+      logical :: used = .false.
+      integer(int64) :: nonce = 0_int64
+      integer(int64) :: vine_id = -1_int64
+      integer :: port = 0
+      character(len=MAXHOST) :: host = ''
+      integer :: host_len = 0
+   end type rpc_introduction_t
+
    !> One in-flight Join (level 4), keyed by the sender's joinId.
    !>
    !> A Join asks whether several capabilities are the same object. The
@@ -181,6 +211,7 @@ module capnp_rpc
       type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
       type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
+      type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
    end type rpc_conn_t
@@ -855,6 +886,7 @@ contains
       ctx%interface_id = call_interface_id_get(c)
       ctx%method_id = int(call_method_id_get(c))
       params = call_params_get(c, err)
+      if (err == CAPNP_OK) call note_introductions(conn, params, err)
       ctx%params = payload_content_get(params, err)
       ctx%rmsg => rm
       ctx%results = return_results_init(r, err)
@@ -953,6 +985,136 @@ contains
          end if
       end select
    end subroutine resolve_message_target
+
+   ! ------------------------------------------------------------------
+   ! Level 3: introductions handed to us
+   ! ------------------------------------------------------------------
+
+   !> Record every `thirdPartyHosted` entry in an incoming cap table.
+   !>
+   !> The descriptor says where the capability really lives and hands us
+   !> a vine, an ordinary import through the introducer. Calls on the
+   !> vine work right away, which is the fallback the spec gives
+   !> receivers that cannot reach a third party; the vine must therefore
+   !> outlive the pickup. Dialling the third vat belongs to the network
+   !> layer, so the arrangement is recorded and handed over rather than
+   !> acted on here.
+   subroutine note_introductions(conn, pl, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(payload_t), intent(in) :: pl
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: ctab, cdp, idp
+      type(cap_descriptor_t) :: cd
+      type(third_party_cap_descriptor_t) :: tp
+      type(third_party_cap_id_t) :: id
+      type(vat_id_t) :: vat
+      character(len=:), allocatable :: host
+      integer :: i, j, n
+      err = CAPNP_OK
+      if (pl%p%kind /= CAPNP_PK_STRUCT) return
+      ctab = payload_cap_table_get(pl, err)
+      if (err /= CAPNP_OK) then
+         err = CAPNP_OK
+         return
+      end if
+      n = capnp_list_len(ctab)
+      do i = 0, n - 1
+         cd%p = capnp_list_get_struct(ctab, i, err)
+         if (err /= CAPNP_OK) cycle
+         if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG) cycle
+         tp = cap_descriptor_third_party_hosted_get(cd, err)
+         if (err /= CAPNP_OK .or. tp%p%kind /= CAPNP_PK_STRUCT) cycle
+         idp = third_party_cap_descriptor_id_get(tp, err)
+         if (err /= CAPNP_OK .or. idp%kind /= CAPNP_PK_STRUCT) cycle
+         id%p = idp
+         vat = third_party_cap_id_vat_get(id, err)
+         if (err /= CAPNP_OK .or. vat%p%kind /= CAPNP_PK_STRUCT) cycle
+         call vat_id_host_get(vat, host, err)
+         if (err /= CAPNP_OK .or. .not. allocated(host)) cycle
+         ! A host that will not fit is refused rather than truncated: a
+         ! truncated address names a different vat.
+         if (len(host) > MAXHOST) cycle
+
+         do j = 0, MAXINTRO - 1
+            if (conn%introductions(j)%used) cycle
+            conn%introductions(j)%used = .true.
+            conn%introductions(j)%nonce = third_party_cap_id_nonce_get(id)
+            conn%introductions(j)%vine_id = &
+               third_party_cap_descriptor_vine_id_get(tp)
+            conn%introductions(j)%port = int(vat_id_port_get(vat))
+            conn%introductions(j)%host = host
+            conn%introductions(j)%host_len = len(host)
+            exit
+         end do
+      end do
+      err = CAPNP_OK
+   end subroutine note_introductions
+
+   !> Introductions handed to us and not yet picked up.
+   function rpc_pending_introductions(conn, out) result(n)
+      type(rpc_conn_t), intent(in) :: conn
+      type(rpc_introduction_t), intent(out), optional :: out(:)
+      integer :: n, i
+      n = 0
+      do i = 0, MAXINTRO - 1
+         if (.not. conn%introductions(i)%used) cycle
+         if (present(out)) then
+            if (n < size(out)) out(n + 1) = conn%introductions(i)
+         end if
+         n = n + 1
+      end do
+   end function rpc_pending_introductions
+
+   !> Finish the pickup for `nonce`: releases the vine, which the sender
+   !> treats as the signal to close its Provide. Call this only once the
+   !> third party has actually handed the capability over; releasing
+   !> early drops the fallback path with nothing in its place.
+   subroutine rpc_introduction_done(conn, nonce, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: nonce
+      integer, intent(out) :: err
+      type(rpc_cap_t) :: vine
+      integer :: i
+      err = CAPNP_ERR_BOUNDS
+      do i = 0, MAXINTRO - 1
+         if (.not. conn%introductions(i)%used) cycle
+         if (conn%introductions(i)%nonce /= nonce) cycle
+         vine%kind = RPC_CAP_IMPORT
+         vine%id = conn%introductions(i)%vine_id
+         call rpc_release_send(conn, vine, err)
+         conn%introductions(i) = rpc_introduction_t()
+         return
+      end do
+   end subroutine rpc_introduction_done
+
+   !> Write a `thirdPartyHosted` descriptor into `cd`: where the
+   !> recipient should go, which pending Provide to claim once there, and
+   !> the vine we export so calls work in the meantime.
+   subroutine rpc_write_third_party_cap(cd, host, port, nonce, vine_id, err)
+      type(cap_descriptor_t), intent(in) :: cd
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      integer(int64), intent(in) :: nonce, vine_id
+      integer, intent(out) :: err
+      type(third_party_cap_descriptor_t) :: tp
+      type(third_party_cap_id_t) :: id
+      type(vat_id_t) :: vat
+      tp = cap_descriptor_third_party_hosted_init(cd, err)
+      if (err /= CAPNP_OK) return
+      call third_party_cap_descriptor_vine_id_set(tp, vine_id, err)
+      if (err /= CAPNP_OK) return
+      id = third_party_cap_id_new(cd%p%msg, err)
+      if (err /= CAPNP_OK) return
+      call third_party_cap_id_nonce_set(id, nonce, err)
+      if (err /= CAPNP_OK) return
+      vat = third_party_cap_id_vat_init(id, err)
+      if (err /= CAPNP_OK) return
+      call vat_id_host_set(vat, host, err)
+      if (err /= CAPNP_OK) return
+      call vat_id_port_set(vat, port, err)
+      if (err /= CAPNP_OK) return
+      call third_party_cap_descriptor_id_set(tp, id%p, err)
+   end subroutine rpc_write_third_party_cap
 
    !> Level 3: hold a capability for whoever presents this nonce.
    !>
@@ -1380,6 +1542,14 @@ contains
       r = message_return_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = return_answer_id_get(r)
+      if (return_which(r) == RETURN_RESULTS_TAG) then
+         block
+            type(payload_t) :: rpl
+            integer :: ierr
+            rpl = return_results_get(r, ierr)
+            if (ierr == CAPNP_OK) call note_introductions(conn, rpl, ierr)
+         end block
+      end if
       q = int(qid)
       if (q < 0 .or. q >= MAXQ) then
          err = CAPNP_ERR_BOUNDS

@@ -186,7 +186,10 @@ level 2 persistence with application-defined SturdyRefs.
 
 Level 3 `Provide` records the capability under the recipient's nonce and
 answers empty; `Accept` matches that nonce, consumes it, and returns the
-capability. The ids come from `rpc_threeparty_capnp`, the network layer
+capability. The other half is receiving: a `thirdPartyHosted`
+CapDescriptor in an incoming payload records an introduction, which
+`rpc_pending_introductions` hands over and `rpc_introduction_done`
+finishes by releasing the vine. The ids come from `rpc_threeparty_capnp`, the network layer
 this family defines (`schema/rpc-threeparty.capnp`); it also carries the
 join keys, so a vat speaks it instead of `rpc_twoparty_capnp`, not
 alongside. Level 4 `Join` accumulates parts against their `joinId` and
