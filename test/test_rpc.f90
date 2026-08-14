@@ -64,6 +64,7 @@ contains
       if (.not. allocated(error)) call t_accept_unknown_nonce(error)
       if (.not. allocated(error)) call t_provide_unhosted(error)
       if (.not. allocated(error)) call t_two_provisions_independent(error)
+      if (.not. allocated(error)) call t_reference_frames(error)
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
@@ -171,6 +172,56 @@ contains
       end do
       if (a >= 0) n = 1
    end subroutine two_live_exports
+
+   !> Level 3 driven by frames the reference `capnp` CLI encoded.
+   !>
+   !> Every other level 3 case here builds its own Provide and Accept, so
+   !> it shows the vat agrees with this library's builder and nothing
+   !> more: a layout both sides share but the wire format does not would
+   !> pass all of them. These bytes come from the reference
+   !> implementation (scripts/gen-rpc-frames.sh), so decoding them is the
+   !> claim that a peer can hand this vat a capability.
+   !>
+   !> The frames say: hold export 0 for whoever presents 0xfeedface
+   !> (question 42), then claim it (question 43).
+   subroutine t_reference_frames(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer(int8), allocatable :: frame(:)
+      integer :: a, b, n, kind, before
+      integer(int64) :: ansid
+      logical :: is_exc
+      call two_live_exports(a, b, n)
+      call check_(error, a == 0, 'frames: export 0 is the bootstrap capability')
+      if (allocated(error)) return
+      before = rpc_pending_provisions(srv)
+
+      call capnp_read_file('test/fixtures/rpc-provide.bin', frame, err)
+      ! A checked-in golden that will not open is a broken tree, not a
+      ! reason to pass.
+      call check_(error, err == CAPNP_OK, 'frames: provide golden readable')
+      if (allocated(error)) return
+      call px_send_all(cli%fd, frame, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 42_int64 .and. .not. is_exc, &
+                  'frames: reference Provide answered')
+      call check_(error, rpc_pending_provisions(srv) == before + 1, &
+                  'frames: reference Provide recorded')
+
+      call capnp_read_file('test/fixtures/rpc-accept.bin', frame, err)
+      call check_(error, err == CAPNP_OK, 'frames: accept golden readable')
+      if (allocated(error)) return
+      call px_send_all(cli%fd, frame, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 43_int64 .and. .not. is_exc, &
+                  'frames: reference Accept answered')
+      ! The nonce the vat matched on is the one the CLI wrote, which is
+      ! the whole point: both sides read the same field.
+      call check_(error, kind == CAPNP_PK_CAP, 'frames: capability handed over')
+      call check_(error, rpc_pending_provisions(srv) == before, &
+                  'frames: reference Accept consumed the arrangement')
+   end subroutine t_reference_frames
 
    !> Level 4: two parts naming one capability join successfully, and
    !> exactly one result carries the joined cap.
