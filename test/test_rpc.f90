@@ -5,7 +5,9 @@ module test_rpc
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use rpc_capnp
-   use rpc_twoparty_capnp
+   ! The vat speaks the three-party network layer, which names a third
+   ! vat and carries the join keys; see capnp_rpc.
+   use rpc_threeparty_capnp
    use capnp_posix
    use capnp_rpc
    use capnp_rpc_transport
@@ -58,6 +60,10 @@ contains
       if (.not. allocated(error)) call t_disembargo_promised_answer(error)
       if (.not. allocated(error)) call t_disembargo_receiver_loopback_absorbed(error)
       if (.not. allocated(error)) call t_pump_poll(error)
+      if (.not. allocated(error)) call t_provide_and_accept(error)
+      if (.not. allocated(error)) call t_accept_unknown_nonce(error)
+      if (.not. allocated(error)) call t_provide_unhosted(error)
+      if (.not. allocated(error)) call t_two_provisions_independent(error)
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
@@ -467,25 +473,281 @@ contains
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: bad method raises')
    end subroutine t_exception
 
-   !> A level 3 message (provide) must come back as Message.unimplemented
-   !> and be quietly absorbed.
+   !> The obsolete save/delete messages are gone from the protocol, so
+   !> they must come back as Message.unimplemented echoing the original,
+   !> and the sender must absorb that reply without disturbing the
+   !> connection.
    subroutine t_unimplemented(error)
       type(error_type), allocatable, intent(inout) :: error
+      type(capnp_message_t), target :: m, rm
+      type(message_t) :: msg, rmsg
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      call message_obsolete_delete_set(msg, capnp_new_struct(m, 1, 0, err), err)
+      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_free(m)
+      call check_(error, err == CAPNP_OK, 'rpc: obsoleteDelete sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'rpc: server handled obsoleteDelete')
+
+      call rpc_recv_message(cli%fd, rm, err)
+      call check_(error, err == CAPNP_OK, 'rpc: reply read')
+      if (allocated(error)) return
+      rmsg = message_read_root(rm, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_UNIMPLEMENTED_TAG, &
+                  'rpc: reply is unimplemented')
+      ! The reply echoes the message it could not handle, which is how the
+      ! sender knows which one was refused.
+      msg = message_unimplemented_get(rmsg, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  message_which(msg) == MESSAGE_OBSOLETE_DELETE_TAG, &
+                  'rpc: unimplemented echoes the original')
+      call capnp_message_free(rm)
+
+      ! And an unimplemented arriving at a vat is absorbed, not fatal.
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      rmsg = message_unimplemented_init(msg, err)
+      call message_obsolete_save_set(rmsg, capnp_new_struct(m, 1, 0, err), err)
+      call rpc_send_message(srv%fd, m, err)
+      call capnp_message_free(m)
+      call rpc_pump_once(cli, err)
+      call check_(error, err == CAPNP_OK .and. .not. cli%dead, &
+                  'rpc: client absorbs unimplemented')
+   end subroutine t_unimplemented
+
+   ! ------------------------------------------------------------------
+   ! Level 3: handing a capability to a third vat
+   ! ------------------------------------------------------------------
+
+   !> Alice -> Bob: hold export `eid` for whoever presents `nonce`.
+   subroutine send_provide(qid, eid, nonce, e)
+      integer(int64), intent(in) :: qid, nonce
+      integer, intent(in) :: eid
+      integer, intent(out) :: e
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(provide_t) :: pv
-      call capnp_message_init_builder(m, err)
-      msg = message_new_root(m, err)
-      pv = message_provide_init(msg, err)
-      call provide_question_id_set(pv, 60_int64, err)
-      call rpc_send_message(cli%fd, m, err)
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(vat_id_t) :: vat
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      pv = message_provide_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call provide_question_id_set(pv, qid, e)
+      if (e /= CAPNP_OK) return
+      tgt = provide_target_init(pv, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, int(eid, int64), e)
+      if (e /= CAPNP_OK) return
+      rid = recipient_id_new(m, e)
+      if (e /= CAPNP_OK) return
+      call recipient_id_nonce_set(rid, nonce, e)
+      if (e /= CAPNP_OK) return
+      vat = recipient_id_vat_init(rid, e)
+      if (e /= CAPNP_OK) return
+      call vat_id_host_set(vat, '127.0.0.1', e)
+      if (e /= CAPNP_OK) return
+      call vat_id_port_set(vat, 4000, e)
+      if (e /= CAPNP_OK) return
+      call provide_recipient_set(pv, rid%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
       call capnp_message_free(m)
-      call check_(error, err == CAPNP_OK, 'rpc: provide sent')
+   end subroutine send_provide
+
+   !> Carol -> Bob: claim the capability held under `nonce`.
+   subroutine send_accept(qid, nonce, e)
+      integer(int64), intent(in) :: qid, nonce
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(accept_t) :: ac
+      type(provision_id_t) :: pid
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      ac = message_accept_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call accept_question_id_set(ac, qid, e)
+      if (e /= CAPNP_OK) return
+      pid = provision_id_new(m, e)
+      if (e /= CAPNP_OK) return
+      call provision_id_nonce_set(pid, nonce, e)
+      if (e /= CAPNP_OK) return
+      call accept_provision_set(ac, pid%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_accept
+
+   !> Read one Return: its answerId, whether it is an exception, and the
+   !> pointer kind of its content.
+   subroutine recv_answer(ansid, is_exc, kind, e)
+      integer(int64), intent(out) :: ansid
+      logical, intent(out) :: is_exc
+      integer, intent(out) :: kind, e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: content
+      ansid = -1_int64
+      is_exc = .false.
+      kind = CAPNP_PK_NULL
+      call rpc_recv_message(cli%fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) then
+         e = CAPNP_ERR_KIND
+         call capnp_message_free(m)
+         return
+      end if
+      r = message_return_get(msg, e)
+      if (e /= CAPNP_OK) return
+      ansid = return_answer_id_get(r)
+      is_exc = return_which(r) /= RETURN_RESULTS_TAG
+      if (.not. is_exc) then
+         pl = return_results_get(r, e)
+         if (e /= CAPNP_OK) return
+         content = payload_content_get(pl, e)
+         if (e /= CAPNP_OK) return
+         kind = content%kind
+      end if
+      e = CAPNP_OK
+      call capnp_message_free(m)
+   end subroutine recv_answer
+
+   !> A capability provided for a third vat is claimable exactly once.
+   subroutine t_provide_and_accept(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, kind
+      integer(int64) :: ansid
+      integer(int64), parameter :: nonce = int(z'FEEDFACE', int64)
+      logical :: is_exc
+      call two_live_exports(a, b, n)
+      call check_(error, a >= 0, 'provide: server has a live export')
+      if (allocated(error)) return
+
+      call send_provide(80_int64, a, nonce, err)
+      call check_(error, err == CAPNP_OK, 'provide: sent')
       call rpc_pump_once(srv, err)
-      call check_(error, err == CAPNP_OK, 'rpc: server replied unimplemented')
-      call rpc_pump_once(cli, err)
-      call check_(error, err == CAPNP_OK, 'rpc: client absorbed unimplemented')
-   end subroutine t_unimplemented
+      call check_(error, err == CAPNP_OK, 'provide: server handled')
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 80_int64 .and. .not. is_exc, &
+                  'provide: answered without exception')
+      call check_(error, rpc_pending_provisions(srv) == 1, &
+                  'provide: arrangement recorded')
+
+      call send_accept(81_int64, nonce, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 81_int64 .and. .not. is_exc, &
+                  'accept: answered without exception')
+      ! What comes back is a capability, not a struct.
+      call check_(error, kind == CAPNP_PK_CAP, 'accept: content is a capability')
+      call check_(error, rpc_pending_provisions(srv) == 0, &
+                  'accept: arrangement consumed')
+
+      ! A nonce is single-use: leaving it claimable would let anyone who
+      ! learned it take the capability again.
+      call send_accept(82_int64, nonce, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 82_int64 .and. is_exc, &
+                  'accept: replay refused')
+   end subroutine t_provide_and_accept
+
+   !> An Accept naming a nonce nobody arranged is refused, even while a
+   !> different arrangement is standing: matching is on the nonce, not on
+   !> the mere existence of something to hand over.
+   subroutine t_accept_unknown_nonce(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, kind
+      integer(int64) :: ansid
+      integer(int64), parameter :: arranged = int(z'C0FFEE', int64)
+      logical :: is_exc
+      call two_live_exports(a, b, n)
+      call check_(error, a >= 0, 'accept: server has a live export')
+      if (allocated(error)) return
+
+      call send_provide(84_int64, a, arranged, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. .not. is_exc, 'accept: setup provide')
+
+      call send_accept(85_int64, int(z'DEADBEEF', int64), err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 85_int64 .and. is_exc, &
+                  'accept: unknown nonce refused')
+      call check_(error, rpc_pending_provisions(srv) == 1, &
+                  'accept: the standing arrangement is untouched')
+
+      ! Clear it, so later cases start from an empty table.
+      call send_accept(87_int64, arranged, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. .not. is_exc, 'accept: arranged nonce claimed')
+   end subroutine t_accept_unknown_nonce
+
+   !> Providing a capability the vat does not host is refused, and leaves
+   !> no arrangement behind.
+   subroutine t_provide_unhosted(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: kind, before
+      integer(int64) :: ansid
+      logical :: is_exc
+      before = rpc_pending_provisions(srv)
+      call send_provide(86_int64, size(srv%exports) - 1, 1234_int64, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 86_int64 .and. is_exc, &
+                  'provide: unhosted target refused')
+      call check_(error, rpc_pending_provisions(srv) == before, &
+                  'provide: nothing recorded for a refused target')
+   end subroutine t_provide_unhosted
+
+   !> Two arrangements over the same capability are independent: claiming
+   !> one leaves the other standing.
+   subroutine t_two_provisions_independent(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, kind, before
+      integer(int64) :: ansid
+      logical :: is_exc
+      call two_live_exports(a, b, n)
+      if (allocated(error)) return
+      before = rpc_pending_provisions(srv)
+
+      call send_provide(90_int64, a, int(z'AAA', int64), err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call send_provide(91_int64, a, int(z'BBB', int64), err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, rpc_pending_provisions(srv) == before + 2, &
+                  'provide: two arrangements recorded')
+
+      call send_accept(92_int64, int(z'AAA', int64), err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. .not. is_exc, 'accept: first claimed')
+      call check_(error, rpc_pending_provisions(srv) == before + 1, &
+                  'accept: the other arrangement stands')
+
+      call send_accept(93_int64, int(z'BBB', int64), err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. .not. is_exc, 'accept: second claimed')
+      call check_(error, rpc_pending_provisions(srv) == before, &
+                  'accept: both arrangements consumed')
+   end subroutine t_two_provisions_independent
 
    !> Level 2 persistence hook: Persistent.save on the bootstrap cap
    !> answers an application-defined SturdyRef.

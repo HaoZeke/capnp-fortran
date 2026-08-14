@@ -182,9 +182,18 @@ Capability implementations extend `rpc_server_t` and implement
 `dispatch(ctx, err)`; `ctx` carries `interface_id`, `method_id`, the
 resolved `params` content, and the results payload. Answering
 `RPC_PERSISTENT_IFACE` / `RPC_PERSISTENT_SAVE` opts a capability into
-level 2 persistence with application-defined SturdyRefs. Level 3/4
-messages (provide/accept/join) are answered with `Message.unimplemented`
-per the spec, matching capnp-C++. `capnp_posix` provides the socket
+level 2 persistence with application-defined SturdyRefs.
+
+Level 3 `Provide` records the capability under the recipient's nonce and
+answers empty; `Accept` matches that nonce, consumes it, and returns the
+capability. The ids come from `rpc_threeparty_capnp`, the network layer
+this family defines (`schema/rpc-threeparty.capnp`); it also carries the
+join keys, so a vat speaks it instead of `rpc_twoparty_capnp`, not
+alongside. Level 4 `Join` accumulates parts against their `joinId` and
+answers the whole set at once. The obsolete save/delete messages get
+`Message.unimplemented`, echoing the original per the spec.
+
+`capnp_posix` provides the socket
 surface (socketpair, TCP listen/accept/connect, poll) as pure
 `iso_c_binding` interfaces into libc.
 

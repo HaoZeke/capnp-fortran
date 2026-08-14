@@ -12,12 +12,20 @@ module capnp_rpc
    use rpc_capnp
    ! JoinKeyPart / JoinResult are defined by the network layer, not by
    ! rpc.capnp; this vat speaks the two-party one.
-   use rpc_twoparty_capnp, only: join_key_part_t, join_result_t, &
-                                 join_key_part_join_id_get, &
-                                 join_key_part_part_count_get, &
-                                 join_key_part_part_num_get, &
-                                 join_result_new, join_result_join_id_set, &
-                                 join_result_succeeded_set, join_result_cap_set
+   ! One network layer, not two. rpc-twoparty.capnp declares the
+   ! third-party ids empty, because a two-party connection has no third
+   ! vat to name; rpc-threeparty.capnp gives them content and carries the
+   ! same join keys, and both modules declare the same names, so a vat
+   ! speaks one or the other.
+   use rpc_threeparty_capnp, only: provision_id_t, recipient_id_t, &
+                                   provision_id_nonce_get, &
+                                   recipient_id_nonce_get, &
+                                   join_key_part_t, join_result_t, &
+                                   join_key_part_join_id_get, &
+                                   join_key_part_part_count_get, &
+                                   join_key_part_part_num_get, &
+                                   join_result_new, join_result_join_id_set, &
+                                   join_result_succeeded_set, join_result_cap_set
    use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
    implicit none
@@ -32,6 +40,7 @@ module capnp_rpc
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
+   public :: rpc_pending_provisions
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
@@ -56,6 +65,7 @@ module capnp_rpc
    integer, parameter :: MAXE = 64   ! live exports
    integer, parameter :: MAXOPS = 8  ! pipeline ops per capability
    integer, parameter :: MAXCAPS = 16 ! caps per payload
+   integer, parameter :: MAXPROV = 32       ! capabilities held for a third vat
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
    integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
 
@@ -120,6 +130,18 @@ module capnp_rpc
       integer :: exports(0:MAXCAPS - 1) = -1
    end type rpc_answer_slot_t
 
+   !> A capability promised to a third vat (level 3), awaiting its Accept.
+   !>
+   !> The introducer told us to expect someone, and the nonce is the whole
+   !> of the arrangement. Matching on it alone is what lets the recipient
+   !> claim the capability without us having to trust her account of who
+   !> sent her.
+   type :: rpc_provision_slot_t
+      logical :: used = .false.
+      integer(int64) :: nonce = 0_int64
+      integer :: eid = -1
+   end type rpc_provision_slot_t
+
    !> One in-flight Join (level 4), keyed by the sender's joinId.
    !>
    !> A Join asks whether several capabilities are the same object. The
@@ -158,6 +180,7 @@ module capnp_rpc
       type(rpc_export_slot_t) :: exports(0:MAXE - 1)
       type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
+      type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
    end type rpc_conn_t
@@ -707,6 +730,10 @@ contains
       case (MESSAGE_UNIMPLEMENTED_TAG)
          ! Peer did not understand something we sent; nothing to do at
          ! level 1 (we only send level 1 messages).
+      case (MESSAGE_PROVIDE_TAG)
+         call handle_provide(conn, msg, err)
+      case (MESSAGE_ACCEPT_TAG)
+         call handle_accept(conn, msg, err)
       case (MESSAGE_JOIN_TAG)
          call handle_join(conn, msg, err)
       case (MESSAGE_RESOLVE_TAG)
@@ -716,10 +743,8 @@ contains
          ! addressed to the promise, which it does until Release.
          call send_unimplemented(conn, msg, err)
       case default
-         ! Provide and Accept introduce a capability to a third vat, which
-         ! a two-party connection has no way to name, and the obsolete
-         ! save/delete messages are gone from the protocol. Reply
-         ! unimplemented, echoing the message, per the spec.
+         ! The obsolete save/delete messages. Reply unimplemented,
+         ! echoing the message, per the spec.
          call send_unimplemented(conn, msg, err)
       end select
       call capnp_message_free(m)
@@ -928,6 +953,178 @@ contains
          end if
       end select
    end subroutine resolve_message_target
+
+   !> Level 3: hold a capability for whoever presents this nonce.
+   !>
+   !> The answer is an empty Return: the introducer is not waiting for a
+   !> value, only for confirmation that the arrangement is recorded.
+   subroutine handle_provide(conn, msg, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_t), intent(in) :: msg
+      integer, intent(out) :: err
+      type(provide_t) :: pv
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(capnp_ptr_t) :: rp
+      integer(int64) :: qid, nonce
+      integer :: eid, i
+
+      pv = message_provide_get(msg, err)
+      if (err /= CAPNP_OK) return
+      qid = provide_question_id_get(pv)
+
+      tgt = provide_target_get(pv, err)
+      if (err /= CAPNP_OK) return
+      call resolve_message_target(conn, tgt, eid, err)
+      if (err /= CAPNP_OK) return
+      if (eid < 0) then
+         call send_answer_exception(conn, qid, 'provide: no such capability', err)
+         return
+      end if
+
+      rp = provide_recipient_get(pv, err)
+      if (err /= CAPNP_OK) return
+      if (rp%kind /= CAPNP_PK_STRUCT) then
+         call send_answer_exception(conn, qid, 'provide: no recipient', err)
+         return
+      end if
+      rid%p = rp
+      nonce = recipient_id_nonce_get(rid)
+
+      do i = 0, MAXPROV - 1
+         if (.not. conn%provisions(i)%used) then
+            conn%provisions(i)%used = .true.
+            conn%provisions(i)%nonce = nonce
+            conn%provisions(i)%eid = eid
+            ! The recipient holds a reference once it accepts.
+            conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+            call send_empty_answer(conn, qid, err)
+            return
+         end if
+      end do
+      call send_answer_exception(conn, qid, 'provide: table full', err)
+   end subroutine handle_provide
+
+   !> Level 3: claim a capability a third vat provided for us.
+   !>
+   !> A nonce is single-use. Leaving it claimable would let anyone who
+   !> learns it take the capability again later.
+   subroutine handle_accept(conn, msg, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_t), intent(in) :: msg
+      integer, intent(out) :: err
+      type(accept_t) :: ac
+      type(provision_id_t) :: pid
+      type(capnp_ptr_t) :: pp, ctab
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      type(rpc_call_ctx_t) :: ctx
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qid, nonce
+      integer :: i, eid
+
+      ac = message_accept_get(msg, err)
+      if (err /= CAPNP_OK) return
+      qid = accept_question_id_get(ac)
+
+      pp = accept_provision_get(ac, err)
+      if (err /= CAPNP_OK) return
+      if (pp%kind /= CAPNP_PK_STRUCT) then
+         call send_answer_exception(conn, qid, 'accept: no provision', err)
+         return
+      end if
+      pid%p = pp
+      nonce = provision_id_nonce_get(pid)
+
+      eid = -1
+      do i = 0, MAXPROV - 1
+         if (conn%provisions(i)%used .and. conn%provisions(i)%nonce == nonce) then
+            eid = conn%provisions(i)%eid
+            conn%provisions(i) = rpc_provision_slot_t()
+            exit
+         end if
+      end do
+      if (eid < 0) then
+         call send_answer_exception(conn, qid, 'accept: no such provision', err)
+         return
+      end if
+
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) return
+      r = message_return_init(rmsg, err)
+      if (err /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, err)
+      if (err /= CAPNP_OK) return
+      ctx%results = return_results_init(r, err)
+      if (err /= CAPNP_OK) return
+      ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+      if (err /= CAPNP_OK) return
+      cd%p = capnp_list_get_struct(ctab, 0, err)
+      if (err /= CAPNP_OK) return
+      call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
+      if (err /= CAPNP_OK) return
+      call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, 0), err)
+      if (err /= CAPNP_OK) return
+      call finish_answer(conn, qid, rm, ctx, err)
+   end subroutine handle_accept
+
+   !> Answer a question with empty results.
+   subroutine send_empty_answer(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      type(rpc_call_ctx_t) :: ctx
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) return
+      r = message_return_init(rmsg, err)
+      if (err /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, err)
+      if (err /= CAPNP_OK) return
+      ctx%results = return_results_init(r, err)
+      if (err /= CAPNP_OK) return
+      call finish_answer(conn, qid, rm, ctx, err)
+   end subroutine send_empty_answer
+
+   !> Answer a question with an exception.
+   subroutine send_answer_exception(conn, qid, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      type(rpc_call_ctx_t) :: ctx
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) return
+      r = message_return_init(rmsg, err)
+      if (err /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, err)
+      if (err /= CAPNP_OK) return
+      call fill_exception(r, reason, err)
+      if (err /= CAPNP_OK) return
+      call finish_answer(conn, qid, rm, ctx, err)
+   end subroutine send_answer_exception
+
+   !> Nonces of capabilities held for a third vat.
+   function rpc_pending_provisions(conn) result(n)
+      type(rpc_conn_t), intent(in) :: conn
+      integer :: n, i
+      n = 0
+      do i = 0, MAXPROV - 1
+         if (conn%provisions(i)%used) n = n + 1
+      end do
+   end function rpc_pending_provisions
 
    !> Join (level 4): does this set of capabilities name one object?
    !>

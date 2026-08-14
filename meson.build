@@ -26,6 +26,7 @@ capnp_fsrc = files(
   'src/capnp_rpc_transport.f90',
   'src/rpc_capnp.f90',
   'src/rpc_twoparty_capnp.f90',
+  'src/rpc_threeparty_capnp.f90',
   'src/capnp_rpc.f90',
   'src/capnp_schema.f90',
   'src/capnp_dynamic.f90',

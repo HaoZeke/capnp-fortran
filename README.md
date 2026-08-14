@@ -67,7 +67,7 @@ and capnp-C++:
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3 (three-party: `Provide`/`Accept`) | no | no (replies `unimplemented`) | not yet (replies `unimplemented`) |
+| RPC level 3 (three-party: `Provide`/`Accept`) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
@@ -78,13 +78,24 @@ The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
 over TCP and calls it, pipelined and settled.
 
-Level 3 is three-party introduction, which a two-party connection cannot
-express: `rpc-twoparty.capnp` declares `ThirdPartyCapId` and `RecipientId`
-as empty structs, "never used, because there is no third party". So
-`Provide` and `Accept` get `Message.unimplemented` here, and will until
-this vat grows a network layer that can name a third vat. Upstream added
-level 3 after 1.4.0; `capnp` 1.4.0 has no `Provide`/`Accept` handling at
-all.
+Level 3 is three-party introduction. `rpc.capnp` leaves `ProvisionId`,
+`RecipientId` and `ThirdPartyCapId` as `AnyPointer` for the network layer
+to define, and `rpc-twoparty.capnp` declares them empty, "never used,
+because there is no third party". Defining them is the network layer's
+job, so this family ships one: `schema/rpc-threeparty.capnp`, shared
+verbatim by all four ports, names a vat by host and port and keys a
+handoff by a nonce.
+
+Alice, holding a capability hosted by Bob, wants Carol to have it. She
+sends Bob `Provide{target, recipient = RecipientId{carol, nonce}}` and
+tells Carol where to go; Carol sends Bob `Accept{ProvisionId{nonce}}` and
+gets the capability back in the Return. The nonce is the whole of the
+arrangement, which is what lets Bob hand the capability over without
+taking Carol's word for who sent her, and it is single-use: leaving it
+claimable would let anyone who learned it take the capability again.
+
+Upstream added level 3 after 1.4.0; `capnp` 1.4.0 has no `Provide` /
+`Accept` handling at all, and main (4bfab51) has it.
 
 Level 4 is `Join`: asking whether several capabilities are one object.
 The two-party network defines this fully, and it is implemented here.
