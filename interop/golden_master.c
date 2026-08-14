@@ -16,14 +16,12 @@
  *     _  @0p :AnyPointer;          # spare pointer slot, left null
  *   }
  *
- * Why Elem carries a spare (null) pointer slot: c-capnproto's capn_new_list
- * only emits a COMPOSITE list when `ptrs || datasz > 8` (see capn.c
- * capn_new_list). A struct with a single data word and no pointers would be
- * down-encoded to a primitive List(UInt64) there, while our runtime always
- * emits composite. Giving Elem one pointer slot forces composite on both
- * sides so the golden bytes can match. The u32 field @0 is exactly as
- * specified; the spare slot stays zero and costs nothing on the wire beyond
- * the (shared) pointer word both encoders reserve.
+ * Elem carries a spare (null) pointer slot so this message exercises a
+ * two-word element. c-capnproto's generic capn_new_list still down-encodes
+ * `ptrs == 0 && datasz <= 8` to a primitive list, but its generated code
+ * calls capn_new_struct_list, which is always COMPOSITE. The narrower
+ * one-data-word, zero-pointer element that upstream also encodes as
+ * COMPOSITE is covered by test_single_word_struct_list below.
  */
 
 #include <stdarg.h>
@@ -366,6 +364,86 @@ static void test_canonical_form(void **state)
 	assert_memory_equal(canon, root_ptr, sizeof root_ptr);
 }
 
+/* List(Struct) whose element is one data word with no pointer section.
+ *
+ * This is the shape where a down-encoding to a primitive List(UInt64) would
+ * still satisfy a reader (the spec allows the upgrade) while diverging from
+ * the reference C++ encoder byte for byte. Upstream `capnp encode` emits
+ * COMPOSITE here, so both encoders must too. The expected bytes below are
+ * the ones capnp 1.0.2 produces for
+ *
+ *   struct Pt { n @0 :UInt32; }
+ *   struct Holder { items @0 :List(Pt); }
+ *   (items = [(n = 1), (n = 2), (n = 3)])
+ */
+static const uint8_t kUpstreamSingleWordList[] = {
+	/* segment table: 1 segment, 6 words */
+	0x00, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+	/* root struct pointer: 0 data words, 1 pointer word */
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+	/* list pointer: composite (C=7), 3 words of content */
+	0x01, 0x00, 0x00, 0x00, 0x1f, 0x00, 0x00, 0x00,
+	/* tag: 3 elements, 1 data word, 0 pointer words */
+	0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+	0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+static void test_single_word_struct_list(void **state)
+{
+	uint8_t fbuf[512], cbuf[512];
+	int64_t fn, cn;
+	(void)state;
+
+	/* Fortran runtime through the shim. */
+	{
+		int h, rs, lst, el, rc, i;
+		int64_t written = 0;
+
+		h = cabi_builder_new();
+		assert_true(h >= 0);
+		rs = cabi_new_struct(h, 0, 1);
+		lst = cabi_new_composite_list(h, 3, 1, 0);
+		for (i = 0; i < 3; i++) {
+			el = cabi_list_get_struct(h, lst, i);
+			cabi_set_u32(h, el, 0, (int32_t)(i + 1));
+		}
+		cabi_setp(h, rs, 0, lst);
+		cabi_set_root(h, rs);
+		rc = cabi_serialize(h, fbuf, sizeof fbuf, &written);
+		cabi_builder_free(h);
+		assert_int_equal(rc, 0);
+		fn = written;
+	}
+
+	/* Reference C encoder, through the always-composite entry point that
+	 * capnpc-c emits for List(Struct). */
+	{
+		struct capn c;
+		capn_ptr root, rs, lst, el;
+		int i;
+
+		capn_init_malloc(&c);
+		root = capn_root(&c);
+		rs = capn_new_struct(root.seg, 0, 1);
+		lst = capn_new_struct_list(root.seg, 3, 8, 0);
+		for (i = 0; i < 3; i++) {
+			el = capn_getp(lst, i, 0);
+			capn_write32(el, 0, (uint32_t)(i + 1));
+		}
+		capn_setp(rs, 0, lst);
+		capn_setp(root, 0, rs);
+		cn = capn_write_mem(&c, cbuf, sizeof cbuf, 0);
+		capn_free(&c);
+	}
+
+	assert_int_equal(fn, (int64_t)sizeof kUpstreamSingleWordList);
+	assert_memory_equal(fbuf, kUpstreamSingleWordList, sizeof kUpstreamSingleWordList);
+	assert_int_equal(cn, (int64_t)sizeof kUpstreamSingleWordList);
+	assert_memory_equal(cbuf, kUpstreamSingleWordList, sizeof kUpstreamSingleWordList);
+}
+
 int main(void)
 {
 	const struct CMUnitTest tests[] = {
@@ -375,6 +453,7 @@ int main(void)
 	    cmocka_unit_test(test_packed_golden),
 	    cmocka_unit_test(test_primitive_list_golden),
 	    cmocka_unit_test(test_canonical_form),
+	    cmocka_unit_test(test_single_word_struct_list),
 	};
 	return cmocka_run_group_tests(tests, NULL, NULL);
 }

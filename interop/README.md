@@ -55,6 +55,12 @@ $ pixi run -e interop meson test -C build-interop
 - **`test_canonical_form`** -- `cabi_canonicalize` of the golden message:
   8-word preorder single segment with the composite elements' null pointer
   sections trimmed uniformly, root pointer word checked byte for byte.
+- **`test_single_word_struct_list`** -- `List(Struct)` whose element is one
+  data word with no pointer section, built with `cabi_new_composite_list` and
+  with `capn_new_struct_list`, both compared against the literal bytes
+  `capnp encode` produces. This is the shape a reader would still accept
+  down-encoded to `List(UInt64)`, so byte equality is the only check that
+  catches a divergence.
 
 ## Schema and the composite-list gate
 
@@ -72,12 +78,13 @@ Elem :Struct {
 }
 ```
 
-`Elem` carries a spare (null) pointer slot on purpose. c-capnproto's
-`capn_new_list` only emits a **composite** list when `ptrs || datasz > 8`; a
-one-data-word, zero-pointer struct would be down-encoded there to a primitive
-`List(UInt64)`, whereas this runtime always emits composite. The spare slot
-forces composite on both sides so the golden bytes match. The `UInt32` field at
-offset 0 is unchanged; the spare slot stays zero on the wire.
+`Elem` carries a spare (null) pointer slot so the golden message exercises a
+two-word composite element. c-capnproto's generic `capn_new_list` still
+down-encodes `ptrs == 0 && datasz <= 8` to a primitive list, but the code
+`capnpc-c` generates for `List(Struct)` calls `capn_new_struct_list`, which is
+always composite -- the same choice upstream `capnp encode` makes. The narrower
+one-data-word, zero-pointer element is covered separately by
+`test_single_word_struct_list`.
 
 [ccapnp]: https://github.com/HaoZeke/c-capnproto
 [meson]: https://mesonbuild.com/
