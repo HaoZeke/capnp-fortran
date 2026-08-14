@@ -60,6 +60,7 @@ contains
       if (.not. allocated(error)) call t_pump_poll(error)
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
+      if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
 
       call rpc_conn_close(cli)
@@ -237,6 +238,36 @@ contains
       call check_(error, .not. ok1 .and. .not. ok2, 'join: unresolvable part fails the set')
       call check_(error, .not. cap1 .and. .not. cap2, 'join: failed join carries no cap')
    end subroutine t_join_unresolvable_part
+
+   !> Every part agrees, but they agree on naming nothing: equality has to
+   !> be proven against a capability we host, not against absence.
+   subroutine t_join_all_parts_unresolvable(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: dead
+      integer(int64) :: ansid1, ansid2, jid1, jid2
+      logical :: ok1, ok2, cap1, cap2
+      dead = free_export_slot()
+      call check_(error, dead >= 0, 'join: found an unused export id')
+      if (allocated(error)) return
+
+      call send_join_part(740_int64, dead, 17_int64, 2, 0, err)
+      call check_(error, err == CAPNP_OK, 'join: dead part 0 sent')
+      call rpc_pump_once(srv, err)
+      call send_join_part(741_int64, dead, 17_int64, 2, 1, err)
+      call check_(error, err == CAPNP_OK, 'join: dead part 1 sent')
+      call rpc_pump_once(srv, err)
+      if (allocated(error)) return
+
+      call recv_join_result(ansid1, jid1, ok1, cap1, err)
+      call check_(error, err == CAPNP_OK, 'join: all-dead first result')
+      call recv_join_result(ansid2, jid2, ok2, cap2, err)
+      call check_(error, err == CAPNP_OK, 'join: all-dead second result')
+      if (allocated(error)) return
+
+      call check_(error, .not. ok1 .and. .not. ok2, &
+                  'join: agreeing on nothing is not a join')
+      call check_(error, .not. cap1 .and. .not. cap2, 'join: no cap for a failed set')
+   end subroutine t_join_all_parts_unresolvable
 
    !> An export id the server is not using.
    function free_export_slot() result(idx)
