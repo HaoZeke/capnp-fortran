@@ -26,6 +26,9 @@ jobs:
       # our own earlier output.
       - name: wire goldens still match the capnp CLI
         run: pixi run -- bash scripts/gen-fixtures.sh --check
+
+      - name: level 3 frames still match the capnp CLI
+        run: pixi run -- bash scripts/gen-rpc-frames.sh --check
       - name: test
         run: pixi run test
       - name: codegen output matches checked-in modules
