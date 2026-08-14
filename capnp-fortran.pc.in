@@ -1,0 +1,14 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+bindir=@bindir@
+includedir=@includedir@
+moddir=${includedir}/capnp_fortran
+codegen=${bindir}/capnpc-fortran
+
+Name: capnp-fortran
+Description: Native modern-Fortran Cap'n Proto (wire, packed, canonical, RPC)
+URL: https://capnp-fortran.rgoswami.me
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lcapnp_fortran
+Cflags: -I${moddir}

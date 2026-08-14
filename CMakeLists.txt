@@ -145,4 +145,33 @@ if(CAPNP_FORTRAN_INSTALL)
     "${CMAKE_CURRENT_BINARY_DIR}/capnp_fortranConfigVersion.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/capnp_fortran
   )
+
+  # pkg-config, for build systems that do not speak CMake. Cflags points at
+  # the .mod directory, which is what a Fortran consumer needs on the
+  # compile line; meson's pkg.generate writes the same file.
+  set(prefix "${CMAKE_INSTALL_PREFIX}")
+  set(exec_prefix "\${prefix}")
+  if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}")
+    set(libdir "${CMAKE_INSTALL_LIBDIR}")
+  else()
+    set(libdir "\${prefix}/${CMAKE_INSTALL_LIBDIR}")
+  endif()
+  if(IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}")
+    set(bindir "${CMAKE_INSTALL_BINDIR}")
+  else()
+    set(bindir "\${prefix}/${CMAKE_INSTALL_BINDIR}")
+  endif()
+  if(IS_ABSOLUTE "${CMAKE_INSTALL_INCLUDEDIR}")
+    set(includedir "${CMAKE_INSTALL_INCLUDEDIR}")
+  else()
+    set(includedir "\${prefix}/${CMAKE_INSTALL_INCLUDEDIR}")
+  endif()
+  configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/capnp-fortran.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/capnp-fortran.pc"
+    @ONLY
+  )
+  install(FILES "${CMAKE_CURRENT_BINARY_DIR}/capnp-fortran.pc"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig
+  )
 endif()

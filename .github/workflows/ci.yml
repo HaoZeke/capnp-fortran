@@ -77,3 +77,15 @@ jobs:
           pixi run -e interop meson compile -C build-interop
       - name: golden master vs c-capnproto
         run: pixi run -e interop meson test -C build-interop -v
+
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.8
+        with:
+          environments: interop
+      # Install rules that nothing exercises are how a broken Config.cmake
+      # or a stale .pc reaches users. This builds a consumer four ways.
+      - name: CMake, find_package, pkg-config and meson subproject
+        run: pixi run -e interop bash scripts/packaging-smoke.sh

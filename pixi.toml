@@ -18,6 +18,8 @@ pkg-config = "*"
 c-compiler = "*"
 cxx-compiler = "*"
 capnproto = ">=1.0"
+# scripts/packaging-smoke.sh consumes the project through CMake as well.
+cmake = ">=3.16"
 
 [feature.docs]
 dependencies = { python = ">=3.10", sphinx = ">=7,<9", graphviz = "*", emacs = "*" }

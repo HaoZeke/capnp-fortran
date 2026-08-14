@@ -1,7 +1,7 @@
 project(
-  'capnp-fortran-interop',
+  'capnp-fortran',
   ['fortran', 'c'],
-  version: '0.1.0',
+  version: '0.1.1',
   license: 'MIT',
   default_options: ['warning_level=2', 'c_std=c11'],
 )
@@ -32,7 +32,27 @@ capnp_fsrc = files(
   'src/stream_capnp.f90',
 )
 
-capnp_flib = static_library('capnp_f', capnp_fsrc)
+capnp_flib = static_library(
+  'capnp_fortran',
+  capnp_fsrc,
+  install: true,
+)
+
+# Consumers reach this through `dependency('capnp-fortran')`, which falls
+# back to this subproject via a .wrap. Meson tracks the Fortran module
+# directory of a linked target itself, so `use capnp` resolves without the
+# consumer naming an include path.
+capnp_fortran_dep = declare_dependency(link_with: capnp_flib)
+meson.override_dependency('capnp-fortran', capnp_fortran_dep)
+
+pkg = import('pkgconfig')
+pkg.generate(
+  capnp_flib,
+  name: 'capnp-fortran',
+  description: 'Native modern-Fortran Cap\'n Proto (wire, packed, canonical, RPC)',
+  filebase: 'capnp-fortran',
+  url: 'https://capnp-fortran.rgoswami.me',
+)
 
 # c-capnproto reference runtime. It ships autotools/cmake, but the runtime is
 # just three .c files plus its headers, so we compile those directly from a
