@@ -54,7 +54,7 @@ hooks = [
     files = "^(fpm\\.toml|docs/source/conf\\.py)$",
     args = [
       "-c",
-      "v=$(rg -n '^version\\s*=' fpm.toml | head -1 | sed -E 's/.*\"([^\"]+)\".*/\\1/'); r=$(rg -n '^release\\s*=' docs/source/conf.py | head -1 | sed -E 's/.*\"([^\"]+)\".*/\\1/'); if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: fpm.toml=$v conf.py release=$r\"; exit 1; fi",
+      "set -eu; v=$(sed -n 's/^version[[:space:]]*=[[:space:]]*\"\\(.*\\)\"/\\1/p' fpm.toml | head -1); r=$(sed -n 's/^release[[:space:]]*=[[:space:]]*\"\\(.*\\)\"/\\1/p' docs/source/conf.py | head -1); if [ -z \"$v\" ] || [ -z \"$r\" ]; then echo \"could not read a version: fpm.toml='$v' conf.py release='$r'\"; exit 1; fi; if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: fpm.toml=$v conf.py release=$r\"; exit 1; fi",
     ],
   },
   {
