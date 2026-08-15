@@ -8,6 +8,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-15
+
+RPC levels 1 through 4, with level 3 over a network layer this family
+defines, and packaging for CMake, meson and pkg-config consumers.
+
 ### Added
 
 - RPC level 3, both halves. `Provide` holds a capability under the
@@ -146,5 +151,6 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.2.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.1
 [0.1.0]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.0
