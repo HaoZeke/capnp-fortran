@@ -68,6 +68,7 @@ contains
       if (.not. allocated(error)) call t_third_party_introduction(error)
       if (.not. allocated(error)) call t_introduction_in_an_answer(error)
       if (.not. allocated(error)) call t_overlong_host_refused(error)
+      if (.not. allocated(error)) call t_reference_introduction(error)
       if (.not. allocated(error)) call t_reference_frames(error)
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
@@ -483,6 +484,35 @@ contains
       call check_(error, rpc_pending_introductions(srv) == before, &
                   'intro: overlong host refused')
    end subroutine t_overlong_host_refused
+
+   !> The frame the reference encoder writes, rather than one this
+   !> library built: a layout the writer and reader share but the wire
+   !> format does not would pass every case above.
+   subroutine t_reference_introduction(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer(int8), allocatable :: frame(:)
+      type(rpc_introduction_t) :: got(4)
+      integer :: kind, before, n
+      integer(int64) :: ansid
+      logical :: is_exc
+      before = rpc_pending_introductions(srv)
+      call capnp_read_file('test/fixtures/rpc-introduce.bin', frame, err)
+      call check_(error, err == CAPNP_OK, 'frames: introduce golden readable')
+      if (allocated(error)) return
+      call px_send_all(cli%fd, frame, err)
+      call rpc_pump_once(srv, err)
+      ! The call names export 0, which is live, so it is answered too;
+      ! the introduction rides in its params either way.
+      call recv_answer(ansid, is_exc, kind, err)
+      n = rpc_pending_introductions(srv, got)
+      call check_(error, n == before + 1, 'frames: reference introduction recorded')
+      if (allocated(error)) return
+      call check_(error, got(n)%nonce == int(z'ABCDEF', int64), 'frames: reference nonce')
+      call check_(error, got(n)%vine_id == 77_int64, 'frames: reference vine')
+      call check_(error, got(n)%port == 5000, 'frames: reference port')
+      call check_(error, got(n)%host(1:got(n)%host_len) == '10.0.0.7', &
+                  'frames: reference host')
+   end subroutine t_reference_introduction
 
    !> Level 3 driven by frames the reference `capnp` CLI encoded.
    !>
