@@ -184,16 +184,31 @@ resolved `params` content, and the results payload. Answering
 `RPC_PERSISTENT_IFACE` / `RPC_PERSISTENT_SAVE` opts a capability into
 level 2 persistence with application-defined SturdyRefs.
 
-Level 3 `Provide` records the capability under the recipient's nonce and
-answers empty; `Accept` matches that nonce, consumes it, and returns the
-capability. The other half is receiving: a `thirdPartyHosted`
-CapDescriptor in an incoming payload records an introduction, which
-`rpc_pending_introductions` hands over and `rpc_introduction_done`
-finishes by releasing the vine. The ids come from `rpc_threeparty_capnp`, the network layer
-this family defines (`schema/rpc-threeparty.capnp`); it also carries the
-join keys, so a vat speaks it instead of `rpc_twoparty_capnp`, not
-alongside. Level 4 `Join` accumulates parts against their `joinId` and
-answers the whole set at once. The obsolete save/delete messages get
+Level 3 has both halves. Hosting: `Provide` records the capability under
+the recipient's nonce and answers empty; `Accept` matches that nonce,
+consumes it, and returns the capability. An `Accept` with `embargo` is
+claimed but not answered until the introducer sends `Disembargo` with
+`context.provide` naming its own Provide question, since answering
+sooner would let a call sent straight here overtake one still in flight
+through the introducer.
+
+Receiving: a `thirdPartyHosted` CapDescriptor in an incoming payload
+records an introduction, which `rpc_pending_introductions` hands over
+and `rpc_introduction_done` finishes by releasing the vine. Dialling the
+third vat belongs to the network layer.
+
+Introducing: `rpc_provide_send`, `rpc_accept_send` and
+`rpc_disembargo_provide_send`. An arrangement is made on one connection
+and claimed on another, so it belongs to the vat: `rpc_conn_set_vat`
+shares one between a vat's connections, and it holds the capability
+rather than an export id, since ids are per-connection.
+
+The ids come from `rpc_threeparty_capnp`, the network layer this family
+defines (`schema/rpc-threeparty.capnp`); it also carries the join keys,
+so a vat speaks it instead of `rpc_twoparty_capnp`, not alongside.
+
+Level 4 `Join` accumulates parts against their `joinId` and answers the
+whole set at once. The obsolete save/delete messages get
 `Message.unimplemented`, echoing the original per the spec.
 
 `capnp_posix` provides the socket
