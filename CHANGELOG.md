@@ -8,6 +8,16 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-15
+
+### Fixed
+
+- The optional `cmocka` lookup is pinned to pkg-config. Left to try
+  every method it reaches the CMake one, which warns about the toolchain
+  state wherever CMake cannot probe the compilers, and a consumer
+  building with `--fatal-meson-warnings` then fails on a dependency this
+  project does not need. Found by WrapDB's CI on Alpine, MSYS2 and MSVC.
+
 ## [0.2.1] - 2026-08-15
 
 ### Fixed
@@ -158,6 +168,7 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.2.2]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.1

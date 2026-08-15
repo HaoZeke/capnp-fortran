@@ -1,7 +1,7 @@
 project(
   'capnp-fortran',
   ['fortran', 'c'],
-  version: '0.2.1',
+  version: '0.2.2',
   license: 'MIT',
   default_options: ['warning_level=2', 'c_std=c11'],
 )
@@ -88,6 +88,10 @@ else
   )
 endif
 
-cmocka_dep = dependency('cmocka', required: false)
+# pkg-config only: an optional dependency that falls through to the CMake
+# lookup warns about the toolchain state on hosts where CMake cannot
+# probe the compilers, and a consumer building with --fatal-meson-warnings
+# then fails on a dependency this project does not need.
+cmocka_dep = dependency('cmocka', required: false, method: 'pkg-config')
 
 subdir('interop')
