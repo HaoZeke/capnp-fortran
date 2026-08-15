@@ -1,7 +1,7 @@
 project(
   'capnp-fortran',
   ['fortran', 'c'],
-  version: '0.2.2',
+  version: '0.2.4',
   license: 'MIT',
   default_options: ['warning_level=2', 'c_std=c11'],
 )

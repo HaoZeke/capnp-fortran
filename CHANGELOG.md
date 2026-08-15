@@ -8,6 +8,25 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-15
+
+### Fixed
+
+- Version strings across the build files, which v0.2.3 left at 0.2.2.
+  That tag carries the flang fix below and describes itself as the
+  release before it; use this one.
+
+## [0.2.3] - 2026-08-15
+
+### Fixed
+
+- The RPC question and answer slots are cleared field by field rather
+  than by an empty structure constructor. A component of derived type is
+  where compilers disagree about whether default initialisation carries
+  through: flang rejects `rpc_question_slot_t()` for lacking a value for
+  `retmsg`, where gfortran accepts it. Found by WrapDB's MSYS2 CLANG64
+  and CLANGARM64 runners, which have no gfortran and build with flang.
+
 ## [0.2.2] - 2026-08-15
 
 ### Fixed
@@ -168,6 +187,8 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.2.4]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.1.1...v0.2.0
