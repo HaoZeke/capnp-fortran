@@ -8,6 +8,26 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- RPC level 3, both halves. `Provide` holds a capability under the
+  recipient's nonce and `Accept` claims it; an `Accept` with `embargo`
+  waits for `Disembargo` with `context.provide`. A `thirdPartyHosted`
+  CapDescriptor records an introduction, handed over by
+  `rpc_pending_introductions` and finished by `rpc_introduction_done`,
+  which releases the vine. `rpc_provide_send`, `rpc_accept_send` and
+  `rpc_disembargo_provide_send` are the introducer's side.
+- `schema/rpc-threeparty.capnp`, the network layer that names a third
+  vat, shared verbatim with c-capnproto, capnp-janet and capnp-ts.
+  `rpc.capnp` leaves those ids to the network, and `rpc-twoparty.capnp`
+  declares them empty because a two-party connection has no third to
+  name. A vat speaks one layer or the other, not both.
+- `rpc_conn_set_vat`: level 3 arrangements belong to a vat rather than a
+  connection, since a handoff is made on one and claimed on another.
+- Level 3 goldens the reference `capnp` CLI encodes
+  (`test/fixtures/rpc-{provide,accept,introduce}.bin`), regenerated and
+  verified by `scripts/gen-rpc-frames.sh`.
+
 ### Changed
 
 - Sphinx RST is generated from `docs/orgmode/` at build time and is no
