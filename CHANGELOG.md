@@ -8,6 +8,13 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-15
+
+### Fixed
+
+- The Sphinx release string is back in lockstep with `fpm.toml`. v0.2.0
+  was tagged one commit early and its tree fails the repo's own check.
+
 ## [0.2.0] - 2026-08-15
 
 RPC levels 1 through 4, with level 3 over a network layer this family
@@ -151,6 +158,7 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.2.1]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.1
 [0.1.0]: https://github.com/HaoZeke/capnp-fortran/releases/tag/v0.1.0
