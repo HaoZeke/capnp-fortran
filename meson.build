@@ -1,7 +1,7 @@
 project(
   'capnp-fortran',
   ['fortran', 'c'],
-  version: '0.3.0',
+  version: '0.3.1',
   license: 'MIT',
   default_options: ['warning_level=2', 'c_std=c11'],
 )
@@ -33,10 +33,21 @@ capnp_fsrc = files(
   'src/stream_capnp.f90',
 )
 
-capnp_flib = static_library(
+capnp_flib = library(
   'capnp_fortran',
   capnp_fsrc,
   install: true,
+)
+
+# A subproject reaches the modules through meson itself; an installed
+# package has to carry them, or a consumer cannot `use capnp` at all.
+# Meson compiles them into the target's private directory and passes its
+# own -J, so copy them at install time rather than redirecting the
+# compiler.
+meson.add_install_script(
+  find_program('python3'),
+  meson.current_source_dir() / 'scripts/install-fortran-modules.py',
+  get_option('includedir') / 'capnp-fortran',
 )
 
 # Consumers reach this through `dependency('capnp-fortran')`, which falls
@@ -46,6 +57,15 @@ capnp_flib = static_library(
 capnp_fortran_dep = declare_dependency(link_with: capnp_flib)
 meson.override_dependency('capnp-fortran', capnp_fortran_dep)
 
+# The schema plugin, so `capnp compile -o capnpc-fortran` works from an
+# installed package rather than only from a build tree.
+capnpc_fortran = executable(
+  'capnpc-fortran',
+  ['app/capnpc_emit.f90', 'app/main.f90'],
+  link_with: capnp_flib,
+  install: true,
+)
+
 pkg = import('pkgconfig')
 pkg.generate(
   capnp_flib,
@@ -53,6 +73,7 @@ pkg.generate(
   description: 'Native modern-Fortran Cap\'n Proto (wire, packed, canonical, RPC)',
   filebase: 'capnp-fortran',
   url: 'https://capnp-fortran.rgoswami.me',
+  extra_cflags: ['-I${includedir}/capnp-fortran'],
 )
 
 # c-capnproto reference runtime. It ships autotools/cmake, but the runtime is

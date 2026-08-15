@@ -157,7 +157,7 @@ To depend on it, name the git source and a tag in your own `fpm.toml`:
 
 ```toml
 [dependencies]
-capnp = { git = "https://github.com/HaoZeke/capnp-fortran", tag = "v0.3.0" }
+capnp = { git = "https://github.com/HaoZeke/capnp-fortran", tag = "v0.3.1" }
 ```
 
 then `use capnp` and build as usual. This is the supported route:
@@ -183,7 +183,7 @@ include(FetchContent)
 FetchContent_Declare(
   capnp_fortran
   GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
-  GIT_TAG        v0.3.0
+  GIT_TAG        v0.3.1
 )
 FetchContent_MakeAvailable(capnp_fortran)
 target_link_libraries(myapp PRIVATE capnp_fortran::capnp_fortran)

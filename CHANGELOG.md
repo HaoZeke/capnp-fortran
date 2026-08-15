@@ -8,6 +8,19 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-15
+
+### Fixed
+
+- The meson install is complete enough to use. It shipped a static
+  library and a `.pc` file and nothing else: no `.mod` files, so a
+  consumer could not `use capnp` at all, and no `capnpc-fortran`. The
+  build was written for the subproject case, where meson tracks the
+  module directory itself and the gap does not show. Now a shared
+  library by default, the modules installed to
+  `include/capnp-fortran`, and the schema plugin installed beside them.
+  Found while packaging for conda-forge.
+
 ## [0.3.0] - 2026-08-15
 
 The release to depend on. 0.2.1 through 0.2.4 were four patch tags cut in
@@ -203,6 +216,7 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.3.1]: https://github.com/HaoZeke/capnp-fortran/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.2...v0.2.3
