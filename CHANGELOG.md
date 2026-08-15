@@ -8,6 +8,22 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-15
+
+The release to depend on. 0.2.1 through 0.2.4 were four patch tags cut in
+one afternoon while WrapDB's matrix found real portability bugs, and one
+of them (0.2.3) describes itself as 0.2.2. This supersedes the lot; their
+fixes are all in here.
+
+- 0.2.1: sphinx release string lockstep
+- 0.2.2: `cmocka` lookup pinned to pkg-config, so an optional test
+  dependency cannot reach the CMake lookup and fail a build run with
+  `--fatal-meson-warnings`
+- 0.2.3: RPC slots cleared field by field, since flang rejects an empty
+  structure constructor whose derived-type component it will not default
+  initialise
+- 0.2.4: version strings, which 0.2.3 left behind
+
 ## [0.2.4] - 2026-08-15
 
 ### Fixed
@@ -187,6 +203,7 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.3.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.1...v0.2.2
