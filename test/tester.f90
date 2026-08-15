@@ -14,6 +14,7 @@ program tester
    use test_kitchen, only: collect_kitchen
    use test_parity, only: collect_parity
    use test_rpc, only: collect_rpc
+   use test_rpc_handoff, only: collect_rpc_handoff
    use test_rpc_typed, only: collect_rpc_typed
    use test_stream, only: collect_stream
    implicit none
@@ -35,6 +36,7 @@ program tester
         new_testsuite("kitchen", collect_kitchen), &
         new_testsuite("parity", collect_parity), &
         new_testsuite("rpc", collect_rpc), &
+        new_testsuite("rpc_handoff", collect_rpc_handoff), &
         new_testsuite("rpc_typed", collect_rpc_typed), &
         new_testsuite("stream", collect_stream) &
         ]

@@ -31,6 +31,9 @@ module capnp_rpc
                                    third_party_cap_id_vat_init, &
                                    third_party_cap_id_nonce_get, &
                                    third_party_cap_id_nonce_set, &
+                                   provision_id_new, provision_id_nonce_set, &
+                                   recipient_id_new, recipient_id_nonce_set, &
+                                   recipient_id_vat_init, &
                                    vat_id_t, vat_id_host_get, vat_id_port_get, &
                                    vat_id_host_set, vat_id_port_set
    use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
@@ -48,6 +51,8 @@ module capnp_rpc
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
    public :: rpc_pending_provisions, rpc_embargoed_accepts
+   public :: rpc_vat_t, rpc_conn_set_vat
+   public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
@@ -151,6 +156,10 @@ module capnp_rpc
    type :: rpc_provision_slot_t
       logical :: used = .false.
       integer(int64) :: nonce = 0_int64
+      !> The capability itself, not this connection's id for it: the
+      !> recipient may well arrive on another connection, where that id
+      !> means nothing.
+      class(*), pointer :: srv => null()
       integer :: eid = -1
       !> The introducer's Provide question, which is how a later
       !> Disembargo names this arrangement (rpc.capnp,
@@ -211,6 +220,18 @@ module capnp_rpc
       logical :: failed = .false.
    end type rpc_stream_t
 
+   !> What a vat knows across all its connections.
+   !>
+   !> A level 3 handoff is arranged on one connection and claimed on
+   !> another: the introducer sends `Provide` over its own, and the
+   !> recipient arrives on hers. Holding the arrangement on the
+   !> connection would make it claimable only by the introducer, which is
+   !> no handoff at all. Connections given no vat get one to themselves,
+   !> which is what a two-party deployment wants.
+   type :: rpc_vat_t
+      type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
+   end type rpc_vat_t
+
    type :: rpc_conn_t
       integer :: fd = PX_BAD_FD
       logical :: dead = .false.
@@ -219,7 +240,10 @@ module capnp_rpc
       type(rpc_export_slot_t) :: exports(0:MAXE - 1)
       type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
-      type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
+      !> Shared with this vat's other connections when one is attached;
+      !> otherwise `own_vat` below.
+      type(rpc_vat_t), pointer :: vat => null()
+      type(rpc_vat_t) :: own_vat
       type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
@@ -232,12 +256,15 @@ contains
    ! ------------------------------------------------------------------
 
    subroutine rpc_conn_init(conn, fd, bootstrap)
-      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: fd
       class(rpc_server_t), pointer, intent(in) :: bootstrap
       conn%fd = fd
       conn%dead = .false.
       conn%bootstrap_srv => bootstrap
+      ! Its own vat until told otherwise, which is what a two-party
+      ! deployment wants.
+      conn%vat => conn%own_vat
    end subroutine rpc_conn_init
 
    subroutine rpc_conn_close(conn)
@@ -304,6 +331,117 @@ contains
    !> Ask the peer for its bootstrap capability. The returned cap is a
    !> pipeline on the new question; calls on it work immediately, and
    !> rpc_wait + rpc_result_cap turn it into a settled import.
+   !> `Provide`: ask the peer to hold `imported_cap` for a third vat.
+   !>
+   !> This is the introducer's half of a handoff. The nonce is the whole
+   !> of the arrangement: the recipient presents it in an `Accept`, and
+   !> the host matches on it alone, so it never has to take the
+   !> recipient's word for who sent her. `qid` comes back because a later
+   !> `Disembargo.provide` names it.
+   subroutine rpc_provide_send(conn, imported_cap, host, port, nonce, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: imported_cap, nonce
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(provide_t) :: pv
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(vat_id_t) :: vat
+      err = CAPNP_OK
+      qid = alloc_qid(conn)
+      if (qid < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) return
+      pv = message_provide_init(msg, err)
+      if (err /= CAPNP_OK) return
+      call provide_question_id_set(pv, qid, err)
+      if (err /= CAPNP_OK) return
+      tgt = provide_target_init(pv, err)
+      if (err /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, imported_cap, err)
+      if (err /= CAPNP_OK) return
+      rid = recipient_id_new(m, err)
+      if (err /= CAPNP_OK) return
+      call recipient_id_nonce_set(rid, nonce, err)
+      if (err /= CAPNP_OK) return
+      vat = recipient_id_vat_init(rid, err)
+      if (err /= CAPNP_OK) return
+      call vat_id_host_set(vat, host, err)
+      if (err /= CAPNP_OK) return
+      call vat_id_port_set(vat, port, err)
+      if (err /= CAPNP_OK) return
+      call provide_recipient_set(pv, rid%p, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      call capnp_message_free(m)
+   end subroutine rpc_provide_send
+
+   !> `Accept`: claim a capability a third vat provided for us. The
+   !> answer to `qid` carries the capability.
+   subroutine rpc_accept_send(conn, nonce, embargo, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: nonce
+      logical, intent(in) :: embargo
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(accept_t) :: ac
+      type(provision_id_t) :: pid
+      err = CAPNP_OK
+      qid = alloc_qid(conn)
+      if (qid < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) return
+      ac = message_accept_init(msg, err)
+      if (err /= CAPNP_OK) return
+      call accept_question_id_set(ac, qid, err)
+      if (err /= CAPNP_OK) return
+      if (embargo) then
+         call accept_embargo_set(ac, .true., err)
+         if (err /= CAPNP_OK) return
+      end if
+      pid = provision_id_new(m, err)
+      if (err /= CAPNP_OK) return
+      call provision_id_nonce_set(pid, nonce, err)
+      if (err /= CAPNP_OK) return
+      call accept_provision_set(ac, pid%p, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      call capnp_message_free(m)
+   end subroutine rpc_accept_send
+
+   !> Lift the embargo on the Accept this vat arranged with `Provide`.
+   subroutine rpc_disembargo_provide_send(conn, provide_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: provide_qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) return
+      d = message_disembargo_init(msg, err)
+      if (err /= CAPNP_OK) return
+      call disembargo_context_provide_set(d, provide_qid, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      call capnp_message_free(m)
+   end subroutine rpc_disembargo_provide_send
+
    subroutine rpc_bootstrap_send(conn, cap, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_cap_t), intent(out) :: cap
@@ -886,6 +1024,12 @@ contains
          call finish_answer(conn, qid, rm, ctx, err)
          return
       end if
+      ! The cap table describes the message, not the dispatch: a call
+      ! this vat cannot route still told us where a third party's
+      ! capability lives.
+      params = call_params_get(c, err)
+      if (err == CAPNP_OK) call note_introductions(conn, params, err)
+
       call resolve_target(conn, c, eid, err)
       if (err /= CAPNP_OK .or. eid < 0) then
          call fill_exception(r, 'no such capability', err)
@@ -894,8 +1038,6 @@ contains
       end if
       ctx%interface_id = call_interface_id_get(c)
       ctx%method_id = int(call_method_id_get(c))
-      params = call_params_get(c, err)
-      if (err == CAPNP_OK) call note_introductions(conn, params, err)
       ctx%params = payload_content_get(params, err)
       ctx%rmsg => rm
       ctx%results = return_results_init(r, err)
@@ -1163,12 +1305,13 @@ contains
       nonce = recipient_id_nonce_get(rid)
 
       do i = 0, MAXPROV - 1
-         if (.not. conn%provisions(i)%used) then
-            conn%provisions(i)%used = .true.
-            conn%provisions(i)%nonce = nonce
-            conn%provisions(i)%eid = eid
-            conn%provisions(i)%qid = qid
-            conn%provisions(i)%embargoed = .false.
+         if (.not. conn%vat%provisions(i)%used) then
+            conn%vat%provisions(i)%used = .true.
+            conn%vat%provisions(i)%nonce = nonce
+            conn%vat%provisions(i)%srv => conn%exports(eid)%srv
+            conn%vat%provisions(i)%eid = eid
+            conn%vat%provisions(i)%qid = qid
+            conn%vat%provisions(i)%embargoed = .false.
             ! The recipient holds a reference once it accepts.
             conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
             call send_empty_answer(conn, qid, err)
@@ -1212,18 +1355,25 @@ contains
 
       eid = -1
       do i = 0, MAXPROV - 1
-         if (conn%provisions(i)%used .and. .not. conn%provisions(i)%embargoed &
-             .and. conn%provisions(i)%nonce == nonce) then
-            eid = conn%provisions(i)%eid
+         if (conn%vat%provisions(i)%used .and. .not. conn%vat%provisions(i)%embargoed &
+             .and. conn%vat%provisions(i)%nonce == nonce) then
+            ! Export it here: the id the introducer used belongs to its
+            ! own connection and means nothing on this one.
+            eid = export_server(conn, conn%vat%provisions(i)%srv)
+            if (eid < 0) then
+               call send_answer_exception(conn, qid, 'accept: export table full', err)
+               return
+            end if
+            conn%vat%provisions(i)%eid = eid
             if (accept_embargo_get(ac)) then
                ! Claimed, but the Return waits: the recipient has calls
                ! in flight through the introducer, and answering now
                ! would let one sent straight to us overtake them. The
                ! introducer lifts it with Disembargo.provide.
-               conn%provisions(i)%embargoed = .true.
-               conn%provisions(i)%accept_qid = qid
+               conn%vat%provisions(i)%embargoed = .true.
+               conn%vat%provisions(i)%accept_qid = qid
             else
-               conn%provisions(i) = rpc_provision_slot_t()
+               conn%vat%provisions(i) = rpc_provision_slot_t()
             end if
             exit
          end if
@@ -1282,12 +1432,12 @@ contains
       integer :: i, eid
       err = CAPNP_OK
       do i = 0, MAXPROV - 1
-         if (.not. conn%provisions(i)%used) cycle
-         if (.not. conn%provisions(i)%embargoed) cycle
-         if (conn%provisions(i)%qid /= provide_qid) cycle
-         qid = conn%provisions(i)%accept_qid
-         eid = conn%provisions(i)%eid
-         conn%provisions(i) = rpc_provision_slot_t()
+         if (.not. conn%vat%provisions(i)%used) cycle
+         if (.not. conn%vat%provisions(i)%embargoed) cycle
+         if (conn%vat%provisions(i)%qid /= provide_qid) cycle
+         qid = conn%vat%provisions(i)%accept_qid
+         eid = conn%vat%provisions(i)%eid
+         conn%vat%provisions(i) = rpc_provision_slot_t()
          call send_accepted_cap(conn, qid, eid, err)
          return
       end do
@@ -1301,7 +1451,7 @@ contains
       integer :: n, i
       n = 0
       do i = 0, MAXPROV - 1
-         if (conn%provisions(i)%used .and. conn%provisions(i)%embargoed) n = n + 1
+         if (conn%vat%provisions(i)%used .and. conn%vat%provisions(i)%embargoed) n = n + 1
       end do
    end function rpc_embargoed_accepts
 
@@ -1356,9 +1506,22 @@ contains
       integer :: n, i
       n = 0
       do i = 0, MAXPROV - 1
-         if (conn%provisions(i)%used) n = n + 1
+         if (conn%vat%provisions(i)%used) n = n + 1
       end do
    end function rpc_pending_provisions
+
+   !> Share level 3 arrangements with this vat's other connections. Call
+   !> after rpc_conn_init and before any Provide; `vat` must outlive the
+   !> connection.
+   subroutine rpc_conn_set_vat(conn, vat)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_vat_t), pointer, intent(in) :: vat
+      if (associated(vat)) then
+         conn%vat => vat
+      else
+         conn%vat => conn%own_vat
+      end if
+   end subroutine rpc_conn_set_vat
 
    !> Join (level 4): does this set of capabilities name one object?
    !>

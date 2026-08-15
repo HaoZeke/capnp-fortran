@@ -67,7 +67,7 @@ and capnp-C++:
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3 (three-party: `Provide`/`Accept`, vines) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves) |
+| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves, three-vat tested) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
@@ -93,6 +93,14 @@ gets the capability back in the Return. The nonce is the whole of the
 arrangement, which is what lets Bob hand the capability over without
 taking Carol's word for who sent her, and it is single-use: leaving it
 claimable would let anyone who learned it take the capability again.
+
+A handoff is arranged on one connection and claimed on another, so the
+arrangement belongs to the vat rather than the connection:
+`rpc_conn_set_vat` shares it between a vat's connections, and it holds
+the capability rather than an export id, since ids are per-connection.
+`test/test_rpc_handoff.f90` runs the whole flow across three vats.
+Connections given no vat get one to themselves, which is what a
+two-party deployment wants.
 
 Both halves of the introduction are here. Hosting is `Provide` and
 `Accept`, above. Receiving is the `thirdPartyHosted` CapDescriptor: a
