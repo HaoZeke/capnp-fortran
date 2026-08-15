@@ -277,8 +277,8 @@ contains
       do i = 0, MAXQ - 1
          if (conn%questions(i)%used) call capnp_message_free(conn%questions(i)%retmsg)
          if (conn%answers(i)%used) call capnp_message_free(conn%answers(i)%retmsg)
-         conn%questions(i) = rpc_question_slot_t()
-         conn%answers(i) = rpc_answer_slot_t()
+         call question_slot_clear(conn%questions(i))
+         call answer_slot_clear(conn%answers(i))
       end do
    end subroutine rpc_conn_close
 
@@ -683,9 +683,32 @@ contains
       call capnp_message_free(m)
       if (conn%questions(int(qid))%used) then
          call capnp_message_free(conn%questions(int(qid))%retmsg)
-         conn%questions(int(qid)) = rpc_question_slot_t()
+         call question_slot_clear(conn%questions(int(qid)))
       end if
    end subroutine rpc_finish_send
+
+   !> Clear a question slot.
+   !>
+   !> An empty structure constructor says this more briefly, but a
+   !> component of derived type is where compilers disagree about whether
+   !> default initialisation carries through: flang rejects
+   !> `rpc_question_slot_t()` for lacking a value for `retmsg` where
+   !> gfortran accepts it. Assigning the fields is unambiguous, and
+   !> callers free `retmsg` first, which already restores it.
+   subroutine question_slot_clear(slot)
+      type(rpc_question_slot_t), intent(inout) :: slot
+      slot%used = .false.
+      slot%returned = .false.
+   end subroutine question_slot_clear
+
+   !> Clear an answer slot; see question_slot_clear.
+   subroutine answer_slot_clear(slot)
+      type(rpc_answer_slot_t), intent(inout) :: slot
+      slot%used = .false.
+      slot%has_results = .false.
+      slot%nexp = 0
+      slot%exports = -1
+   end subroutine answer_slot_clear
 
    !> Drop refcount on an imported capability.
    subroutine rpc_release_send(conn, cap, err)
@@ -802,7 +825,7 @@ contains
       q = int(qid)
       if (q >= 0 .and. q < MAXQ) then
          if (conn%questions(q)%used .and. .not. conn%questions(q)%returned) &
-            conn%questions(q) = rpc_question_slot_t()
+            call question_slot_clear(conn%questions(q))
       end if
    end subroutine release_question
 
@@ -1820,7 +1843,7 @@ contains
          end do
       end if
       call capnp_message_free(conn%answers(q)%retmsg)
-      conn%answers(q) = rpc_answer_slot_t()
+      call answer_slot_clear(conn%answers(q))
    end subroutine handle_finish
 
    subroutine handle_release(conn, msg, err)
