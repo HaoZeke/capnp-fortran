@@ -154,7 +154,7 @@ contains
       integer, intent(out) :: err
       integer(int64) :: v
       type(capnp_ptr_t) :: f, t, dv
-      integer(int64) :: off, d
+      integer(int64) :: off
       v = 0_int64
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return

@@ -1580,6 +1580,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       integer(int64) :: n
+      integer(int8), pointer :: bytes(:)
       view => null()
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
@@ -1588,7 +1589,8 @@ contains
          return
       end if
       n = q%nelem
-      if (n > 0_int64) view(0:n - 1) => q%msg%segs(q%seg)%bytes(q%off:q%off + n - 1)
+      bytes => q%msg%segs(q%seg)%bytes
+      if (n > 0_int64) view(0:n - 1) => bytes(q%off:q%off + n - 1)
    end subroutine capnp_get_data_view
 
    !> Zero-copy view of a Text field's characters, trailing NUL excluded.
@@ -1600,6 +1602,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       integer(int64) :: n
+      integer(int8), pointer :: bytes(:)
       view => null()
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
@@ -1608,7 +1611,8 @@ contains
          return
       end if
       n = max(0_int64, q%nelem - 1_int64)
-      if (n > 0_int64) view(0:n - 1) => q%msg%segs(q%seg)%bytes(q%off:q%off + n - 1)
+      bytes => q%msg%segs(q%seg)%bytes
+      if (n > 0_int64) view(0:n - 1) => bytes(q%off:q%off + n - 1)
    end subroutine capnp_get_text_view
 
    !> Length of a Text field in characters (NUL excluded), without copying.

@@ -1177,7 +1177,7 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: ctab, cdp, idp
+      type(capnp_ptr_t) :: ctab, idp
       type(cap_descriptor_t) :: cd
       type(third_party_cap_descriptor_t) :: tp
       type(third_party_cap_id_t) :: id
@@ -1191,7 +1191,7 @@ contains
          err = CAPNP_OK
          return
       end if
-      n = capnp_list_len(ctab)
+      n = int(capnp_list_len(ctab))
       do i = 0, n - 1
          cd%p = capnp_list_get_struct(ctab, i, err)
          if (err /= CAPNP_OK) cycle
@@ -1354,12 +1354,7 @@ contains
       integer, intent(out) :: err
       type(accept_t) :: ac
       type(provision_id_t) :: pid
-      type(capnp_ptr_t) :: pp, ctab
-      type(capnp_message_t), target :: rm
-      type(message_t) :: rmsg
-      type(return_t) :: r
-      type(rpc_call_ctx_t) :: ctx
-      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: pp
       integer(int64) :: qid, nonce
       integer :: i, eid
 
