@@ -8,6 +8,16 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Zero-copy Text and Data views associate through the segment byte pointer,
+  preserving the Fortran pointer-target invariant across compilers.
+- RPC capability-table lengths convert explicitly to the loop-index kind, and
+  dead temporaries no longer obscure the handoff path.
+- Missing optional c-capnproto/cmocka golden dependencies do not bypass the
+  independent live capnp-C++ RPC interop target.
+- The golden-master C harness is clean under strict compiler warnings.
+
 ## [0.3.1] - 2026-08-15
 
 ### Fixed
