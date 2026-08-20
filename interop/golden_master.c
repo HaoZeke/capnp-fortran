@@ -268,7 +268,6 @@ static void test_packed_golden(void **state)
 	{
 		int bh = cabi_builder_new();
 		int rs, lst, e0, e1;
-		int64_t w = 0;
 
 		assert_true(bh >= 1);
 		rs = cabi_new_struct(bh, 1, 2);
