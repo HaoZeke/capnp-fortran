@@ -108,15 +108,23 @@ contains
    end function snake
 
    !> Polynomial rolling hash -> lowercase 16-hex (deterministic, pure).
+   !> The hash is h*131 + c modulo 2**64, read as two's complement. Signed
+   !> overflow is undefined in Fortran, so the product is carried in two
+   !> 32-bit halves and only reassembled with bit operations.
    pure function ident_hash_hex(s) result(hex)
       character(len=*), intent(in) :: s
       character(len=16) :: hex
-      integer(int64) :: h
+      integer(int64), parameter :: mask32 = 4294967295_int64
+      integer(int64) :: h, lo, hi, t
       integer :: i, d
-      h = 0_int64
+      lo = 0_int64
+      hi = 0_int64
       do i = 1, len(s)
-         h = h * 131_int64 + int(iachar(s(i:i)), int64)
+         t = lo * 131_int64 + int(iachar(s(i:i)), int64)
+         lo = iand(t, mask32)
+         hi = iand(hi * 131_int64 + ishft(t, -32), mask32)
       end do
+      h = ior(ishft(hi, 32), lo)
       ! Manual hex (avoid internal write: not pure in F2003).
       hex = '0000000000000000'
       do i = 16, 1, -1
