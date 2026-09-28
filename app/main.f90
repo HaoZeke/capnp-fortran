@@ -50,6 +50,11 @@ program capnpc_fortran
       if (err /= CAPNP_OK) call die('emit failed for '//fname, err)
    end do
 
+   ! Main-program allocatables are not freed at exit; release them so leak
+   ! checkers see a clean run.
+   if (allocated(fname)) deallocate (fname)
+   if (allocated(bytes)) deallocate (bytes)
+
 contains
 
    !> Drain stdin (a pipe: no queryable size) into a byte buffer.
