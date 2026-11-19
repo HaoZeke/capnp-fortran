@@ -1224,10 +1224,12 @@ contains
          //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: text convert exits')
       call check_(error, sh(cap_setup()//' && "$CAP" convert binary:json schema/common.capnp Vec3 < ' &
          //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: json convert exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" --help >/dev/full; test $? -ne 0'), &
+      call check_(error, sh(cap_setup()//' && "$CAP" --help >/dev/full; test $? -eq 0'), &
                   'io: help exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" --version >/dev/full; test $? -ne 0'), &
+      call check_(error, sh(cap_setup()//' && "$CAP" --version >/dev/full; test $? -eq 0'), &
                   'io: version exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" eval schema/kitchen.capnp answer >/dev/full' &
+         //'; test $? -eq 0'), 'io: eval exits')
       call check_(error, sh(cap_setup()//' && printf "(x = 1, y = 0, z = 0)\n"' &
          //' | "$CAP" encode schema/common.capnp Vec3 >/dev/full; test $? -ne 0'), &
          'io: binary encode exits')
