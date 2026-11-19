@@ -61,7 +61,8 @@ contains
            new_unittest("depth-limit-nested", test_depth_limit_nested), &
            new_unittest("nest-limit-64", test_nest_limit_64), &
            new_unittest("far-depth-one", test_far_depth_one), &
-           new_unittest("reader-options", test_reader_options)]
+           new_unittest("reader-options", test_reader_options), &
+           new_unittest("builder-options", test_builder_options)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2344,6 +2345,79 @@ contains
 
    !> Fixed-size allocation repeats the first segment (or the object, if
    !> larger). The default strategy still doubles the previous segment.
+   subroutine test_builder_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_builder_options_t) :: opt
+      type(capnp_ptr_t) :: a
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      call check(error, err == CAPNP_OK .and. seg_words(msg, 1) == 1024_int64, &
+                  'builder: default first segment is 1024 words')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_message_init_builder(msg, err, first_words=4_int64)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 2, 'builder: default spills')
+      if (allocated(error)) return
+      call check(error, seg_words(msg, 2) == 8_int64, 'builder: default later segment doubles')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = 4_int64
+      opt%allocation_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
+      call capnp_message_init_builder(msg, err, options=opt)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, seg_words(msg, 2) == 8_int64, 'builder: heuristic matches the default')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
+      call capnp_message_init_builder(msg, err, options=opt)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 2, 'builder: fixed spills')
+      if (allocated(error)) return
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: fixed repeats the first size')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 5, 0, err)
+      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 5_int64, &
+                  'builder: fixed grows to fit one object')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = 0_int64
+      call capnp_message_init_builder(msg, err, options=opt)
+      call check(error, err == CAPNP_OK .and. seg_words(msg, 1) == 1_int64, &
+                  'builder: zero first segment keeps the root word')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 1, 0, err)
+      a = capnp_new_struct(msg, 3, 0, err)
+      call check(error, seg_words(msg, 2) == 1_int64 .and. seg_words(msg, 3) == 3_int64, &
+                  'builder: zero fixed size isolates each object')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = huge(0_int64)
+      opt%allocation_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
+      call capnp_message_init_builder(msg, err, options=opt)
+      call check(error, err == CAPNP_ERR_ARG, 'builder: huge first segment is rejected')
+      if (allocated(error)) return
+      call capnp_message_init_builder(msg, err, first_words=huge(0_int64))
+      call check(error, err == CAPNP_ERR_ARG, 'builder: huge first_words is rejected')
+      if (allocated(error)) return
+      ! A previous segment past half the cap must not double with a signed
+      ! overflow. Both sizes sit above that half, so both saturate equal.
+      call check(error, capnp_grown_segment_bytes(huge(0_int64)/2_int64 + 1_int64, 8_int64) == &
+                 capnp_grown_segment_bytes(huge(0_int64), 8_int64), &
+                 'builder: growth saturates instead of wrapping')
+      if (allocated(error)) return
+      call check(error, capnp_grown_segment_bytes(16_int64, 8_int64) == 32_int64, &
+                 'builder: a small segment still doubles')
+   end subroutine test_builder_options
 
    pure function seg_words(msg, idx) result(n)
       type(capnp_message_t), intent(in) :: msg
