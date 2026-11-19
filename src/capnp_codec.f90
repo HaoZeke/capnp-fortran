@@ -1,4 +1,5 @@
-!> Shared scalar formatting for the text and JSON codecs.
+!> Shared scalar formatting, escaping, schema defaults, and builder allocation
+!> for the text and JSON codecs.
 !>
 !> Float text matches KJ's DoubleToBuffer / FloatToBuffer (snprintf %.*g,
 !> then one extra retry, then the redundant exponent '+' stripped). Integer
@@ -9,7 +10,9 @@ module capnp_codec
       c_loc, c_null_char, c_ptr, c_associated
    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite, &
       ieee_quiet_nan, ieee_value
-   use capnp_kinds, only: int8, int16, int32, int64, real32, real64, CAPNP_OK, CAPNP_ERR_ARG
+   use capnp
+   use capnp_schema
+   use capnp_dynamic, only: capnp_dyn_schema_t
    implicit none
    private
 
@@ -20,6 +23,7 @@ module capnp_codec
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
    public :: capnp_quiet_nan
+   public :: capnp_codec_find_id, capnp_codec_find_field
 
    interface
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
@@ -350,6 +354,45 @@ contains
       end do
       out = buf(1:m)
    end subroutine capnp_cunescape
+
+   ! --- Schema, brand, default, and builder helpers ---------------------
+
+   function capnp_codec_find_id(schema, id) result(idx)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id
+      integer :: idx, i
+      idx = 0
+      if (.not. schema%loaded) return
+      do i = 1, size(schema%nodes)
+         if (node_id(schema%nodes(i)) == id) then
+            idx = i
+            return
+         end if
+      end do
+   end function capnp_codec_find_id
+
+   subroutine capnp_codec_find_field(schema, idx, name, f, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(out) :: f
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl
+      character(len=:), allocatable :: nm
+      integer :: i, n
+      err = CAPNP_OK
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(fl))
+      do i = 0, n - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         call field_name(f, nm, err)
+         if (err /= CAPNP_OK) return
+         if (nm == name) return
+      end do
+      err = CAPNP_ERR_ARG
+   end subroutine capnp_codec_find_field
 
    pure function capnp_as_i8(u) result(v)
       integer, intent(in) :: u

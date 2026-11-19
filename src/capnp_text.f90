@@ -146,7 +146,7 @@ contains
       case (TYPE_STRUCT)
          q = value_pointer(val, err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(typ))
+         idx = capnp_codec_find_id(schema, type_type_id(typ))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -251,7 +251,7 @@ contains
       err = CAPNP_OK
       out = ''
       if (field_which(f) == FIELD_GROUP) then
-         idx = find_id(schema, field_group_type_id(f))
+         idx = capnp_codec_find_id(schema, field_group_type_id(f))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -331,7 +331,7 @@ contains
       case (TYPE_STRUCT)
          q = capnp_getp(p, int(off), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(t))
+         idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -441,7 +441,7 @@ contains
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(et))
+         idx = capnp_codec_find_id(schema, type_type_id(et))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -482,7 +482,7 @@ contains
          if (err /= CAPNP_OK) return
          call expect_ch(sc, '=', err)
          if (err /= CAPNP_OK) return
-         call find_field(schema, idx, name, f, err)
+         call capnp_codec_find_field(schema, idx, name, f, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
          if (fd /= NO_DISCRIMINANT) then
@@ -516,7 +516,7 @@ contains
       integer(int64) :: off
       err = CAPNP_OK
       if (field_which(f) == FIELD_GROUP) then
-         idx = find_id(schema, field_group_type_id(f))
+         idx = capnp_codec_find_id(schema, field_group_type_id(f))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -534,7 +534,7 @@ contains
          if (err /= CAPNP_OK) return
          call parse_list(schema, et, p, int(off), sc, depth, err)
       case (TYPE_STRUCT)
-         idx = find_id(schema, type_type_id(t))
+         idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -617,7 +617,7 @@ contains
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(et))
+         idx = capnp_codec_find_id(schema, type_type_id(et))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -936,7 +936,7 @@ contains
       integer :: idx, n
       err = CAPNP_OK
       out = ''
-      idx = find_id(schema, tid)
+      idx = capnp_codec_find_id(schema, tid)
       if (idx /= 0) then
          el = node_enumerants(schema%nodes(idx), err)
          if (err /= CAPNP_OK) return
@@ -963,7 +963,7 @@ contains
       integer :: idx, i, n
       err = CAPNP_OK
       ord = -1
-      idx = find_id(schema, tid)
+      idx = capnp_codec_find_id(schema, tid)
       if (idx == 0) then
          err = CAPNP_ERR_ARG
          return
@@ -983,43 +983,6 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end function enum_by_name
-
-   subroutine find_field(schema, idx, name, f, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx
-      character(len=*), intent(in) :: name
-      type(capnp_ptr_t), intent(out) :: f
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: fl
-      character(len=:), allocatable :: nm
-      integer :: i, n
-      err = CAPNP_OK
-      fl = node_struct_fields(schema%nodes(idx), err)
-      if (err /= CAPNP_OK) return
-      n = int(capnp_list_len(fl))
-      do i = 0, n - 1
-         f = capnp_list_get_struct(fl, i, err)
-         if (err /= CAPNP_OK) return
-         call field_name(f, nm, err)
-         if (err /= CAPNP_OK) return
-         if (nm == name) return
-      end do
-      err = CAPNP_ERR_ARG
-   end subroutine find_field
-
-   function find_id(schema, id) result(idx)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer(int64), intent(in) :: id
-      integer :: idx, i
-      idx = 0
-      if (.not. schema%loaded) return
-      do i = 1, size(schema%nodes)
-         if (node_id(schema%nodes(i)) == id) then
-            idx = i
-            return
-         end if
-      end do
-   end function find_id
 
    function new_struct(p, dw, pw, err) result(q)
       type(capnp_ptr_t), intent(in) :: p
@@ -1044,7 +1007,7 @@ contains
       tw = type_which(et)
       select case (tw)
       case (TYPE_STRUCT)
-         idx = find_id(schema, type_type_id(et))
+         idx = capnp_codec_find_id(schema, type_type_id(et))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
