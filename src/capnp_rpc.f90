@@ -2294,16 +2294,16 @@ contains
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
+      do i = 0, MAXJOINS - 1
+         if (.not. conn%joins(i)%used) cycle
+         if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
+            conn%joins(i) = rpc_join_slot_t()
+            return
+         end if
+      end do
       if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
       q = int(qid)
       if (.not. conn%answers(q)%used) then
-         do i = 0, MAXJOINS - 1
-            if (.not. conn%joins(i)%used) cycle
-            if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
-               conn%joins(i) = rpc_join_slot_t()
-               return
-            end if
-         end do
          return
       end if
       if (finish_release_result_caps_get(f)) then
