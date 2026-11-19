@@ -23,6 +23,7 @@ module capnp_codec
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
    public :: capnp_quiet_nan
+   public :: capnp_dec_digit, capnp_oct_digit, capnp_hex_digit
    public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
    public :: capnp_codec_new_struct, capnp_codec_alloc_list, capnp_codec_elem_esize
    public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
@@ -318,7 +319,7 @@ contains
             i = i + 1
             noct = 0
             do while (noct < 2 .and. i <= n)
-               d = oct_digit(src(i:i))
+               d = capnp_oct_digit(src(i:i))
                if (d < 0) exit
                v = v*8 + d
                i = i + 1
@@ -338,8 +339,8 @@ contains
                out = ''
                return
             end if
-            d = hex_digit(src(i + 1:i + 1))
-            d2 = hex_digit(src(i + 2:i + 2))
+            d = capnp_hex_digit(src(i + 1:i + 1))
+            d2 = capnp_hex_digit(src(i + 2:i + 2))
             if (d < 0 .or. d2 < 0) then
                err = CAPNP_ERR_ARG
                out = ''
@@ -891,9 +892,9 @@ contains
       mul = int(base, int64)
       do while (i <= len(body))
          select case (base)
-         case (16); d = hex_digit(body(i:i))
-         case (8); d = oct_digit(body(i:i))
-         case default; d = dec_digit(body(i:i))
+         case (16); d = capnp_hex_digit(body(i:i))
+         case (8); d = capnp_oct_digit(body(i:i))
+         case default; d = capnp_dec_digit(body(i:i))
          end select
          if (d < 0) then
             err = CAPNP_ERR_ARG
@@ -937,7 +938,7 @@ contains
       end select
    end subroutine escape_byte
 
-   pure function dec_digit(c) result(d)
+   pure function capnp_dec_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '9') then
@@ -945,9 +946,9 @@ contains
       else
          d = -1
       end if
-   end function dec_digit
+   end function capnp_dec_digit
 
-   pure function oct_digit(c) result(d)
+   pure function capnp_oct_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '7') then
@@ -955,9 +956,9 @@ contains
       else
          d = -1
       end if
-   end function oct_digit
+   end function capnp_oct_digit
 
-   pure function hex_digit(c) result(d)
+   pure function capnp_hex_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '9') then
@@ -969,6 +970,6 @@ contains
       else
          d = -1
       end if
-   end function hex_digit
+   end function capnp_hex_digit
 
 end module capnp_codec

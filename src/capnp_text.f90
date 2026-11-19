@@ -1030,23 +1030,23 @@ contains
          if (sc%s(sc%i:sc%i) == '0' .and. &
              (sc%s(sc%i + 1:sc%i + 1) == 'x' .or. sc%s(sc%i + 1:sc%i + 1) == 'X')) then
             sc%i = sc%i + 2
-            if (hex_val(peek(sc)) < 0) then
+            if (capnp_hex_digit(peek(sc)) < 0) then
                err = CAPNP_ERR_ARG
                return
             end if
-            do while (hex_val(peek(sc)) >= 0)
+            do while (capnp_hex_digit(peek(sc)) >= 0)
                sc%i = sc%i + 1
             end do
             return
          end if
       end if
-      do while (dec_val(peek(sc)) >= 0)
+      do while (capnp_dec_digit(peek(sc)) >= 0)
          sc%i = sc%i + 1
          nd = nd + 1
       end do
       if (peek(sc) == '.') then
          sc%i = sc%i + 1
-         do while (dec_val(peek(sc)) >= 0)
+         do while (capnp_dec_digit(peek(sc)) >= 0)
             sc%i = sc%i + 1
             nd = nd + 1
          end do
@@ -1056,11 +1056,11 @@ contains
          sc%i = sc%i + 1
          c = peek(sc)
          if (c == '+' .or. c == '-') sc%i = sc%i + 1
-         if (dec_val(peek(sc)) < 0) then
+         if (capnp_dec_digit(peek(sc)) < 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         do while (dec_val(peek(sc)) >= 0)
+         do while (capnp_dec_digit(peek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
       end if
@@ -1132,9 +1132,9 @@ contains
                   sc%i = sc%i + 1
                   exit
                end if
-               d1 = hex_val(peek(sc))
+               d1 = capnp_hex_digit(peek(sc))
                sc%i = sc%i + 1
-               d2 = hex_val(peek(sc))
+               d2 = capnp_hex_digit(peek(sc))
                if (d1 < 0 .or. d2 < 0) then
                   err = CAPNP_ERR_ARG
                   return
@@ -1313,29 +1313,5 @@ contains
       logical :: y
       y = (c >= '0' .and. c <= '9') .or. c == '+' .or. c == '-' .or. c == '.'
    end function is_num_start
-
-   pure function dec_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else
-         d = -1
-      end if
-   end function dec_val
-
-   pure function hex_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else if (c >= 'a' .and. c <= 'f') then
-         d = iachar(c) - iachar('a') + 10
-      else if (c >= 'A' .and. c <= 'F') then
-         d = iachar(c) - iachar('A') + 10
-      else
-         d = -1
-      end if
-   end function hex_val
 
 end module capnp_text

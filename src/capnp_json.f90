@@ -1006,7 +1006,7 @@ contains
                   err = CAPNP_ERR_ARG
                   return
                end if
-               h = hex_val(sc%s(sc%i:sc%i))
+               h = capnp_hex_digit(sc%s(sc%i:sc%i))
                if (h < 0) then
                   err = CAPNP_ERR_ARG
                   return
@@ -1059,35 +1059,35 @@ contains
       err = CAPNP_OK
       a = sc%i
       if (jpeek(sc) == '-') sc%i = sc%i + 1
-      if (dec_val(jpeek(sc)) < 0) then
+      if (capnp_dec_digit(jpeek(sc)) < 0) then
          err = CAPNP_ERR_ARG
          return
       end if
       if (jpeek(sc) == '0') then
          sc%i = sc%i + 1
       else
-         do while (dec_val(jpeek(sc)) >= 0)
+         do while (capnp_dec_digit(jpeek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
       end if
       if (jpeek(sc) == '.') then
          sc%i = sc%i + 1
-         if (dec_val(jpeek(sc)) < 0) then
+         if (capnp_dec_digit(jpeek(sc)) < 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         do while (dec_val(jpeek(sc)) >= 0)
+         do while (capnp_dec_digit(jpeek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
       end if
       if (jpeek(sc) == 'e' .or. jpeek(sc) == 'E') then
          sc%i = sc%i + 1
          if (jpeek(sc) == '+' .or. jpeek(sc) == '-') sc%i = sc%i + 1
-         if (dec_val(jpeek(sc)) < 0) then
+         if (capnp_dec_digit(jpeek(sc)) < 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         do while (dec_val(jpeek(sc)) >= 0)
+         do while (capnp_dec_digit(jpeek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
       end if
@@ -1296,8 +1296,8 @@ contains
       end if
       allocate (raw(0:n/2 - 1))
       do i = 1, n/2
-         hi = hex_val(s(2*i - 1:2*i - 1))
-         lo = hex_val(s(2*i:2*i))
+         hi = capnp_hex_digit(s(2*i - 1:2*i - 1))
+         lo = capnp_hex_digit(s(2*i:2*i))
          if (hi < 0 .or. lo < 0) then
             err = CAPNP_ERR_ARG
             return
@@ -1552,29 +1552,5 @@ contains
       logical :: y
       y = ieee_is_finite(x)
    end function ieee_finite
-
-   pure function dec_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else
-         d = -1
-      end if
-   end function dec_val
-
-   pure function hex_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else if (c >= 'a' .and. c <= 'f') then
-         d = iachar(c) - iachar('a') + 10
-      else if (c >= 'A' .and. c <= 'F') then
-         d = iachar(c) - iachar('A') + 10
-      else
-         d = -1
-      end if
-   end function hex_val
 
 end module capnp_json
