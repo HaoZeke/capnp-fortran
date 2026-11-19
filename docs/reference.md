@@ -128,6 +128,25 @@ as primitive via field `@0`).
 | `capnp_unpacker_t` + `capnp_unpack_push` | `(u, chunk, out, outn, err)` | incremental; chunks may split anywhere |
 | `capnp_packer_t` + `capnp_pack_push` / `capnp_pack_finish` | `(pk, chunk, out, outn, err)` | incremental; byte-identical to `capnp_pack` |
 
+## Text format (`capnp_text`)
+
+`use capnp_text`. This is the struct-literal format `capnp decode` prints and
+`capnp encode` reads. `capnp_text_encode(schema, idx, p, text, err [, pretty])`
+writes a struct. Pretty output (the default) follows the C++ text codec:
+primitives are always shown, null pointers are omitted, and only the active
+union member is shown. `pretty=.false.` is the one-line form of `capnp decode
+--short`. Floats use the same shortest round-trip spelling as KJ (`nan`,
+`inf`, `-inf`). Data is a C-escaped string; bytes outside ASCII become
+three-digit octal escapes.
+
+`capnp_text_decode(schema, idx, text, msg, err)` parses one struct literal
+into a new builder, applying schema defaults on the way in. Comments (`#`),
+trailing commas, `0x"..."` data, and adjacent string literals are accepted.
+`capnp_text_encode_value` renders a schema `Value` (a const or a field
+default). `capnp_text_span` finds the next top-level value in a stream.
+
+External constants and embedded files are not accepted.
+
 ## Canonical form (`capnp_canonical`)
 
 `capnp_canonicalize (msg, bytes, err)` produces the canonical single
