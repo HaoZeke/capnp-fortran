@@ -1588,7 +1588,8 @@ contains
             call capnp_get_text(p, int(off), s, err)
             if (err /= CAPNP_OK) return
          end if
-         call capnp_cescape_text(s, esc)
+         call capnp_cescape_text(s, esc, err)
+         if (err /= CAPNP_OK) return
          text = '"'//esc//'"'
       case (TYPE_DATA)
          q = capnp_ptr_t()
@@ -1600,14 +1601,16 @@ contains
             if (dv%kind /= CAPNP_PK_NULL) then
                call value_data(dv, raw, err)
                if (err /= CAPNP_OK) return
-               call capnp_cescape_data(raw, esc)
+               call capnp_cescape_data(raw, esc, err)
+               if (err /= CAPNP_OK) return
             else
                esc = ''
             end if
          else
             call capnp_get_data(p, int(off), raw, err)
             if (err /= CAPNP_OK) return
-            call capnp_cescape_data(raw, esc)
+            call capnp_cescape_data(raw, esc, err)
+            if (err /= CAPNP_OK) return
          end if
          text = '"'//esc//'"'
       case (TYPE_ANY_POINTER)
@@ -1666,12 +1669,14 @@ contains
       case (TYPE_TEXT)
          call capnp_list_get_text(lst, int(ix), s, err)
          if (err /= CAPNP_OK) return
-         call capnp_cescape_text(s, esc)
+         call capnp_cescape_text(s, esc, err)
+         if (err /= CAPNP_OK) return
          text = '"'//esc//'"'
       case (TYPE_DATA)
          call capnp_get_data(lst, int(ix), raw, err)
          if (err /= CAPNP_OK) return
-         call capnp_cescape_data(raw, esc)
+         call capnp_cescape_data(raw, esc, err)
+         if (err /= CAPNP_OK) return
          text = '"'//esc//'"'
       case (TYPE_ANY_POINTER)
          text = '<opaque pointer>'
