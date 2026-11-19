@@ -1,4 +1,5 @@
-!> Shared scalar formatting for the text and JSON codecs.
+!> Shared scalar formatting, escaping, schema defaults, builder allocation,
+!> and generic brand resolution for the text and JSON codecs.
 !>
 !> Float text matches KJ's DoubleToBuffer / FloatToBuffer (snprintf %.*g,
 !> then one extra retry, then the redundant exponent '+' stripped). Integer
@@ -9,7 +10,9 @@ module capnp_codec
       c_loc, c_null_char, c_ptr, c_size_t, c_associated
    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite, &
       ieee_quiet_nan, ieee_value
-   use capnp_kinds, only: int8, int16, int32, int64, real32, real64, CAPNP_OK, CAPNP_ERR_ARG
+   use capnp
+   use capnp_schema
+   use capnp_dynamic, only: capnp_dyn_schema_t, capnp_dyn_brand_t, capnp_dyn_load_brand
    implicit none
    private
 
@@ -19,7 +22,29 @@ module capnp_codec
    public :: capnp_cescape_text, capnp_cescape_data, capnp_cunescape
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
+   public :: capnp_u64_to_f64, capnp_f64_to_u64, capnp_f64_to_i64
    public :: capnp_quiet_nan
+   public :: capnp_dec_digit, capnp_oct_digit, capnp_hex_digit
+   public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
+   public :: capnp_codec_new_struct, capnp_codec_alloc_list, capnp_codec_elem_esize
+   public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
+   public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
+   public :: capnp_put_signed, capnp_put_unsigned
+   public :: capnp_brand_env_t, capnp_brand_enter, capnp_brand_resolve
+
+   type :: brand_param_t
+      logical :: bound = .false.
+      type(capnp_ptr_t) :: typ
+   end type brand_param_t
+
+   type :: brand_scope_t
+      integer(int64) :: id = 0_int64
+      type(brand_param_t), allocatable :: params(:)
+   end type brand_scope_t
+
+   type :: capnp_brand_env_t
+      type(brand_scope_t), allocatable :: scopes(:)
+   end type capnp_brand_env_t
 
    interface
       function c_snprintf_d(buf, n, fmt, prec, val) bind(c, name="snprintf") &
@@ -320,7 +345,7 @@ contains
             i = i + 1
             noct = 0
             do while (noct < 2 .and. i <= n)
-               d = oct_digit(src(i:i))
+               d = capnp_oct_digit(src(i:i))
                if (d < 0) exit
                v = v*8 + d
                i = i + 1
@@ -340,8 +365,8 @@ contains
                out = ''
                return
             end if
-            d = hex_digit(src(i + 1:i + 1))
-            d2 = hex_digit(src(i + 2:i + 2))
+            d = capnp_hex_digit(src(i + 1:i + 1))
+            d2 = capnp_hex_digit(src(i + 2:i + 2))
             if (d < 0 .or. d2 < 0) then
                err = CAPNP_ERR_ARG
                out = ''
@@ -360,6 +385,390 @@ contains
       end do
       out = buf(1:m)
    end subroutine capnp_cunescape
+
+   ! --- Schema, brand, default, and builder helpers ---------------------
+
+   function capnp_codec_find_id(schema, id) result(idx)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id
+      integer :: idx, i
+      idx = 0
+      if (.not. schema%loaded) return
+      do i = 1, size(schema%nodes)
+         if (node_id(schema%nodes(i)) == id) then
+            idx = i
+            return
+         end if
+      end do
+   end function capnp_codec_find_id
+
+   subroutine capnp_codec_find_field(schema, idx, name, f, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(out) :: f
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl
+      character(len=:), allocatable :: nm
+      integer :: i, n
+      err = CAPNP_OK
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(fl))
+      do i = 0, n - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         call field_name(f, nm, err)
+         if (err /= CAPNP_OK) return
+         if (nm == name) return
+      end do
+      err = CAPNP_ERR_ARG
+   end subroutine capnp_codec_find_field
+
+   function capnp_codec_field_present(f, p, err) result(y)
+      type(capnp_ptr_t), intent(in) :: f, p
+      integer, intent(out) :: err
+      logical :: y
+      type(capnp_ptr_t) :: t, q
+      integer :: tw
+      err = CAPNP_OK
+      y = .false.
+      if (field_which(f) == FIELD_GROUP) then
+         y = .true.
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      tw = type_which(t)
+      select case (tw)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
+            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+         if (p%kind == CAPNP_PK_NULL) then
+            y = .false.
+         else
+            q = capnp_getp(p, int(field_slot_offset(f)), err)
+            y = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+         end if
+      case default
+         y = .true.
+      end select
+   end function capnp_codec_field_present
+
+   function capnp_codec_new_struct(p, dw, pw, err) result(q)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: dw, pw
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      type(capnp_message_t), pointer :: m
+      m => p%msg
+      q = capnp_new_struct(m, dw, pw, err)
+   end function capnp_codec_new_struct
+
+   function capnp_codec_alloc_list(parent, et, n, schema, err, env) result(lst)
+      type(capnp_ptr_t), intent(in) :: parent, et
+      integer, intent(in) :: n
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(out) :: err
+      type(capnp_brand_env_t), intent(in), optional :: env
+      type(capnp_ptr_t) :: lst, rt
+      type(capnp_message_t), pointer :: m
+      integer :: tw, idx, dw, pw, es
+      m => parent%msg
+      err = CAPNP_OK
+      rt = et
+      if (present(env)) rt = capnp_brand_resolve(env, et)
+      tw = type_which(rt)
+      if (tw == TYPE_STRUCT) then
+         idx = capnp_codec_find_id(schema, type_type_id(rt))
+         if (idx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         dw = node_struct_data_words(schema%nodes(idx))
+         pw = node_struct_pointer_count(schema%nodes(idx))
+         lst = capnp_new_composite_list(m, int(n, int64), dw, pw, err)
+      else
+         es = capnp_codec_elem_esize(tw)
+         if (es < 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         lst = capnp_new_list(m, es, int(n, int64), err)
+      end if
+   end function capnp_codec_alloc_list
+
+   pure function capnp_codec_elem_esize(tw) result(es)
+      integer, intent(in) :: tw
+      integer :: es
+      select case (tw)
+      case (TYPE_VOID); es = CAPNP_SZ_VOID
+      case (TYPE_BOOL); es = CAPNP_SZ_BIT
+      case (TYPE_INT8, TYPE_UINT8); es = CAPNP_SZ_BYTE
+      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE, &
+            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+         es = CAPNP_SZ_PTR
+      case default; es = -1
+      end select
+   end function capnp_codec_elem_esize
+
+   function capnp_brand_resolve(env, t) result(rt)
+      type(capnp_brand_env_t), intent(in) :: env
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_ptr_t) :: rt
+      integer(int64) :: sid
+      integer :: pidx, i, step
+      logical :: hit
+      rt = t
+      if (.not. allocated(env%scopes)) return
+      do step = 1, 16
+         if (type_which(rt) /= TYPE_ANY_POINTER) return
+         if (type_anyptr_which(rt) /= ANYPTR_PARAMETER) return
+         sid = type_param_scope_id(rt)
+         pidx = type_param_index(rt) + 1
+         hit = .false.
+         do i = 1, size(env%scopes)
+            if (env%scopes(i)%id /= sid) cycle
+            if (allocated(env%scopes(i)%params)) then
+               if (pidx >= 1 .and. pidx <= size(env%scopes(i)%params)) then
+                  if (env%scopes(i)%params(pidx)%bound) then
+                     rt = env%scopes(i)%params(pidx)%typ
+                     hit = .true.
+                  end if
+               end if
+            end if
+            exit
+         end do
+         if (.not. hit) return
+      end do
+   end function capnp_brand_resolve
+
+   subroutine capnp_brand_enter(parent_env, t, child_env, err)
+      type(capnp_brand_env_t), intent(in) :: parent_env
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_brand_env_t), intent(out) :: child_env
+      integer, intent(out) :: err
+      type(capnp_dyn_brand_t) :: b
+      type(brand_scope_t) :: entry
+      type(brand_scope_t), allocatable :: grown(:)
+      integer :: i, j, k, nb, nsc, pos
+      err = CAPNP_OK
+      if (allocated(parent_env%scopes)) then
+         nsc = size(parent_env%scopes)
+         allocate (child_env%scopes(nsc))
+         child_env%scopes = parent_env%scopes
+      else
+         allocate (child_env%scopes(0))
+      end if
+      call capnp_dyn_load_brand(t, b, err)
+      if (err /= CAPNP_OK) return
+      if (.not. allocated(b%scopes)) return
+      do i = 1, size(b%scopes)
+         if (b%scopes(i)%inherited) cycle
+         entry%id = b%scopes(i)%id
+         if (allocated(entry%params)) deallocate (entry%params)
+         if (allocated(b%scopes(i)%bindings)) then
+            nb = size(b%scopes(i)%bindings)
+         else
+            nb = 0
+         end if
+         allocate (entry%params(nb))
+         do j = 1, nb
+            if (b%scopes(i)%bindings(j)%unbound) then
+               entry%params(j)%bound = .false.
+            else
+               entry%params(j)%bound = .true.
+               entry%params(j)%typ = capnp_brand_resolve(parent_env, b%scopes(i)%bindings(j)%type)
+            end if
+         end do
+         pos = 0
+         do k = 1, size(child_env%scopes)
+            if (child_env%scopes(k)%id == entry%id) then
+               pos = k
+               exit
+            end if
+         end do
+         if (pos > 0) then
+            child_env%scopes(pos) = entry
+         else
+            nsc = size(child_env%scopes)
+            allocate (grown(nsc + 1))
+            if (nsc > 0) grown(1:nsc) = child_env%scopes
+            grown(nsc + 1) = entry
+            call move_alloc(grown, child_env%scopes)
+         end if
+      end do
+   end subroutine capnp_brand_enter
+
+   function capnp_def_bool(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      logical :: d
+      d = .false.
+      if (dv%kind /= CAPNP_PK_NULL) d = value_bool(dv)
+   end function capnp_def_bool
+
+   function capnp_def_i8(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int8) :: d
+      d = 0_int8
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i8(dv)
+   end function capnp_def_i8
+
+   function capnp_def_i16(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int16) :: d
+      d = 0_int16
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i16(dv)
+   end function capnp_def_i16
+
+   function capnp_def_i32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int32) :: d
+      d = 0_int32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i32(dv)
+   end function capnp_def_i32
+
+   function capnp_def_i64(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int64) :: d
+      d = 0_int64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i64(dv)
+   end function capnp_def_i64
+
+   function capnp_def_u8(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int16) :: d
+      d = 0_int16
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u8(dv)
+   end function capnp_def_u8
+
+   function capnp_def_u16(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int32) :: d
+      d = 0_int32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u16(dv)
+   end function capnp_def_u16
+
+   function capnp_def_u32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int64) :: d
+      d = 0_int64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u32(dv)
+   end function capnp_def_u32
+
+   function capnp_def_f32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      real(real32) :: d
+      d = 0.0_real32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_f32(dv)
+   end function capnp_def_f32
+
+   function capnp_def_f64(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      real(real64) :: d
+      d = 0.0_real64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_f64(dv)
+   end function capnp_def_f64
+
+   subroutine capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, iv, ix
+      integer, intent(in) :: tw
+      logical, intent(in) :: in_list
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      select case (tw)
+      case (TYPE_INT8)
+         if (iv < -128_int64 .or. iv > 127_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i8(p, ix, int(iv, int8), err)
+         else
+            call capnp_set_i8(p, off, int(iv, int8), err, default=capnp_def_i8(dv))
+         end if
+      case (TYPE_INT16)
+         if (iv < -32768_int64 .or. iv > 32767_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i16(p, ix, int(iv, int16), err)
+         else
+            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=capnp_def_i16(dv))
+         end if
+      case (TYPE_INT32)
+         if (iv < -2147483648_int64 .or. iv > 2147483647_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i32(p, ix, int(iv, int32), err)
+         else
+            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=capnp_def_i32(dv))
+         end if
+      case (TYPE_INT64)
+         if (in_list) then
+            call capnp_list_set_i64(p, ix, iv, err)
+         else
+            call capnp_set_i64(p, off*8_int64, iv, err, default=capnp_def_i64(dv))
+         end if
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine capnp_put_signed
+
+   subroutine capnp_put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, uv, ix
+      integer, intent(in) :: tw
+      logical, intent(in) :: in_list
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      select case (tw)
+      case (TYPE_UINT8)
+         if (uv < 0_int64 .or. uv > 255_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i8(p, ix, capnp_as_i8(int(uv)), err)
+         else
+            call capnp_set_u8(p, off, int(uv, int16), err, default=capnp_def_u8(dv))
+         end if
+      case (TYPE_UINT16)
+         if (uv < 0_int64 .or. uv > 65535_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i16(p, ix, capnp_as_i16(int(uv)), err)
+         else
+            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=capnp_def_u16(dv))
+         end if
+      case (TYPE_UINT32)
+         if (uv < 0_int64 .or. uv > 4294967295_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i32(p, ix, capnp_as_i32u(uv), err)
+         else
+            call capnp_set_u32(p, off*4_int64, uv, err, default=capnp_def_u32(dv))
+         end if
+      case (TYPE_UINT64)
+         if (in_list) then
+            call capnp_list_set_i64(p, ix, uv, err)
+         else
+            call capnp_set_i64(p, off*8_int64, uv, err, default=capnp_def_i64(dv))
+         end if
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine capnp_put_unsigned
 
    pure function capnp_as_i8(u) result(v)
       integer, intent(in) :: u
@@ -414,6 +823,64 @@ contains
       integer(int64) :: u
       u = iand(int(s, int64), 4294967295_int64)
    end function capnp_u_of_i32
+
+   pure function capnp_u64_to_f64(bits) result(x)
+      integer(int64), intent(in) :: bits
+      real(real64) :: x
+      integer(int64) :: half
+      if (iand(bits, int(z'8000000000000000', int64)) == 0_int64) then
+         x = real(bits, real64)
+      else
+         half = ior(iand(shiftr(bits, 1), int(z'7fffffffffffffff', int64)), iand(bits, 1_int64))
+         x = real(half, real64)*2.0_real64
+      end if
+   end function capnp_u64_to_f64
+
+   subroutine capnp_f64_to_u64(x, uv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: uv
+      integer, intent(out) :: err
+      real(real64), parameter :: two63 = 9223372036854775808.0_real64
+      real(real64), parameter :: max_u64_f64 = 18446744073709549568.0_real64
+      err = CAPNP_OK
+      uv = 0_int64
+      if (.not. ieee_is_finite(x)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < 0.0_real64 .or. x > max_u64_f64 .or. aint(x) /= x) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < two63) then
+         uv = int(x, int64)
+      else
+         uv = ieor(int(x - two63, int64), int(z'8000000000000000', int64))
+      end if
+   end subroutine capnp_f64_to_u64
+
+   subroutine capnp_f64_to_i64(x, iv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: iv
+      integer, intent(out) :: err
+      real(real64), parameter :: min_i64_f64 = -9223372036854775808.0_real64
+      real(real64), parameter :: max_i64_f64 = 9223372036854774784.0_real64
+      err = CAPNP_OK
+      iv = 0_int64
+      if (.not. ieee_is_finite(x)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < min_i64_f64 .or. x > max_i64_f64 .or. aint(x) /= x) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x == min_i64_f64) then
+         iv = int(z'8000000000000000', int64)
+      else
+         iv = int(x, int64)
+      end if
+   end subroutine capnp_f64_to_i64
 
    subroutine fmt_g(val, prec, s)
       real(c_double), intent(in) :: val
@@ -566,9 +1033,9 @@ contains
       mul = int(base, int64)
       do while (i <= len(body))
          select case (base)
-         case (16); d = hex_digit(body(i:i))
-         case (8); d = oct_digit(body(i:i))
-         case default; d = dec_digit(body(i:i))
+         case (16); d = capnp_hex_digit(body(i:i))
+         case (8); d = capnp_oct_digit(body(i:i))
+         case default; d = capnp_dec_digit(body(i:i))
          end select
          if (d < 0) then
             err = CAPNP_ERR_ARG
@@ -612,7 +1079,7 @@ contains
       end select
    end subroutine escape_byte
 
-   pure function dec_digit(c) result(d)
+   pure function capnp_dec_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '9') then
@@ -620,9 +1087,9 @@ contains
       else
          d = -1
       end if
-   end function dec_digit
+   end function capnp_dec_digit
 
-   pure function oct_digit(c) result(d)
+   pure function capnp_oct_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '7') then
@@ -630,9 +1097,9 @@ contains
       else
          d = -1
       end if
-   end function oct_digit
+   end function capnp_oct_digit
 
-   pure function hex_digit(c) result(d)
+   pure function capnp_hex_digit(c) result(d)
       character(len=1), intent(in) :: c
       integer :: d
       if (c >= '0' .and. c <= '9') then
@@ -644,6 +1111,6 @@ contains
       else
          d = -1
       end if
-   end function hex_digit
+   end function capnp_hex_digit
 
 end module capnp_codec
