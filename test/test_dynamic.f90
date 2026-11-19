@@ -8,7 +8,7 @@ module test_dynamic
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
                                 type_which, value_which, value_text, node_id
-   use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__A826_NOTE_ID
+   use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__9715_NOTE_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
@@ -146,14 +146,14 @@ contains
       call check_(error, sink_idx > 0 .and. vec_idx > 0, 'dyn: Sink and Vec3 nodes found')
       call capnp_dyn_node_annotations(kschema, sink_idx, annotations, err)
       call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
-                  annotations(1)%id == SCHEMA__A826_NOTE_ID .and. &
+                  annotations(1)%id == SCHEMA__9715_NOTE_ID .and. &
                   value_which(annotations(1)%value) == TYPE_TEXT, &
                   'dyn: node annotation metadata')
       call value_text(annotations(1)%value, s, err)
       call check_(error, err == CAPNP_OK .and. s == 'sink type', 'dyn: node annotation value')
       call capnp_dyn_field_annotations(kschema, sink_idx, 'flag', annotations, err)
       call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
-                  annotations(1)%id == SCHEMA__A826_NOTE_ID .and. &
+                  annotations(1)%id == SCHEMA__9715_NOTE_ID .and. &
                   value_which(annotations(1)%value) == TYPE_TEXT, &
                   'dyn: field annotation metadata')
       call value_text(annotations(1)%value, s, err)

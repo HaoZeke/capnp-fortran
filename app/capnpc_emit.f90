@@ -397,7 +397,7 @@ contains
          else
             hex(i:i) = achar(iachar('a') + d - 10)
          end if
-         h = h / 16_int64
+         h = ishft(h, -4)
       end do
    end function ident_hash_hex
 

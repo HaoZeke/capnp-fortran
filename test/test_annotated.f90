@@ -41,7 +41,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       type(ping_srv_t) :: srv
       call check(error, &
-                 SCHEMA__A879_ANNOTATED_SERVICE_PING_METHOD_NOTE == 'ping method', &
+                 SCHEMA__9768_ANNOTATED_SERVICE_PING_METHOD_NOTE == 'ping method', &
                  'annotated: method note is generated')
       if (allocated(error)) return
       call check(error, same_type_as(srv, srv), 'annotated: server type extends')

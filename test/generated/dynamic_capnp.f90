@@ -56,8 +56,8 @@ module schema__dynamic_capnp
       type(capnp_ptr_t) :: p
    end type scalars_t
 
-   integer(int64), parameter :: SCHEMA__A879_METHOD_NOTE_ID = -2113916645833798051_int64
-   character(len=*), parameter :: SCHEMA__A879_ANNOTATED_SERVICE_PING_METHOD_NOTE = 'ping method'
+   integer(int64), parameter :: SCHEMA__9768_METHOD_NOTE_ID = -2113916645833798051_int64
+   character(len=*), parameter :: SCHEMA__9768_ANNOTATED_SERVICE_PING_METHOD_NOTE = 'ping method'
    private :: cap_resolve
    private :: cap_resolve_id
    private :: rpc_capnp_cap_descriptor_t, rpc_capnp_cap_descriptor_which
