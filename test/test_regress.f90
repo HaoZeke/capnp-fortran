@@ -708,7 +708,8 @@ contains
       call udiff(error, schema, n, 'MultiUnionDoc', '{"fast":3,"mode":"fast"}')
       call udiff(error, schema, n, 'GroupArm', '{"box":{"x":4,"y":5},"kind":"box"}')
       call udiff(error, schema, n, 'GroupArm', '{"kind":"box","box":{"x":4,"y":5}}')
-      call check_(error, n == 68, 'union-diff: case count')
+      call udiff(error, schema, n, 'GroupArm', '{"n":5,"box":{}}')
+      call check_(error, n == 69, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
