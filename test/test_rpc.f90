@@ -174,6 +174,7 @@ contains
       integer, intent(in) :: method_id
       integer, intent(out) :: err
       self%inbound_calls = self%inbound_calls + 1
+      if (method_id < 0) self%inbound_calls = self%inbound_calls + int(interface_id)
       if (self%block) then
          err = RPC_ERR_EXCEPTION
       else
@@ -187,6 +188,7 @@ contains
       integer, intent(in) :: method_id
       integer, intent(out) :: err
       self%outbound_calls = self%outbound_calls + 1
+      if (method_id < 0) self%outbound_calls = self%outbound_calls + int(interface_id)
       if (self%block) then
          err = RPC_ERR_EXCEPTION
       else
@@ -240,6 +242,7 @@ contains
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
+      if (.not. allocated(error)) call t_dial_guard(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -1332,6 +1335,8 @@ contains
       call rpc_pump_once(msrv, e)
       call rpc_wait(mcli, qb, e)
       call rpc_result_cap(mcli, qb, [integer ::], root, e)
+      call rpc_finish_send(mcli, qb, .true., e)
+      call rpc_pump_once(msrv, e)
 
       call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, qm, e)
       s = capnp_new_struct(m, 1, 0, e)
@@ -1354,6 +1359,10 @@ contains
       call rpc_result_content(mcli, qa, content, e)
       call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
                   'membrane: recursive result capability works')
+      call rpc_finish_send(mcli, qm, .true., e)
+      call rpc_pump_once(msrv, e)
+      call rpc_finish_send(mcli, qa, .false., e)
+      call rpc_pump_once(msrv, e)
       call check_(error, policy_store%inbound_calls == 2, &
                   'membrane: recursive result capability checked')
 
@@ -1396,6 +1405,8 @@ contains
       call rpc_result_content(mcli, qa, content, e)
       call check_(error, e == RPC_ERR_EXCEPTION, &
                   'membrane: revocation reaches recursive wrappers')
+      call rpc_finish_send(mcli, qa, .false., e)
+      call rpc_pump_once(msrv, e)
 
       call rpc_conn_close(mcli)
       call rpc_conn_close(msrv)
@@ -1567,6 +1578,8 @@ contains
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 10_int64, &
                   'rpc: settled call')
 
+      call rpc_finish_send(cli, q0, .true., err)
+      call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, q1, .false., err)
       call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, q2, .false., err)
@@ -1613,6 +1626,10 @@ contains
       call rpc_result_content(cli, qp, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
                   'rpc: pipelined add result')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qp, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Settle the adder and call it directly.
       call rpc_result_cap(cli, qm, [0], adder, err)
@@ -1627,6 +1644,8 @@ contains
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 107_int64, &
                   'rpc: settled adder call')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Retain the adder import across the finish of its origin question.
       call rpc_finish_send(cli, qm, .true., err)
@@ -1641,6 +1660,8 @@ contains
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 101_int64, &
                   'rpc: retained cap survives finish')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Release the adder; a call afterwards must raise an exception.
       call rpc_release_send(cli, adder, err)
@@ -1654,6 +1675,8 @@ contains
       call rpc_wait(cli, qs, err)
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: released cap raises')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_cap_result_and_pipeline
 
    !> Unknown method ids surface as exception returns.
@@ -1676,6 +1699,10 @@ contains
       call rpc_wait(cli, qx, err)
       call rpc_result_content(cli, qx, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: bad method raises')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qx, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_exception
 
    !> The obsolete save/delete messages are gone from the protocol, so
@@ -1994,6 +2021,10 @@ contains
       call capnp_get_text(save_results, 0, ref, err)
       call check_(error, err == CAPNP_OK .and. ref == 'sturdy:echo-main:alice', &
                   'rpc: sealed sturdy ref')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
       call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
@@ -2044,6 +2075,10 @@ contains
       call rpc_wait(cli, qy, err)
       call rpc_result_content(cli, qy, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: sendResultsTo.yourself raises')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qy, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! takeFromOtherQuestion Return -> exception with reason, not
       ! ERR_KIND. The peer (impersonated on the raw fd) redirects a live
@@ -2066,6 +2101,8 @@ contains
       call rpc_result_content(cli, qy, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: tail-call return raises cleanly')
       call check_(error, index(rpc_conn_reason(cli), 'tail-call') > 0, 'rpc: tail-call reason')
+      call rpc_finish_send(cli, qy, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_resolve_and_tail_calls
 
    !> A senderPromise capTable entry settles into a usable import, per
@@ -2105,6 +2142,8 @@ contains
       call rpc_result_cap(cli, qb, [integer ::], cap, err)
       call check_(error, err == CAPNP_OK .and. cap%kind == RPC_CAP_IMPORT .and. &
                   cap%id == 5_int64, 'rpc: senderPromise settles as import')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_sender_promise_import
 
    !> Level 1 embargo: a senderLoopback Disembargo is answered by the
@@ -2223,6 +2262,8 @@ contains
       call rpc_pump_once(srv, err)
       call rpc_wait(cli, qb, err)
       call check_(error, err == CAPNP_OK, 'rpc: bootstrap after receiverLoopback')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_disembargo_receiver_loopback_absorbed
 
    !> Poll-driven pumping: a quiet connection times out with
@@ -2238,6 +2279,8 @@ contains
       call check_(error, err == CAPNP_OK .and. handled, 'poll: pending message handled')
       call rpc_wait(cli, bootcap%id, err)
       call check_(error, err == CAPNP_OK, 'poll: answer arrived')
+      call rpc_finish_send(cli, bootcap%id, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_pump_poll
 
    !> Send bytes and close the write side, so a reader that wrongly asks
@@ -2542,5 +2585,66 @@ contains
       call check_(error, dst%nsegs == 1, 'short/padded: empty frame segment count')
       call capnp_message_free(dst)
    end subroutine t_framing_short_and_padded
+
+   subroutine deny_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = .false.
+      if (port < 0 .and. len(host) < 0) allow = .true.
+   end subroutine deny_dial
+
+   subroutine allow_local_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = host == '127.0.0.1' .and. port > 0
+   end subroutine allow_local_dial
+
+   !> A dial hook can refuse an introduction, and a timeout returns
+   !> instead of blocking. The default hook still reaches a local listener.
+   subroutine t_dial_guard(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: holder, introduced
+      class(rpc_server_t), pointer :: boot
+      integer :: fa, fb, lfd, port, acc, e
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      call px_tcp_listen(0, lfd, e)
+      call px_tcp_bound_port(lfd, port, e)
+      call check_(error, e == CAPNP_OK .and. port > 0, 'dial: listener')
+      if (allocated(error)) return
+      boot => null()
+      call rpc_conn_init(holder, fa, boot)
+      holder%introductions(0)%used = .true.
+      holder%introductions(0)%nonce = 55_int64
+      holder%introductions(0)%host = '127.0.0.1'
+      holder%introductions(0)%host_len = 9
+      holder%introductions(0)%port = port
+      holder%dial_allow => deny_dial
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e == CAPNP_ERR_ARG, 'dial: hook refusal is an argument error')
+      call px_poll_in(lfd, 100, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, 'dial: refused hook does not connect')
+
+      holder%dial_allow => allow_local_dial
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e == CAPNP_OK, 'dial: allowed local connect')
+      call px_poll_in(lfd, 500, readable, e)
+      call check_(error, readable, 'dial: listener sees the allowed connect')
+      call px_tcp_accept(lfd, acc, e)
+      call px_close(acc)
+      call rpc_conn_close(introduced)
+
+      holder%introductions(0)%host = '192.0.2.1'
+      holder%introductions(0)%port = 81
+      holder%dial_allow => null()
+      holder%dial_timeout_ms = 300
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e /= CAPNP_OK, 'dial: timeout or refusal returns')
+      call rpc_conn_close(holder)
+      call px_close(fb)
+      call px_close(lfd)
+   end subroutine t_dial_guard
 
 end module test_rpc
