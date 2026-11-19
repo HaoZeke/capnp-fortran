@@ -7,7 +7,11 @@ module test_dynamic
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
-                                type_which, value_which, value_text, node_id
+                                TYPE_STRUCT, TYPE_ANY_POINTER, type_which, &
+                                type_list_element, type_type_id, type_anyptr_which, &
+                                type_param_scope_id, ANYPTR_PARAMETER, &
+                                value_which, value_text, node_id, &
+                                node_struct_discriminant_offset
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -35,7 +39,9 @@ contains
                    new_unittest("dynamic-group-union", run_group_union), &
                    new_unittest("dynamic-union-clear", run_union_clear), &
                    new_unittest("dynamic-scalars", run_scalars), &
-                   new_unittest("dynamic-reader-default", run_reader_default)]
+                   new_unittest("dynamic-reader-default", run_reader_default), &
+                   new_unittest("dynamic-unset-which", run_unset_which), &
+                   new_unittest("dynamic-two-hop-brand", run_two_hop_brand)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -792,5 +798,140 @@ contains
       call capnp_message_free(reader)
       call capnp_dyn_free(schema)
    end subroutine run_reader_default
+
+   !> No active union arm is -1, for both a struct discriminant and a brand.
+   subroutine run_unset_which(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_ptr_t) :: shape, typed, raw, scopes, scope, binds, binding, bad
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: off
+      integer :: err, shape_idx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      shape_idx = capnp_dyn_find(schema, 'Shape', err)
+      call check_(error, shape_idx > 0, 'unset: shape node')
+      call capnp_message_init_builder(msg, err)
+      shape = capnp_dyn_new_root(schema, shape_idx, msg, err)
+      off = node_struct_discriminant_offset(schema%nodes(shape_idx))
+      call capnp_set_u16(shape, off*2_int64, 18_int32, err)
+      tag = capnp_dyn_which(schema, shape_idx, shape, err)
+      call check_(error, err == CAPNP_OK .and. tag == -1, 'unset: discriminant 18 is no arm')
+
+      typed = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(typed, 0_int64, 16_int32, err)
+      raw = capnp_new_struct(msg, 0, 1, err)
+      scopes = capnp_new_composite_list(msg, 1_int64, 2, 1, err)
+      call capnp_setp(raw, 0, scopes, err)
+      scope = capnp_list_get_struct(scopes, 0, err)
+      call capnp_set_i64(scope, 0_int64, 42_int64, err)
+      call capnp_set_u16(scope, 8_int64, 0_int32, err)
+      binds = capnp_new_composite_list(msg, 1_int64, 1, 1, err)
+      call capnp_setp(scope, 0, binds, err)
+      binding = capnp_list_get_struct(binds, 0, err)
+      call capnp_set_u16(binding, 0_int64, 1_int32, err)
+      bad = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(bad, 0_int64, 18_int32, err)
+      call capnp_set_u16(bad, 8_int64, 99_int32, err)
+      call capnp_setp(binding, 0, bad, err)
+      call capnp_setp(typed, 0, raw, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_OK .and. size(brand%scopes) == 1 .and. &
+                  size(brand%scopes(1)%bindings) == 1 .and. &
+                  brand%scopes(1)%bindings(1)%resolved_which == -1, &
+                  'unset: resolved_which is not anyPointer')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_unset_which
+
+   !> Box(parameter of Nest) plus Nest(Item). Cap'n Proto 1.4.0 resolves
+   !> that walk to Item.
+   subroutine run_two_hop_brand(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: inner_brand, bag_brand, brand
+      type(capnp_ptr_t) :: inner_t, bag_t, item_type
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: nest_scope, bound
+      integer :: err, box_idx, nest_idx, item_idx, bag_idx, tw
+      ! Ids reported by the C++ 1.4.0 schema loader for schema/box.capnp.
+      integer(int64), parameter :: cpp_item_id = -6139276977445145440_int64
+      integer(int64), parameter :: cpp_nest_id = -5680941978801891149_int64
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      nest_idx = capnp_dyn_find(schema, 'Nest', err)
+      item_idx = capnp_dyn_find(schema, 'Item', err)
+      bag_idx = capnp_dyn_find(schema, 'BagUse', err)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. nest_idx > 0 .and. &
+                  item_idx > 0 .and. bag_idx > 0 .and. &
+                  node_id(schema%nodes(item_idx)) == cpp_item_id .and. &
+                  node_id(schema%nodes(nest_idx)) == cpp_nest_id, &
+                  'twohop: schema ids match the C++ loader')
+
+      ! Nest.inner is Box, bound to Nest's own parameter.
+      inner_t = capnp_dyn_field_schema(schema, nest_idx, 'inner', err)
+      call capnp_dyn_load_brand(inner_t, inner_brand, err)
+      call check_(error, err == CAPNP_OK .and. allocated(inner_brand%scopes) .and. &
+                  size(inner_brand%scopes) == 1 .and. &
+                  allocated(inner_brand%scopes(1)%bindings) .and. &
+                  size(inner_brand%scopes(1)%bindings) == 1, &
+                  'twohop: inner brand has one binding')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      nest_scope = type_param_scope_id(inner_brand%scopes(1)%bindings(1)%type)
+      call check_(error, type_which(inner_brand%scopes(1)%bindings(1)%type) == &
+                  TYPE_ANY_POINTER .and. &
+                  type_anyptr_which(inner_brand%scopes(1)%bindings(1)%type) == &
+                  ANYPTR_PARAMETER .and. nest_scope == cpp_nest_id, &
+                  'twohop: box binding is a parameter of Nest')
+
+      ! BagUse.bag is Box(List(Item)); the list element is the Item type.
+      bag_t = capnp_dyn_field_schema(schema, bag_idx, 'bag', err)
+      call capnp_dyn_load_brand(bag_t, bag_brand, err)
+      call check_(error, err == CAPNP_OK .and. allocated(bag_brand%scopes) .and. &
+                  size(bag_brand%scopes) == 1 .and. &
+                  allocated(bag_brand%scopes(1)%bindings) .and. &
+                  type_which(bag_brand%scopes(1)%bindings(1)%type) == TYPE_LIST, &
+                  'twohop: bag binding is a list')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      item_type = type_list_element(bag_brand%scopes(1)%bindings(1)%type, err)
+      call check_(error, err == CAPNP_OK .and. type_which(item_type) == TYPE_STRUCT .and. &
+                  type_type_id(item_type) == cpp_item_id, &
+                  'twohop: list element is Item')
+
+      allocate (brand%scopes(2))
+      brand%scopes(1) = inner_brand%scopes(1)
+      brand%scopes(2)%id = nest_scope
+      brand%scopes(2)%inherited = .false.
+      allocate (brand%scopes(2)%bindings(1))
+      brand%scopes(2)%bindings(1)%unbound = .false.
+      brand%scopes(2)%bindings(1)%type = item_type
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_STRUCT .and. &
+                  bound == cpp_item_id, &
+                  'twohop: value resolves to Item')
+
+      call capnp_dyn_free(schema)
+   end subroutine run_two_hop_brand
 
 end module test_dynamic

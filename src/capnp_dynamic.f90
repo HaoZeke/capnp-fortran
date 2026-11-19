@@ -343,13 +343,19 @@ contains
       integer(int64), intent(out) :: id
       integer, intent(out) :: err
       type(capnp_ptr_t) :: et
-      integer :: i, idx, ew
+      integer :: ew
       which = -1
       id = 0_int64
       err = CAPNP_OK
       if (depth > 8) return
       if (t%kind == CAPNP_PK_NULL) return
       which = type_which(t)
+      ! A discriminant with no arm is unset. Leaving the raw tag (anyPointer
+      ! is 18) would claim a member that is not active.
+      if (which < TYPE_VOID .or. which > TYPE_ANY_POINTER) then
+         which = -1
+         return
+      end if
       select case (which)
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
          id = type_type_id(t)
@@ -362,21 +368,57 @@ contains
          which = TYPE_LIST
          if (ew /= TYPE_STRUCT .and. ew /= TYPE_ENUM .and. ew /= TYPE_INTERFACE) id = 0_int64
       case (TYPE_ANY_POINTER)
-         if (type_anyptr_which(t) /= ANYPTR_PARAMETER) return
-         if (.not. allocated(brand%scopes)) return
+         call dyn_resolve_anyptr(brand, t, depth, which, id, err)
+      end select
+   end subroutine dyn_resolve_type
+
+   !> anyPointer is only resolved when one of its arms is active.
+   !> Anything else, including a parameter that does not bind, is unset.
+   recursive subroutine dyn_resolve_anyptr(brand, t, depth, which, id, err)
+      type(capnp_dyn_brand_t), intent(in) :: brand
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(in) :: depth
+      integer, intent(inout) :: which
+      integer(int64), intent(inout) :: id
+      integer, intent(out) :: err
+      integer :: aw, uw, i, idx
+      err = CAPNP_OK
+      aw = type_anyptr_which(t)
+      select case (aw)
+      case (ANYPTR_UNCONSTRAINED)
+         uw = type_uncon_which(t)
+         if (uw < UNCON_ANY .or. uw > UNCON_CAPABILITY) which = -1
+      case (ANYPTR_IMPLICIT)
+      case (ANYPTR_PARAMETER)
+         if (.not. allocated(brand%scopes)) then
+            which = -1
+            return
+         end if
          idx = type_param_index(t) + 1
          do i = 1, size(brand%scopes)
             if (brand%scopes(i)%inherited) cycle
             if (brand%scopes(i)%id /= type_param_scope_id(t)) cycle
-            if (.not. allocated(brand%scopes(i)%bindings)) return
-            if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) return
-            if (brand%scopes(i)%bindings(idx)%unbound) return
+            if (.not. allocated(brand%scopes(i)%bindings)) then
+               which = -1
+               return
+            end if
+            if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) then
+               which = -1
+               return
+            end if
+            if (brand%scopes(i)%bindings(idx)%unbound) then
+               which = -1
+               return
+            end if
             call dyn_resolve_type(brand, brand%scopes(i)%bindings(idx)%type, &
                                   depth + 1, which, id, err)
             return
          end do
+         which = -1
+      case default
+         which = -1
       end select
-   end subroutine dyn_resolve_type
+   end subroutine dyn_resolve_anyptr
 
    !> Zero one slot. Wire zero reads back as the field's default.
    subroutine dyn_zero_slot(p, f, err)
@@ -1082,6 +1124,8 @@ contains
          return
       end if
       tag = capnp_which(p, int(disc_off))
+      ! C++ which() is empty when the discriminant names no arm.
+      if (tag < 0 .or. tag >= disc_count) tag = -1
    end function capnp_dyn_which
 
    !> Select a union member by its field name before initializing or assigning
