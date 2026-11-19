@@ -28,7 +28,8 @@ contains
       testsuite = [new_unittest("dynamic", run_dynamic), &
                    new_unittest("dynamic-default-isolation", run_default_isolation), &
                    new_unittest("dynamic-malformed-text", run_malformed_text), &
-                   new_unittest("dynamic-unloaded-schema", run_unloaded_schema)]
+                   new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
+                   new_unittest("dynamic-init-null", run_init_null)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -442,5 +443,34 @@ contains
       call check_(error, err == CAPNP_ERR_ARG .and. tag == -1, 'unloaded: which')
       call capnp_message_free(msg)
    end subroutine run_unloaded_schema
+
+   !> init on a pointer with no message reports an error.
+   subroutine run_init_null(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_ptr_t) :: p, q
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      call check_(error, err == CAPNP_OK .and. sink_idx > 0, 'init-null: sink node')
+      p = capnp_ptr_t()
+      q = capnp_dyn_init_struct(schema, sink_idx, p, 'origin', err)
+      call check_(error, err == CAPNP_ERR_ARG .and. q%kind == CAPNP_PK_NULL, &
+                  'init-null: struct')
+      q = capnp_dyn_init_list(schema, sink_idx, p, 'tags', 1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. q%kind == CAPNP_PK_NULL, &
+                  'init-null: pointer list')
+      q = capnp_dyn_init_list(schema, sink_idx, p, 'scores', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. q%kind == CAPNP_PK_NULL, &
+                  'init-null: primitive list')
+      call capnp_dyn_free(schema)
+   end subroutine run_init_null
 
 end module test_dynamic
