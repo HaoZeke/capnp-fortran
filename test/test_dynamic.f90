@@ -47,7 +47,7 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, dual_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
@@ -128,7 +128,8 @@ contains
       call capnp_dyn_load(kschema, bytes, err)
       call check_(error, err == CAPNP_OK, 'dyn: kitchen schema loads')
       sink_idx = capnp_dyn_find(kschema, 'Sink', err)
-      call check_(error, sink_idx > 0, 'dyn: Sink node found')
+      vec_idx = capnp_dyn_find(kschema, 'Vec3', err)
+      call check_(error, sink_idx > 0 .and. vec_idx > 0, 'dyn: Sink and Vec3 nodes found')
       call capnp_dyn_node_annotations(kschema, sink_idx, annotations, err)
       call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
                   annotations(1)%id == SCHEMA__A826_NOTE_ID .and. &
@@ -163,6 +164,18 @@ contains
       call check_(error, err == CAPNP_OK .and. size(data) == 3 .and. &
                   data(lbound(data, 1)) == -34_int8 .and. data(ubound(data, 1)) == -66_int8, &
                   'dyn: get_data payload')
+      q = capnp_dyn_init_struct(kschema, sink_idx, sink%p, 'origin', err)
+      call capnp_dyn_set_f64(kschema, vec_idx, q, 'x', 9.5_real64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'x', err) - 9.5_real64) < 1.0e-15_real64, &
+                  'dyn: init_struct and write nested value')
+      q = capnp_dyn_init_list(kschema, sink_idx, sink%p, 'tags', 2_int64, err)
+      call capnp_list_set_text(q, 0, 'left', err)
+      call capnp_list_set_text(q, 1, 'right', err)
+      call capnp_dyn_setp(kschema, sink_idx, sink%p, 'tags', q, err)
+      q = capnp_dyn_getp(kschema, sink_idx, sink%p, 'tags', err)
+      call check_(error, err == CAPNP_OK .and. capnp_list_len(q) == 2_int64, &
+                  'dyn: init_list and setp')
 
       ! Multi-union Dual: set *divergent* tags (primary voidA=0, secondary
       ! intB=1) so a first-union-only dyn_which cannot satisfy both named
