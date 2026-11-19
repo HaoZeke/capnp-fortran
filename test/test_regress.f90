@@ -1,11 +1,12 @@
 !> Regressions for the text and JSON codec review.
 module test_regress
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
-   use, intrinsic :: iso_fortran_env, only: int64
+   use, intrinsic :: iso_fortran_env, only: int64, real64
    use capnp
    use capnp_dynamic
    use capnp_text
    use capnp_json
+   use capnp_codec, only: capnp_brand_env_t
    use cli_path, only: capnpf_setup, capnpc_setup
    implicit none
    private
@@ -77,11 +78,31 @@ contains
       call check_(error, err == CAPNP_OK, 'comment: schema')
       idx = capnp_dyn_find(schema, 'Sink', err)
       call check_(error, idx > 0, 'comment: Sink')
-      call capnp_text_decode(schema, idx, '(count = 1) # c', msg, err)
-      call check_(error, err == CAPNP_OK, 'comment: decode at eof')
+      call capnp_text_decode(schema, idx, '(count = 1)#', msg, err)
+      call check_(error, err == CAPNP_OK, 'comment: hash ends the input')
       root = capnp_root(msg, err)
       count = capnp_dyn_get_int(schema, idx, root, 'count', err)
       call check_(error, err == CAPNP_OK .and. count == 1_int64, 'comment: count is 1')
+      call capnp_text_decode(schema, idx, '(count = 1 # hide'//achar(10)//', ratio = 9.0)', msg, err)
+      call check_(error, err == CAPNP_OK, 'comment: field after a hash')
+      root = capnp_root(msg, err)
+      count = capnp_dyn_get_int(schema, idx, root, 'count', err)
+      call check_(error, err == CAPNP_OK .and. count == 1_int64, 'comment: count survives the hash')
+      block
+         real(real64) :: ratio
+         ratio = capnp_dyn_get_f64(schema, idx, root, 'ratio', err)
+         call check_(error, err == CAPNP_OK .and. abs(ratio - 9.0_real64) < 1.0e-12_real64, &
+                     'comment: ratio follows the hash')
+      end block
+      call capnp_text_decode(schema, idx, '(scores = [3, # c'//achar(10)//'1, 4])', msg, err)
+      call check_(error, err == CAPNP_OK, 'comment: list element after a hash')
+      root = capnp_root(msg, err)
+      block
+         character(len=:), allocatable :: text
+         call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK .and. index(text, 'scores = [3, 1, 4]') > 0, &
+                     'comment: list keeps 3, 1, 4')
+      end block
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_comment_eof
@@ -215,7 +236,8 @@ contains
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: root, cap
       integer(int8), allocatable :: bytes(:)
-      integer :: err
+      integer :: err, n0, n1
+      n0 = capnp_arena_live_blocks()
       call capnp_message_init_builder(msg, err)
       root = capnp_new_struct(msg, 0, 1, err)
       call check_(error, err == CAPNP_OK, 'canon: struct')
@@ -226,9 +248,13 @@ contains
       cap%msg => msg
       call capnp_setp(root, 0, cap, err)
       call check_(error, err == CAPNP_OK, 'canon: set capability')
+      n1 = capnp_arena_live_blocks()
       call capnp_canonicalize(msg, bytes, err)
       call check_(error, err == CAPNP_ERR_KIND, 'canon: capability has no canonical form')
+      call check_(error, capnp_arena_live_blocks() == n1, &
+                  'canon: failed copy releases the builder')
       call capnp_message_free(msg)
+      call check_(error, capnp_arena_live_blocks() == n0, 'canon: source message is released')
       call capnp_message_init_builder(msg, err)
       root = capnp_new_struct(msg, 1, 0, err)
       call capnp_set_root(msg, root, err)
@@ -405,6 +431,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: p
+      type(capnp_brand_env_t) :: env
       character(len=:), allocatable :: text
       integer :: err
       p = capnp_ptr_t()
@@ -416,6 +443,12 @@ contains
       call check_(error, err == CAPNP_ERR_ARG, 'guard: json encode unloaded schema')
       call capnp_json_decode(schema, 1, '{}', msg, err)
       call check_(error, err == CAPNP_ERR_ARG, 'guard: json decode unloaded schema')
+      call capnp_text_encode_enum(schema, 1_int64, 0, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text enum unloaded schema')
+      call capnp_text_encode_value(schema, p, p, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text value unloaded schema')
+      call capnp_text_encode_list(schema, p, p, env, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text list unloaded schema')
    end subroutine run_unloaded
 
    subroutine run_long_arg(error)
@@ -509,16 +542,22 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && echo kept > '//tmp//'/kept' &
+         //' && printf "(x = 1, y = 2, z = 3)\n" > '//tmp//'/pipe.in' &
          //' && '//cap_setup() &
-         //' && (' &
-         //' ln -sfn '//tmp//'/kept /tmp/capnpf-$$.cgr' &
-         //' && printf "(x = 1, y = 2, z = 3)\n" | exec "$CAP" encode' &
-         //' schema/common.capnp Vec3 > '//tmp//'/pipe.bin' &
-         //' )' &
-         //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
-         //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref' &
+         //' && export CAP' &
+         //' && printf "%s\n"' &
+         //' "echo \$\$ > \"\$1\""' &
+         //' "ln -sfn \"\$2\" /tmp/capnpf-\$\$.cgr"' &
+         //' "exec \"\$CAP\" encode schema/common.capnp Vec3 < \"\$3\" > \"\$4\""' &
+         //' > '//tmp//'/pipe.sh' &
+         //' && sh '//tmp//'/pipe.sh '//tmp//'/pipe.pid '//tmp//'/kept ' &
+         //tmp//'/pipe.in '//tmp//'/pipe.bin' &
+         //' && pid=$(cat '//tmp//'/pipe.pid)' &
+         //' && test -L /tmp/capnpf-$pid.cgr' &
          //' && test "$(cat '//tmp//'/kept)" = kept' &
-         //' && rm -f /tmp/capnpf-*.cgr')) then
+         //' && rm -f /tmp/capnpf-$pid.cgr' &
+         //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
+         //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref')) then
          call test_failed(error, 'schema pipe encode failed')
          return
       end if

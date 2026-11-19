@@ -84,6 +84,12 @@ contains
       integer(int64), intent(in), optional :: traversal_words
       integer :: ind
       integer(int64) :: limit
+      err = CAPNP_OK
+      text = ''
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       ind = 1
       if (present(pretty)) then
          if (.not. pretty) ind = 0
@@ -101,6 +107,12 @@ contains
       integer, intent(in) :: ord
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
+      err = CAPNP_OK
+      text = ''
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call enum_text(schema, tid, ord, text, err)
    end subroutine capnp_text_encode_enum
 
@@ -159,6 +171,10 @@ contains
       character(len=:), allocatable :: body, esc
       err = CAPNP_OK
       text = ''
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       ind = 1
       if (present(pretty)) then
          if (.not. pretty) ind = 0
