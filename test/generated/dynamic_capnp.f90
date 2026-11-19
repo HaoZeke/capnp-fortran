@@ -48,6 +48,16 @@ module schema__dynamic_capnp
    integer, parameter :: SHAPE_CIRCLE_TAG = 0
    integer, parameter :: SHAPE_SQUARE_TAG = 1
 
+   integer, parameter :: HUE_RED_E = 0
+   integer, parameter :: HUE_GREEN_E = 1
+   integer, parameter :: HUE_BLUE_E = 2
+
+   integer, parameter :: SCALARS_DWORDS = 6
+   integer, parameter :: SCALARS_PWORDS = 2
+   type :: scalars_t
+      type(capnp_ptr_t) :: p
+   end type scalars_t
+
    integer(int64), parameter :: SCHEMA__A879_METHOD_NOTE_ID = -2113916645833798051_int64
    character(len=*), parameter :: SCHEMA__A879_ANNOTATED_SERVICE_PING_METHOD_NOTE = 'ping method'
    private :: cap_resolve
@@ -438,6 +448,230 @@ contains
       integer, intent(out) :: err
       call capnp_set_f64(h%p, 0_int64, v, err)
    end subroutine shape_square_width_set
+
+   function scalars_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(scalars_t) :: h
+      h%p = capnp_new_struct(msg, SCALARS_DWORDS, SCALARS_PWORDS, err)
+   end function scalars_new
+
+   function scalars_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(scalars_t) :: h
+      h = scalars_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function scalars_new_root
+
+   function scalars_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(scalars_t) :: h
+      h%p = capnp_root(msg, err)
+   end function scalars_read_root
+
+   function scalars_b_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      logical :: v
+      v = capnp_get_bool(h%p, 0_int64)
+   end function scalars_b_get
+
+   subroutine scalars_b_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      logical, intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_bool(h%p, 0_int64, v, err)
+   end subroutine scalars_b_set
+
+   function scalars_i8_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int8) :: v
+      v = capnp_get_i8(h%p, 1_int64)
+   end function scalars_i8_get
+
+   subroutine scalars_i8_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int8), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i8(h%p, 1_int64, v, err)
+   end subroutine scalars_i8_set
+
+   function scalars_i16_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int16) :: v
+      v = capnp_get_i16(h%p, 2_int64)
+   end function scalars_i16_get
+
+   subroutine scalars_i16_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int16), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i16(h%p, 2_int64, v, err)
+   end subroutine scalars_i16_set
+
+   function scalars_i32_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 4_int64)
+   end function scalars_i32_get
+
+   subroutine scalars_i32_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 4_int64, v, err)
+   end subroutine scalars_i32_set
+
+   function scalars_i64_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int64) :: v
+      v = capnp_get_i64(h%p, 8_int64)
+   end function scalars_i64_get
+
+   subroutine scalars_i64_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i64(h%p, 8_int64, v, err)
+   end subroutine scalars_i64_set
+
+   function scalars_u8_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int16) :: v
+      v = capnp_get_u8(h%p, 16_int64)
+   end function scalars_u8_get
+
+   subroutine scalars_u8_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int16), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u8(h%p, 16_int64, v, err)
+   end subroutine scalars_u8_set
+
+   function scalars_u16_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_u16(h%p, 18_int64)
+   end function scalars_u16_get
+
+   subroutine scalars_u16_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 18_int64, v, err)
+   end subroutine scalars_u16_set
+
+   function scalars_u32_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int64) :: v
+      v = capnp_get_u32(h%p, 20_int64)
+   end function scalars_u32_get
+
+   subroutine scalars_u32_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u32(h%p, 20_int64, v, err)
+   end subroutine scalars_u32_set
+
+   function scalars_u64_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer(int64) :: v
+      v = capnp_get_i64(h%p, 24_int64)
+   end function scalars_u64_get
+
+   subroutine scalars_u64_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i64(h%p, 24_int64, v, err)
+   end subroutine scalars_u64_set
+
+   function scalars_f32_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      real(real32) :: v
+      v = capnp_get_f32(h%p, 32_int64)
+   end function scalars_f32_get
+
+   subroutine scalars_f32_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      real(real32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_f32(h%p, 32_int64, v, err)
+   end subroutine scalars_f32_set
+
+   function scalars_f64_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      real(real64) :: v
+      v = capnp_get_f64(h%p, 40_int64)
+   end function scalars_f64_get
+
+   subroutine scalars_f64_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      real(real64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_f64(h%p, 40_int64, v, err)
+   end subroutine scalars_f64_set
+
+   function scalars_hue_get(h) result(v)
+      type(scalars_t), intent(in) :: h
+      integer :: v
+      v = int(capnp_get_u16(h%p, 36_int64))
+   end function scalars_hue_get
+
+   subroutine scalars_hue_set(h, v, err)
+      type(scalars_t), intent(in) :: h
+      integer, intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 36_int64, int(v, int32), err)
+   end subroutine scalars_hue_set
+
+   function scalars_note_has(h) result(v)
+      type(scalars_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function scalars_note_has
+
+   subroutine scalars_note_get(h, s, err)
+      type(scalars_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 0, s, err)
+   end subroutine scalars_note_get
+
+   subroutine scalars_note_set(h, s, err)
+      type(scalars_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 0, s, err)
+   end subroutine scalars_note_set
+
+   function scalars_blob_has(h) result(v)
+      type(scalars_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function scalars_blob_has
+
+   subroutine scalars_blob_get(h, b, err)
+      type(scalars_t), intent(in) :: h
+      integer(int8), allocatable, intent(out) :: b(:)
+      integer, intent(out) :: err
+      call capnp_get_data(h%p, 1, b, err)
+   end subroutine scalars_blob_get
+
+   subroutine scalars_blob_set(h, b, err)
+      type(scalars_t), intent(in) :: h
+      integer(int8), intent(in) :: b(:)
+      integer, intent(out) :: err
+      call capnp_set_data(h%p, 1, b, err)
+   end subroutine scalars_blob_set
 
    subroutine cap_resolve(ctab, idx, cap, err)
       type(capnp_ptr_t), intent(in) :: ctab

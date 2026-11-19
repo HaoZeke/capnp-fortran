@@ -6,7 +6,7 @@ module test_dynamic
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, type_which, value_which, value_text
+   use capnp_schema, only: TYPE_TEXT, TYPE_VOID, type_which, value_which, value_text
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -31,7 +31,8 @@ contains
                    new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
                    new_unittest("dynamic-init-null", run_init_null), &
                    new_unittest("dynamic-assign-types", run_assign_types), &
-                   new_unittest("dynamic-group-union", run_group_union)]
+                   new_unittest("dynamic-group-union", run_group_union), &
+                   new_unittest("dynamic-scalars", run_scalars)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -563,5 +564,86 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_group_union
+
+   !> Every scalar width, void, an unknown enumerant, and embedded NULs.
+   subroutine run_scalars(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:), blob(:), got(:)
+      character(len=:), allocatable :: text, back
+      integer :: err, idx
+      integer(int64) :: n
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'scalars: node')
+      call check_(error, capnp_dyn_field_type(schema, idx, 'v', err) == TYPE_VOID, &
+                  'scalars: void type')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call check_(error, err == CAPNP_OK, 'scalars: root')
+      n = capnp_dyn_get_int(schema, idx, root, 'v', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. n == 0_int64, 'scalars: void is not an int')
+
+      call capnp_dyn_set_bool(schema, idx, root, 'b', .true., err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_bool(schema, idx, root, 'b', err), 'scalars: bool')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', -5_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'i8', err) == -5_int64, &
+                  'scalars: int8')
+      call capnp_dyn_set_int(schema, idx, root, 'i16', -300_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'i16', err) == -300_int64, &
+                  'scalars: int16')
+      call capnp_dyn_set_int(schema, idx, root, 'i32', -70000_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'i32', err) == -70000_int64, &
+                  'scalars: int32')
+      call capnp_dyn_set_int(schema, idx, root, 'i64', -5000000000_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'i64', err) == -5000000000_int64, &
+                  'scalars: int64')
+      call capnp_dyn_set_int(schema, idx, root, 'u8', 200_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'u8', err) == 200_int64, &
+                  'scalars: uint8')
+      call capnp_dyn_set_int(schema, idx, root, 'u16', 40000_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'u16', err) == 40000_int64, &
+                  'scalars: uint16')
+      call capnp_dyn_set_int(schema, idx, root, 'u32', 3000000000_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'u32', err) == 3000000000_int64, &
+                  'scalars: uint32')
+      call capnp_dyn_set_int(schema, idx, root, 'u64', 2_int64**62, err)
+      call check_(error, capnp_dyn_get_int(schema, idx, root, 'u64', err) == 2_int64**62, &
+                  'scalars: uint64')
+      call capnp_dyn_set_f64(schema, idx, root, 'f32', 1.5_real64, err)
+      call check_(error, capnp_dyn_get_f64(schema, idx, root, 'f32', err) == 1.5_real64, &
+                  'scalars: float32')
+      call capnp_dyn_set_f64(schema, idx, root, 'f64', -2.5_real64, err)
+      call check_(error, capnp_dyn_get_f64(schema, idx, root, 'f64', err) == -2.5_real64, &
+                  'scalars: float64')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 9_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'hue', err) == 9_int64, &
+                  'scalars: unknown enum')
+
+      text = 'a'//achar(0)//'b'
+      call capnp_dyn_set_text(schema, idx, root, 'note', text, err)
+      call capnp_dyn_get_text(schema, idx, root, 'note', back, err)
+      call check_(error, err == CAPNP_OK .and. len(back) == 3 .and. back(2:2) == achar(0), &
+                  'scalars: text keeps an embedded NUL')
+      allocate (blob(0:2))
+      blob = [int(iachar('a'), int8), 0_int8, int(iachar('b'), int8)]
+      call capnp_dyn_set_data(schema, idx, root, 'blob', blob, err)
+      call capnp_dyn_get_data(schema, idx, root, 'blob', got, err)
+      call check_(error, err == CAPNP_OK .and. allocated(got) .and. all(got == blob), &
+                  'scalars: data keeps an embedded NUL')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_scalars
 
 end module test_dynamic
