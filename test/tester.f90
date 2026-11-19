@@ -7,6 +7,7 @@ program tester
    use test_addressbook, only: collect_addressbook
    use test_canonical, only: collect_canonical
    use test_dynamic, only: collect_dynamic
+   use test_annotated, only: collect_annotated
    use test_generated, only: collect_generated
    use test_generic, only: collect_generic
    use test_holder, only: collect_holder
@@ -30,6 +31,7 @@ program tester
         new_testsuite("addressbook", collect_addressbook), &
         new_testsuite("canonical", collect_canonical), &
         new_testsuite("dynamic", collect_dynamic), &
+        new_testsuite("annotated", collect_annotated), &
         new_testsuite("generated", collect_generated), &
         new_testsuite("generic", collect_generic), &
         new_testsuite("holder", collect_holder), &
