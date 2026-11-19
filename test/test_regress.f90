@@ -36,7 +36,8 @@ contains
          new_unittest("plugin-release", run_plugin_release), &
          new_unittest("cli-locate", run_cli_locate), &
          new_unittest("string-linear", run_string_linear), &
-         new_unittest("write-error", run_write_error) &
+         new_unittest("write-error", run_write_error), &
+         new_unittest("f32-text", run_f32_text) &
          ]
    end subroutine collect_regress
 
@@ -916,6 +917,143 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_string_linear
+
+   subroutine run_f32_text(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: err, idx, i
+      character(len=*), parameter :: sch = &
+         '@0x8c1e4a7b2d9056f3;'//achar(10)//'struct F { x @0 :Float32; }'//achar(10)
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/f32.capnp', sch, err)
+      if (.not. sh('capnp compile -o- '//tmp//'/f32.capnp > '//tmp//'/f32.cgr')) then
+         call test_failed(error, 'f32: compile schema')
+         return
+      end if
+      call load_cgr(error, schema, tmp//'/f32.cgr')
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'F', err)
+      call check_(error, idx > 0, 'f32: type F')
+      do i = 1, 7
+         call one_f32(error, schema, idx, f32_bits(i), f32_expect(i))
+      end do
+      call capnp_dyn_free(schema)
+   end subroutine run_f32_text
+
+   function f32_bits(i) result(b)
+      integer, intent(in) :: i
+      integer(int32) :: b
+      select case (i)
+      case (1); b = int(z'00000001', int32)
+      case (2); b = int(z'007fffff', int32)
+      case (3); b = int(z'00800000', int32)
+      case (4); b = int(z'80000000', int32)
+      case (5); b = int(z'7f800000', int32)
+      case (6); b = int(z'ff800000', int32)
+      case default; b = int(z'7fc00000', int32)
+      end select
+   end function f32_bits
+
+   function f32_expect(i) result(s)
+      integer, intent(in) :: i
+      character(len=:), allocatable :: s
+      select case (i)
+      case (1); s = '1.4012985e-45'
+      case (2); s = '1.1754942e-38'
+      case (3); s = '1.1754944e-38'
+      case (4); s = '-0'
+      case (5); s = 'inf'
+      case (6); s = '-inf'
+      case default; s = 'nan'
+      end select
+   end function f32_expect
+
+   subroutine one_f32(error, schema, idx, bits, expect)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      integer(int32), intent(in) :: bits
+      character(len=*), intent(in) :: expect
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: raw(:)
+      character(len=:), allocatable :: text, ref
+      integer(int32) :: u, gotb
+      integer :: err, i
+      real(real64) :: d
+      real(real32) :: x32
+      if (allocated(error)) return
+      allocate (raw(0:23))
+      raw = 0_int8
+      raw(4) = 2_int8
+      raw(12) = 1_int8
+      u = bits
+      do i = 0, 3
+         raw(16 + i) = i8_of(int(iand(u, 255_int32)))
+         u = ishft(u, -8)
+      end do
+      call capnp_write_file(tmp//'/f32.bin', raw, err)
+      if (.not. sh('capnp decode '//tmp//'/f32.capnp F < '//tmp//'/f32.bin > '//tmp//'/f32.txt')) then
+         call test_failed(error, 'f32: capnp decode '//expect)
+         return
+      end if
+      call slurp(tmp//'/f32.txt', ref, err)
+      ref = chomp(ref)
+      call capnp_deserialize_bytes(raw, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
+      text = chomp(text)
+      call check_(error, err == CAPNP_OK .and. text == ref .and. index(text, expect) > 0, &
+                  'f32 text '//expect//' got ['//text//'] capnp ['//ref//']')
+      call capnp_message_free(msg)
+      call capnp_text_decode(schema, idx, ref, msg, err)
+      call check_(error, err == CAPNP_OK, 'f32: text decode '//expect)
+      root = capnp_root(msg, err)
+      d = capnp_dyn_get_f64(schema, idx, root, 'x', err)
+      x32 = real(d, real32)
+      gotb = transfer(x32, 0_int32)
+      if (expect == 'nan') then
+         call check_(error, err == CAPNP_OK .and. gotb /= 0_int32, 'f32: nan decodes')
+      else
+         call check_(error, err == CAPNP_OK .and. gotb == bits, 'f32 bits '//expect)
+      end if
+      call capnp_message_free(msg)
+   end subroutine one_f32
+
+   function chomp(s) result(t)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: t
+      if (len(s) > 0) then
+         if (s(len(s):len(s)) == achar(10)) then
+            if (len(s) == 1) then
+               t = ''
+            else
+               t = s(1:len(s) - 1)
+            end if
+            return
+         end if
+      end if
+      t = s
+   end function chomp
+
+   subroutine load_cgr(error, schema, path)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(out) :: schema
+      character(len=*), intent(in) :: path
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (allocated(error)) return
+      call capnp_read_file(path, bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      if (err /= CAPNP_OK) call test_failed(error, 'load '//path)
+   end subroutine load_cgr
 
    subroutine run_write_error(error)
       type(error_type), allocatable, intent(out) :: error
