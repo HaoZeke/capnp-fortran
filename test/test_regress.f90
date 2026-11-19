@@ -6,6 +6,7 @@ module test_regress
    use capnp_dynamic
    use capnp_text
    use capnp_json
+   use cli_path, only: capnpf_setup, capnpc_setup
    implicit none
    private
    public :: collect_regress
@@ -28,7 +29,8 @@ contains
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
          new_unittest("schema-pipe", run_schema_pipe), &
-         new_unittest("plugin-release", run_plugin_release) &
+         new_unittest("plugin-release", run_plugin_release), &
+         new_unittest("cli-locate", run_cli_locate) &
          ]
    end subroutine collect_regress
 
@@ -55,7 +57,7 @@ contains
 
    function cap_setup() result(s)
       character(len=:), allocatable :: s
-      s = 'set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1'
+      s = capnpf_setup()
    end function cap_setup
 
    subroutine run_comment_eof(error)
@@ -453,6 +455,30 @@ contains
       end if
    end subroutine spit
 
+   !> A decoy profile directory must not hide the binary. The runner's
+   !> path is used when it is set. With that variable unset, the same
+   !> executable is chosen from this process's build directory, so a
+   !> release or sanitized run does not fall back to another profile.
+   !> The decoy name includes the shell pid so two suites do not share it.
+   subroutine run_cli_locate(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('decoy=build/gfortran_decoy.$$' &
+         //' && rm -rf "$decoy" build/gfortran_decoy' &
+         //' && mkdir -p "$decoy/app"' &
+         //' && printf "%s\n" "#!/bin/sh" "echo decoy" > "$decoy/app/capnpf"' &
+         //' && chmod +x "$decoy/app/capnpf"' &
+         //' && ok=0; if '//capnpf_setup() &
+         //' && test "$CAP" = "$CAPNPF"' &
+         //' && "$CAP" --version >/dev/null' &
+         //' && saved=$CAPNPF && unset CAPNPF && '//capnpf_setup() &
+         //' && test "$CAP" = "$saved"' &
+         //' && case "$CAP" in *gfortran_decoy*) false;; *) true;; esac' &
+         //' && "$CAP" --version >/dev/null; then ok=1; fi' &
+         //'; rm -rf "$decoy"; test "$ok" = 1 && test ! -d build/gfortran_decoy')) then
+         call test_failed(error, 'cli locate failed')
+      end if
+   end subroutine run_cli_locate
+
    !> The schema plugin must release the command argument, the request
    !> buffer, the file name, and the message on the success path and on
    !> every error path. A sanitized build exits nonzero if any remain.
@@ -460,9 +486,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=*), parameter :: ptmp = '/tmp/capnpf-regress/plugin'
       if (.not. sh('mkdir -p '//ptmp &
-         //' && root=$(pwd)' &
-         //' && set -- build/gfortran_*/app/capnpc-fortran && test $# -eq 1' &
-         //' && CAP=$root/$1' &
+         //' && '//capnpc_setup() &
          //' && cp test/fixtures/addressbook.cgr.bin '//ptmp//'/req.bin' &
          //' && (cd '//ptmp//' && "$CAP" req.bin)' &
          //' && test -s '//ptmp//'/addressbook_capnp.f90' &

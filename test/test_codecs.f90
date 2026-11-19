@@ -6,6 +6,7 @@ module test_codecs
    use capnp_dynamic
    use capnp_text
    use capnp_json
+   use cli_path, only: capnpf_setup
    implicit none
    private
    public :: collect_codecs
@@ -622,7 +623,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp// &
-         ' && set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+         ' && '//capnpf_setup() &
          //' && test -n "$CAP"' &
          //' && "$CAP" decode schema/addressbook.capnp AddressBook < test/fixtures/addressbook.bin > '//tmp//'/cli.txt' &
          //' && capnp decode schema/addressbook.capnp AddressBook < test/fixtures/addressbook.bin > '//tmp//'/cli.ref' &
@@ -663,7 +664,7 @@ contains
 
       ! 1. flat-packed encode, decode, convert, and multi-segment schema-less binary:flat / binary:flat-packed.
       if (.not. sh('mkdir -p '//tmp// &
-         ' && set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+         ' && '//capnpf_setup() &
          //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
          //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
          //' | "$CAP" encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ours' &
@@ -690,7 +691,7 @@ contains
       call check_bytes(error, b_got, b_exp, 'cli-ext: multi-segment flat-packed roundtrip')
 
       ! 2. Multi-message packed, text, and JSON streams.
-      if (.not. sh('set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+      if (.not. sh(capnpf_setup() &
          //' && printf "(x = 1, y = 2, z = 3)\n(x = 4, y = 5, z = 6)\n"' &
          //' | "$CAP" encode -p schema/common.capnp Vec3 > '//tmp//'/two.pbin' &
          //' && "$CAP" decode -p --short schema/common.capnp Vec3 < '//tmp//'/two.pbin > '//tmp//'/two.pdec.ours' &
@@ -707,7 +708,7 @@ contains
       call check_(error, got == exp, 'cli-ext: multi-message json->text convert')
 
       ! 3. Deep eval paths and binary/packed/flat/flat-packed/canonical/json eval output formats.
-      if (.not. sh('set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+      if (.not. sh(capnpf_setup() &
          //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
          //' && "$CAP" eval -I "$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ours' &
          //' && capnp eval -I"$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ref' &
@@ -758,9 +759,9 @@ contains
       call check_bytes(error, b_got, b_exp, 'cli-ext: eval -ocanonical')
 
       ! 4. Flags, exit codes, stderr separation, and zero leaked /tmp/capnpf-*.cgr files.
-      call check_(error, sh('set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+      call check_(error, sh(capnpf_setup() &
          //' && "$CAP" --help >/dev/null && "$CAP" --version >/dev/null'), 'cli-ext: --help/--version exit 0')
-      call check_(error, sh('set -- build/gfortran_*/app/capnpf && test $# -eq 1 && CAP=$1' &
+      call check_(error, sh(capnpf_setup() &
          //' && ! "$CAP" encode schema/common.capnp Vec3 < /dev/null 2>/dev/null' &
          //' && ! (printf "   \n" | "$CAP" encode schema/common.capnp Vec3 2>/dev/null)' &
          //' && ! "$CAP" eval -b schema/kitchen.capnp answer 2>/dev/null' &
