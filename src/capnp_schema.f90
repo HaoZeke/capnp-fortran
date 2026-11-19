@@ -293,12 +293,12 @@ contains
       l = capnp_getp(p, 3, err)
    end function node_interface_methods
 
-   !> Method.annotations: List(Annotation) at pointer slot 2.
+   !> Method.annotations: List(Annotation) at pointer slot 1.
    function method_annotations(p, err) result(l)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(p, 2, err)
+      l = capnp_getp(p, 1, err)
    end function method_annotations
 
    !> Method: name ptr 0, paramStructType u64 at byte 8, resultStructType
