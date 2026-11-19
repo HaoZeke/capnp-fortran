@@ -838,7 +838,7 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (x < 0.0_real64 .or. x > max_u64_f64 .or. aint(x) /= x) then
+      if (x < 0.0_real64 .or. x > max_u64_f64 .or. abs(x - aint(x)) > 0.0_real64) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -861,11 +861,11 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (x < min_i64_f64 .or. x > max_i64_f64 .or. aint(x) /= x) then
+      if (x < min_i64_f64 .or. x > max_i64_f64 .or. abs(x - aint(x)) > 0.0_real64) then
          err = CAPNP_ERR_ARG
          return
       end if
-      if (x == min_i64_f64) then
+      if (.not. (x > min_i64_f64)) then
          iv = int(z'8000000000000000', int64)
       else
          iv = int(x, int64)
@@ -884,7 +884,7 @@ contains
       else
          sign_s = ''
       end if
-      if (val == 0.0_real64) then
+      if (iand(transfer(val, 0_int64), int(z'7fffffffffffffff', int64)) == 0_int64) then
          s = sign_s//'0'
          return
       end if
