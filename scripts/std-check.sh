@@ -29,6 +29,8 @@ SOURCES=(
   src/capnp_rpc.f90
   src/capnp_schema.f90
   src/capnp_dynamic.f90
+  src/capnp_codec.f90
+  src/capnp_text.f90
   src/stream_capnp.f90
   app/capnpc_emit.f90
   app/main.f90
