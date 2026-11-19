@@ -4,6 +4,9 @@ module rpc_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_RPC_CAPNP_ANNOTATION_NAMESPACE_KIND = 12
+   character(len=*), parameter :: SCHEMA_RPC_CAPNP_ANNOTATION_NAMESPACE = 'capnp::rpc'
+
    integer, parameter :: MESSAGE_DWORDS = 1
    integer, parameter :: MESSAGE_PWORDS = 1
    type :: message_t
