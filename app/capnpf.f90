@@ -734,7 +734,7 @@ contains
       if (count == 0) call fail('empty input', rc)
    end subroutine bytes_to_out
 
-   subroutine emit_one(sch, idx, env, msg, root, to, pretty, seg_words, rc, strict_io)
+   subroutine emit_one(sch, idx, env, msg, root, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       type(capnp_brand_env_t), intent(in) :: env
@@ -744,14 +744,10 @@ contains
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
-      logical, intent(in), optional :: strict_io
       character(len=:), allocatable :: text
       integer(int8), allocatable :: outb(:)
       integer :: err
-      logical :: strict
       rc = 0
-      strict = .true.
-      if (present(strict_io)) strict = strict_io
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
          if (err /= CAPNP_OK) then
@@ -760,7 +756,7 @@ contains
          end if
          call write_fd_line(1, text, err)
          if (err /= CAPNP_OK) then
-            if (strict) call fail('cannot write stdout', rc)
+            call fail('cannot write stdout', rc)
             return
          end if
       else if (to == 'json') then
@@ -771,7 +767,7 @@ contains
          end if
          call write_fd_line(1, text, err)
          if (err /= CAPNP_OK) then
-            if (strict) call fail('cannot write stdout', rc)
+            call fail('cannot write stdout', rc)
             return
          end if
       else
@@ -781,7 +777,7 @@ contains
             return
          end if
          call write_stdout(outb, err)
-         if (err /= CAPNP_OK .and. strict) call fail('cannot write stdout', rc)
+         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
       end if
    end subroutine emit_one
 
@@ -1465,7 +1461,10 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
          return
       end if
       if (node_struct_is_group(sch%nodes(idx))) then
@@ -1508,7 +1507,7 @@ contains
             return
          end if
       end if
-      call emit_one(sch, idx, env, msg, root, fmt, pretty, seg_words, rc, strict_io=.false.)
+      call emit_one(sch, idx, env, msg, root, fmt, pretty, seg_words, rc)
       call capnp_message_free(msg)
    end subroutine emit_eval_struct
 
