@@ -38,7 +38,8 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
   wire bytes (see `interop/README.md`).
 - RPC level 1: two-party vat over a POSIX socket transport
-  (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
+  and pluggable byte streams (`capnp_rpc`, `capnp_posix`,
+  `capnp_rpc_transport`), cap tables,
   promise pipelining, embargo echo (same-process fpm suite), and level 2
   `Persistent<SturdyRef, Owner>.save` calls; bootstrap and
   pipelined/settled calls are also
@@ -55,7 +56,7 @@ and capnp-C++:
 | Feature | capnp-c | capnp-C++ | capnp-fortran |
 |---------|---------|-----------|---------------|
 | Wire format read/write (all pointer kinds) | yes | yes | yes |
-| Stream framing | yes | yes | yes |
+| Stream framing | yes | yes | yes (pluggable byte stream, fd and socketpair adapters) |
 | Packed codec | yes | yes | yes, plus incremental pack/unpack |
 | Zero-copy reads from a caller buffer | yes | yes | yes (`capnp_deserialize_view`, `capnp_get_data_view`) |
 | Traversal and depth limits | yes (0.2+) | yes | yes |
@@ -79,6 +80,14 @@ and capnp-C++:
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
 over TCP and calls it, pipelined and settled.
+
+`rpc_byte_stream_t` is the transport boundary used by RPC connections.
+Applications can implement its exact-read, exact-write, readiness, and
+close bindings for another stream. `rpc_fd_stream_t` adapts an existing
+descriptor, and `rpc_socketpair_streams` creates an owned loopback pair.
+TCP remains an adapter choice rather than a requirement of the RPC
+core. TLS can be supplied by a stream implementation; the library does
+not impose a TLS stack or certificate policy.
 
 Level 2 follows `capnp/persistent.capnp`: `rpc_persistent_save_begin`
 sends `Persistent<AnyPointer, AnyPointer>.save`, including the optional

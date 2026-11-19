@@ -41,16 +41,17 @@ module capnp_rpc
                                    recipient_id_vat_init, &
                                    vat_id_t, vat_id_host_get, vat_id_port_get, &
                                    vat_id_host_set, vat_id_port_set
-   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in, &
-                         px_tcp_connect_host
-   use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
+   use capnp_posix, only: PX_BAD_FD, px_tcp_connect_host
+   use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message, &
+                                 rpc_byte_stream_t, rpc_fd_stream_t, &
+                                 rpc_fd_stream_init
    implicit none
    private
 
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
    public :: rpc_membrane_policy_t, rpc_membrane_server_t
    public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
-   public :: rpc_conn_init, rpc_conn_close
+   public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
    public :: rpc_finish_send, rpc_release_send
@@ -281,6 +282,8 @@ module capnp_rpc
 
    type :: rpc_conn_t
       integer :: fd = PX_BAD_FD
+      class(rpc_byte_stream_t), pointer :: transport => null()
+      type(rpc_fd_stream_t) :: own_transport
       logical :: dead = .false.
       character(len=:), allocatable :: abort_reason
       class(rpc_server_t), pointer :: bootstrap_srv => null()
@@ -307,6 +310,8 @@ contains
       integer, intent(in) :: fd
       class(rpc_server_t), pointer, intent(in) :: bootstrap
       conn%fd = fd
+      call rpc_fd_stream_init(conn%own_transport, fd, .true.)
+      conn%transport => conn%own_transport
       conn%dead = .false.
       conn%bootstrap_srv => bootstrap
       ! Its own vat until told otherwise, which is what a two-party
@@ -314,11 +319,28 @@ contains
       conn%vat => conn%own_vat
    end subroutine rpc_conn_init
 
+   !> Initialize RPC over an application-defined byte stream. The stream
+   !> must outlive the connection and its close binding defines ownership.
+   subroutine rpc_conn_init_stream(conn, stream, bootstrap)
+      type(rpc_conn_t), intent(inout), target :: conn
+      class(rpc_byte_stream_t), intent(inout), target :: stream
+      class(rpc_server_t), pointer, intent(in) :: bootstrap
+      conn%fd = PX_BAD_FD
+      select type (stream)
+      type is (rpc_fd_stream_t)
+         conn%fd = stream%fd
+      end select
+      conn%transport => stream
+      conn%dead = .false.
+      conn%bootstrap_srv => bootstrap
+      conn%vat => conn%own_vat
+   end subroutine rpc_conn_init_stream
+
    subroutine rpc_conn_close(conn)
       type(rpc_conn_t), intent(inout) :: conn
       integer :: i
-      call px_shutdown_wr(conn%fd)
-      call px_close(conn%fd)
+      if (associated(conn%transport)) call conn%transport%close()
+      conn%transport => null()
       conn%fd = PX_BAD_FD
       conn%dead = .true.
       do i = 0, MAXQ - 1
@@ -334,7 +356,7 @@ contains
    pure function rpc_conn_alive(conn) result(alive)
       type(rpc_conn_t), intent(in) :: conn
       logical :: alive
-      alive = .not. conn%dead .and. conn%fd /= PX_BAD_FD
+      alive = .not. conn%dead .and. associated(conn%transport)
    end function rpc_conn_alive
 
    !> The abort/exception reason last recorded on the connection, or ''.
@@ -540,7 +562,7 @@ contains
       call vat_id_port_set(vat, port, err)
       if (err /= CAPNP_OK) return
       call provide_recipient_set(pv, rid%p, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_provide_send
 
@@ -579,7 +601,7 @@ contains
       call provision_id_nonce_set(pid, nonce, err)
       if (err /= CAPNP_OK) return
       call accept_provision_set(ac, pid%p, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_accept_send
 
@@ -598,7 +620,7 @@ contains
       d = message_disembargo_init(msg, err)
       if (err /= CAPNP_OK) return
       call disembargo_context_provide_set(d, provide_qid, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_disembargo_provide_send
 
@@ -621,7 +643,7 @@ contains
       msg = message_new_root(m, err)
       b = message_bootstrap_init(msg, err)
       call bootstrap_question_id_set(b, qid, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
       cap%kind = RPC_CAP_PIPELINE
       cap%id = qid
@@ -696,7 +718,7 @@ contains
       type(rpc_conn_t), intent(inout) :: conn
       type(capnp_message_t), intent(inout) :: m
       integer, intent(out) :: err
-      call rpc_send_message(conn%fd, m, err)
+      call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_call_send
 
@@ -811,7 +833,7 @@ contains
          if (err == CAPNP_OK) call join_key_part_part_count_set(kp, size(caps), err)
          if (err == CAPNP_OK) call join_key_part_part_num_set(kp, i - 1, err)
          if (err == CAPNP_OK) call join_key_part_set(jn, kp%p, err)
-         if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+         if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
          call capnp_message_free(m)
          if (err /= CAPNP_OK) return
       end do
@@ -1003,7 +1025,7 @@ contains
       call finish_question_id_set(f, qid, err)
       call finish_release_result_caps_set(f, .not. retain_caps, err)
       call finish_require_early_cancellation_workaround_set(f, .false., err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
       if (conn%questions(int(qid))%used) then
          call capnp_message_free(conn%questions(int(qid))%retmsg)
@@ -1030,7 +1052,7 @@ contains
       call finish_question_id_set(f, qid, err)
       call finish_release_result_caps_set(f, .true., err)
       call finish_require_early_cancellation_workaround_set(f, .false., err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
       q = int(qid)
       if (q >= 0 .and. q < MAXQ) then
@@ -1082,7 +1104,7 @@ contains
       rel = message_release_init(msg, err)
       call release_id_set(rel, cap%id, err)
       call release_reference_count_set(rel, 1_int64, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_release_send
 
@@ -1279,7 +1301,7 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
-      call rpc_recv_message(conn%fd, m, err)
+      call rpc_recv_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
          conn%dead = .true.
          err = RPC_ERR_DEAD
@@ -1342,7 +1364,7 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
-      call px_poll_in(conn%fd, timeout_ms, readable, err)
+      call conn%transport%poll_in(timeout_ms, readable, err)
       if (err /= CAPNP_OK .or. .not. readable) return
       call rpc_pump_once(conn, err)
       handled = err == CAPNP_OK
@@ -2164,7 +2186,7 @@ contains
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
       integer :: q, i
-      call rpc_send_message(conn%fd, rm, err)
+      call rpc_send_message(conn%transport, rm, err)
       q = int(qid)
       if (q >= 0 .and. q < MAXQ .and. err == CAPNP_OK) then
          if (conn%answers(q)%used) call capnp_message_free(conn%answers(q)%retmsg)
@@ -2325,7 +2347,7 @@ contains
                                                  promised_answer_question_id_get(pa), err)
          end block
       end if
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, rm, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
       call capnp_message_free(rm)
    end subroutine handle_disembargo
 
@@ -2354,7 +2376,7 @@ contains
       call capnp_set_which(root, 0, MESSAGE_UNIMPLEMENTED_TAG, err)
       c = capnp_copy(rm, msg%p, err)
       if (err == CAPNP_OK) call capnp_setp(root, 0, c, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, rm, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
       call capnp_message_free(rm)
    end subroutine send_unimplemented
 
