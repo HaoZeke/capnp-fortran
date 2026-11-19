@@ -25,7 +25,8 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("dynamic", run_dynamic)]
+      testsuite = [new_unittest("dynamic", run_dynamic), &
+                   new_unittest("dynamic-default-isolation", run_default_isolation)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -320,5 +321,50 @@ contains
       call capnp_dyn_free(aschema)
       call capnp_dyn_free(bschema)
    end subroutine run_dynamic
+
+   !> Writing through a pointer default must not change the schema object.
+   subroutine run_default_isolation(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: a, b
+      type(sink_t) :: sink_a, sink_b
+      type(capnp_ptr_t) :: origin
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK, 'default: kitchen schema loads')
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call check_(error, sink_idx > 0 .and. vec_idx > 0, 'default: nodes found')
+
+      call capnp_message_init_builder(a, err)
+      sink_a = sink_new_root(a, err)
+      origin = capnp_dyn_getp(schema, sink_idx, sink_a%p, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT, &
+                  'default: origin handle')
+      call capnp_dyn_set_f64(schema, vec_idx, origin, 'x', 42.0_real64, err)
+      call check_(error, err == CAPNP_OK, 'default: write through origin')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 42.0_real64) < 1.0e-15_real64, &
+                  'default: write stays on the first struct')
+
+      call capnp_message_init_builder(b, err)
+      sink_b = sink_new_root(b, err)
+      origin = capnp_dyn_getp(schema, sink_idx, sink_b%p, 'origin', err)
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'default: schema origin x stays 1.5')
+
+      call capnp_message_free(a)
+      call capnp_message_free(b)
+      call capnp_dyn_free(schema)
+   end subroutine run_default_isolation
 
 end module test_dynamic
