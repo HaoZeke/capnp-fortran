@@ -129,6 +129,7 @@ contains
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
+      if (.not. allocated(error)) call t_frame_word_limit(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -2127,5 +2128,26 @@ contains
       call rpc_wait(cli, bootcap%id, err)
       call check_(error, err == CAPNP_OK, 'poll: answer arrived')
    end subroutine t_pump_poll
+
+   !> A segment table that claims more words than the traversal limit is
+   !> rejected before the body is read or allocated.
+   subroutine t_frame_word_limit(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_message_t) :: m
+      integer(int8) :: hdr(0:7)
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'frame limit: socketpair')
+      if (allocated(error)) return
+      hdr = 0_int8
+      ! One segment whose size word is traversal_words + 1 (0x00800001).
+      hdr(4) = 1_int8
+      hdr(6) = int(z'80', int8)
+      call px_send_all(fa, hdr, e)
+      call rpc_recv_message(fb, m, e)
+      call check_(error, e == CAPNP_ERR_TRAVERSAL, 'frame limit: oversized segment rejected')
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_frame_word_limit
 
 end module test_rpc

@@ -153,7 +153,7 @@ contains
       integer, intent(out) :: err
       integer(int8) :: head(0:3)
       integer(int8), allocatable :: rest(:), whole(:)
-      integer(int64) :: nsegs64, header_bytes, total, i, n
+      integer(int64) :: nsegs64, header_bytes, total, i, n, words
       call stream%recv_all(head, err)
       if (err /= CAPNP_OK) return
       nsegs64 = iand(int(cp_get_i32(head, 0_int64), int64), 4294967295_int64) + 1_int64
@@ -166,9 +166,18 @@ contains
       call stream%recv_all(rest, err)
       if (err /= CAPNP_OK) return
       total = 0_int64
+      words = 0_int64
       do i = 1_int64, nsegs64
          ! Size entries start at header byte 4; rest lacks the first word.
          n = iand(int(cp_get_i32(rest, (i - 1_int64)*4_int64), int64), 4294967295_int64)
+         ! Reject before the body is read. A claimed size past the
+         ! traversal limit must not be allocated.
+         if (n > CAPNP_DEFAULT_TRAVERSAL_WORDS .or. &
+             words > CAPNP_DEFAULT_TRAVERSAL_WORDS - n) then
+            err = CAPNP_ERR_TRAVERSAL
+            return
+         end if
+         words = words + n
          total = total + n*CAPNP_WORD_BYTES
       end do
       allocate (whole(0:header_bytes + total - 1_int64))
