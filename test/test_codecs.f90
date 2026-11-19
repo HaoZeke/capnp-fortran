@@ -1,5 +1,4 @@
-!> Text codec against the capnp 1.4 tool: pretty and short text, and
-!> canonical bytes of a decoded literal.
+!> Text, JSON, and CLI codecs differential-tested against the capnp 1.4 tool.
 module test_codecs
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
@@ -20,10 +19,15 @@ contains
       testsuite = [ &
          new_unittest("text-addressbook", run_addressbook), &
          new_unittest("text-kitchen", run_kitchen), &
+         new_unittest("text-edge-cases", run_text_edges), &
+         new_unittest("text-generics", run_text_generics), &
          new_unittest("json-addressbook", run_json_addressbook), &
          new_unittest("json-kitchen", run_json_kitchen), &
          new_unittest("json-sample", run_json_sample), &
-         new_unittest("cli", run_cli) &
+         new_unittest("json-edge-cases", run_json_edges), &
+         new_unittest("json-flatten-discriminator", run_json_flatten_disc), &
+         new_unittest("cli", run_cli), &
+         new_unittest("cli-extended", run_cli_extended) &
          ]
    end subroutine collect_codecs
 
@@ -48,7 +52,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp// &
-         ' && capnp decode schema/addressbook.capnp AddressBook'//' < test/fixtures/addressbook.bin > '//tmp//'/ab.txt' &
+         ' && capnp decode schema/addressbook.capnp AddressBook < test/fixtures/addressbook.bin > '//tmp//'/ab.txt' &
          //' && capnp decode --short schema/addressbook.capnp AddressBook' &
          //' < test/fixtures/addressbook.bin > '//tmp//'/ab.short.txt')) then
          call test_failed(error, 'capnp decode addressbook')
@@ -91,18 +95,7 @@ contains
       integer(int8), allocatable :: bytes(:), ours(:), ref(:)
       character(len=:), allocatable :: text, src
       integer :: err, idx
-      src = '( flag = false,'//achar(10)// &
-         '  count = 0,'//achar(10)// &
-         '  ratio = nan,'//achar(10)// &
-         '  label = "a\"b\\c",'//achar(10)// &
-         '  payload = "\001\177\200",'//achar(10)// &
-         '  origin = (x = -inf, y = nan, z = 1e306),'//achar(10)// &
-         '  state = down,'//achar(10)// &
-         '  tags = ["hi", "a\n"],'//achar(10)// &
-         '  blobs = [0x"00 ff"],'//achar(10)// &
-         '  grid = [[1, -2], [], [3]],'//achar(10)// &
-         '  spots = [(x = 1.5, y = 0, z = -0)],'//achar(10)// &
-         '  scores = [-9223372036854775808, 9223372036854775807] )'//achar(10)
+      src = kitchen_text()
       if (.not. have_capnp()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
@@ -145,6 +138,158 @@ contains
       call capnp_message_free(decoded)
       call capnp_dyn_free(schema)
    end subroutine run_kitchen
+
+   subroutine run_text_edges(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:), ours(:), ref(:)
+      character(len=:), allocatable :: src, text
+      integer :: err, idx, uidx, beg, topos, disc
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      uidx = capnp_dyn_find(schema, 'UnionDefaults', err)
+      call check_(error, idx > 0 .and. uidx > 0, 'text-edges: nodes')
+
+      ! Escape \xHH followed by hex char, \?, octal 0777, float from UINT64_MAX, 8-digit f32.
+      src = '( big = -0777,'//achar(10)// &
+            '  ubig = 0777,'//achar(10)// &
+            '  tiny = 1.5038984e-36,'//achar(10)// &
+            '  wide = 18446744073709551615,'//achar(10)// &
+            '  title = "\x41B\?''caf'//achar(195)//achar(169)//'",'//achar(10)// &
+            '  blob = "\x00\xffA" )'//achar(10)
+      call spit(tmp//'/te.txt', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp encode -I"$INC" schema/codec.capnp Sample < '//tmp//'/te.txt > '//tmp//'/te.bin' &
+         //' && capnp decode -I"$INC" schema/codec.capnp Sample < '//tmp//'/te.bin > '//tmp//'/te.out' &
+         //' && capnp convert -I"$INC" binary:canonical schema/codec.capnp Sample < '//tmp//'/te.bin > '//tmp//'/te.can')) then
+         call test_failed(error, 'capnp encode/decode text-edges')
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_text_decode(schema, idx, src, decoded, err)
+      call check_(error, err == CAPNP_OK, 'text-edges: decode sample')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/te.can', ref, err)
+      call check_bytes(error, ours, ref, 'text-edges: canonical match')
+      call capnp_read_file(tmp//'/te.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.true.)
+      call check_file(error, text, tmp//'/te.out', 'text-edges: pretty match')
+      call capnp_message_free(msg)
+      call capnp_message_free(decoded)
+
+      ! Active union pointer fields with null wire pointers must render schema defaults.
+      do disc = 0, 4
+         call capnp_message_init_builder(msg, err)
+         root = capnp_dyn_new_root(schema, uidx, msg, err)
+         call capnp_set_i32(root, 0_int64, 10_int32, err)
+         call capnp_set_which(root, 2, disc, err)
+         call capnp_set_i32(root, 8_int64, 20_int32, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_write_file(tmp//'/ud.bin', bytes, err)
+         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp decode -I"$INC" schema/codec.capnp UnionDefaults < '//tmp//'/ud.bin > '//tmp//'/ud.txt')) then
+            call test_failed(error, 'capnp decode UnionDefaults')
+            call capnp_message_free(msg)
+            call capnp_dyn_free(schema)
+            return
+         end if
+         call capnp_text_encode(schema, uidx, root, text, err, pretty=.true.)
+         call check_file(error, text, tmp//'/ud.txt', 'text-edges: union null ptr default')
+         call capnp_message_free(msg)
+      end do
+
+      ! Malformed text inputs must be rejected cleanly.
+      call capnp_text_decode(schema, idx, '(title = "\x4")', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject 1-digit \x')
+      call capnp_text_decode(schema, idx, '(title = "\q")', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject unknown escape')
+      call capnp_text_decode(schema, idx, '(title = "\u00e9")', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject \u escape')
+      call capnp_text_decode(schema, idx, '(title = "line1'//achar(10)//'line2")', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject raw newline in string')
+      call capnp_text_decode(schema, idx, '(ubig = 08)', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject bad octal digit')
+      call capnp_text_decode(schema, idx, '(wide = +inf)', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject +inf')
+      call capnp_text_decode(schema, idx, '(wide = infinity)', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject infinity')
+      call capnp_text_decode(schema, idx, '(scores = [1,,2])', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject empty list item')
+      call capnp_text_decode(schema, idx, '(scores = [1, 2))', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: reject mismatched bracket')
+      call capnp_text_span('(ubig = 1]', 1, beg, topos, err)
+      call check_(error, err /= CAPNP_OK, 'text-edges: span rejects (]')
+
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_edges
+
+   subroutine run_text_generics(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:), ours(:), ref(:)
+      character(len=:), allocatable :: src, text, jtxt
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      src = '( textBox = (value = "hello", label = "l1"),'//achar(10)// &
+            '  boxes = [(value = "a"), (value = "b")],'//achar(10)// &
+            '  listBox = (value = ["x", "y"]),'//achar(10)// &
+            '  nest = (inner = (value = "deep"), boxes = [(value = "n1")]) )'//achar(10)
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/box_use.txt', src, err)
+      if (.not. sh('capnp encode schema/box.capnp BoxUse < '//tmp//'/box_use.txt > '//tmp//'/box_use.bin' &
+         //' && capnp decode schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.out' &
+         //' && capnp convert binary:json schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.json' &
+         //' && capnp convert binary:canonical schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.can')) then
+         call test_failed(error, 'capnp generic BoxUse')
+         return
+      end if
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'BoxUse', err)
+      call check_(error, idx > 0, 'generics: BoxUse node')
+      call capnp_read_file(tmp//'/box_use.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.true.)
+      call check_(error, err == CAPNP_OK, 'generics: text encode')
+      call check_file(error, text, tmp//'/box_use.out', 'generics: text pretty')
+      call capnp_text_decode(schema, idx, src, decoded, err)
+      call check_(error, err == CAPNP_OK, 'generics: text decode')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/box_use.can', ref, err)
+      call check_bytes(error, ours, ref, 'generics: text canonical')
+
+      call capnp_json_encode(schema, idx, root, jtxt, err, pretty=.true.)
+      call check_(error, err == CAPNP_OK, 'generics: json encode')
+      call check_file(error, jtxt, tmp//'/box_use.json', 'generics: json pretty')
+      call slurp(tmp//'/box_use.json', jtxt, err)
+      call capnp_json_decode(schema, idx, jtxt, decoded, err)
+      call check_(error, err == CAPNP_OK, 'generics: json decode')
+      call capnp_canonicalize(decoded, ours, err)
+      call check_bytes(error, ours, ref, 'generics: json canonical')
+
+      call capnp_message_free(msg)
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_generics
 
    subroutine run_json_addressbook(error)
       type(error_type), allocatable, intent(out) :: error
@@ -260,12 +405,8 @@ contains
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
-      if (.not. sh('mkdir -p '//tmp// &
-         ' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
-         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
-         call test_failed(error, 'capnp compile codec schema')
-         return
-      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
       call spit(tmp//'/s.txt', src, err)
       if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
          //' && capnp encode -I"$INC" schema/codec.capnp Sample < '//tmp//'/s.txt > '//tmp//'/s.bin' &
@@ -273,11 +414,9 @@ contains
          //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp Sample < '//tmp//'/s.bin > '//tmp//'/s.short.json' &
          //' && capnp convert -I"$INC" binary:canonical schema/codec.capnp Sample < '//tmp//'/s.bin > '//tmp//'/s.can')) then
          call test_failed(error, 'capnp sample json')
+         call capnp_dyn_free(schema)
          return
       end if
-      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
-      call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_OK, 'json: sample schema')
       idx = capnp_dyn_find(schema, 'Sample', err)
       call check_(error, idx > 0, 'json: Sample node')
       call capnp_read_file(tmp//'/s.bin', bytes, err)
@@ -298,6 +437,181 @@ contains
       call capnp_message_free(decoded)
       call capnp_dyn_free(schema)
    end subroutine run_json_sample
+
+   subroutine run_json_edges(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:), ours(:), ref(:)
+      character(len=:), allocatable :: text, js
+      integer :: err, idx, uidx, disc
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      uidx = capnp_dyn_find(schema, 'UnionDefaults', err)
+
+      ! UnionDefaults: variant 0 null pointer, non-0 null pointers with defaults, and after-union ordering.
+      do disc = 0, 4
+         call capnp_message_init_builder(msg, err)
+         root = capnp_dyn_new_root(schema, uidx, msg, err)
+         call capnp_set_i32(root, 0_int64, 11_int32, err)
+         call capnp_set_which(root, 2, disc, err)
+         call capnp_set_i32(root, 8_int64, 22_int32, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_write_file(tmp//'/jud.bin', bytes, err)
+         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" binary:json schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.json' &
+            //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.s.json')) then
+            call test_failed(error, 'capnp convert UnionDefaults json')
+            call capnp_message_free(msg)
+            call capnp_dyn_free(schema)
+            return
+         end if
+         call capnp_json_encode(schema, uidx, root, text, err, pretty=.true.)
+         call check_file(error, text, tmp//'/jud.json', 'json-edges: union defaults pretty')
+         call capnp_json_encode(schema, uidx, root, text, err, pretty=.false.)
+         call check_file(error, text, tmp//'/jud.s.json', 'json-edges: union defaults short')
+         call capnp_message_free(msg)
+      end do
+
+      ! UInt64 JSON number >= 2^63, decimal "0777" string, and null base64/hex Data.
+      js = '{"ubig":10000000000000000000,"big":"0777","b64":null,"hexed":null,"hue":"azure"}'
+      call spit(tmp//'/je.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < '//tmp//'/je.json > '//tmp//'/je.can')) then
+         call test_failed(error, 'capnp convert json-edges')
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_OK, 'json-edges: decode u64>=2^63 + null b64/hex')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/je.can', ref, err)
+      call check_bytes(error, ours, ref, 'json-edges: canonical match')
+
+      ! Negative JSON inputs.
+      call capnp_json_decode(schema, idx, '{"hue":"blue"}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject overridden enum name')
+      call capnp_json_decode(schema, idx, '{"big":1.5}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject fractional int')
+      call capnp_json_decode(schema, idx, '{"ubig":-1}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject negative uint')
+      call capnp_json_decode(schema, uidx, '{"u2sub":null}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject null struct')
+      call capnp_json_decode(schema, idx, '{"display_name":null}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject null text')
+
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_edges
+
+   subroutine run_json_flatten_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+
+      ! 1. Nested $Json.flatten (populated and null sub-structs).
+      call verify_json_case(error, schema, 'FlatEnvelope', &
+         '(id = 7, direct = (city = "Bern", code = 3000), '// &
+         'nested = (midId = 9, place = (city = "Graz", code = 8010)), '// &
+         'grp = (flag = true), renamedGrp = (val = 42))', &
+         'flatten: populated')
+      call verify_json_case(error, schema, 'FlatEnvelope', &
+         '(id = 7)', 'flatten: null substructs')
+
+      ! 2. $Json.discriminator(name = "kind") across Void, primitive, flattened, and $Json.name variants.
+      call verify_json_case(error, schema, 'TaggedEvent', &
+         '(seq = 1, idle = void, tail = 9)', 'disc: void')
+      call verify_json_case(error, schema, 'TaggedEvent', &
+         '(seq = 2, count = 55, tail = 9)', 'disc: primitive')
+      call verify_json_case(error, schema, 'TaggedEvent', &
+         '(seq = 3, moved = (city = "Oslo", code = 150), tail = 9)', 'disc: flattened variant')
+      call verify_json_case(error, schema, 'TaggedEvent', &
+         '(seq = 4, note = "hello", tail = 9)', 'disc: renamed variant')
+
+      ! 3. $Json.discriminator(name = "type", valueName = "payload").
+      call verify_json_case(error, schema, 'ValueEvent', &
+         '(seq = 1, empty = void, tail = 8)', 'disc-val: void')
+      call verify_json_case(error, schema, 'ValueEvent', &
+         '(seq = 2, num = -12, tail = 8)', 'disc-val: primitive')
+      call verify_json_case(error, schema, 'ValueEvent', &
+         '(seq = 3, loc = (city = "Lima", code = 51), tail = 8)', 'disc-val: struct')
+      call verify_json_case(error, schema, 'ValueEvent', &
+         '(seq = 4, renamed = "tagged", tail = 8)', 'disc-val: renamed')
+
+      ! 4. Named unions with $Json.flatten + $Json.discriminator() and $Json.name + $Json.discriminator(...).
+      call verify_json_case(error, schema, 'MultiUnionDoc', &
+         '(id = 10, mode = (fast = 3), extra = (off = void))', 'multi-union: fast/off')
+      call verify_json_case(error, schema, 'MultiUnionDoc', &
+         '(id = 11, mode = (custom = (city = "Riga", code = 1050)), extra = (on = "ready"))', &
+         'multi-union: custom/on')
+
+      ! Non-string discriminator must be rejected; unknown discriminator tag must be ignored like C++.
+      idx = capnp_dyn_find(schema, 'TaggedEvent', err)
+      call capnp_json_decode(schema, idx, '{"kind":123}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'disc: reject non-string tag')
+      call capnp_json_decode(schema, idx, '{"seq":5,"kind":"future_variant","x":1}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'disc: ignore unknown variant tag')
+
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_flatten_disc
+
+   subroutine verify_json_case(error, schema, tname, src_txt, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      character(len=*), intent(in) :: tname, src_txt, label
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:), ours(:), ref(:)
+      character(len=:), allocatable :: text, jsrc
+      integer :: err, idx
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, tname, err)
+      call check_(error, idx > 0, label//': node')
+      if (allocated(error)) return
+      call spit(tmp//'/vc.txt', src_txt//achar(10), err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp encode -I"$INC" schema/codec.capnp '//tname//' < '//tmp//'/vc.txt > '//tmp//'/vc.bin' &
+         //' && capnp convert -I"$INC" binary:json schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.json' &
+         //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp ' &
+         //tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.s.json' &
+         //' && capnp convert -I"$INC" binary:canonical schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.can')) then
+         call test_failed(error, label//': capnp reference failed')
+         return
+      end if
+      call capnp_read_file(tmp//'/vc.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.true.)
+      call check_(error, err == CAPNP_OK, label//': encode pretty')
+      call check_file(error, text, tmp//'/vc.json', label//': pretty match')
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK, label//': encode short')
+      call check_file(error, text, tmp//'/vc.s.json', label//': short match')
+      call slurp(tmp//'/vc.json', jsrc, err)
+      call capnp_json_decode(schema, idx, jsrc, decoded, err)
+      call check_(error, err == CAPNP_OK, label//': decode')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/vc.can', ref, err)
+      call check_bytes(error, ours, ref, label//': canonical match')
+      call capnp_message_free(msg)
+      call capnp_message_free(decoded)
+   end subroutine verify_json_case
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
@@ -336,6 +650,143 @@ contains
       call slurp(tmp//'/cli.home.ref', exp, err)
       call check_(error, got == exp, 'cli: eval home')
    end subroutine run_cli
+
+   subroutine run_cli_extended(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: got, exp
+      integer(int8), allocatable :: b_got(:), b_exp(:)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+
+      ! 1. flat-packed encode, decode, convert, and multi-segment schema-less binary:flat / binary:flat-packed.
+      if (.not. sh('mkdir -p '//tmp// &
+         ' && CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
+         //' | "$CAP" encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ours' &
+         //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
+         //' | capnp encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ref' &
+         //' && "$CAP" decode --flat -p --short schema/common.capnp Vec3 < '//tmp//'/fp.ref > '//tmp//'/fp.dec.ours' &
+         //' && capnp decode --flat -p --short schema/common.capnp Vec3 < '//tmp//'/fp.ref > '//tmp//'/fp.dec.ref' &
+         //' && printf "(people = [(id = 1, name = \"Alice\", email = \"a@b.c\")])\n"' &
+         //' | capnp encode --segment-size=2 schema/addressbook.capnp AddressBook > '//tmp//'/mseg.bin' &
+         //' && "$CAP" convert binary:flat-packed < '//tmp//'/mseg.bin > '//tmp//'/mseg.fp' &
+         //' && "$CAP" convert flat-packed:canonical < '//tmp//'/mseg.fp > '//tmp//'/mseg.can.ours' &
+         //' && capnp convert binary:canonical < '//tmp//'/mseg.bin > '//tmp//'/mseg.can.ref')) then
+         call test_failed(error, 'cli-ext: flat-packed / multi-seg failed')
+         return
+      end if
+      call capnp_read_file(tmp//'/fp.ours', b_got, err)
+      call capnp_read_file(tmp//'/fp.ref', b_exp, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: encode --flat -p bytes')
+      call slurp(tmp//'/fp.dec.ours', got, err)
+      call slurp(tmp//'/fp.dec.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: decode --flat -p text')
+      call capnp_read_file(tmp//'/mseg.can.ours', b_got, err)
+      call capnp_read_file(tmp//'/mseg.can.ref', b_exp, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: multi-segment flat-packed roundtrip')
+
+      ! 2. Multi-message packed, text, and JSON streams.
+      if (.not. sh('CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
+         //' && printf "(x = 1, y = 2, z = 3)\n(x = 4, y = 5, z = 6)\n"' &
+         //' | "$CAP" encode -p schema/common.capnp Vec3 > '//tmp//'/two.pbin' &
+         //' && "$CAP" decode -p --short schema/common.capnp Vec3 < '//tmp//'/two.pbin > '//tmp//'/two.pdec.ours' &
+         //' && capnp decode -p --short schema/common.capnp Vec3 < '//tmp//'/two.pbin > '//tmp//'/two.pdec.ref' &
+         //' && "$CAP" convert packed:json --short schema/common.capnp Vec3 < '//tmp//'/two.pbin > '//tmp//'/two.json' &
+         //' && "$CAP" convert json:text --short schema/common.capnp Vec3 < '//tmp//'/two.json > '//tmp//'/two.jdec.ours')) then
+         call test_failed(error, 'cli-ext: multi-message streams failed')
+         return
+      end if
+      call slurp(tmp//'/two.pdec.ours', got, err)
+      call slurp(tmp//'/two.pdec.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: multi-message packed decode')
+      call slurp(tmp//'/two.jdec.ours', got, err)
+      call check_(error, got == exp, 'cli-ext: multi-message json->text convert')
+
+      ! 3. Deep eval paths and binary/packed/flat/flat-packed/canonical/json eval output formats.
+      if (.not. sh('CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && "$CAP" eval -I "$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ours' &
+         //' && capnp eval -I"$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ref' &
+         //' && "$CAP" eval -I"$INC" schema/codec.capnp "EvalRoot.items[1].matrix[1][1]" > '//tmp//'/ev2.ours' &
+         //' && capnp eval -I"$INC" schema/codec.capnp "EvalRoot.items[1].matrix[1][1]" > '//tmp//'/ev2.ref' &
+         //' && "$CAP" eval -I"$INC" schema/codec.capnp "EvalRoot.nestedPlace.city" > '//tmp//'/ev3.ours' &
+         //' && capnp eval -I"$INC" schema/codec.capnp "EvalRoot.nestedPlace.city" > '//tmp//'/ev3.ref' &
+         //' && "$CAP" eval -I"$INC" schema/codec.capnp "Sample.where.zip" > '//tmp//'/ev4.ours' &
+         //' && capnp eval -I"$INC" schema/codec.capnp "Sample.where.zip" > '//tmp//'/ev4.ref' &
+         //' && "$CAP" eval -I"$INC" -ojson --short schema/codec.capnp "evalConst.home" > '//tmp//'/evj.ours' &
+         //' && capnp eval -I"$INC" -ojson --short schema/codec.capnp "evalConst.home" > '//tmp//'/evj.ref' &
+         //' && "$CAP" eval -I"$INC" -b schema/codec.capnp "evalConst.home" | capnp convert binary:canonical > '//tmp//'/evb.ours' &
+         //' && capnp eval -I"$INC" -b schema/codec.capnp "evalConst.home" | capnp convert binary:canonical > '//tmp//'/evb.ref' &
+         //' && "$CAP" eval -I"$INC" -p schema/codec.capnp "evalConst.home" | capnp convert packed:canonical > '//tmp//'/evp.ours' &
+         //' && "$CAP" eval -I"$INC" --flat schema/codec.capnp "evalConst.home"' &
+         //' | capnp convert flat:canonical > '//tmp//'/evf.ours' &
+         //' && "$CAP" eval -I"$INC" -oflat-packed schema/codec.capnp "evalConst.home"' &
+         //' | capnp convert flat-packed:canonical > '//tmp//'/evfp.ours' &
+         //' && "$CAP" eval -I"$INC" -ocanonical schema/codec.capnp "evalConst.home" > '//tmp//'/evc.ours')) then
+         call test_failed(error, 'cli-ext: deep/binary eval failed')
+         return
+      end if
+      call slurp(tmp//'/ev1.ours', got, err)
+      call slurp(tmp//'/ev1.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: eval const deep list/field/matrix')
+      call slurp(tmp//'/ev2.ours', got, err)
+      call slurp(tmp//'/ev2.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: eval struct default deep path')
+      call slurp(tmp//'/ev3.ours', got, err)
+      call slurp(tmp//'/ev3.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: eval nested const field')
+      call slurp(tmp//'/ev4.ours', got, err)
+      call slurp(tmp//'/ev4.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: eval group uint16 default')
+      call slurp(tmp//'/evj.ours', got, err)
+      call slurp(tmp//'/evj.ref', exp, err)
+      call check_(error, got == exp, 'cli-ext: eval -ojson struct')
+      call capnp_read_file(tmp//'/evb.ref', b_exp, err)
+      call capnp_read_file(tmp//'/evb.ours', b_got, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: eval -b')
+      call capnp_read_file(tmp//'/evp.ours', b_got, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: eval -p')
+      call capnp_read_file(tmp//'/evf.ours', b_got, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: eval --flat')
+      call capnp_read_file(tmp//'/evfp.ours', b_got, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: eval -oflat-packed')
+      call capnp_read_file(tmp//'/evc.ours', b_got, err)
+      call check_bytes(error, b_got, b_exp, 'cli-ext: eval -ocanonical')
+
+      ! 4. Flags, exit codes, stderr separation, and zero leaked /tmp/capnpf-*.cgr files.
+      call check_(error, sh('CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
+         //' && "$CAP" --help >/dev/null && "$CAP" --version >/dev/null'), 'cli-ext: --help/--version exit 0')
+      call check_(error, sh('CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
+         //' && ! "$CAP" encode schema/common.capnp Vec3 < /dev/null 2>/dev/null' &
+         //' && ! (printf "   \n" | "$CAP" encode schema/common.capnp Vec3 2>/dev/null)' &
+         //' && ! "$CAP" eval -b schema/kitchen.capnp answer 2>/dev/null' &
+         //' && ! "$CAP" eval -ojson schema/kitchen.capnp answer 2>/dev/null' &
+         //' && ! "$CAP" eval schema/kitchen.capnp "primes[9]" 2>/dev/null' &
+         //' && ! "$CAP" convert bogus:text schema/common.capnp Vec3 < /dev/null 2>/dev/null'), &
+         'cli-ext: error exit codes')
+      call check_(error, sh('! ls /tmp/capnpf-*.cgr >/dev/null 2>&1'), &
+         'cli-ext: no leaked /tmp/capnpf-*.cgr files')
+   end subroutine run_cli_extended
+
+   subroutine compile_codec_schema(error, schema)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(inout), target :: schema
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (.not. sh('mkdir -p '//tmp// &
+         ' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
+         call test_failed(error, 'capnp compile codec schema')
+         return
+      end if
+      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK, 'load codec.cgr')
+   end subroutine compile_codec_schema
 
    function kitchen_text() result(src)
       character(len=:), allocatable :: src
