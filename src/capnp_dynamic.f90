@@ -780,8 +780,7 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
-            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
       case default
          err = CAPNP_ERR_KIND
          return
@@ -1110,8 +1109,7 @@ contains
          ok = value%esize == CAPNP_SZ_FOUR
       case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64)
          ok = value%esize == CAPNP_SZ_EIGHT
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE, &
-            TYPE_CAPABILITY)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
          ok = value%esize == CAPNP_SZ_PTR
       case (TYPE_STRUCT)
          if (value%esize /= CAPNP_SZ_COMPOSITE) return
@@ -1126,6 +1124,35 @@ contains
       end select
    end function dyn_list_ok
 
+   !> True when an anyPointer Type accepts a value of this resolved kind.
+   !> Unconstrained struct, list and capability are the inner union at
+   !> byte 10, not Type tags. Parameters and implicit parameters accept
+   !> any pointer. anyKind accepts struct, list and capability.
+   function any_accepts(t, kind) result(ok)
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(in) :: kind
+      logical :: ok
+      integer :: inner
+      ok = .false.
+      if (type_which(t) /= TYPE_ANY_POINTER) return
+      select case (type_anyptr_which(t))
+      case (ANYPTR_PARAMETER, ANYPTR_IMPLICIT)
+         ok = kind == CAPNP_PK_STRUCT .or. kind == CAPNP_PK_LIST .or. kind == CAPNP_PK_CAP
+      case (ANYPTR_UNCONSTRAINED)
+         inner = type_anyptr_kind(t)
+         select case (inner)
+         case (ANYPTR_KIND_ANY)
+            ok = kind == CAPNP_PK_STRUCT .or. kind == CAPNP_PK_LIST .or. kind == CAPNP_PK_CAP
+         case (ANYPTR_KIND_STRUCT)
+            ok = kind == CAPNP_PK_STRUCT
+         case (ANYPTR_KIND_LIST)
+            ok = kind == CAPNP_PK_LIST
+         case (ANYPTR_KIND_CAPABILITY)
+            ok = kind == CAPNP_PK_CAP
+         end select
+      end select
+   end function any_accepts
+
    subroutine capnp_dyn_setp(schema, idx, p, fname, value, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -1138,17 +1165,11 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
-            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
          if (value%kind /= CAPNP_PK_NULL) then
             select case (type_which(t))
             case (TYPE_STRUCT)
                if (.not. dyn_struct_ok(schema, t, value)) then
-                  err = CAPNP_ERR_KIND
-                  return
-               end if
-            case (TYPE_ANY_STRUCT)
-               if (value%kind /= CAPNP_PK_STRUCT) then
                   err = CAPNP_ERR_KIND
                   return
                end if
@@ -1159,18 +1180,18 @@ contains
                   err = CAPNP_ERR_KIND
                   return
                end if
-            case (TYPE_ANY_LIST)
-               if (value%kind /= CAPNP_PK_LIST) then
-                  err = CAPNP_ERR_KIND
-                  return
-               end if
             case (TYPE_TEXT, TYPE_DATA)
                if (value%kind /= CAPNP_PK_LIST .or. value%esize /= CAPNP_SZ_BYTE) then
                   err = CAPNP_ERR_KIND
                   return
                end if
-            case (TYPE_INTERFACE, TYPE_CAPABILITY)
+            case (TYPE_INTERFACE)
                if (value%kind /= CAPNP_PK_CAP) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_ANY_POINTER)
+               if (.not. any_accepts(t, value%kind)) then
                   err = CAPNP_ERR_KIND
                   return
                end if
@@ -1199,10 +1220,15 @@ contains
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_INTERFACE .and. type_which(t) /= TYPE_CAPABILITY .and. &
-          type_which(t) /= TYPE_ANY_POINTER) then
-         err = CAPNP_ERR_KIND
-         return
+      if (type_which(t) /= TYPE_INTERFACE) then
+         if (type_which(t) /= TYPE_ANY_POINTER) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         if (.not. any_accepts(t, CAPNP_PK_CAP)) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
       end if
       value = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
@@ -1239,7 +1265,20 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: value
+      type(capnp_ptr_t) :: value, f, t
+      value = capnp_ptr_t()
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (.not. any_accepts(t, CAPNP_PK_STRUCT)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       value = capnp_dyn_getp(schema, idx, p, fname, err)
       if (err /= CAPNP_OK .or. value%kind == CAPNP_PK_NULL) return
       if (value%kind /= CAPNP_PK_STRUCT) err = CAPNP_ERR_KIND
@@ -1251,7 +1290,20 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: value
+      type(capnp_ptr_t) :: value, f, t
+      value = capnp_ptr_t()
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (.not. any_accepts(t, CAPNP_PK_LIST)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       value = capnp_dyn_getp(schema, idx, p, fname, err)
       if (err /= CAPNP_OK .or. value%kind == CAPNP_PK_NULL) return
       if (value%kind /= CAPNP_PK_LIST) err = CAPNP_ERR_KIND

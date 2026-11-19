@@ -39,9 +39,6 @@ module capnp_schema
    integer, parameter, public :: TYPE_STRUCT = 16
    integer, parameter, public :: TYPE_INTERFACE = 17
    integer, parameter, public :: TYPE_ANY_POINTER = 18
-   integer, parameter, public :: TYPE_ANY_STRUCT = 25
-   integer, parameter, public :: TYPE_ANY_LIST = 26
-   integer, parameter, public :: TYPE_CAPABILITY = 27
 
    integer, parameter, public :: NO_DISCRIMINANT = 65535
 
