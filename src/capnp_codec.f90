@@ -110,7 +110,9 @@ contains
       end if
       call fmt_g(real(x, real64), 6, s)
       call capnp_parse_f32(s, y, err)
-      if (err /= CAPNP_OK .or. .not. f32_same(y, x)) &
+      ! strtof sets ERANGE for a subnormal, so KJ retries at FLT_DIG+2
+      ! even when the shorter text parses back to the same bits.
+      if (err /= CAPNP_OK .or. .not. f32_same(y, x) .or. f32_subnormal(x)) &
          call fmt_g(real(x, real64), 8, s)
    end subroutine capnp_fmt_f32
 
@@ -1002,6 +1004,14 @@ contains
              iand(bb, int(z'7fffffffffffffff', int64)) == 0_int64
       end if
    end function f64_same
+
+   pure function f32_subnormal(x) result(y)
+      real(real32), intent(in) :: x
+      logical :: y
+      integer(int32) :: bits
+      bits = iand(transfer(x, 0_int32), int(z'7fffffff', int32))
+      y = bits > 0_int32 .and. bits < int(z'00800000', int32)
+   end function f32_subnormal
 
    pure function f32_same(a, b) result(y)
       real(real32), intent(in) :: a, b
