@@ -2,6 +2,10 @@
 
 using Common = import "common.capnp";
 
+annotation note @0xfab0b2a29d2f0b19(file, struct, field) :Text;
+
+$note("kitchen schema");
+
 const answer :Int32 = 42;
 const tau :Float64 = 6.283185307179586;
 const greeting :Text = "hey there";
@@ -9,8 +13,8 @@ const magic :Data = 0x"ca fe f0 0d";
 const primes :List(Int32) = [2, 3, 5, 7];
 const home :Common.Vec3 = (x = -1.0, y = 0.5, z = 9.25);
 
-struct Sink {
-  flag @0 :Bool = true;
+struct Sink $note("sink type") {
+  flag @0 :Bool = true $note("flag field");
   count @1 :Int32 = -7;
   ratio @2 :Float64 = 2.5;
   label @3 :Text = "unnamed";

@@ -5,9 +5,20 @@ module schema__kitchen_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE = 'kitchen schema'
+
+   integer(int64), parameter :: SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID = -382609556834940135_int64
+
    integer(int64), parameter :: ANSWER = 42_int64
    real(real64), parameter :: TAU = transfer(4618760256179416344_int64, 1.0_real64)
    character(len=*), parameter :: GREETING = 'hey there'
+   integer, parameter :: SINK_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_ANNOTATION_NOTE = 'sink type'
+
+   integer, parameter :: SINK_FLAG_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_FLAG_ANNOTATION_NOTE = 'flag field'
+
    integer, parameter :: SINK_DWORDS = 2
    integer, parameter :: SINK_PWORDS = 9
    type :: sink_t
@@ -34,6 +45,10 @@ module schema__kitchen_capnp
       3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,  &
       4, 0, 0, 0, 0, 0, 0, 0]
 
+   integer(int64), parameter :: SCHEMA__A826_NOTE_ID = -382609556834940135_int64
+   character(len=*), parameter :: SCHEMA__A826_SINK_NOTE = 'sink type'
+   character(len=*), parameter :: SCHEMA__A826_SINK_FLAG_NOTE = 'flag field'
+   character(len=*), parameter :: KITCHEN_CAPNP_NOTE = 'kitchen schema'
 contains
 
    function primes(err) result(o)

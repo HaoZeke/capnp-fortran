@@ -56,6 +56,7 @@ module capnp_schema
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
    public :: field_slot_had_default
    public :: enumerant_name
+   public :: annotation_brand
    public :: type_which, type_list_element, type_type_id
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
@@ -422,6 +423,15 @@ contains
       integer, intent(out) :: err
       call capnp_get_text(p, 0, s, err)
    end subroutine enumerant_name
+
+   ! --- Annotation: 1 data word, 2 ptrs ----------------------------------
+
+   function annotation_brand(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 1, err)
+   end function annotation_brand
 
    ! --- Type: 3 data words, 1 ptr ----------------------------------------
 

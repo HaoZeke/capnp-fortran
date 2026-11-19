@@ -6,8 +6,9 @@ module test_dynamic
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT
-   use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set
+   use capnp_schema, only: TYPE_TEXT, value_which, value_text
+   use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set, &
+                            SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
@@ -41,6 +42,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema, kschema, dschema
       type(capnp_message_t), target :: msg, bmsg, kmsg, dmsg
       type(capnp_ptr_t) :: root, people, person, phones, phone, q
+      type(capnp_dyn_annotation_t), allocatable :: annotations(:)
       type(sink_t) :: sink
       type(person_t) :: pe
       type(dual_t) :: dual
@@ -128,6 +130,20 @@ contains
       call check_(error, err == CAPNP_OK, 'dyn: kitchen schema loads')
       sink_idx = capnp_dyn_find(kschema, 'Sink', err)
       call check_(error, sink_idx > 0, 'dyn: Sink node found')
+      call capnp_dyn_node_annotations(kschema, sink_idx, annotations, err)
+      call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
+                  annotations(1)%id == SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID .and. &
+                  value_which(annotations(1)%value) == TYPE_TEXT, &
+                  'dyn: node annotation metadata')
+      call value_text(annotations(1)%value, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'sink type', 'dyn: node annotation value')
+      call capnp_dyn_field_annotations(kschema, sink_idx, 'flag', annotations, err)
+      call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
+                  annotations(1)%id == SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID .and. &
+                  value_which(annotations(1)%value) == TYPE_TEXT, &
+                  'dyn: field annotation metadata')
+      call value_text(annotations(1)%value, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'flag field', 'dyn: field annotation value')
       call capnp_message_init_builder(kmsg, err)
       sink = sink_new_root(kmsg, err)
       call sink_flag_set(sink, .false., err)

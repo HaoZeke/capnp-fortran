@@ -39,6 +39,11 @@ contains
       call check_(error, ANSWER == 42_int64, 'const: answer')
       call check_(error, abs(TAU - 6.283185307179586_real64) < 1.0e-15_real64, 'const: tau')
       call check_(error, GREETING == 'hey there', 'const: greeting')
+      call check_(error, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID /= 0_int64, 'annotation: declaration id')
+      call check_(error, SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE == 'kitchen schema', &
+                  'annotation: file value')
+      call check_(error, SINK_ANNOTATION_NOTE == 'sink type', 'annotation: struct value')
+      call check_(error, SINK_FLAG_ANNOTATION_NOTE == 'flag field', 'annotation: field value')
       call check_(error, STATUS_BUSY_E == 1, 'const: imported enum')
       call check_(error, size(MAGIC) == 4 .and. MAGIC(0) == -54_int8 .and. &
                   MAGIC(3) == 13_int8, 'const: data bytes')
