@@ -127,6 +127,7 @@ contains
       if (.not. allocated(error)) call t_cancel_reserves_qid(error)
       if (.not. allocated(error)) call t_send_failure_releases_qid(error)
       if (.not. allocated(error)) call t_membrane(error)
+      if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
 
       call rpc_conn_close(cli)
@@ -1287,6 +1288,90 @@ contains
       call rpc_conn_close(mcli)
       call rpc_conn_close(msrv)
    end subroutine t_membrane
+
+   !> A cap-returning call against a full export table is an exception,
+   !> and the membrane wrapper built for that call is not left allocated.
+   subroutine t_export_table_full(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: mcli, msrv
+      type(echo_srv_t), target :: inner_server
+      type(rpc_membrane_server_t), target :: wrapped_server
+      type(counting_membrane_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, mboot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: root
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: q
+      integer :: ma, mb, e, i, nused
+      call px_socketpair(ma, mb, e)
+      call check_(error, e == CAPNP_OK, 'export full: socketpair')
+      if (allocated(error)) return
+      inner => inner_server
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped_server, inner, policy)
+      mboot => wrapped_server
+      call rpc_conn_init(msrv, mb, mboot)
+      mboot => null()
+      call rpc_conn_init(mcli, ma, mboot)
+      call rpc_bootstrap_send(mcli, root, e)
+      q = root%id
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_cap(mcli, q, [integer ::], root, e)
+      call rpc_finish_send(mcli, q, .true., e)
+      call rpc_pump_once(msrv, e)
+      do i = 1, 63
+         call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, q, e)
+         s = capnp_new_struct(m, 1, 0, e)
+         call capnp_set_i64(s, 0_int64, int(i, int64), e)
+         call payload_content_set(params, s, e)
+         call rpc_call_send(mcli, m, e)
+         call rpc_pump_once(msrv, e)
+         call rpc_wait(mcli, q, e)
+         call rpc_result_content(mcli, q, content, e)
+         if (e /= CAPNP_OK) exit
+         call rpc_finish_send(mcli, q, .true., e)
+         call rpc_pump_once(msrv, e)
+      end do
+      call check_(error, e == CAPNP_OK, 'export full: table filled')
+      if (allocated(error)) return
+      nused = 0
+      do i = 0, size(msrv%exports) - 1
+         if (msrv%exports(i)%used) nused = nused + 1
+      end do
+      call check_(error, nused == size(msrv%exports), 'export full: every slot is live')
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, q, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 9_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_content(mcli, q, content, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, 'export full: mint is an exception')
+      nused = 0
+      do i = 0, size(msrv%exports) - 1
+         if (msrv%exports(i)%used) nused = nused + 1
+      end do
+      call check_(error, nused == size(msrv%exports), 'export full: no partial export kept')
+      call rpc_finish_send(mcli, q, .false., e)
+      call rpc_pump_once(msrv, e)
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 3_int64, e)
+      call capnp_set_text(s, 0, 'z', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_content(mcli, q, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 6_int64, &
+                  'export full: later call still answers')
+      call rpc_conn_close(mcli)
+      call rpc_conn_close(msrv)
+   end subroutine t_export_table_full
 
    !> Connections can own an abstract byte stream rather than depending
    !> on the integer descriptor adapter in the RPC core.
