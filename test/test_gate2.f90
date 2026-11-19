@@ -22,6 +22,7 @@ program test_gate2
    call case_18()
    call case_19()
    call case_20()
+   call case_21()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -591,4 +592,78 @@ contains
          'mp -s /tmp/g2-ph.e1 /tmp/g2-ph.e2 && test "$(cat /tmp/g2-ph.' // &
          'e1)" != 0')
    end subroutine case_20
+
+   subroutine case_21()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'command -v cc > /dev/null || exit 77' // &
+         achar(10) // &
+         'd=/tmp/g2-eintr-$$; mkdir -p "$d"' // &
+         achar(10) // &
+         'cat > "$d/shim.c" <<' // &
+         achar(39) // &
+         'EOF' // &
+         achar(39) // &
+         achar(10) // &
+         '#define _GNU_SOURCE' // &
+         achar(10) // &
+         '#include <dlfcn.h>' // &
+         achar(10) // &
+         '#include <errno.h>' // &
+         achar(10) // &
+         '#include <unistd.h>' // &
+         achar(10) // &
+         'static int hit;' // &
+         achar(10) // &
+         'ssize_t write(int fd, const void *b, size_t n) {' // &
+         achar(10) // &
+         '  static ssize_t (*real)(int, const void *, size_t);' // &
+         achar(10) // &
+         '  if (!real) real = (ssize_t (*)(int, const void *, size_t))' // &
+         'dlsym(RTLD_NEXT, "write");' // &
+         achar(10) // &
+         '  if (fd == 1 && !hit) { hit = 1; errno = EINTR; return -1; ' // &
+         '}' // &
+         achar(10) // &
+         '  return real(fd, b, n);' // &
+         achar(10) // &
+         '}' // &
+         achar(10) // &
+         'EOF' // &
+         achar(10) // &
+         'cc -shared -fPIC -o "$d/shim.so" "$d/shim.c" -ldl || { rm -r' // &
+         'f "$d"; exit 77; }' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '(x = 1, y = 2, z = 3)\n' // &
+         achar(39) // &
+         ' > "$d/in"' // &
+         achar(10) // &
+         'LD_PRELOAD="$d/shim.so" /bin/true 2> "$d/ld"; if test -s "$d' // &
+         '/ld"; then rm -rf "$d"; exit 77; fi' // &
+         achar(10) // &
+         'LD_PRELOAD="$d/shim.so" "$CAP" convert text:binary schema/co' // &
+         'mmon.capnp Vec3 < "$d/in" > "$d/o" 2> "$d/e"; r=$?' // &
+         achar(10) // &
+         'if grep -q ' // &
+         achar(39) // &
+         'runtime does not come first' // &
+         achar(39) // &
+         ' "$d/e"; then rm -rf "$d"; exit 77; fi' // &
+         achar(10) // &
+         'capnp convert text:binary schema/common.capnp Vec3 < "$d/in"' // &
+         ' > "$d/r"' // &
+         achar(10) // &
+         'test $r -eq 0 && cmp -s "$d/o" "$d/r"; r=$?' // &
+         achar(10) // &
+         'rm -rf "$d"; exit $r')
+   end subroutine case_21
 end program test_gate2
