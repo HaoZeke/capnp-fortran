@@ -47,6 +47,7 @@ module test_rpc
    type(echo_srv_t), target :: echo
    class(rpc_server_t), pointer :: boot
    integer :: fda, fdb, err
+   logical :: rpc_up = .false.
 
    integer(c_int), parameter :: SIGALRM = 14_c_int
 
@@ -99,22 +100,117 @@ contains
 
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One ordered suite: cases share a socketpair connection (setup once).
-      allocate (testsuite(7))
-      testsuite(1)%name = "rpc"
-      testsuite(1)%test => run_rpc
-      testsuite(2)%name = "posix-recv-eintr-retried"
-      testsuite(2)%test => t_recv_all_retries_eintr
-      testsuite(3)%name = "rpc-framing-511-accepted"
-      testsuite(3)%test => t_framing_511_accepted
-      testsuite(4)%name = "rpc-framing-512-rejected"
-      testsuite(4)%test => t_framing_512_rejected
-      testsuite(5)%name = "rpc-framing-oversized-rejected"
-      testsuite(5)%test => t_framing_oversized_rejected
-      testsuite(6)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(6)%test => t_framing_negative_traversal_rejected
-      testsuite(7)%name = "rpc-framing-short-and-padded"
-      testsuite(7)%test => t_framing_short_and_padded
+      ! Ordered cases. They share one socketpair, so a failure
+      ! names the check and the later checks still run.
+      allocate (testsuite(54))
+      testsuite(1)%name = "rpc-bootstrap-and-echo"
+      testsuite(1)%test => w_bootstrap_and_echo
+      testsuite(2)%name = "rpc-cap-result-and-pipeline"
+      testsuite(2)%test => w_cap_result_and_pipeline
+      testsuite(3)%name = "rpc-exception"
+      testsuite(3)%test => w_exception
+      testsuite(4)%name = "rpc-unimplemented"
+      testsuite(4)%test => w_unimplemented
+      testsuite(5)%name = "rpc-persistent-save"
+      testsuite(5)%test => w_persistent_save
+      testsuite(6)%name = "rpc-resolve-and-tail-calls"
+      testsuite(6)%test => w_resolve_and_tail_calls
+      testsuite(7)%name = "rpc-sender-promise-import"
+      testsuite(7)%test => w_sender_promise_import
+      testsuite(8)%name = "rpc-disembargo-echo"
+      testsuite(8)%test => w_disembargo_echo
+      testsuite(9)%name = "rpc-disembargo-promised-answer"
+      testsuite(9)%test => w_disembargo_promised_answer
+      testsuite(10)%name = "rpc-disembargo-receiver-loopback-absorbed"
+      testsuite(10)%test => w_disembargo_receiver_loopback_absorbed
+      testsuite(11)%name = "rpc-pump-poll"
+      testsuite(11)%test => w_pump_poll
+      testsuite(12)%name = "rpc-provide-and-accept"
+      testsuite(12)%test => w_provide_and_accept
+      testsuite(13)%name = "rpc-accept-unknown-nonce"
+      testsuite(13)%test => w_accept_unknown_nonce
+      testsuite(14)%name = "rpc-provide-unhosted"
+      testsuite(14)%test => w_provide_unhosted
+      testsuite(15)%name = "rpc-two-provisions-independent"
+      testsuite(15)%test => w_two_provisions_independent
+      testsuite(16)%name = "rpc-accept-embargo"
+      testsuite(16)%test => w_accept_embargo
+      testsuite(17)%name = "rpc-third-party-introduction"
+      testsuite(17)%test => w_third_party_introduction
+      testsuite(18)%name = "rpc-introduction-in-an-answer"
+      testsuite(18)%test => w_introduction_in_an_answer
+      testsuite(19)%name = "rpc-overlong-host-refused"
+      testsuite(19)%test => w_overlong_host_refused
+      testsuite(20)%name = "rpc-reference-introduction"
+      testsuite(20)%test => w_reference_introduction
+      testsuite(21)%name = "rpc-reference-frames"
+      testsuite(21)%test => w_reference_frames
+      testsuite(22)%name = "rpc-join-same-capability"
+      testsuite(22)%test => w_join_same_capability
+      testsuite(23)%name = "rpc-join-unresolvable-part"
+      testsuite(23)%test => w_join_unresolvable_part
+      testsuite(24)%name = "rpc-join-all-parts-unresolvable"
+      testsuite(24)%test => w_join_all_parts_unresolvable
+      testsuite(25)%name = "rpc-join-client-api"
+      testsuite(25)%test => w_join_client_api
+      testsuite(26)%name = "rpc-join-incomplete-set-is-silent"
+      testsuite(26)%test => w_join_incomplete_set_is_silent
+      testsuite(27)%name = "rpc-join-finish-one-part"
+      testsuite(27)%test => w_join_finish_one_part
+      testsuite(28)%name = "rpc-join-send-unwinds"
+      testsuite(28)%test => w_join_send_unwinds
+      testsuite(29)%name = "rpc-join-finish-releases-cap"
+      testsuite(29)%test => w_join_finish_releases_cap
+      testsuite(30)%name = "rpc-abandoned-join-cleared"
+      testsuite(30)%test => w_abandoned_join_cleared
+      testsuite(31)%name = "rpc-finish-provide-qid"
+      testsuite(31)%test => w_finish_provide_qid
+      testsuite(32)%name = "rpc-request-cancellation"
+      testsuite(32)%test => w_request_cancellation
+      testsuite(33)%name = "rpc-cancel-reserves-qid"
+      testsuite(33)%test => w_cancel_reserves_qid
+      testsuite(34)%name = "rpc-send-failure-releases-qid"
+      testsuite(34)%test => w_send_failure_releases_qid
+      testsuite(35)%name = "rpc-call-send-failure-releases"
+      testsuite(35)%test => w_call_send_failure_releases
+      testsuite(36)%name = "rpc-malformed-root-is-freed"
+      testsuite(36)%test => w_malformed_root_is_freed
+      testsuite(37)%name = "rpc-membrane-unwrap-frees"
+      testsuite(37)%test => w_membrane_unwrap_frees
+      testsuite(38)%name = "rpc-provide-overrelease-keeps-server"
+      testsuite(38)%test => w_provide_overrelease_keeps_server
+      testsuite(39)%name = "rpc-embargo-finish-answers-recipient"
+      testsuite(39)%test => w_embargo_finish_answers_recipient
+      testsuite(40)%name = "rpc-accept-finish-releases-cap"
+      testsuite(40)%test => w_accept_finish_releases_cap
+      testsuite(41)%name = "rpc-accept-finish-after-embargo"
+      testsuite(41)%test => w_accept_finish_after_embargo
+      testsuite(42)%name = "rpc-embargo-recipient-close"
+      testsuite(42)%test => w_embargo_recipient_close
+      testsuite(43)%name = "rpc-membrane"
+      testsuite(43)%test => w_membrane
+      testsuite(44)%name = "rpc-export-table-full"
+      testsuite(44)%test => w_export_table_full
+      testsuite(45)%name = "rpc-pluggable-transport"
+      testsuite(45)%test => w_pluggable_transport
+      testsuite(46)%name = "rpc-dial-guard"
+      testsuite(46)%test => w_dial_guard
+      testsuite(47)%name = "rpc-disembargo-provide-wrong-conn"
+      testsuite(47)%test => w_disembargo_provide_wrong_conn
+      testsuite(48)%name = "rpc-shutdown"
+      testsuite(48)%test => w_shutdown
+      testsuite(49)%name = "posix-recv-eintr-retried"
+      testsuite(49)%test => t_recv_all_retries_eintr
+      testsuite(50)%name = "rpc-framing-511-accepted"
+      testsuite(50)%test => t_framing_511_accepted
+      testsuite(51)%name = "rpc-framing-512-rejected"
+      testsuite(51)%test => t_framing_512_rejected
+      testsuite(52)%name = "rpc-framing-oversized-rejected"
+      testsuite(52)%test => t_framing_oversized_rejected
+      testsuite(53)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(53)%test => t_framing_negative_traversal_rejected
+      testsuite(54)%name = "rpc-framing-short-and-padded"
+      testsuite(54)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -215,67 +311,357 @@ contains
       end if
    end subroutine counting_outbound_call
 
-   subroutine run_rpc(error)
+   subroutine ensure_rpc(error)
       type(error_type), allocatable, intent(out) :: error
+      if (rpc_up) return
       call px_socketpair(fda, fdb, err)
-      call check_(error, err == CAPNP_OK, 'rpc: socketpair')
-      if (allocated(error)) return
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'rpc: socketpair')
+         return
+      end if
       boot => echo
       call rpc_conn_init(srv, fdb, boot)
       boot => null()
       call rpc_conn_init(cli, fda, boot)
+      rpc_up = .true.
+   end subroutine ensure_rpc
 
-      call t_bootstrap_and_echo(error)
-      if (.not. allocated(error)) call t_cap_result_and_pipeline(error)
-      if (.not. allocated(error)) call t_exception(error)
-      if (.not. allocated(error)) call t_unimplemented(error)
-      if (.not. allocated(error)) call t_persistent_save(error)
-      if (.not. allocated(error)) call t_resolve_and_tail_calls(error)
-      if (.not. allocated(error)) call t_sender_promise_import(error)
-      if (.not. allocated(error)) call t_disembargo_echo(error)
-      if (.not. allocated(error)) call t_disembargo_promised_answer(error)
-      if (.not. allocated(error)) call t_disembargo_receiver_loopback_absorbed(error)
-      if (.not. allocated(error)) call t_pump_poll(error)
-      if (.not. allocated(error)) call t_provide_and_accept(error)
-      if (.not. allocated(error)) call t_accept_unknown_nonce(error)
-      if (.not. allocated(error)) call t_provide_unhosted(error)
-      if (.not. allocated(error)) call t_two_provisions_independent(error)
-      if (.not. allocated(error)) call t_accept_embargo(error)
-      if (.not. allocated(error)) call t_third_party_introduction(error)
-      if (.not. allocated(error)) call t_introduction_in_an_answer(error)
-      if (.not. allocated(error)) call t_overlong_host_refused(error)
-      if (.not. allocated(error)) call t_reference_introduction(error)
-      if (.not. allocated(error)) call t_reference_frames(error)
-      if (.not. allocated(error)) call t_join_same_capability(error)
-      if (.not. allocated(error)) call t_join_unresolvable_part(error)
-      if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
-      if (.not. allocated(error)) call t_join_client_api(error)
-      if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
-      if (.not. allocated(error)) call t_join_finish_one_part(error)
-      if (.not. allocated(error)) call t_join_send_unwinds(error)
-      if (.not. allocated(error)) call t_join_finish_releases_cap(error)
-      if (.not. allocated(error)) call t_abandoned_join_cleared(error)
-      if (.not. allocated(error)) call t_finish_provide_qid(error)
-      if (.not. allocated(error)) call t_request_cancellation(error)
-      if (.not. allocated(error)) call t_cancel_reserves_qid(error)
-      if (.not. allocated(error)) call t_send_failure_releases_qid(error)
-      if (.not. allocated(error)) call t_call_send_failure_releases(error)
-      if (.not. allocated(error)) call t_malformed_root_is_freed(error)
-      if (.not. allocated(error)) call t_membrane_unwrap_frees(error)
-      if (.not. allocated(error)) call t_provide_overrelease_keeps_server(error)
-      if (.not. allocated(error)) call t_embargo_finish_answers_recipient(error)
-      if (.not. allocated(error)) call t_accept_finish_releases_cap(error)
-      if (.not. allocated(error)) call t_accept_finish_after_embargo(error)
-      if (.not. allocated(error)) call t_embargo_recipient_close(error)
-      if (.not. allocated(error)) call t_membrane(error)
-      if (.not. allocated(error)) call t_export_table_full(error)
-      if (.not. allocated(error)) call t_pluggable_transport(error)
-      if (.not. allocated(error)) call t_dial_guard(error)
-
+   subroutine w_shutdown(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. rpc_up) return
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
-   end subroutine run_rpc
+      rpc_up = .false.
+   end subroutine w_shutdown
 
+   subroutine w_bootstrap_and_echo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_bootstrap_and_echo(error)
+   end subroutine w_bootstrap_and_echo
+
+   subroutine w_cap_result_and_pipeline(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_cap_result_and_pipeline(error)
+   end subroutine w_cap_result_and_pipeline
+
+   subroutine w_exception(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_exception(error)
+   end subroutine w_exception
+
+   subroutine w_unimplemented(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_unimplemented(error)
+   end subroutine w_unimplemented
+
+   subroutine w_persistent_save(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_persistent_save(error)
+   end subroutine w_persistent_save
+
+   subroutine w_resolve_and_tail_calls(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_and_tail_calls(error)
+   end subroutine w_resolve_and_tail_calls
+
+   subroutine w_sender_promise_import(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_sender_promise_import(error)
+   end subroutine w_sender_promise_import
+
+   subroutine w_disembargo_echo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_disembargo_echo(error)
+   end subroutine w_disembargo_echo
+
+   subroutine w_disembargo_promised_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_disembargo_promised_answer(error)
+   end subroutine w_disembargo_promised_answer
+
+   subroutine w_disembargo_receiver_loopback_absorbed(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_disembargo_receiver_loopback_absorbed(error)
+   end subroutine w_disembargo_receiver_loopback_absorbed
+
+   subroutine w_pump_poll(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_pump_poll(error)
+   end subroutine w_pump_poll
+
+   subroutine w_provide_and_accept(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_provide_and_accept(error)
+   end subroutine w_provide_and_accept
+
+   subroutine w_accept_unknown_nonce(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_accept_unknown_nonce(error)
+   end subroutine w_accept_unknown_nonce
+
+   subroutine w_provide_unhosted(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_provide_unhosted(error)
+   end subroutine w_provide_unhosted
+
+   subroutine w_two_provisions_independent(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_two_provisions_independent(error)
+   end subroutine w_two_provisions_independent
+
+   subroutine w_accept_embargo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_accept_embargo(error)
+   end subroutine w_accept_embargo
+
+   subroutine w_third_party_introduction(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_third_party_introduction(error)
+   end subroutine w_third_party_introduction
+
+   subroutine w_introduction_in_an_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_introduction_in_an_answer(error)
+   end subroutine w_introduction_in_an_answer
+
+   subroutine w_overlong_host_refused(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_overlong_host_refused(error)
+   end subroutine w_overlong_host_refused
+
+   subroutine w_reference_introduction(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_reference_introduction(error)
+   end subroutine w_reference_introduction
+
+   subroutine w_reference_frames(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_reference_frames(error)
+   end subroutine w_reference_frames
+
+   subroutine w_join_same_capability(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_same_capability(error)
+   end subroutine w_join_same_capability
+
+   subroutine w_join_unresolvable_part(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_unresolvable_part(error)
+   end subroutine w_join_unresolvable_part
+
+   subroutine w_join_all_parts_unresolvable(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_all_parts_unresolvable(error)
+   end subroutine w_join_all_parts_unresolvable
+
+   subroutine w_join_client_api(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_client_api(error)
+   end subroutine w_join_client_api
+
+   subroutine w_join_incomplete_set_is_silent(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_incomplete_set_is_silent(error)
+   end subroutine w_join_incomplete_set_is_silent
+
+   subroutine w_join_finish_one_part(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_finish_one_part(error)
+   end subroutine w_join_finish_one_part
+
+   subroutine w_join_send_unwinds(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_send_unwinds(error)
+   end subroutine w_join_send_unwinds
+
+   subroutine w_join_finish_releases_cap(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_join_finish_releases_cap(error)
+   end subroutine w_join_finish_releases_cap
+
+   subroutine w_abandoned_join_cleared(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_abandoned_join_cleared(error)
+   end subroutine w_abandoned_join_cleared
+
+   subroutine w_finish_provide_qid(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_finish_provide_qid(error)
+   end subroutine w_finish_provide_qid
+
+   subroutine w_request_cancellation(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_request_cancellation(error)
+   end subroutine w_request_cancellation
+
+   subroutine w_cancel_reserves_qid(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_cancel_reserves_qid(error)
+   end subroutine w_cancel_reserves_qid
+
+   subroutine w_send_failure_releases_qid(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_send_failure_releases_qid(error)
+   end subroutine w_send_failure_releases_qid
+
+   subroutine w_call_send_failure_releases(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_call_send_failure_releases(error)
+   end subroutine w_call_send_failure_releases
+
+   subroutine w_malformed_root_is_freed(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_malformed_root_is_freed(error)
+   end subroutine w_malformed_root_is_freed
+
+   subroutine w_membrane_unwrap_frees(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_membrane_unwrap_frees(error)
+   end subroutine w_membrane_unwrap_frees
+
+   subroutine w_provide_overrelease_keeps_server(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_provide_overrelease_keeps_server(error)
+   end subroutine w_provide_overrelease_keeps_server
+
+   subroutine w_embargo_finish_answers_recipient(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_embargo_finish_answers_recipient(error)
+   end subroutine w_embargo_finish_answers_recipient
+
+   subroutine w_accept_finish_releases_cap(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_accept_finish_releases_cap(error)
+   end subroutine w_accept_finish_releases_cap
+
+   subroutine w_accept_finish_after_embargo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_accept_finish_after_embargo(error)
+   end subroutine w_accept_finish_after_embargo
+
+   subroutine w_embargo_recipient_close(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_embargo_recipient_close(error)
+   end subroutine w_embargo_recipient_close
+
+   subroutine w_membrane(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_membrane(error)
+   end subroutine w_membrane
+
+   subroutine w_export_table_full(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_export_table_full(error)
+   end subroutine w_export_table_full
+
+   subroutine w_pluggable_transport(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_pluggable_transport(error)
+   end subroutine w_pluggable_transport
+
+   subroutine w_dial_guard(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_dial_guard(error)
+   end subroutine w_dial_guard
+
+   subroutine w_disembargo_provide_wrong_conn(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_disembargo_provide_wrong_conn(error)
+   end subroutine w_disembargo_provide_wrong_conn
 
    !> Send one Join part: question `qid`, targeting export `eid`, carrying
    !> a two-party JoinKeyPart naming the set.
@@ -2174,125 +2560,220 @@ contains
       call rpc_pump_once(srv, err)
    end subroutine t_sender_promise_import
 
-   !> Level 1 embargo: a senderLoopback Disembargo is answered by the
-   !> peer as receiverLoopback with the same id and importedCap target
-   !> (handle_disembargo on the pumped vat).
+   !> senderLoopback aimed at a capability this vat hosts aborts: that
+   !> object does not point back at the sender. An unknown export id
+   !> aborts with the export-id reason.
    subroutine t_disembargo_echo(error)
       type(error_type), allocatable, intent(inout) :: error
-      type(capnp_message_t), target :: m, reply
-      type(message_t) :: msg, rmsg
-      type(disembargo_t) :: d, rd
-      type(message_target_t) :: tgt, rtgt
-      integer(int64), parameter :: emb_id = 99_int64
-      integer(int64), parameter :: import_id = 3_int64
-      call capnp_message_init_builder(m, err)
-      msg = message_new_root(m, err)
-      d = message_disembargo_init(msg, err)
-      call disembargo_context_sender_loopback_set(d, emb_id, err)
-      tgt = disembargo_target_init(d, err)
-      call message_target_imported_cap_set(tgt, import_id, err)
-      call rpc_send_message(cli%fd, m, err)
-      call capnp_message_free(m)
-      call check_(error, err == CAPNP_OK, 'rpc: disembargo sent')
-      call rpc_pump_once(srv, err)
-      call check_(error, err == CAPNP_OK, 'rpc: server handled disembargo')
-      call rpc_recv_message(cli%fd, reply, err)
-      call check_(error, err == CAPNP_OK, 'rpc: disembargo echo received')
-      rmsg = message_read_root(reply, err)
-      call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
-                  'rpc: echo is Disembargo')
-      rd = message_disembargo_get(rmsg, err)
-      call check_(error, disembargo_context_which(rd) == &
-                  DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG, &
-                  'rpc: receiverLoopback context')
-      call check_(error, disembargo_context_receiver_loopback_get(rd) == emb_id, &
-                  'rpc: embargo id echoed')
-      rtgt = disembargo_target_get(rd, err)
-      call check_(error, message_target_which(rtgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG, &
-                  'rpc: echo target is importedCap')
-      call check_(error, message_target_imported_cap_get(rtgt) == import_id, &
-                  'rpc: import id echoed')
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: reply
+      type(message_t) :: rmsg
+      type(disembargo_t) :: rd
+      type(message_target_t) :: rtgt
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call check_(error, e == CAPNP_OK .and. sconn%exports(0)%used, &
+                  'rpc: disembargo export is live')
+      if (allocated(error)) return
+      call send_loopback(cconn%fd, 99_int64, 0_int64, e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. rpc_conn_alive(sconn), &
+                  'rpc: hosted senderLoopback aborts')
+      call recv_within(cconn%fd, reply, error, 'rpc: hosted senderLoopback abort arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                  'rpc: hosted senderLoopback is Abort')
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'does not point back') > 0, &
+                  'rpc: hosted senderLoopback reason')
       call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call send_loopback(cconn%fd, 100_int64, 3_int64, e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. rpc_conn_alive(sconn), &
+                  'rpc: unknown senderLoopback aborts')
+      call recv_within(cconn%fd, reply, error, 'rpc: unknown senderLoopback abort arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'not a current export ID') > 0, &
+                  'rpc: unknown senderLoopback reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
    end subroutine t_disembargo_echo
 
-   !> senderLoopback with a promisedAnswer target is echoed the same way
-   !> (question id preserved on the reply target).
+   !> A promisedAnswer that resolves to a local export does not point
+   !> back at the sender, so senderLoopback aborts. An unknown question
+   !> id aborts the same way.
    subroutine t_disembargo_promised_answer(error)
       type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
       type(capnp_message_t), target :: m, reply
       type(message_t) :: msg, rmsg
       type(disembargo_t) :: d, rd
       type(message_target_t) :: tgt, rtgt
-      type(promised_answer_t) :: pa, rpa
-      integer(int64), parameter :: emb_id = 77_int64
-      integer(int64), parameter :: qid = 42_int64
-      call capnp_message_init_builder(m, err)
-      msg = message_new_root(m, err)
-      d = message_disembargo_init(msg, err)
-      call disembargo_context_sender_loopback_set(d, emb_id, err)
-      tgt = disembargo_target_init(d, err)
-      pa = message_target_promised_answer_init(tgt, err)
-      call promised_answer_question_id_set(pa, qid, err)
-      call rpc_send_message(cli%fd, m, err)
+      type(promised_answer_t) :: pa
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(d, 77_int64, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qboot, e)
+      call rpc_send_message(cconn%fd, m, e)
       call capnp_message_free(m)
-      call check_(error, err == CAPNP_OK, 'rpc: pa disembargo sent')
-      call rpc_pump_once(srv, err)
-      call check_(error, err == CAPNP_OK, 'rpc: server handled pa disembargo')
-      call rpc_recv_message(cli%fd, reply, err)
-      call check_(error, err == CAPNP_OK, 'rpc: pa disembargo echo received')
-      rmsg = message_read_root(reply, err)
-      call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
-                  'rpc: pa echo is Disembargo')
-      rd = message_disembargo_get(rmsg, err)
-      call check_(error, disembargo_context_which(rd) == &
-                  DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG, &
-                  'rpc: pa receiverLoopback')
-      call check_(error, disembargo_context_receiver_loopback_get(rd) == emb_id, &
-                  'rpc: pa embargo id echoed')
-      rtgt = disembargo_target_get(rd, err)
-      call check_(error, message_target_which(rtgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG, &
-                  'rpc: pa echo target kind')
-      rpa = message_target_promised_answer_get(rtgt, err)
-      call check_(error, promised_answer_question_id_get(rpa) == qid, &
-                  'rpc: pa question id echoed')
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. rpc_conn_alive(sconn), &
+                  'rpc: resolved promisedAnswer aborts')
+      call recv_within(cconn%fd, reply, error, 'rpc: resolved promisedAnswer abort arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                  'rpc: resolved promisedAnswer is Abort')
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'does not point back') > 0, &
+                  'rpc: resolved promisedAnswer reason')
       call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(d, 78_int64, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, 42_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call recv_within(cconn%fd, reply, error, 'rpc: unknown promisedAnswer abort arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                  'rpc: unknown promisedAnswer aborts')
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'senderLoopback') > 0, &
+                  'rpc: unknown promisedAnswer reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
    end subroutine t_disembargo_promised_answer
 
-   !> A receiverLoopback Disembargo is accepted (no error) and does not
-   !> produce a further echo; the vat stays usable for a later bootstrap.
+   !> A receiverLoopback whose embargo id this connection did not issue
+   !> aborts the connection.
    subroutine t_disembargo_receiver_loopback_absorbed(error)
       type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_receiver_loopback_set(d, 1_int64, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call rpc_recv_message(cconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                  'rpc: receiverLoopback aborts')
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'receiverLoopback') > 0, &
+                  'rpc: receiverLoopback reason')
+      call check_(error, .not. rpc_conn_alive(sconn), &
+                  'rpc: receiverLoopback kills the connection')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_disembargo_receiver_loopback_absorbed
+
+   !> senderLoopback aimed at one importedCap.
+   subroutine send_loopback(fd, emb_id, import_id, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: emb_id, import_id
+      integer, intent(out) :: e
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(disembargo_t) :: d
       type(message_target_t) :: tgt
-      type(rpc_cap_t) :: bootcap
-      integer(int64) :: qb
-      logical :: handled
-      call capnp_message_init_builder(m, err)
-      msg = message_new_root(m, err)
-      d = message_disembargo_init(msg, err)
-      call disembargo_context_receiver_loopback_set(d, 1_int64, err)
-      tgt = disembargo_target_init(d, err)
-      call message_target_imported_cap_set(tgt, 0_int64, err)
-      call rpc_send_message(cli%fd, m, err)
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      d = message_disembargo_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call disembargo_context_sender_loopback_set(d, emb_id, e)
+      if (e /= CAPNP_OK) return
+      tgt = disembargo_target_init(d, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, import_id, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
       call capnp_message_free(m)
-      call check_(error, err == CAPNP_OK, 'rpc: receiverLoopback sent')
-      call rpc_pump_once(srv, err)
-      call check_(error, err == CAPNP_OK, 'rpc: receiverLoopback absorbed')
-      ! No echo should be pending: a short poll on the client stays quiet.
-      call rpc_pump_poll(cli, 20, handled, err)
-      call check_(error, err == CAPNP_OK .and. .not. handled, &
-                  'rpc: no echo after receiverLoopback')
-      ! Connection still works.
-      call rpc_bootstrap_send(cli, bootcap, err)
-      qb = bootcap%id
-      call rpc_pump_once(srv, err)
-      call rpc_wait(cli, qb, err)
-      call check_(error, err == CAPNP_OK, 'rpc: bootstrap after receiverLoopback')
-      call rpc_finish_send(cli, qb, .true., err)
-      call rpc_pump_once(srv, err)
-   end subroutine t_disembargo_receiver_loopback_absorbed
+   end subroutine send_loopback
 
    !> Poll-driven pumping: a quiet connection times out with
    !> handled=.false.; a pending message is handled within the window.
@@ -2629,8 +3110,6 @@ contains
       allow = host == '127.0.0.1' .and. port > 0
    end subroutine allow_local_dial
 
-   !> A dial hook can refuse an introduction, and a timeout returns
-   !> instead of blocking. The default hook still reaches a local listener.
    subroutine allow_any_dial(host, port, allow)
       character(len=*), intent(in) :: host
       integer, intent(in) :: port
@@ -2639,6 +3118,8 @@ contains
       if (port < 0 .and. len(host) < 0) allow = .false.
    end subroutine allow_any_dial
 
+   !> A dial hook can refuse an introduction, and a timeout returns
+   !> instead of blocking. With no hook, a dial is refused.
    subroutine t_dial_guard(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: holder, introduced
@@ -3214,5 +3695,78 @@ contains
       is_exc = return_which(r) /= RETURN_RESULTS_TAG
       call capnp_message_free(m)
    end subroutine recv_on
+
+
+   !> Disembargo.provide from the recipient must not lift the embargo.
+   !> The introducer's connection still can.
+   subroutine t_disembargo_provide_wrong_conn(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat_store
+      type(rpc_vat_t), pointer :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, pq, aq
+      integer :: ia, pa, ra, pb, e
+      logical :: readable
+      vat => vat_store
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'provide embargo: bootstrap')
+      if (allocated(error)) return
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 94_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 94_int64, .true., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call check_(error, rpc_embargoed_accepts(prov_b) == 1, &
+                  'provide embargo: held')
+      call rpc_disembargo_provide_send(recip, pq, e)
+      call rpc_pump_once(prov_b, e)
+      call px_poll_in(recip%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'provide embargo: recipient cannot lift it')
+      call check_(error, rpc_embargoed_accepts(prov_a) == 1, &
+                  'provide embargo: still held')
+      call rpc_disembargo_provide_send(intro, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call px_poll_in(recip%fd, 200, readable, e)
+      call check_(error, readable, 'provide embargo: introducer lifts it')
+      call check_(error, rpc_embargoed_accepts(prov_a) == 0, &
+                  'provide embargo: cleared')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+   end subroutine t_disembargo_provide_wrong_conn
+
+   subroutine recv_within(fd, m, error, name)
+      integer, intent(in) :: fd
+      type(capnp_message_t), intent(inout), target :: m
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: name
+      logical :: readable
+      integer :: e
+      if (allocated(error)) return
+      call px_poll_in(fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, trim(name)//' timed out')
+      if (allocated(error)) return
+      call rpc_recv_message(fd, m, e)
+      call check_(error, e == CAPNP_OK, name)
+   end subroutine recv_within
 
 end module test_rpc

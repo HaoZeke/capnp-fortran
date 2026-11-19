@@ -1908,6 +1908,34 @@ contains
       if (err == RPC_ERR_DEAD .and. .not. allocated(conn%abort_reason)) err = CAPNP_OK
    end subroutine rpc_serve
 
+   !> Tell the peer this connection is done and stop using it. The reason
+   !> is the text a later rpc_conn_reason returns.
+   subroutine abort_conn(conn, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(exception_t) :: ex
+      integer :: e
+      conn%abort_reason = reason
+      conn%dead = .true.
+      err = CAPNP_ERR_BOUNDS
+      if (.not. associated(conn%transport)) return
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      ex = message_abort_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+      if (e /= CAPNP_OK) return
+      call exception_reason_set(ex, reason, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(conn%transport, m, e)
+      call capnp_message_free(m)
+   end subroutine abort_conn
+
    subroutine handle_bootstrap(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
@@ -2453,6 +2481,9 @@ contains
          if (.not. conn%vat%provisions(i)%used) cycle
          if (.not. conn%vat%provisions(i)%embargoed) cycle
          if (conn%vat%provisions(i)%qid /= provide_qid) cycle
+         ! Only the introducer that arranged the Provide may lift it.
+         ! The recipient naming the same question id must not.
+         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
          qid = conn%vat%provisions(i)%accept_qid
          eid = conn%vat%provisions(i)%eid
          recip => conn%vat%provisions(i)%recipient
@@ -3073,61 +3104,66 @@ contains
       end if
    end subroutine drop_export
 
-   !> senderLoopback disembargoes come back as receiverLoopback with the
-   !> same id and target, per the level 1 embargo protocol.
+   !> receiverLoopback is accepted only for an embargo id this vat issued.
+   !> senderLoopback aborts. A locally hosted target does not point back
+   !> at the sender, and an unknown export id is rejected on its own.
    subroutine handle_disembargo(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
-      type(disembargo_t) :: d, rd
-      type(message_target_t) :: tgt, rtgt
-      type(capnp_message_t), target :: rm
-      type(message_t) :: rmsg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: which
+      integer(int64) :: embargo_id
+      type(rpc_embargo_node_t), pointer :: emb
       d = message_disembargo_get(msg, err)
       if (err /= CAPNP_OK) return
-      if (disembargo_context_which(d) == DISEMBARGO_CONTEXT_PROVIDE_TAG) then
+      which = disembargo_context_which(d)
+      if (which == DISEMBARGO_CONTEXT_PROVIDE_TAG) then
          call release_provide_embargo(conn, disembargo_context_provide_get(d), err)
          return
       end if
-      if (disembargo_context_which(d) /= DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG) then
-         err = CAPNP_OK ! receiverLoopback handled by waiters; nothing here
+      if (which == DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG) then
+         embargo_id = disembargo_context_receiver_loopback_get(d)
+         emb => conn%embargoes
+         do while (associated(emb))
+            if (emb%open .and. emb%id == embargo_id) exit
+            emb => emb%next
+         end do
+         if (.not. associated(emb)) then
+            call abort_conn(conn, &
+                            "Invalid embargo ID in 'Disembargo.context.receiverLoopback'.", &
+                            err)
+            return
+         end if
+         emb%open = .false.
+         err = CAPNP_OK
          return
       end if
-      call capnp_message_init_builder(rm, err)
-      if (err /= CAPNP_OK) return
-      rmsg = message_new_root(rm, err)
-      rd = message_disembargo_init(rmsg, err)
-      call disembargo_context_receiver_loopback_set( &
-         rd, disembargo_context_sender_loopback_get(d), err)
+      if (which /= DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG) then
+         call abort_conn(conn, 'Unimplemented Disembargo type.', err)
+         return
+      end if
+      ! senderLoopback names one of our exports. C++ echoes it only when
+      ! that export is an import pointing back at the sender. A locally
+      ! hosted capability does not, and an id we never exported is a
+      ! different error from getMessageTarget.
       tgt = disembargo_target_get(d, err)
-      rtgt = disembargo_target_init(rd, err)
-      if (err /= CAPNP_OK) then
-         call capnp_message_free(rm)
-         return
-      end if
+      if (err /= CAPNP_OK) return
       if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
-         call message_target_imported_cap_set(rtgt, &
-                                              message_target_imported_cap_get(tgt), err)
-      else if (message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
-         ! Echo the promisedAnswer target (question id + empty transform).
-         block
-            type(promised_answer_t) :: pa, rpa
-            pa = message_target_promised_answer_get(tgt, err)
-            if (err /= CAPNP_OK) then
-               call capnp_message_free(rm)
-               return
-            end if
-            rpa = message_target_promised_answer_init(rtgt, err)
-            if (err /= CAPNP_OK) then
-               call capnp_message_free(rm)
-               return
-            end if
-            call promised_answer_question_id_set(rpa, &
-                                                 promised_answer_question_id_get(pa), err)
-         end block
+         embargo_id = message_target_imported_cap_get(tgt)
+         if (embargo_id < 0_int64 .or. embargo_id >= int(MAXE, int64)) then
+            call abort_conn(conn, 'Message target is not a current export ID.', err)
+            return
+         end if
+         if (.not. conn%exports(int(embargo_id))%used) then
+            call abort_conn(conn, 'Message target is not a current export ID.', err)
+            return
+         end if
       end if
-      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
-      call capnp_message_free(rm)
+      call abort_conn(conn, &
+                      "'Disembargo' of type 'senderLoopback' sent to an " // &
+                      "object that does not point back to the sender.", err)
    end subroutine handle_disembargo
 
    subroutine handle_abort(conn, msg, err)
