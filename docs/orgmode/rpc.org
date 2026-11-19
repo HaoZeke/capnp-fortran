@@ -117,6 +117,13 @@ that release has no Provide or Accept implementation. The
 ``rpc-threeparty.capnp`` layer and its live TCP handoff test therefore
 exercise this project's network parameterization, not C++ 1.4.0 level
 3 interoperability.
+
+For level 4 equality, ``rpc_join_send`` emits every Join part before
+``rpc_join_wait`` collects the result set and settles its single
+capability. The receiver groups incoming parts by joinId and compares
+local export identity only after the set is complete. Capnp-C++ 1.4.0
+does not handle Join and replies ``Message.unimplemented``, so this
+feature has same-language wire tests but no live C++ peer test.
 #+end_export
 
 * Procedure reference
@@ -131,6 +138,8 @@ exercise this project's network parameterization, not C++ 1.4.0 level
 | ~rpc_persistent_save_begin~ | ~(conn, target, m, owner, qid, err)~                           | begin generic ~Persistent.save~; ~owner~ is optional |
 | ~rpc_persistent_save_wait~ | ~(conn, qid, sturdy_ref, err)~                                   | return the realm-defined SturdyRef                    |
 | ~rpc_introduction_dial~ | ~(conn, nonce, introduced, bootstrap, err)~                           | dial a pending three-party VatId                      |
+| ~rpc_join_send~         | ~(conn, caps, join_id, qids, err)~                                    | send a complete two-party Join set                    |
+| ~rpc_join_wait~         | ~(conn, qids, joined, succeeded, err)~                                | collect and settle the Join result                    |
 | ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |

@@ -184,6 +184,7 @@ contains
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
+      if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
 
       call rpc_conn_close(cli)
@@ -778,6 +779,33 @@ contains
                   'join: agreeing on nothing is not a join')
       call check_(error, .not. cap1 .and. .not. cap2, 'join: no cap for a failed set')
    end subroutine t_join_all_parts_unresolvable
+
+   !> The client API sends a complete remote Join and settles the one
+   !> capability carried by its successful result set.
+   subroutine t_join_client_api(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: caps(2), joined
+      integer(int64) :: qids(2)
+      integer :: a, b, n
+      logical :: succeeded
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join client: server has a live export')
+      if (allocated(error)) return
+      caps%kind = RPC_CAP_IMPORT
+      caps%id = int(a, int64)
+      call rpc_join_send(cli, caps, 19_int64, qids, err)
+      call check_(error, err == CAPNP_OK .and. all(qids >= 0_int64), &
+                  'join client: complete set sent')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+      call rpc_join_wait(cli, qids, joined, succeeded, err)
+      call check_(error, err == CAPNP_OK .and. succeeded, &
+                  'join client: equal remote capabilities join')
+      call check_(error, joined%kind == RPC_CAP_IMPORT .and. joined%id == int(a, int64), &
+                  'join client: joined capability settles')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+   end subroutine t_join_client_api
 
    !> An export id the server is not using.
    function free_export_slot() result(idx)
