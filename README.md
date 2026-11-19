@@ -73,6 +73,7 @@ and capnp-C++:
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes, two-party sender and receiver (upstream C++ has none) |
 | `-> stream` flow control and cancellation | no | yes | yes (`rpc_stream_t`, windowed, Finish cancellation) |
+| Capability membranes | no | yes | yes (bidirectional policy, recursive result caps, shared revocation) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
 | Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
@@ -167,6 +168,15 @@ call. A callee may still run application code to completion unless its
 method opts into cancellation, matching C++'s `allowCancellation`
 annotation. The live C++ interop peer includes an opted-in method whose
 never-ending promise is dropped by the Fortran cancellation request.
+
+Membranes follow the capability behavior of `capnp/membrane.h`.
+`rpc_membrane_policy_t` checks inbound and outbound calls, wrappers that
+share one policy share revocation, capabilities exported in results are
+recursively wrapped, and a wrapper crossing back through the same policy
+is unwrapped instead of doubled. `rpc_membrane_cap` wraps an imported
+client capability and `rpc_membrane_server_t` wraps a local server.
+Membranes are local capability machinery, not an RPC wire extension, so
+their tests run between Fortran vats rather than against a C++ peer.
 
 ## Changelog
 
