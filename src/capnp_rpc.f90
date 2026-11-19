@@ -21,11 +21,16 @@ module capnp_rpc
                                    provision_id_nonce_get, &
                                    recipient_id_nonce_get, &
                                    join_key_part_t, join_result_t, &
+                                   join_key_part_new, &
                                    join_key_part_join_id_get, &
+                                   join_key_part_join_id_set, &
                                    join_key_part_part_count_get, &
+                                   join_key_part_part_count_set, &
                                    join_key_part_part_num_get, &
+                                   join_key_part_part_num_set, &
                                    join_result_new, join_result_join_id_set, &
                                    join_result_succeeded_set, join_result_cap_set, &
+                                   join_result_succeeded_get, join_result_cap_get, &
                                    third_party_cap_id_t, third_party_cap_id_new, &
                                    third_party_cap_id_vat_get, &
                                    third_party_cap_id_vat_init, &
@@ -54,6 +59,7 @@ module capnp_rpc
    public :: rpc_pending_provisions, rpc_embargoed_accepts
    public :: rpc_vat_t, rpc_conn_set_vat
    public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
+   public :: rpc_join_send, rpc_join_wait
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: rpc_introduction_dial
@@ -584,6 +590,112 @@ contains
          cap%ops(i - 1) = field_indices(i)
       end do
    end function rpc_pipeline_cap
+
+   !> Send every part of a two-party Join. The receiver waits for all
+   !> parts before answering, so callers should send the complete set
+   !> before waiting on any returned question id.
+   subroutine rpc_join_send(conn, caps, join_id, qids, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: caps(:)
+      integer(int64), intent(in) :: join_id
+      integer(int64), intent(out) :: qids(:)
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(join_key_part_t) :: kp
+      type(capnp_ptr_t) :: ops
+      integer :: i, k
+      err = CAPNP_OK
+      if (size(caps) < 1 .or. size(caps) > MAXJOINPARTS .or. &
+          size(qids) < size(caps)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      qids = -1_int64
+      do i = 1, size(caps)
+         qids(i) = alloc_qid(conn)
+         if (qids(i) < 0_int64) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         call capnp_message_init_builder(m, err)
+         if (err /= CAPNP_OK) return
+         msg = message_new_root(m, err)
+         jn = message_join_init(msg, err)
+         call join_question_id_set(jn, qids(i), err)
+         tgt = join_target_init(jn, err)
+         select case (caps(i)%kind)
+         case (RPC_CAP_IMPORT)
+            call message_target_imported_cap_set(tgt, caps(i)%id, err)
+         case (RPC_CAP_PIPELINE)
+            pa = message_target_promised_answer_init(tgt, err)
+            call promised_answer_question_id_set(pa, caps(i)%id, err)
+            ops = promised_answer_transform_init(pa, int(caps(i)%nops, int64), err)
+            do k = 0, caps(i)%nops - 1
+               op%p = capnp_list_get_struct(ops, k, err)
+               call promised_answer_op_get_pointer_field_set(op, caps(i)%ops(k), err)
+            end do
+         case default
+            err = CAPNP_ERR_ARG
+         end select
+         if (err == CAPNP_OK) kp = join_key_part_new(m, err)
+         if (err == CAPNP_OK) call join_key_part_join_id_set(kp, join_id, err)
+         if (err == CAPNP_OK) call join_key_part_part_count_set(kp, size(caps), err)
+         if (err == CAPNP_OK) call join_key_part_part_num_set(kp, i - 1, err)
+         if (err == CAPNP_OK) call join_key_part_set(jn, kp%p, err)
+         if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+         call capnp_message_free(m)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine rpc_join_send
+
+   !> Collect a complete Join result set. `joined` is the single
+   !> capability carried by a successful set; a failed set returns
+   !> `succeeded=.false.` and RPC_CAP_NONE.
+   subroutine rpc_join_wait(conn, qids, joined, succeeded, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      type(rpc_cap_t), intent(out) :: joined
+      logical, intent(out) :: succeeded
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: content, cap_ptr
+      type(join_result_t) :: jr
+      type(rpc_cap_t) :: candidate
+      integer :: i, ferr, ncap
+      joined = rpc_cap_t()
+      succeeded = size(qids) > 0
+      ncap = 0
+      err = CAPNP_OK
+      do i = 1, size(qids)
+         call rpc_wait(conn, qids(i), err)
+         if (err /= CAPNP_OK) return
+         call rpc_result_content(conn, qids(i), content, err)
+         if (err /= CAPNP_OK) return
+         jr%p = content
+         if (.not. join_result_succeeded_get(jr)) succeeded = .false.
+         cap_ptr = join_result_cap_get(jr, err)
+         if (err /= CAPNP_OK) return
+         if (cap_ptr%kind == CAPNP_PK_CAP) then
+            call rpc_result_cap(conn, qids(i), [0], candidate, err)
+            if (err /= CAPNP_OK) return
+            joined = candidate
+            ncap = ncap + 1
+         end if
+      end do
+      if (succeeded .and. ncap /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. succeeded) joined = rpc_cap_t()
+      do i = 1, size(qids)
+         call rpc_finish_send(conn, qids(i), succeeded .and. ncap == 1, ferr)
+         if (ferr /= CAPNP_OK .and. err == CAPNP_OK) err = ferr
+      end do
+   end subroutine rpc_join_wait
 
    !> Pump the connection until question qid has returned.
    subroutine rpc_wait(conn, qid, err)
