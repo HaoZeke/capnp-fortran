@@ -906,9 +906,11 @@ contains
       call send_join_part(721_int64, a, 13_int64, 1, 0, err)
       call rpc_pump_once(srv, err)
       call recv_join_result(ansid, jid, succeeded, has_cap, err)
-      call check_(error, err == CAPNP_OK .and. ansid == 721_int64 .and. &
-                  jid == 13_int64 .and. succeeded .and. has_cap, &
-                  'join: cancellation frees pending join state')
+      call check_(error, err == CAPNP_OK, 'join: canceled replacement result read')
+      call check_(error, ansid == 721_int64, 'join: canceled replacement answer id')
+      call check_(error, jid == 13_int64, 'join: canceled replacement join id')
+      call check_(error, succeeded, 'join: canceled replacement succeeds')
+      call check_(error, has_cap, 'join: canceled replacement carries cap')
    end subroutine t_join_incomplete_set_is_silent
 
    !> Cancellation is a Finish sent before Return, with the legacy early
