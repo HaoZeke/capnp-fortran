@@ -70,7 +70,7 @@ module capnp_rpc
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: rpc_introduction_dial
-   public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
+   public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE, RPC_CAP_LOCAL
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
    public :: rpc_persistent_save_begin, rpc_persistent_save_wait
@@ -78,6 +78,8 @@ module capnp_rpc
    integer, parameter :: RPC_CAP_NONE = 0
    integer, parameter :: RPC_CAP_IMPORT = 1
    integer, parameter :: RPC_CAP_PIPELINE = 2
+   !> An export this vat hosts. Calls run locally and are not sent.
+   integer, parameter :: RPC_CAP_LOCAL = 3
 
    !> Level 2 persistence: capnp/persistent.capnp's Persistent interface
    !> (id 0xc8cb212fcd9f5691) as a signed container, and its save method.
@@ -225,6 +227,10 @@ module capnp_rpc
       logical :: tail_call = .false.
       !> The call was delivered to a local capability, not sent on the wire.
       logical :: local_call = .false.
+      !> Caps in retmsg are exports this vat hosts, not imports.
+      logical :: local_results = .false.
+      !> Set when the call target is a local export, before send.
+      integer :: local_export = -1
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -283,6 +289,14 @@ module capnp_rpc
       integer(int64) :: qid = -1_int64
       type(rpc_queued_call_t), pointer :: next => null()
    end type rpc_queued_call_t
+
+   !> A pipeline call waiting on a local question that has not returned.
+   type :: rpc_pipe_wait_t
+      integer(int64) :: target_qid = -1_int64
+      integer(int64) :: call_qid = -1_int64
+      type(capnp_message_t) :: msg
+      type(rpc_pipe_wait_t), pointer :: next => null()
+   end type rpc_pipe_wait_t
 
    !> An embargo id this vat has sent in Disembargo.senderLoopback.
    type :: rpc_embargo_node_t
@@ -406,6 +420,7 @@ module capnp_rpc
       !> Embargo ids issued by a reflected Resolve. receiverLoopback is
       !> accepted only for an id on this list.
       type(rpc_embargo_node_t), pointer :: embargoes => null()
+      type(rpc_pipe_wait_t), pointer :: pipe_wait => null()
       integer(int64) :: next_embargo = 0_int64
       !> Shared with this vat's other connections when one is attached;
       !> otherwise `own_vat` below.
@@ -504,6 +519,7 @@ contains
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
       end do
+      call free_pipe_waits(conn)
       call clear_joins(conn)
    end subroutine rpc_conn_close
 
@@ -804,6 +820,10 @@ contains
             conn%questions(k)%used = .true.
             conn%questions(k)%returned = .false.
             conn%questions(k)%canceled = .false.
+            conn%questions(k)%tail_call = .false.
+            conn%questions(k)%local_call = .false.
+            conn%questions(k)%local_results = .false.
+            conn%questions(k)%local_export = -1
             conn%questions(k)%membrane => null()
             conn%questions(k)%membrane_reverse = .false.
             conn%next_qid = int(k + 1, int64)
@@ -988,6 +1008,12 @@ contains
          select case (target%kind)
          case (RPC_CAP_IMPORT)
             call message_target_imported_cap_set(tgt, target%id, err)
+         case (RPC_CAP_LOCAL)
+            ! The call never leaves this vat. The imported-cap slot is
+            ! only here so the message is well formed until send.
+            call message_target_imported_cap_set(tgt, target%id, err)
+            conn%questions(int(qid))%local_export = int(target%id)
+            conn%questions(int(qid))%local_call = .true.
          case (RPC_CAP_PIPELINE)
             pa = message_target_promised_answer_init(tgt, err)
             if (err == CAPNP_OK) call promised_answer_question_id_set(pa, target%id, err)
@@ -1013,18 +1039,365 @@ contains
    end subroutine rpc_call_begin
 
    subroutine rpc_call_send(conn, m, err)
-      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: m
       integer, intent(out) :: err
       integer(int64) :: qid
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      integer :: rerr
       qid = call_question_of(m)
+      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+         msg = message_read_root(m, rerr)
+         if (rerr == CAPNP_OK .and. message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, rerr)
+            if (rerr == CAPNP_OK) then
+               conn%questions(int(qid))%tail_call = &
+                  call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
+            end if
+         end if
+      end if
+      ! A call on a capability this vat hosts never goes on the wire.
+      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+         if (conn%questions(int(qid))%local_export >= 0) then
+            call fulfill_local_call(conn, conn%questions(int(qid))%local_export, &
+                                    m, qid, err)
+            call capnp_message_free(m)
+            return
+         end if
+      end if
+      ! A pipeline on a local question is resolved here, or queued until
+      ! that question's Return is stored.
+      msg = message_read_root(m, rerr)
+      if (rerr == CAPNP_OK .and. message_which(msg) == MESSAGE_CALL_TAG) then
+         c = message_call_get(msg, rerr)
+         if (rerr == CAPNP_OK) tgt = call_target_get(c, rerr)
+         if (rerr == CAPNP_OK) then
+            if (message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+               block
+                  type(promised_answer_t) :: pa
+                  integer(int64) :: tqid
+                  integer :: tq
+                  pa = message_target_promised_answer_get(tgt, rerr)
+                  if (rerr == CAPNP_OK) then
+                     tqid = promised_answer_question_id_get(pa)
+                     if (tqid >= 0_int64 .and. tqid < int(MAXQ, int64)) then
+                        tq = int(tqid)
+                        if (conn%questions(tq)%local_call .or. &
+                            conn%questions(tq)%local_results) then
+                           if (conn%questions(tq)%returned) then
+                              call dispatch_local_pipeline(conn, m, qid, tqid, err)
+                           else
+                              call enqueue_pipeline(conn, m, qid, tqid, err)
+                           end if
+                           call capnp_message_free(m)
+                           return
+                        end if
+                     end if
+                  end if
+               end block
+            end if
+         end if
+      end if
       call rpc_send_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
          call release_unsent_call_caps(conn, m)
-         if (qid >= 0_int64) call release_question(conn, qid)
+         if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+            call question_slot_clear(conn%questions(int(qid)))
+         end if
       end if
       call capnp_message_free(m)
    end subroutine rpc_call_send
+
+   !> Run a saved Call against a local export and store the Return on
+   !> the question. Nothing is written to the peer. A local answer can
+   !> start another local call before this one returns.
+   recursive subroutine fulfill_local_call(conn, export_id, callmsg, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: export_id
+      type(capnp_message_t), intent(inout), target :: callmsg
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: cmsg, rmsg
+      type(call_t) :: c
+      type(return_t) :: r
+      type(payload_t) :: params
+      type(rpc_call_ctx_t) :: ctx
+      integer :: derr
+      logical :: dispatched
+      integer(int8), allocatable :: bytes(:)
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (conn%questions(int(qid))%canceled) then
+         call fail_pipe_waits(conn, qid, err)
+         return
+      end if
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
+      r = message_return_init(rmsg, err)
+      if (err == CAPNP_OK) call return_answer_id_set(r, qid, err)
+      cmsg = message_read_root(callmsg, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
+      c = message_call_get(cmsg, err)
+      params = call_params_get(c, err)
+      if (export_id < 0 .or. export_id >= MAXE .or. &
+          .not. conn%exports(export_id)%used) then
+         call fill_exception(r, 'no such capability', err)
+      else
+         ctx%interface_id = call_interface_id_get(c)
+         ctx%method_id = int(call_method_id_get(c))
+         ctx%params = payload_content_get(params, err)
+         ctx%rmsg => rm
+         ctx%results = return_results_init(r, err)
+         dispatched = .false.
+         derr = CAPNP_ERR_KIND
+         select type (s => conn%exports(export_id)%srv)
+         class is (rpc_server_t)
+            call s%dispatch(ctx, derr)
+            dispatched = .true.
+         end select
+         if (.not. dispatched .or. derr /= CAPNP_OK) then
+            call discard_unexported_wrappers(ctx)
+            call fill_exception(r, 'method raised error', err)
+         else
+            call flush_cap_table(conn, ctx, err)
+            if (err /= CAPNP_OK) then
+               call rollback_staged(conn, ctx)
+               call fill_exception(r, 'export failed', err)
+            end if
+         end if
+      end if
+      call capnp_serialize_bytes(rm, bytes, err)
+      if (err == CAPNP_OK) then
+         call capnp_deserialize_bytes(bytes, conn%questions(int(qid))%retmsg, err)
+         conn%questions(int(qid))%returned = .true.
+         conn%questions(int(qid))%local_call = .true.
+      end if
+      call capnp_message_free(rm)
+      if (err == CAPNP_OK .and. conn%questions(int(qid))%returned) &
+         call drain_pipe_waits(conn, qid, err)
+   end subroutine fulfill_local_call
+
+   !> Run pipeline calls that were waiting on a local question.
+   recursive subroutine drain_pipe_waits(conn, target_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: target_qid
+      integer, intent(out) :: err
+      type(rpc_pipe_wait_t), pointer :: node, prev, nxt
+      err = CAPNP_OK
+      prev => null()
+      node => conn%pipe_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%target_qid == target_qid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%pipe_wait => nxt
+            end if
+            call dispatch_local_pipeline(conn, node%msg, node%call_qid, &
+                                         target_qid, err)
+            call capnp_message_free(node%msg)
+            deallocate (node)
+         else
+            prev => node
+         end if
+         node => nxt
+         if (err /= CAPNP_OK) exit
+      end do
+   end subroutine drain_pipe_waits
+
+   !> A canceled local question will not produce a result. Waiting
+   !> pipelines fail with that fact instead of sitting on the list.
+   subroutine fail_pipe_waits(conn, target_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: target_qid
+      integer, intent(out) :: err
+      type(rpc_pipe_wait_t), pointer :: node, prev, nxt
+      err = CAPNP_OK
+      prev => null()
+      node => conn%pipe_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%target_qid == target_qid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%pipe_wait => nxt
+            end if
+            call reject_local_question(conn, node%call_qid, 'call canceled', err)
+            call capnp_message_free(node%msg)
+            deallocate (node)
+         else
+            prev => node
+         end if
+         node => nxt
+      end do
+   end subroutine fail_pipe_waits
+
+   subroutine reject_local_question(conn, qid, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      integer(int8), allocatable :: bytes(:)
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      if (conn%questions(int(qid))%returned) return
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
+      r = message_return_init(rmsg, err)
+      if (err == CAPNP_OK) call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call fill_exception(r, reason, err)
+      if (err == CAPNP_OK) call capnp_serialize_bytes(rm, bytes, err)
+      if (err == CAPNP_OK) then
+         call capnp_deserialize_bytes(bytes, conn%questions(int(qid))%retmsg, err)
+         conn%questions(int(qid))%returned = .true.
+         conn%questions(int(qid))%local_call = .true.
+      end if
+      call capnp_message_free(rm)
+   end subroutine reject_local_question
+
+   subroutine enqueue_pipeline(conn, m, call_qid, target_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout) :: m
+      integer(int64), intent(in) :: call_qid, target_qid
+      integer, intent(out) :: err
+      type(rpc_pipe_wait_t), pointer :: node
+      integer(int8), allocatable :: bytes(:)
+      allocate (node)
+      node%call_qid = call_qid
+      node%target_qid = target_qid
+      node%next => conn%pipe_wait
+      call capnp_serialize_bytes(m, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      if (err /= CAPNP_OK) then
+         deallocate (node)
+         return
+      end if
+      conn%pipe_wait => node
+      if (call_qid >= 0_int64 .and. call_qid < int(MAXQ, int64)) &
+         conn%questions(int(call_qid))%local_call = .true.
+      err = CAPNP_OK
+   end subroutine enqueue_pipeline
+
+   !> Turn a pipeline call into a local call on the export the target
+   !> question returned. An exception on that question fails the pipeline.
+   recursive subroutine dispatch_local_pipeline(conn, callmsg, call_qid, target_qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout), target :: callmsg
+      integer(int64), intent(in) :: call_qid, target_qid
+      integer, intent(out) :: err
+      type(message_t) :: cmsg, tmsg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(return_t) :: tr
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ops, p, ctab
+      type(cap_descriptor_t) :: cd
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: eid
+      integer :: i, tq
+      err = CAPNP_OK
+      if (target_qid < 0_int64 .or. target_qid >= int(MAXQ, int64)) then
+         call fulfill_local_call(conn, -1, callmsg, call_qid, err)
+         return
+      end if
+      tq = int(target_qid)
+      tmsg = message_read_root(conn%questions(tq)%retmsg, err)
+      if (err /= CAPNP_OK) return
+      tr = message_return_get(tmsg, err)
+      if (err /= CAPNP_OK) return
+      if (return_which(tr) /= RETURN_RESULTS_TAG) then
+         if (call_qid < 0_int64 .or. call_qid >= int(MAXQ, int64)) return
+         call capnp_serialize_bytes(conn%questions(tq)%retmsg, bytes, err)
+         if (err /= CAPNP_OK) return
+         call capnp_deserialize_bytes(bytes, conn%questions(int(call_qid))%retmsg, err)
+         if (err /= CAPNP_OK) return
+         conn%questions(int(call_qid))%returned = .true.
+         conn%questions(int(call_qid))%local_call = .true.
+         return
+      end if
+      pl = return_results_get(tr, err)
+      p = payload_content_get(pl, err)
+      if (err /= CAPNP_OK) return
+      cmsg = message_read_root(callmsg, err)
+      if (err /= CAPNP_OK) return
+      c = message_call_get(cmsg, err)
+      tgt = call_target_get(c, err)
+      pa = message_target_promised_answer_get(tgt, err)
+      if (err /= CAPNP_OK) return
+      ops = promised_answer_transform_get(pa, err)
+      if (err /= CAPNP_OK) return
+      do i = 0, int(capnp_list_len(ops)) - 1
+         op%p = capnp_list_get_struct(ops, i, err)
+         if (err /= CAPNP_OK) return
+         select case (promised_answer_op_which(op))
+         case (PROMISED_ANSWER_OP_NOOP_TAG)
+         case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+            p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
+            if (err /= CAPNP_OK) return
+         case default
+            call abort_conn(conn, 'Unsupported pipeline op.', err)
+            return
+         end select
+      end do
+      eid = -1_int64
+      if (p%kind == CAPNP_PK_CAP) then
+         ctab = payload_cap_table_get(pl, err)
+         if (err == CAPNP_OK) then
+            if (p%capidx >= 0_int64 .and. p%capidx < capnp_list_len(ctab)) then
+               cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
+               if (err == CAPNP_OK) then
+                  select case (cap_descriptor_which(cd))
+                  case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+                     eid = cap_descriptor_sender_hosted_get(cd)
+                  case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+                     eid = cap_descriptor_sender_promise_get(cd)
+                  end select
+               end if
+            end if
+         end if
+      end if
+      if (conn%dead) return
+      call fulfill_local_call(conn, int(eid), callmsg, call_qid, err)
+   end subroutine dispatch_local_pipeline
+
+   subroutine free_pipe_waits(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_pipe_wait_t), pointer :: node, nxt
+      node => conn%pipe_wait
+      do while (associated(node))
+         nxt => node%next
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
+      conn%pipe_wait => null()
+   end subroutine free_pipe_waits
 
    !> Question id carried by a Call, or -1 when the message is not one.
    function call_question_of(m) result(qid)
@@ -1392,10 +1765,47 @@ contains
          conn%abort_reason = 'results sent elsewhere (unrequested tail call)'
          err = RPC_ERR_EXCEPTION
       case (RETURN_TAKE_FROM_OTHER_QUESTION_TAG)
-         ! Tail-call redirection; requires a sendResultsTo.yourself call
-         ! from us, which we never issue.
-         conn%abort_reason = 'tail-call return for a sendResultsTo.caller question'
-         err = RPC_ERR_EXCEPTION
+         block
+            integer(int64) :: other
+            type(message_t) :: held
+            type(return_t) :: hr
+            type(rpc_answer_slot_t), pointer :: slot
+            logical :: found
+            other = return_take_from_other_question_get(r)
+            call answer_find(conn, other, slot, found)
+            ! .and. and .or. always evaluate both sides, so a missing
+            ! slot must be rejected before it is dereferenced.
+            if (err /= CAPNP_OK .or. .not. found) then
+               call abort_conn(conn, &
+                               '`Return.takeFromOtherQuestion` had invalid answer ID.', &
+                               err)
+               return
+            end if
+            if (.not. associated(slot) .or. .not. slot%used) then
+               call abort_conn(conn, &
+                               '`Return.takeFromOtherQuestion` had invalid answer ID.', &
+                               err)
+               return
+            end if
+            if (.not. slot%redirected .or. .not. slot%has_results) then
+               call abort_conn(conn, &
+                               '`Return.takeFromOtherQuestion` referenced a call that ' // &
+                               'did not use `sendResultsTo.yourself`.', err)
+               return
+            end if
+            held = message_read_root(slot%retmsg, err)
+            if (err /= CAPNP_OK) return
+            hr = message_return_get(held, err)
+            if (err /= CAPNP_OK) return
+            if (return_which(hr) /= RETURN_RESULTS_TAG) then
+               call abort_conn(conn, &
+                               '`Return.takeFromOtherQuestion` referenced a call that ' // &
+                               'did not use `sendResultsTo.yourself`.', err)
+               return
+            end if
+            pl = return_results_get(hr, err)
+            content = payload_content_get(pl, err)
+         end block
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -1440,14 +1850,24 @@ contains
       if (err /= CAPNP_OK) return
       select case (cap_descriptor_which(cd))
       case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
-         cap%kind = RPC_CAP_IMPORT
          cap%id = cap_descriptor_sender_hosted_get(cd)
+         if (conn%questions(int(qid))%local_call .or. &
+             conn%questions(int(qid))%local_results) then
+            cap%kind = RPC_CAP_LOCAL
+         else
+            cap%kind = RPC_CAP_IMPORT
+         end if
       case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
          ! A promise import: the spec permits continuing to address the
          ! promise id after (or without) a Resolve; the exporter keeps
          ! forwarding until we Release it.
-         cap%kind = RPC_CAP_IMPORT
          cap%id = cap_descriptor_sender_promise_get(cd)
+         if (conn%questions(int(qid))%local_call .or. &
+             conn%questions(int(qid))%local_results) then
+            cap%kind = RPC_CAP_LOCAL
+         else
+            cap%kind = RPC_CAP_IMPORT
+         end if
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -1478,20 +1898,67 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      f = message_finish_init(msg, err)
-      call finish_question_id_set(f, qid, err)
-      call finish_release_result_caps_set(f, .not. retain_caps, err)
-      call finish_require_early_cancellation_workaround_set(f, .false., err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
-      call capnp_message_free(m)
+      if (.not. conn%questions(q)%local_call) then
+         call capnp_message_init_builder(m, err)
+         if (err /= CAPNP_OK) return
+         msg = message_new_root(m, err)
+         f = message_finish_init(msg, err)
+         call finish_question_id_set(f, qid, err)
+         call finish_release_result_caps_set(f, .not. retain_caps, err)
+         call finish_require_early_cancellation_workaround_set(f, .false., err)
+         if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+         call capnp_message_free(m)
+      end if
+      if (.not. retain_caps) call drop_finished_caps(conn, q)
       if (conn%questions(q)%used) then
          call capnp_message_free(conn%questions(q)%retmsg)
          call question_slot_clear(conn%questions(q))
       end if
    end subroutine rpc_finish_send
+
+   !> Finish(releaseResultCaps) is the release. A later rpc_release_send
+   !> must not send a second Release for the same result caps.
+   subroutine drop_finished_caps(conn, q)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer :: i, n, ierr
+      integer(int64) :: id
+      logical :: local
+      if (.not. conn%questions(q)%returned) return
+      msg = message_read_root(conn%questions(q)%retmsg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) return
+      r = message_return_get(msg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (return_which(r) /= RETURN_RESULTS_TAG) return
+      pl = return_results_get(r, ierr)
+      if (ierr /= CAPNP_OK) return
+      ctab = payload_cap_table_get(pl, ierr)
+      if (ierr /= CAPNP_OK) return
+      local = conn%questions(q)%local_call .or. conn%questions(q)%local_results
+      n = int(capnp_list_len(ctab))
+      do i = 0, n - 1
+         cd%p = capnp_list_get_struct(ctab, i, ierr)
+         if (ierr /= CAPNP_OK) cycle
+         id = -1_int64
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            id = cap_descriptor_sender_hosted_get(cd)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            id = cap_descriptor_sender_promise_get(cd)
+         end select
+         if (id < 0_int64) cycle
+         if (local) then
+            if (id >= 0_int64 .and. id < int(MAXE, int64)) &
+               call drop_export(conn, int(id), 1)
+         end if
+      end do
+   end subroutine drop_finished_caps
 
    !> Request cancellation by sending Finish before a Return. Modern
    !> peers receive requireEarlyCancellationWorkaround=false, matching
@@ -1515,16 +1982,18 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      f = message_finish_init(msg, err)
-      call finish_question_id_set(f, qid, err)
-      call finish_release_result_caps_set(f, .true., err)
-      call finish_require_early_cancellation_workaround_set(f, .false., err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
-      call capnp_message_free(m)
-      if (err /= CAPNP_OK) return
+      if (.not. conn%questions(q)%local_call) then
+         call capnp_message_init_builder(m, err)
+         if (err /= CAPNP_OK) return
+         msg = message_new_root(m, err)
+         f = message_finish_init(msg, err)
+         call finish_question_id_set(f, qid, err)
+         call finish_release_result_caps_set(f, .true., err)
+         call finish_require_early_cancellation_workaround_set(f, .false., err)
+         if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+         call capnp_message_free(m)
+         if (err /= CAPNP_OK) return
+      end if
       if (.not. conn%questions(q)%used) return
       if (conn%questions(q)%returned) then
          call capnp_message_free(conn%questions(q)%retmsg)
@@ -1549,6 +2018,10 @@ contains
       slot%used = .false.
       slot%returned = .false.
       slot%canceled = .false.
+      slot%tail_call = .false.
+      slot%local_call = .false.
+      slot%local_results = .false.
+      slot%local_export = -1
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -1696,6 +2169,11 @@ contains
       type(message_t) :: msg
       type(release_t) :: rel
       err = CAPNP_OK
+      if (cap%kind == RPC_CAP_LOCAL) then
+         if (cap%id >= 0_int64 .and. cap%id < int(MAXE, int64)) &
+            call drop_export(conn, int(cap%id), 1)
+         return
+      end if
       if (cap%kind /= RPC_CAP_IMPORT) return
       call capnp_message_init_builder(m, err)
       if (err /= CAPNP_OK) return
@@ -2175,12 +2653,6 @@ contains
       rmsg = message_new_root(rm, err)
       r = message_return_init(rmsg, err)
       call return_answer_id_set(r, qid, err)
-      if (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG) then
-         call release_unflushed(conn, ctx)
-         call fill_exception(r, 'sendResultsTo mode unsupported (caller only)', err)
-         call finish_answer(conn, qid, rm, ctx, err)
-         return
-      end if
       ! The cap table describes the message, not the dispatch: a call
       ! this vat cannot route still told us where a third party's
       ! capability lives.
@@ -2252,7 +2724,9 @@ contains
       end if
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
       call drop_export(conn, eid, 1)
-      call finish_answer(conn, qid, rm, ctx, err)
+      call finish_answer(conn, qid, rm, ctx, err, &
+                         elsewhere=call_send_results_to_which(c) == &
+                         CALL_SEND_RESULTS_TO_YOURSELF_TAG)
    end subroutine handle_call
 
    !> Find the export id a Call's target names: a direct export, or a
@@ -3104,24 +3578,51 @@ contains
       end do
    end subroutine flush_cap_table
 
+   !> Return for sendResultsTo.yourself: the results stay in the answer
+   !> slot and the caller is told they were delivered elsewhere.
+   subroutine send_results_elsewhere(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) return
+      r = message_return_init(msg, err)
+      if (err /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, err)
+      if (err /= CAPNP_OK) return
+      call return_results_sent_elsewhere_set(r, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_results_elsewhere
+
    !> Send the Return and stash a copy in the answers table so pipelined
-   !> calls can resolve against it until Finish arrives.
-   subroutine finish_answer(conn, qid, rm, ctx, err)
+   !> calls can resolve against it until Finish arrives. `elsewhere`
+   !> holds the results and tells the caller they were sent elsewhere.
+   !> That hold is the only answer a later takeFromOtherQuestion may take.
+   subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       type(capnp_message_t), intent(inout) :: rm
       type(rpc_call_ctx_t), intent(in) :: ctx
       integer, intent(out) :: err
+      logical, intent(in), optional :: elsewhere
       integer(int8), allocatable :: bytes(:)
       integer :: i
-      logical :: found
+      logical :: hold, found
       type(rpc_answer_slot_t), pointer :: slot
       type(message_t) :: heldmsg
       type(return_t) :: heldr
       integer :: herr
       logical :: capless
+      hold = .false.
       capless = .false.
       err = CAPNP_OK
+      if (present(elsewhere)) hold = elsewhere
       if (qid < 0_int64) then
          do i = 0, ctx%nexp - 1
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
@@ -3142,27 +3643,31 @@ contains
          call abort_conn(conn, 'questionId is already in use', err)
          return
       end if
-      heldmsg = message_read_root(rm, herr)
-      if (herr == CAPNP_OK) then
-         if (message_which(heldmsg) == MESSAGE_RETURN_TAG) then
-            heldr = message_return_get(heldmsg, herr)
-            ! Cap-less results need no Finish (rpc.c++ sendReturn,
-            ! noFinishNeeded when the response has no capabilities).
-            if (herr == CAPNP_OK) then
-               if (return_which(heldr) == RETURN_RESULTS_TAG .and. ctx%nexp == 0) then
-                  call return_no_finish_needed_set(heldr, .true., err)
-                  if (err == CAPNP_OK) capless = .true.
+      ! yourself results stay here until takeFromOtherQuestion. C++ sends
+      ! resultsSentElsewhere from sendRedirectReturn, not from the call.
+      if (.not. hold) then
+         heldmsg = message_read_root(rm, herr)
+         if (herr == CAPNP_OK) then
+            if (message_which(heldmsg) == MESSAGE_RETURN_TAG) then
+               heldr = message_return_get(heldmsg, herr)
+               ! Cap-less results need no Finish (rpc.c++ sendReturn,
+               ! noFinishNeeded when the response has no capabilities).
+               if (herr == CAPNP_OK) then
+                  if (return_which(heldr) == RETURN_RESULTS_TAG .and. ctx%nexp == 0) then
+                     call return_no_finish_needed_set(heldr, .true., err)
+                     if (err == CAPNP_OK) capless = .true.
+                  end if
                end if
             end if
          end if
-      end if
-      ! Close from inside dispatch drops the transport. The server
-      ! is freed when this call returns, and there is no peer left.
-      if (err == CAPNP_OK) then
-         if (.not. associated(conn%transport)) then
-            err = CAPNP_ERR_IO
-         else
-            call rpc_send_message(conn%transport, rm, err)
+         ! Close from inside dispatch drops the transport. The server
+         ! is freed when this call returns, and there is no peer left.
+         if (err == CAPNP_OK) then
+            if (.not. associated(conn%transport)) then
+               err = CAPNP_ERR_IO
+            else
+               call rpc_send_message(conn%transport, rm, err)
+            end if
          end if
       end if
       if (err /= CAPNP_OK) then
@@ -3184,7 +3689,7 @@ contains
          call capnp_deserialize_bytes(bytes, slot%retmsg, err)
          slot%used = .true.
          slot%has_results = .true.
-         slot%redirected = .false.
+         slot%redirected = hold
          slot%nexp = ctx%nexp
          do i = 0, ctx%nexp - 1
             slot%exports(i) = ctx%staged_eids(i)
@@ -3192,6 +3697,65 @@ contains
       end if
       call capnp_message_free(rm)
    end subroutine finish_answer
+
+   !> Copy a yourself answer into the question that asked to take it,
+   !> then tell the peer the redirect is complete.
+   subroutine adopt_redirected(conn, q, other, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      integer(int64), intent(in) :: other
+      integer, intent(out) :: err
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      integer(int8), allocatable :: bytes(:)
+      integer :: i, eid
+      call answer_find(conn, other, slot, found)
+      if (.not. found .or. .not. associated(slot) .or. .not. slot%used) then
+         call abort_conn(conn, &
+                         '`Return.takeFromOtherQuestion` had invalid answer ID.', err)
+         return
+      end if
+      if (.not. slot%redirected .or. .not. slot%has_results) then
+         call abort_conn(conn, &
+                         '`Return.takeFromOtherQuestion` referenced a call that ' // &
+                         'did not use `sendResultsTo.yourself`.', err)
+         return
+      end if
+      call capnp_serialize_bytes(slot%retmsg, bytes, err)
+      if (err /= CAPNP_OK) return
+      call capnp_deserialize_bytes(bytes, conn%questions(q)%retmsg, err)
+      if (err /= CAPNP_OK) return
+      conn%questions(q)%returned = .true.
+      conn%questions(q)%local_results = .true.
+      ! The question now holds the caps. Finish of the yourself call
+      ! still drops the answer's own refs.
+      do i = 0, slot%nexp - 1
+         eid = slot%exports(i)
+         if (eid >= 0 .and. eid < MAXE) then
+            if (conn%exports(eid)%used) &
+               conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+         end if
+      end do
+      slot%redirected = .false.
+      call send_results_elsewhere(conn, other, err)
+   end subroutine adopt_redirected
+
+   !> A canceled question still owes resultsSentElsewhere when the
+   !> takeFrom names a yourself answer. A missing answer is not an abort.
+   subroutine release_redirected(conn, other, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: other
+      integer, intent(out) :: err
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      err = CAPNP_OK
+      call answer_find(conn, other, slot, found)
+      if (.not. found) return
+      if (.not. associated(slot) .or. .not. slot%used) return
+      if (.not. slot%redirected .or. .not. slot%has_results) return
+      slot%redirected = .false.
+      call send_results_elsewhere(conn, other, err)
+   end subroutine release_redirected
 
    subroutine handle_return(conn, m, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -3231,6 +3795,9 @@ contains
       ! ends that reservation and is not delivered to a later call.
       if (conn%questions(q)%canceled) then
          err = CAPNP_OK
+         if (return_which(r) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+            call release_redirected(conn, return_take_from_other_question_get(r), err)
+         end if
          call capnp_message_free(m)
          if (.not. conn%dead) call question_slot_clear(conn%questions(q))
          return
@@ -3247,10 +3814,38 @@ contains
                          'Return message falsely claims call was canceled.', err)
          return
       end if
+      if (return_which(r) == RETURN_RESULTS_SENT_ELSEWHERE_TAG .and. &
+          .not. conn%questions(q)%tail_call) then
+         call capnp_message_free(m)
+         call abort_conn(conn, &
+                         '`Return` had `resultsSentElsewhere` but this was ' // &
+                         'not a tail call.', err)
+         return
+      end if
+      if (conn%questions(q)%tail_call .and. &
+          return_which(r) == RETURN_RESULTS_TAG) then
+         call capnp_message_free(m)
+         call abort_conn(conn, &
+                         'Tail call `Return` must set `resultsSentElsewhere`, ' // &
+                         'not `results`.', err)
+         return
+      end if
+      if (conn%questions(q)%tail_call .and. &
+          return_which(r) == RETURN_EXCEPTION_TAG) then
+         call capnp_message_free(m)
+         call abort_conn(conn, &
+                         'Tail call `Return` must set `resultsSentElsewhere`, ' // &
+                         'not `exception`.', err)
+         return
+      end if
+      if (return_which(r) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+         call adopt_redirected(conn, q, return_take_from_other_question_get(r), err)
+         call capnp_message_free(m)
+         return
+      end if
       if (return_which(r) /= RETURN_RESULTS_TAG .and. &
           return_which(r) /= RETURN_EXCEPTION_TAG .and. &
-          return_which(r) /= RETURN_RESULTS_SENT_ELSEWHERE_TAG .and. &
-          return_which(r) /= RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+          return_which(r) /= RETURN_RESULTS_SENT_ELSEWHERE_TAG) then
          call capnp_message_free(m)
          call abort_conn(conn, "Unknown 'Return' type.", err)
          return

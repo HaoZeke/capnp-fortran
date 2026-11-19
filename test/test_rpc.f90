@@ -102,7 +102,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(70))
+      allocate (testsuite(75))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -201,48 +201,58 @@ contains
       testsuite(48)%test => w_question_id_out_of_range
       testsuite(49)%name = "rpc-duplicate-return"
       testsuite(49)%test => w_duplicate_return
-      testsuite(50)%name = "rpc-join-duplicate-qid"
-      testsuite(50)%test => w_join_duplicate_qid
-      testsuite(51)%name = "rpc-disembargo-provide-wrong-conn"
-      testsuite(51)%test => w_disembargo_provide_wrong_conn
-      testsuite(52)%name = "rpc-third-party-tail-aborts"
-      testsuite(52)%test => w_third_party_tail_aborts
-      testsuite(53)%name = "rpc-release-live-over"
-      testsuite(53)%test => w_release_live_over
-      testsuite(54)%name = "rpc-call-missing-export"
-      testsuite(54)%test => w_call_missing_export
-      testsuite(55)%name = "rpc-return-unknown-question"
-      testsuite(55)%test => w_return_unknown_question
-      testsuite(56)%name = "rpc-return-after-finish"
-      testsuite(56)%test => w_return_after_finish
-      testsuite(57)%name = "rpc-return-answer-id-64"
-      testsuite(57)%test => w_return_answer_id_64
-      testsuite(58)%name = "rpc-return-high-bit-ignored"
-      testsuite(58)%test => w_return_high_bit_ignored
-      testsuite(59)%name = "rpc-return-falsely-canceled"
-      testsuite(59)%test => w_return_falsely_canceled
-      testsuite(60)%name = "rpc-return-canceled-after-cancel"
-      testsuite(60)%test => w_return_canceled_after_cancel
-      testsuite(61)%name = "rpc-unimplemented-bootstrap"
-      testsuite(61)%test => w_unimplemented_bootstrap
-      testsuite(62)%name = "rpc-no-finish-needed"
-      testsuite(62)%test => w_no_finish_needed
-      testsuite(63)%name = "rpc-unknown-tags"
-      testsuite(63)%test => w_unknown_tags
-      testsuite(64)%name = "rpc-shutdown"
-      testsuite(64)%test => w_shutdown
-      testsuite(65)%name = "posix-recv-eintr-retried"
-      testsuite(65)%test => t_recv_all_retries_eintr
-      testsuite(66)%name = "rpc-framing-511-accepted"
-      testsuite(66)%test => t_framing_511_accepted
-      testsuite(67)%name = "rpc-framing-512-rejected"
-      testsuite(67)%test => t_framing_512_rejected
-      testsuite(68)%name = "rpc-framing-oversized-rejected"
-      testsuite(68)%test => t_framing_oversized_rejected
-      testsuite(69)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(69)%test => t_framing_negative_traversal_rejected
-      testsuite(70)%name = "rpc-framing-short-and-padded"
-      testsuite(70)%test => t_framing_short_and_padded
+      testsuite(50)%name = "rpc-take-from-normal-answer"
+      testsuite(50)%test => w_take_from_normal_answer
+      testsuite(51)%name = "rpc-join-duplicate-qid"
+      testsuite(51)%test => w_join_duplicate_qid
+      testsuite(52)%name = "rpc-disembargo-provide-wrong-conn"
+      testsuite(52)%test => w_disembargo_provide_wrong_conn
+      testsuite(53)%name = "rpc-third-party-tail-aborts"
+      testsuite(53)%test => w_third_party_tail_aborts
+      testsuite(54)%name = "rpc-yourself-splice"
+      testsuite(54)%test => w_yourself_splice
+      testsuite(55)%name = "rpc-release-live-over"
+      testsuite(55)%test => w_release_live_over
+      testsuite(56)%name = "rpc-call-missing-export"
+      testsuite(56)%test => w_call_missing_export
+      testsuite(57)%name = "rpc-return-unknown-question"
+      testsuite(57)%test => w_return_unknown_question
+      testsuite(58)%name = "rpc-return-after-finish"
+      testsuite(58)%test => w_return_after_finish
+      testsuite(59)%name = "rpc-return-answer-id-64"
+      testsuite(59)%test => w_return_answer_id_64
+      testsuite(60)%name = "rpc-return-high-bit-ignored"
+      testsuite(60)%test => w_return_high_bit_ignored
+      testsuite(61)%name = "rpc-return-falsely-canceled"
+      testsuite(61)%test => w_return_falsely_canceled
+      testsuite(62)%name = "rpc-return-canceled-after-cancel"
+      testsuite(62)%test => w_return_canceled_after_cancel
+      testsuite(63)%name = "rpc-return-elsewhere-not-tail"
+      testsuite(63)%test => w_return_elsewhere_not_tail
+      testsuite(64)%name = "rpc-tail-return-with-results"
+      testsuite(64)%test => w_tail_return_with_results
+      testsuite(65)%name = "rpc-tail-return-with-exception"
+      testsuite(65)%test => w_tail_return_with_exception
+      testsuite(66)%name = "rpc-unimplemented-bootstrap"
+      testsuite(66)%test => w_unimplemented_bootstrap
+      testsuite(67)%name = "rpc-no-finish-needed"
+      testsuite(67)%test => w_no_finish_needed
+      testsuite(68)%name = "rpc-unknown-tags"
+      testsuite(68)%test => w_unknown_tags
+      testsuite(69)%name = "rpc-shutdown"
+      testsuite(69)%test => w_shutdown
+      testsuite(70)%name = "posix-recv-eintr-retried"
+      testsuite(70)%test => t_recv_all_retries_eintr
+      testsuite(71)%name = "rpc-framing-511-accepted"
+      testsuite(71)%test => t_framing_511_accepted
+      testsuite(72)%name = "rpc-framing-512-rejected"
+      testsuite(72)%test => t_framing_512_rejected
+      testsuite(73)%name = "rpc-framing-oversized-rejected"
+      testsuite(73)%test => t_framing_oversized_rejected
+      testsuite(74)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(74)%test => t_framing_negative_traversal_rejected
+      testsuite(75)%name = "rpc-framing-short-and-padded"
+      testsuite(75)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -719,6 +729,13 @@ contains
       call t_duplicate_return(error)
    end subroutine w_duplicate_return
 
+   subroutine w_take_from_normal_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_take_from_normal_answer(error)
+   end subroutine w_take_from_normal_answer
+
    subroutine w_join_duplicate_qid(error)
       type(error_type), allocatable, intent(out) :: error
       call ensure_rpc(error)
@@ -739,6 +756,13 @@ contains
       if (allocated(error)) return
       call t_third_party_tail_aborts(error)
    end subroutine w_third_party_tail_aborts
+
+   subroutine w_yourself_splice(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_yourself_splice(error)
+   end subroutine w_yourself_splice
 
    subroutine w_release_live_over(error)
       type(error_type), allocatable, intent(out) :: error
@@ -795,6 +819,27 @@ contains
       if (allocated(error)) return
       call t_return_canceled_after_cancel(error)
    end subroutine w_return_canceled_after_cancel
+
+   subroutine w_return_elsewhere_not_tail(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_return_elsewhere_not_tail(error)
+   end subroutine w_return_elsewhere_not_tail
+
+   subroutine w_tail_return_with_results(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_tail_return_with_results(error)
+   end subroutine w_tail_return_with_results
+
+   subroutine w_tail_return_with_exception(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_tail_return_with_exception(error)
+   end subroutine w_tail_return_with_exception
 
    subroutine w_unimplemented_bootstrap(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2608,10 +2653,8 @@ contains
       call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
-   !> Resolve messages come back as unimplemented (the vat keeps using
-   !> promise paths); sendResultsTo.yourself calls fail cleanly; a
-   !> takeFromOtherQuestion Return surfaces as an exception, not a
-   !> kind error.
+   !> Resolve messages come back as unimplemented; sendResultsTo.yourself
+   !> holds the results and returns resultsSentElsewhere on adoption.
    subroutine t_resolve_and_tail_calls(error)
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_message_t), target :: m
@@ -2619,11 +2662,11 @@ contains
       type(resolve_t) :: rv
       type(call_t) :: c
       type(message_target_t) :: tgt
-      type(return_t) :: r
       type(rpc_cap_t) :: bootcap
       type(payload_t) :: params
-      type(capnp_ptr_t) :: s, content
+      type(capnp_ptr_t) :: s
       integer(int64) :: qb, qy
+      logical :: readable
 
       ! Resolve -> unimplemented reply, absorbed by the sender.
       call capnp_message_init_builder(m, err)
@@ -2637,7 +2680,8 @@ contains
       call rpc_pump_once(cli, err)
       call check_(error, err == CAPNP_OK, 'rpc: resolve unimplemented absorbed')
 
-      ! sendResultsTo.yourself -> clean exception return.
+      ! sendResultsTo.yourself runs the call and holds the results.
+      ! Nothing is written until a takeFrom names that answer.
       call rpc_bootstrap_send(cli, bootcap, err)
       qb = bootcap%id
       call rpc_pump_once(srv, err)
@@ -2645,44 +2689,27 @@ contains
       msg = message_read_root(m, err)
       c = message_call_get(msg, err)
       call call_send_results_to_yourself_set(c, err)
+      tgt = call_target_get(c, err)
       s = capnp_new_struct(m, 1, 1, err)
-      call capnp_set_i64(s, 0_int64, 1_int64, err)
-      call capnp_set_text(s, 0, 'x', err)
+      call capnp_set_i64(s, 0_int64, 9_int64, err)
+      call capnp_set_text(s, 0, 'y', err)
       call payload_content_set(params, s, err)
       call rpc_call_send(cli, m, err)
       call rpc_pump_once(srv, err)
       call rpc_wait(cli, qb, err)
-      call rpc_wait(cli, qy, err)
-      call rpc_result_content(cli, qy, content, err)
-      call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: sendResultsTo.yourself raises')
+      ! resultsSentElsewhere is sent when a takeFrom arrives, not when
+      ! the yourself call is delivered.
+      call px_poll_in(cli%fd, 50, readable, err)
+      call check_(error, err == CAPNP_OK .and. .not. readable, &
+                  'rpc: yourself does not return before takeFrom')
+      call check_(error, rpc_conn_alive(srv), 'rpc: yourself leaves the connection up')
       call rpc_finish_send(cli, qb, .true., err)
       call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, qy, .false., err)
       call rpc_pump_once(srv, err)
-
-      ! takeFromOtherQuestion Return -> exception with reason, not
-      ! ERR_KIND. The peer (impersonated on the raw fd) redirects a live
-      ! question.
-      call rpc_call_begin(cli, bootcap, ECHO_IFACE, 0, m, params, qy, err)
-      s = capnp_new_struct(m, 1, 1, err)
-      call capnp_set_i64(s, 0_int64, 1_int64, err)
-      call capnp_set_text(s, 0, 'x', err)
-      call payload_content_set(params, s, err)
-      call capnp_message_free(m) ! never sent; hand-craft the Return instead
-      call capnp_message_init_builder(m, err)
-      msg = message_new_root(m, err)
-      r = message_return_init(msg, err)
-      call return_answer_id_set(r, qy, err)
-      call return_take_from_other_question_set(r, 0_int64, err)
-      call rpc_send_message(srv%fd, m, err)
-      call capnp_message_free(m)
-      call rpc_wait(cli, qy, err)
-      call check_(error, err == CAPNP_OK, 'rpc: tail-call return received')
-      call rpc_result_content(cli, qy, content, err)
-      call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: tail-call return raises cleanly')
-      call check_(error, index(rpc_conn_reason(cli), 'tail-call') > 0, 'rpc: tail-call reason')
-      call rpc_finish_send(cli, qy, .false., err)
-      call rpc_pump_once(srv, err)
+      ! A takeFromOtherQuestion that does not name a yourself redirect
+      ! aborts the connection. That case has its own pair
+      ! (rpc-take-from-normal-answer) so this shared pair stays up.
    end subroutine t_resolve_and_tail_calls
 
    !> A senderPromise capTable entry settles into a usable import, per
@@ -4057,6 +4084,72 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_duplicate_return
 
+   !> takeFromOtherQuestion of a normal answer aborts. Only a
+   !> sendResultsTo.yourself redirect may be taken.
+   subroutine t_take_from_normal_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, unused
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(payload_t) :: params
+      type(return_t) :: r
+      type(exception_t) :: ex
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qy, qsrv
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, qy, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qy, e)
+      call check_(error, e == CAPNP_OK, 'take normal: the call returned')
+      if (allocated(error)) return
+      call rpc_bootstrap_send(sconn, unused, e)
+      qsrv = unused%id
+      ! The server's bootstrap is sitting on the client socket. Drain it
+      ! so the next read is the Abort this return must provoke.
+      call rpc_recv_message(cconn%fd, reply, e)
+      call capnp_message_free(reply)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qsrv, e)
+      ! The echo answer was cap-less, so it is already gone. The bootstrap
+      ! answer is still stored and was not a yourself call.
+      call return_take_from_other_question_set(r, qboot, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. rpc_conn_alive(sconn), 'take normal: aborts')
+      call recv_within(cconn%fd, reply, error, 'take normal: abort arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'sendResultsTo.yourself') > 0, &
+                  'take normal: reason names yourself')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_take_from_normal_answer
+
    !> A Join part that reuses a live question id aborts. The export count
    !> stays where the first part left it.
    subroutine t_join_duplicate_qid(error)
@@ -4197,6 +4290,70 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_third_party_tail_aborts
+
+   !> Results held for sendResultsTo.yourself are what a later
+   !> takeFromOtherQuestion Return delivers.
+   subroutine t_yourself_splice(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, unused
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(return_t) :: r
+      type(capnp_ptr_t) :: s, content
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qy, qsrv
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, qy, e)
+      msg = message_read_root(m, e)
+      c = message_call_get(msg, e)
+      call call_send_results_to_yourself_set(c, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call px_poll_in(cconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'splice: yourself waits for takeFrom')
+      if (allocated(error)) return
+      call rpc_bootstrap_send(sconn, unused, e)
+      qsrv = unused%id
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qsrv, e)
+      call return_take_from_other_question_set(r, qy, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_wait(sconn, qsrv, e)
+      call rpc_result_content(sconn, qsrv, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 8_int64, &
+                  'splice: takeFromOtherQuestion yields the held result')
+      if (allocated(error)) return
+      call rpc_wait(cconn, qy, e)
+      msg = message_read_root(cconn%questions(int(qy))%retmsg, e)
+      r = message_return_get(msg, e)
+      call check_(error, return_which(r) == RETURN_RESULTS_SENT_ELSEWHERE_TAG, &
+                  'splice: takeFrom sends resultsSentElsewhere')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_yourself_splice
 
    subroutine recv_within(fd, m, error, name)
       integer, intent(in) :: fd
@@ -4513,6 +4670,109 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_return_canceled_after_cancel
+
+   !> resultsSentElsewhere on a call that was not sendResultsTo.yourself aborts.
+   subroutine t_return_elsewhere_not_tail(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e
+      integer(int64) :: qboot, q
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'return: elsewhere drains the call')
+      call send_raw_return(sconn%fd, q, 'elsewhere', e)
+      call expect_abort(cconn, sconn%fd, 'not a tail call', error, &
+                        'return: elsewhere on a normal call aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_return_elsewhere_not_tail
+
+   !> A yourself call must not be answered with results.
+   subroutine t_tail_return_with_results(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e
+      integer(int64) :: qboot, q
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      msg = message_read_root(m, e)
+      c = message_call_get(msg, e)
+      call call_send_results_to_yourself_set(c, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'return: tail drains the call')
+      call send_raw_return(sconn%fd, q, 'results', e)
+      call expect_abort(cconn, sconn%fd, 'not `results`', error, &
+                        'return: results on a tail call abort')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_tail_return_with_results
+
+   !> A yourself call must not be answered with an exception.
+   subroutine t_tail_return_with_exception(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e
+      integer(int64) :: qboot, q
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      msg = message_read_root(m, e)
+      c = message_call_get(msg, e)
+      call call_send_results_to_yourself_set(c, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'return: tail exception drains the call')
+      call send_raw_return(sconn%fd, q, 'exception', e)
+      call expect_abort(cconn, sconn%fd, 'not `exception`', error, &
+                        'return: exception on a tail call aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_tail_return_with_exception
 
    !> Unimplemented(Bootstrap) aborts. The question would otherwise never return.
    subroutine t_unimplemented_bootstrap(error)
