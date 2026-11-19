@@ -426,6 +426,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK) q%frozen = p%frozen
    end function capnp_list_get_struct
 
    !> Element i of a pointer list (alias of capnp_getp for lists).
