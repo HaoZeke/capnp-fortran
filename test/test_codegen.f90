@@ -10,13 +10,19 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("codegen-multifile-generics", run_multifile)]
+      testsuite = [new_unittest("codegen-multifile-generics", run_multifile), &
+                   new_unittest("codegen-suffix-clamp", run_suffix)]
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
       type(error_type), allocatable, intent(out) :: error
       call run_mode(error, 'multifile', 'codegen: two generic files')
    end subroutine run_multifile
+
+   subroutine run_suffix(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_mode(error, 'suffix', 'codegen: suffixed names fit')
+   end subroutine run_suffix
 
    subroutine run_mode(error, mode, what)
       type(error_type), allocatable, intent(out) :: error

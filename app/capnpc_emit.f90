@@ -51,6 +51,8 @@ module capnpc_emit
    integer, parameter :: F_IDENT_MAX = 63
    ! Longest accessor suffix we append: `_set_elem` (9 chars).
    integer, parameter :: F_IDENT_SUFFIX = 9
+   ! `_read_root` is glued onto an instantiation stem after clamping.
+   integer, parameter :: F_INST_TAIL = 10
 
 contains
 
@@ -1818,9 +1820,10 @@ contains
          if (err /= CAPNP_OK) return
          o = o//'_'//part
       end do
-      ! Over-long instantiation names clamp with the same hash as other
-      ! identifiers, so the handle stays a legal Fortran name.
-      o = ident_fit(o)
+      ! Clamp after the binding suffixes, and leave room for `_read_root`.
+      ! Hashing the stem first dropped those suffixes or pushed them
+      ! past 63, where they collided.
+      o = ident_fit(o, F_IDENT_MAX - F_INST_TAIL)
       do k = 1, g_ninsts
          if (g_insts(k)%name == o) return
       end do
