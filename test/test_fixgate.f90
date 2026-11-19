@@ -2,6 +2,7 @@ program test_fixgate
    use, intrinsic :: iso_fortran_env, only: real64, real32, int64
    use capnp
    use capnp_codec
+   use capnp_json
    implicit none
    integer :: nfail
    nfail = 0
@@ -9,6 +10,7 @@ program test_fixgate
    call case_f32()
    call case_oct()
    call case_esc()
+   call case_span()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -48,5 +50,12 @@ contains
       call capnp_cunescape("\x41", out, err)
       if (err /= 0 .or. out /= "A") call bad()
    end subroutine case_esc
+
+
+   subroutine case_span()
+      integer :: beg, to, err
+      call capnp_json_span('{"a":1} {"b":2}', 1, beg, to, err)
+      if (err /= 0 .or. beg < 1 .or. to < beg) call bad()
+   end subroutine case_span
 
 end program

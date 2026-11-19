@@ -15,7 +15,7 @@ module capnp_json
    implicit none
    private
 
-   public :: capnp_json_encode, capnp_json_decode
+   public :: capnp_json_encode, capnp_json_decode, capnp_json_span
 
    integer(int64), parameter :: ANN_NAME = int(z'FA5B1FD61C2E7C3D', int64)
    integer(int64), parameter :: ANN_B64 = int(z'D7D879450A253E4B', int64)
@@ -99,6 +99,28 @@ contains
       if (err /= CAPNP_OK) return
       call fill_struct(schema, idx, obj, root, 0, err)
    end subroutine capnp_json_decode
+
+
+   !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
+   subroutine capnp_json_span(text, from, beg, to, err)
+      character(len=*), intent(in) :: text
+      integer, intent(in) :: from
+      integer, intent(out) :: beg, to
+      integer, intent(out) :: err
+      type(scan_t) :: sc
+      type(jval) :: dummy
+      err = CAPNP_OK
+      beg = 0
+      to = 0
+      sc%s = text
+      sc%n = len(text)
+      sc%i = max(from, 1)
+      call jskip(sc)
+      if (sc%i > sc%n) return
+      beg = sc%i
+      call parse_value(sc, dummy, 0, err)
+      if (err == CAPNP_OK) to = sc%i - 1
+   end subroutine capnp_json_span
 
    recursive subroutine enc_struct(schema, idx, p, indent, has_prefix, pretty, depth, out, multi, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
