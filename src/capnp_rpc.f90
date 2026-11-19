@@ -502,7 +502,10 @@ contains
       do i = 0, ctx%nexp - 1
          call membrane_wrap_server_ref(ctx%staged(i)%s, self%policy, &
                                        self%reverse, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call discard_unexported_wrappers(ctx)
+            return
+         end if
       end do
    end subroutine membrane_dispatch
 
@@ -561,6 +564,45 @@ contains
       end select
       srv => null()
    end subroutine release_server
+
+   !> Free an owned membrane wrapper that never reached an export slot.
+   !> The inner server is left alone: it may be a caller-owned object.
+   subroutine discard_unexported_wrapper(srv)
+      class(*), pointer, intent(inout) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned .and. srv%refs <= 0) then
+            deallocate (srv)
+            srv => null()
+         end if
+      end select
+   end subroutine discard_unexported_wrapper
+
+   subroutine discard_unexported_wrappers(ctx)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer :: i
+      do i = 0, ctx%nexp - 1
+         if (ctx%staged_eids(i) < 0) call discard_unexported_wrapper(ctx%staged(i)%s)
+      end do
+   end subroutine discard_unexported_wrappers
+
+   !> Drop exports this call already published and free wrappers that
+   !> never got an id, so a failed flush does not leave them behind.
+   subroutine rollback_staged(conn, ctx)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer :: i
+      do i = 0, ctx%nexp - 1
+         if (ctx%staged_eids(i) >= 0) then
+            call drop_export(conn, ctx%staged_eids(i), 1)
+            ctx%staged_eids(i) = -1
+         else
+            call discard_unexported_wrapper(ctx%staged(i)%s)
+         end if
+      end do
+      ctx%nexp = 0
+   end subroutine rollback_staged
 
    !> Drop the source-export pin a provision took in handle_provide.
    subroutine release_provision_pin(slot)
@@ -1631,13 +1673,12 @@ contains
          if (err == CAPNP_OK) then
             call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, idx), err)
             call flush_cap_table(conn, ctx, err)
-            if (err /= CAPNP_OK) then
-               ! Exports added by the failed flush are already dropped.
-               call release_unflushed(conn, ctx)
-               call fill_exception(r, 'capability table full', err)
-            end if
-         else
+         end if
+         if (err /= CAPNP_OK) then
+            ! Exports added by the failed flush are already dropped.
             call release_unflushed(conn, ctx)
+            call rollback_staged(conn, ctx)
+            call fill_exception(r, 'export failed', err)
          end if
       end if
       call finish_answer(conn, qid, rm, ctx, err)
@@ -1704,7 +1745,9 @@ contains
       if (.not. dispatched .or. derr /= CAPNP_OK) then
          ! An exception return does not publish the results cap table.
          ! Owned servers staged for that table are freed here, once.
+         ! A membrane that never received an export id is freed too.
          call release_unflushed(conn, ctx)
+         call discard_unexported_wrappers(ctx)
          call fill_exception(r, 'method raised error', err)
       else
          call flush_cap_table(conn, ctx, err)
@@ -1712,7 +1755,8 @@ contains
             ! Exports added by the failed flush are already dropped.
             ! Owned servers with no export slot are freed here, once.
             call release_unflushed(conn, ctx)
-            call fill_exception(r, 'capability table full', err)
+            call rollback_staged(conn, ctx)
+            call fill_exception(r, 'export failed', err)
          end if
       end if
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
