@@ -21,11 +21,16 @@ module capnp_rpc
                                    provision_id_nonce_get, &
                                    recipient_id_nonce_get, &
                                    join_key_part_t, join_result_t, &
+                                   join_key_part_new, &
                                    join_key_part_join_id_get, &
+                                   join_key_part_join_id_set, &
                                    join_key_part_part_count_get, &
+                                   join_key_part_part_count_set, &
                                    join_key_part_part_num_get, &
+                                   join_key_part_part_num_set, &
                                    join_result_new, join_result_join_id_set, &
                                    join_result_succeeded_set, join_result_cap_set, &
+                                   join_result_succeeded_get, join_result_cap_get, &
                                    third_party_cap_id_t, third_party_cap_id_new, &
                                    third_party_cap_id_vat_get, &
                                    third_party_cap_id_vat_init, &
@@ -36,28 +41,37 @@ module capnp_rpc
                                    recipient_id_vat_init, &
                                    vat_id_t, vat_id_host_get, vat_id_port_get, &
                                    vat_id_host_set, vat_id_port_set
-   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
-   use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
+   use capnp_posix, only: PX_BAD_FD, px_tcp_connect_host
+   use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message, &
+                                 rpc_byte_stream_t, rpc_fd_stream_t, &
+                                 rpc_fd_stream_init
    implicit none
    private
 
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
-   public :: rpc_conn_init, rpc_conn_close
+   public :: rpc_membrane_policy_t, rpc_membrane_server_t
+   public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
+   public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
    public :: rpc_finish_send, rpc_release_send
+   public :: rpc_request_cancellation
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
+   public :: rpc_stream_cancel
    public :: rpc_pending_provisions, rpc_embargoed_accepts
    public :: rpc_vat_t, rpc_conn_set_vat
    public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
+   public :: rpc_join_send, rpc_join_wait
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
+   public :: rpc_introduction_dial
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
+   public :: rpc_persistent_save_begin, rpc_persistent_save_wait
 
    integer, parameter :: RPC_CAP_NONE = 0
    integer, parameter :: RPC_CAP_IMPORT = 1
@@ -86,12 +100,25 @@ module capnp_rpc
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
    integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
 
+   !> Policy shared by every wrapper belonging to one membrane. Reusing
+   !> the same object gives all wrapped capabilities one revocation
+   !> switch, matching capnp-C++ MembranePolicy identity.
+   type, abstract :: rpc_membrane_policy_t
+      logical :: revoked = .false.
+      character(len=:), allocatable :: revoke_reason
+   contains
+      procedure(rpc_membrane_check_ifc), deferred :: inbound_call
+      procedure(rpc_membrane_check_ifc), deferred :: outbound_call
+   end type rpc_membrane_policy_t
+
    !> Client-side reference to a remote capability.
    type :: rpc_cap_t
       integer :: kind = RPC_CAP_NONE
       integer(int64) :: id = 0_int64 ! import id, or question id for pipelines
       integer :: nops = 0
       integer :: ops(0:MAXOPS - 1) = 0 ! getPointerField indices
+      class(rpc_membrane_policy_t), pointer :: membrane => null()
+      logical :: membrane_reverse = .false.
    end type rpc_cap_t
 
    !> Unlimited-polymorphic holder so ctx and conn can reference servers
@@ -118,6 +145,20 @@ module capnp_rpc
       procedure(rpc_dispatch_ifc), deferred :: dispatch
    end type rpc_server_t
 
+   !> Server capability crossing a membrane. Calls are checked in the
+   !> crossing direction and capabilities staged in results are wrapped
+   !> recursively in the same membrane.
+   type, extends(rpc_server_t) :: rpc_membrane_server_t
+      class(rpc_server_t), pointer :: inner => null()
+      class(rpc_membrane_policy_t), pointer :: policy => null()
+      logical :: reverse = .false.
+      logical :: owned = .false.
+      !> Live export slots and provisions holding this owned wrapper.
+      integer :: refs = 0
+   contains
+      procedure :: dispatch => membrane_dispatch
+   end type rpc_membrane_server_t
+
    abstract interface
       subroutine rpc_dispatch_ifc(self, ctx, err)
          import :: rpc_server_t, rpc_call_ctx_t
@@ -125,6 +166,22 @@ module capnp_rpc
          type(rpc_call_ctx_t), intent(inout) :: ctx
          integer, intent(out) :: err
       end subroutine rpc_dispatch_ifc
+
+      subroutine rpc_membrane_check_ifc(self, interface_id, method_id, err)
+         import :: rpc_membrane_policy_t, int64
+         class(rpc_membrane_policy_t), intent(inout) :: self
+         integer(int64), intent(in) :: interface_id
+         integer, intent(in) :: method_id
+         integer, intent(out) :: err
+      end subroutine rpc_membrane_check_ifc
+
+      !> Return allow=.false. to refuse a third-party dial. A null hook
+      !> allows every recorded introduction.
+      subroutine rpc_dial_allow_ifc(host, port, allow)
+         character(len=*), intent(in) :: host
+         integer, intent(in) :: port
+         logical, intent(out) :: allow
+      end subroutine rpc_dial_allow_ifc
    end interface
 
    type :: rpc_export_slot_t
@@ -136,7 +193,12 @@ module capnp_rpc
    type :: rpc_question_slot_t
       logical :: used = .false.
       logical :: returned = .false.
+      !> Finish arrived before Return. The id stays reserved so a later
+      !> call cannot observe this question's Return.
+      logical :: canceled = .false.
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
+      class(rpc_membrane_policy_t), pointer :: membrane => null()
+      logical :: membrane_reverse = .false.
    end type rpc_question_slot_t
 
    type :: rpc_answer_slot_t
@@ -161,6 +223,11 @@ module capnp_rpc
       !> means nothing.
       class(*), pointer :: srv => null()
       integer :: eid = -1
+      !> Export on `host` that the provision pins. Accept must not drop
+      !> the capability while this pin is held, and must not free the
+      !> wrapper when the recipient's own export is released.
+      integer :: source_eid = -1
+      type(rpc_conn_t), pointer :: host => null()
       !> The introducer's Provide question, which is how a later
       !> Disembargo names this arrangement (rpc.capnp,
       !> Disembargo.context.provide).
@@ -207,15 +274,16 @@ module capnp_rpc
       integer :: eids(0:MAXJOINPARTS - 1) = -1
    end type rpc_join_slot_t
 
-   !> Client-side flow control for `-> stream` methods: a bounded window
-   !> of unacknowledged stream calls. The wire carries ordinary
-   !> Call/Return pairs (StreamResult results); the window is policy, as
-   !> in capnp-C++. After any stream call fails, subsequent sends fail
-   !> immediately and the failure surfaces at finish, per the streaming
-   !> error-propagation rule.
+   !> Client-side flow control for `-> stream` methods. The window is a
+   !> byte budget, matching RpcFlowController::DEFAULT_WINDOW_SIZE. The
+   !> first call is sent even when it is larger than the window; the next
+   !> waits until acknowledged bytes bring the in-flight total back under
+   !> it. After any stream call fails, later sends fail immediately.
    type :: rpc_stream_t
-      integer :: window = 16
+      integer :: window = 65536
       integer :: nout = 0
+      integer :: used_bytes = 0
+      integer :: sizes(0:63) = 0
       integer(int64) :: qids(0:63) = -1_int64
       logical :: failed = .false.
    end type rpc_stream_t
@@ -234,6 +302,8 @@ module capnp_rpc
 
    type :: rpc_conn_t
       integer :: fd = PX_BAD_FD
+      class(rpc_byte_stream_t), pointer :: transport => null()
+      type(rpc_fd_stream_t) :: own_transport
       logical :: dead = .false.
       character(len=:), allocatable :: abort_reason
       class(rpc_server_t), pointer :: bootstrap_srv => null()
@@ -247,6 +317,10 @@ module capnp_rpc
       type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
+      !> Null allows every dial. Otherwise the hook is asked before connect.
+      procedure(rpc_dial_allow_ifc), pointer, nopass :: dial_allow => null()
+      !> Connect timeout for an introduction dial, in milliseconds.
+      integer :: dial_timeout_ms = 10000
    end type rpc_conn_t
 
 contains
@@ -259,19 +333,54 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: fd
       class(rpc_server_t), pointer, intent(in) :: bootstrap
+      if (associated(conn%transport)) call rpc_conn_close(conn)
       conn%fd = fd
+      call rpc_fd_stream_init(conn%own_transport, fd, .true.)
+      conn%transport => conn%own_transport
       conn%dead = .false.
+      if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
+      conn%own_vat = rpc_vat_t()
+      conn%introductions = rpc_introduction_t()
+      conn%joins = rpc_join_slot_t()
+      conn%next_qid = 0_int64
+      conn%dial_allow => null()
+      conn%dial_timeout_ms = 10000
       ! Its own vat until told otherwise, which is what a two-party
       ! deployment wants.
       conn%vat => conn%own_vat
    end subroutine rpc_conn_init
 
+   !> Initialize RPC over an application-defined byte stream. The stream
+   !> must outlive the connection and its close binding defines ownership.
+   subroutine rpc_conn_init_stream(conn, stream, bootstrap)
+      type(rpc_conn_t), intent(inout), target :: conn
+      class(rpc_byte_stream_t), intent(inout), target :: stream
+      class(rpc_server_t), pointer, intent(in) :: bootstrap
+      if (associated(conn%transport)) call rpc_conn_close(conn)
+      conn%fd = PX_BAD_FD
+      select type (stream)
+      type is (rpc_fd_stream_t)
+         conn%fd = stream%fd
+      end select
+      conn%transport => stream
+      conn%dead = .false.
+      if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
+      conn%bootstrap_srv => bootstrap
+      conn%own_vat = rpc_vat_t()
+      conn%introductions = rpc_introduction_t()
+      conn%joins = rpc_join_slot_t()
+      conn%next_qid = 0_int64
+      conn%dial_allow => null()
+      conn%dial_timeout_ms = 10000
+      conn%vat => conn%own_vat
+   end subroutine rpc_conn_init_stream
+
    subroutine rpc_conn_close(conn)
-      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_conn_t), intent(inout), target :: conn
       integer :: i
-      call px_shutdown_wr(conn%fd)
-      call px_close(conn%fd)
+      if (associated(conn%transport)) call conn%transport%close()
+      conn%transport => null()
       conn%fd = PX_BAD_FD
       conn%dead = .true.
       do i = 0, MAXQ - 1
@@ -280,6 +389,11 @@ contains
          call question_slot_clear(conn%questions(i))
          call answer_slot_clear(conn%answers(i))
       end do
+      if (associated(conn%vat)) call release_hosted_provisions(conn)
+      do i = 0, MAXE - 1
+         if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
+      end do
+      call clear_joins(conn)
    end subroutine rpc_conn_close
 
    !> Inquiry getters over connection state, so callers need not touch
@@ -287,7 +401,7 @@ contains
    pure function rpc_conn_alive(conn) result(alive)
       type(rpc_conn_t), intent(in) :: conn
       logical :: alive
-      alive = .not. conn%dead .and. conn%fd /= PX_BAD_FD
+      alive = .not. conn%dead .and. associated(conn%transport)
    end function rpc_conn_alive
 
    !> The abort/exception reason last recorded on the connection, or ''.
@@ -308,6 +422,209 @@ contains
    end function rpc_cap_is_settled
 
    ! ------------------------------------------------------------------
+   ! Membranes
+   ! ------------------------------------------------------------------
+
+   !> Wrap a client capability for use outside a membrane. Set reverse
+   !> when the original capability is outside and the result is for use
+   !> inside.
+   function rpc_membrane_cap(cap, policy, reverse) result(wrapped)
+      type(rpc_cap_t), intent(in) :: cap
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in), optional :: reverse
+      type(rpc_cap_t) :: wrapped
+      wrapped = cap
+      wrapped%membrane => policy
+      wrapped%membrane_reverse = .false.
+      if (present(reverse)) wrapped%membrane_reverse = reverse
+   end function rpc_membrane_cap
+
+   !> Initialize a server wrapper. `inner` and `policy` must outlive the
+   !> wrapper and every result capability exported through it.
+   subroutine rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      type(rpc_membrane_server_t), intent(out) :: wrapper
+      class(rpc_server_t), pointer, intent(in) :: inner
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in), optional :: reverse
+      wrapper%inner => inner
+      wrapper%policy => policy
+      wrapper%reverse = .false.
+      wrapper%owned = .false.
+      if (present(reverse)) wrapper%reverse = reverse
+   end subroutine rpc_membrane_server_init
+
+   !> Revoke every client and server wrapper sharing this policy.
+   subroutine rpc_membrane_revoke(policy, reason)
+      class(rpc_membrane_policy_t), intent(inout) :: policy
+      character(len=*), intent(in), optional :: reason
+      policy%revoked = .true.
+      if (present(reason)) then
+         policy%revoke_reason = reason
+      else
+         policy%revoke_reason = 'membrane revoked'
+      end if
+   end subroutine rpc_membrane_revoke
+
+   subroutine membrane_check(policy, reverse, interface_id, method_id, err)
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in) :: reverse
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      if (.not. associated(policy)) then
+         err = CAPNP_ERR_ARG
+      else if (policy%revoked) then
+         err = RPC_ERR_EXCEPTION
+      else if (reverse) then
+         call policy%outbound_call(interface_id, method_id, err)
+      else
+         call policy%inbound_call(interface_id, method_id, err)
+      end if
+   end subroutine membrane_check
+
+   subroutine membrane_dispatch(self, ctx, err)
+      class(rpc_membrane_server_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      integer :: i
+      if (.not. associated(self%inner) .or. .not. associated(self%policy)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call membrane_check(self%policy, self%reverse, ctx%interface_id, &
+                          ctx%method_id, err)
+      if (err /= CAPNP_OK) return
+      call self%inner%dispatch(ctx, err)
+      if (err /= CAPNP_OK) return
+      do i = 0, ctx%nexp - 1
+         call membrane_wrap_server_ref(ctx%staged(i)%s, self%policy, &
+                                       self%reverse, err)
+         if (err /= CAPNP_OK) then
+            call discard_unexported_wrappers(ctx)
+            return
+         end if
+      end do
+   end subroutine membrane_dispatch
+
+   !> Wrap a result capability crossing the membrane. A wrapper crossing
+   !> back through the same policy is unwrapped instead of doubled.
+   subroutine membrane_wrap_server_ref(srv, policy, reverse, err)
+      class(*), pointer, intent(inout) :: srv
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in) :: reverse
+      integer, intent(out) :: err
+      type(rpc_membrane_server_t), pointer :: wrapper
+      class(rpc_server_t), pointer :: inner
+      err = CAPNP_OK
+      select type (existing => srv)
+      type is (rpc_membrane_server_t)
+         if (associated(existing%policy, policy) .and. &
+             existing%reverse .neqv. reverse) then
+            srv => existing%inner
+            return
+         end if
+      end select
+      select type (typed => srv)
+      class is (rpc_server_t)
+         inner => typed
+      class default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      allocate (wrapper)
+      call rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      wrapper%owned = .true.
+      wrapper%refs = 0
+      srv => wrapper
+   end subroutine membrane_wrap_server_ref
+
+   !> One holder of an owned membrane. Unowned servers are the caller's.
+   subroutine retain_server(srv)
+      class(*), pointer, intent(in) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned) srv%refs = srv%refs + 1
+      end select
+   end subroutine retain_server
+
+   !> Drop one holder. The last holder frees the wrapper.
+   subroutine release_server(srv)
+      class(*), pointer, intent(inout) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned) then
+            srv%refs = srv%refs - 1
+            if (srv%refs <= 0) deallocate (srv)
+         end if
+      end select
+      srv => null()
+   end subroutine release_server
+
+   !> Free an owned membrane wrapper that never reached an export slot.
+   !> The inner server is left alone: it may be a caller-owned object.
+   subroutine discard_unexported_wrapper(srv)
+      class(*), pointer, intent(inout) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned .and. srv%refs <= 0) then
+            deallocate (srv)
+            srv => null()
+         end if
+      end select
+   end subroutine discard_unexported_wrapper
+
+   subroutine discard_unexported_wrappers(ctx)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer :: i
+      do i = 0, ctx%nexp - 1
+         if (ctx%staged_eids(i) < 0) call discard_unexported_wrapper(ctx%staged(i)%s)
+      end do
+   end subroutine discard_unexported_wrappers
+
+   !> Drop exports this call already published and free wrappers that
+   !> never got an id, so a failed flush does not leave them behind.
+   subroutine rollback_staged(conn, ctx)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer :: i
+      do i = 0, ctx%nexp - 1
+         if (ctx%staged_eids(i) >= 0) then
+            call drop_export(conn, ctx%staged_eids(i), 1)
+            ctx%staged_eids(i) = -1
+         else
+            call discard_unexported_wrapper(ctx%staged(i)%s)
+         end if
+      end do
+      ctx%nexp = 0
+   end subroutine rollback_staged
+
+   !> Drop the source-export pin a provision took in handle_provide.
+   subroutine release_provision_pin(slot)
+      type(rpc_provision_slot_t), intent(inout) :: slot
+      if (associated(slot%host) .and. slot%source_eid >= 0 .and. &
+          slot%source_eid < MAXE) then
+         call drop_export(slot%host, slot%source_eid, 1)
+      end if
+      slot%host => null()
+      slot%source_eid = -1
+   end subroutine release_provision_pin
+
+   !> Provisions whose source export lives on this connection.
+   subroutine release_hosted_provisions(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer :: i
+      do i = 0, MAXPROV - 1
+         if (.not. conn%vat%provisions(i)%used) cycle
+         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
+         call release_provision_pin(conn%vat%provisions(i))
+         conn%vat%provisions(i) = rpc_provision_slot_t()
+      end do
+   end subroutine release_hosted_provisions
+
+   ! ------------------------------------------------------------------
    ! Client side
    ! ------------------------------------------------------------------
 
@@ -321,6 +638,9 @@ contains
          if (.not. conn%questions(k)%used) then
             conn%questions(k)%used = .true.
             conn%questions(k)%returned = .false.
+            conn%questions(k)%canceled = .false.
+            conn%questions(k)%membrane => null()
+            conn%questions(k)%membrane_reverse = .false.
             conn%next_qid = int(k + 1, int64)
             qid = int(k, int64)
             return
@@ -358,30 +678,20 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      if (err /= CAPNP_OK) return
-      pv = message_provide_init(msg, err)
-      if (err /= CAPNP_OK) return
-      call provide_question_id_set(pv, qid, err)
-      if (err /= CAPNP_OK) return
-      tgt = provide_target_init(pv, err)
-      if (err /= CAPNP_OK) return
-      call message_target_imported_cap_set(tgt, imported_cap, err)
-      if (err /= CAPNP_OK) return
-      rid = recipient_id_new(m, err)
-      if (err /= CAPNP_OK) return
-      call recipient_id_nonce_set(rid, nonce, err)
-      if (err /= CAPNP_OK) return
-      vat = recipient_id_vat_init(rid, err)
-      if (err /= CAPNP_OK) return
-      call vat_id_host_set(vat, host, err)
-      if (err /= CAPNP_OK) return
-      call vat_id_port_set(vat, port, err)
-      if (err /= CAPNP_OK) return
-      call provide_recipient_set(pv, rid%p, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) pv = message_provide_init(msg, err)
+      if (err == CAPNP_OK) call provide_question_id_set(pv, qid, err)
+      if (err == CAPNP_OK) tgt = provide_target_init(pv, err)
+      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, imported_cap, err)
+      if (err == CAPNP_OK) rid = recipient_id_new(m, err)
+      if (err == CAPNP_OK) call recipient_id_nonce_set(rid, nonce, err)
+      if (err == CAPNP_OK) vat = recipient_id_vat_init(rid, err)
+      if (err == CAPNP_OK) call vat_id_host_set(vat, host, err)
+      if (err == CAPNP_OK) call vat_id_port_set(vat, port, err)
+      if (err == CAPNP_OK) call provide_recipient_set(pv, rid%p, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) call release_question(conn, qid)
    end subroutine rpc_provide_send
 
    !> `Accept`: claim a capability a third vat provided for us. The
@@ -403,24 +713,16 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      if (err /= CAPNP_OK) return
-      ac = message_accept_init(msg, err)
-      if (err /= CAPNP_OK) return
-      call accept_question_id_set(ac, qid, err)
-      if (err /= CAPNP_OK) return
-      if (embargo) then
-         call accept_embargo_set(ac, .true., err)
-         if (err /= CAPNP_OK) return
-      end if
-      pid = provision_id_new(m, err)
-      if (err /= CAPNP_OK) return
-      call provision_id_nonce_set(pid, nonce, err)
-      if (err /= CAPNP_OK) return
-      call accept_provision_set(ac, pid%p, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) ac = message_accept_init(msg, err)
+      if (err == CAPNP_OK) call accept_question_id_set(ac, qid, err)
+      if (err == CAPNP_OK .and. embargo) call accept_embargo_set(ac, .true., err)
+      if (err == CAPNP_OK) pid = provision_id_new(m, err)
+      if (err == CAPNP_OK) call provision_id_nonce_set(pid, nonce, err)
+      if (err == CAPNP_OK) call accept_provision_set(ac, pid%p, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) call release_question(conn, qid)
    end subroutine rpc_accept_send
 
    !> Lift the embargo on the Accept this vat arranged with `Provide`.
@@ -438,7 +740,7 @@ contains
       d = message_disembargo_init(msg, err)
       if (err /= CAPNP_OK) return
       call disembargo_context_provide_set(d, provide_qid, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_disembargo_provide_send
 
@@ -457,12 +759,16 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      b = message_bootstrap_init(msg, err)
-      call bootstrap_question_id_set(b, qid, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) b = message_bootstrap_init(msg, err)
+      if (err == CAPNP_OK) call bootstrap_question_id_set(b, qid, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) then
+         call release_question(conn, qid)
+         cap = rpc_cap_t()
+         return
+      end if
       cap%kind = RPC_CAP_PIPELINE
       cap%id = qid
       cap%nops = 0
@@ -487,73 +793,327 @@ contains
       type(capnp_ptr_t) :: ops
       integer :: i
       err = CAPNP_OK
+      if (associated(target%membrane)) then
+         call membrane_check(target%membrane, target%membrane_reverse, &
+                             interface_id, method_id, err)
+         if (err /= CAPNP_OK) then
+            if (target%membrane%revoked .and. &
+                allocated(target%membrane%revoke_reason)) &
+               conn%abort_reason = target%membrane%revoke_reason
+            qid = -1_int64
+            return
+         end if
+      end if
       qid = alloc_qid(conn)
       if (qid < 0_int64) then
          err = CAPNP_ERR_ALLOC
          return
       end if
+      conn%questions(int(qid))%membrane => target%membrane
+      conn%questions(int(qid))%membrane_reverse = target%membrane_reverse
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      c = message_call_init(msg, err)
-      call call_question_id_set(c, qid, err)
-      call call_interface_id_set(c, interface_id, err)
-      call call_method_id_set(c, method_id, err)
-      call call_send_results_to_caller_set(c, err)
-      tgt = call_target_init(c, err)
-      select case (target%kind)
-      case (RPC_CAP_IMPORT)
-         call message_target_imported_cap_set(tgt, target%id, err)
-      case (RPC_CAP_PIPELINE)
-         pa = message_target_promised_answer_init(tgt, err)
-         call promised_answer_question_id_set(pa, target%id, err)
-         ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
-         do i = 0, target%nops - 1
-            op%p = capnp_list_get_struct(ops, i, err)
-            call promised_answer_op_get_pointer_field_set(op, target%ops(i), err)
-         end do
-      case default
-         err = CAPNP_ERR_ARG
-         return
-      end select
-      params = call_params_init(c, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) c = message_call_init(msg, err)
+      if (err == CAPNP_OK) call call_question_id_set(c, qid, err)
+      if (err == CAPNP_OK) call call_interface_id_set(c, interface_id, err)
+      if (err == CAPNP_OK) call call_method_id_set(c, method_id, err)
+      if (err == CAPNP_OK) call call_send_results_to_caller_set(c, err)
+      if (err == CAPNP_OK) tgt = call_target_init(c, err)
+      if (err == CAPNP_OK) then
+         select case (target%kind)
+         case (RPC_CAP_IMPORT)
+            call message_target_imported_cap_set(tgt, target%id, err)
+         case (RPC_CAP_PIPELINE)
+            pa = message_target_promised_answer_init(tgt, err)
+            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, target%id, err)
+            if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
+            if (err == CAPNP_OK) then
+               do i = 0, target%nops - 1
+                  op%p = capnp_list_get_struct(ops, i, err)
+                  if (err /= CAPNP_OK) exit
+                  call promised_answer_op_get_pointer_field_set(op, target%ops(i), err)
+                  if (err /= CAPNP_OK) exit
+               end do
+            end if
+         case default
+            err = CAPNP_ERR_ARG
+         end select
+      end if
+      if (err == CAPNP_OK) params = call_params_init(c, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         call release_question(conn, qid)
+         qid = -1_int64
+      end if
    end subroutine rpc_call_begin
 
    subroutine rpc_call_send(conn, m, err)
       type(rpc_conn_t), intent(inout) :: conn
       type(capnp_message_t), intent(inout) :: m
       integer, intent(out) :: err
-      call rpc_send_message(conn%fd, m, err)
+      call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_call_send
 
+   !> Begin Persistent.save using the generic
+   !> Persistent<AnyPointer, AnyPointer> wire layout. `owner` is copied to
+   !> SaveParams.sealFor when present; a null owner requests an unsealed
+   !> reference, whose acceptance is realm policy.
+   subroutine rpc_persistent_save_begin(conn, target, m, owner, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: target
+      type(capnp_message_t), intent(inout), target :: m
+      type(capnp_ptr_t), intent(in), optional :: owner
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: save_params
+      call rpc_call_begin(conn, target, RPC_PERSISTENT_IFACE, &
+                          RPC_PERSISTENT_SAVE, m, params, qid, err)
+      if (err /= CAPNP_OK) return
+      save_params = capnp_new_struct(m, 0, 1, err)
+      if (err == CAPNP_OK .and. present(owner)) call capnp_setp(save_params, 0, owner, err)
+      if (err == CAPNP_OK) call payload_content_set(params, save_params, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         call release_question(conn, qid)
+         qid = -1_int64
+      end if
+   end subroutine rpc_persistent_save_begin
+
+   !> Wait for Persistent.save and return SaveResults.sturdyRef. The
+   !> pointer remains owned by the question until rpc_finish_send.
+   subroutine rpc_persistent_save_wait(conn, qid, sturdy_ref, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(capnp_ptr_t), intent(out) :: sturdy_ref
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: results
+      call rpc_wait(conn, qid, err)
+      if (err /= CAPNP_OK) return
+      call rpc_result_content(conn, qid, results, err)
+      if (err /= CAPNP_OK) return
+      sturdy_ref = capnp_getp(results, 0, err)
+   end subroutine rpc_persistent_save_wait
+
    !> A capability reached by pointer-field hops into a question's
    !> not-yet-returned results: promise pipelining.
-   function rpc_pipeline_cap(qid, field_indices) result(cap)
+   function rpc_pipeline_cap(conn, qid, field_indices) result(cap)
+      type(rpc_conn_t), intent(in) :: conn
       integer(int64), intent(in) :: qid
       integer, intent(in) :: field_indices(:)
       type(rpc_cap_t) :: cap
-      integer :: i
+      integer :: i, q
       cap%kind = RPC_CAP_PIPELINE
       cap%id = qid
       cap%nops = min(size(field_indices), MAXOPS)
       do i = 1, cap%nops
          cap%ops(i - 1) = field_indices(i)
       end do
+      ! Same inheritance as rpc_result_cap: a revoke must stop pipelined
+      ! calls, not only calls on the settled import.
+      q = int(qid)
+      if (q >= 0 .and. q < MAXQ) then
+         if (conn%questions(q)%used) then
+            cap%membrane => conn%questions(q)%membrane
+            cap%membrane_reverse = conn%questions(q)%membrane_reverse
+         end if
+      end if
    end function rpc_pipeline_cap
+
+   !> Send every part of a two-party Join. The receiver waits for all
+   !> parts before answering, so callers should send the complete set
+   !> before waiting on any returned question id.
+   subroutine rpc_join_send(conn, caps, join_id, qids, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: caps(:)
+      integer(int64), intent(in) :: join_id
+      integer(int64), intent(out) :: qids(:)
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(join_key_part_t) :: kp
+      type(capnp_ptr_t) :: ops
+      integer :: i, k
+      err = CAPNP_OK
+      if (size(caps) < 1 .or. size(caps) > MAXJOINPARTS .or. &
+          size(qids) < size(caps)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      qids = -1_int64
+      do i = 1, size(caps)
+         qids(i) = alloc_qid(conn)
+         if (qids(i) < 0_int64) then
+            err = CAPNP_ERR_ALLOC
+            call finish_sent_joins(conn, qids, i - 1)
+            return
+         end if
+         call capnp_message_init_builder(m, err)
+         if (err == CAPNP_OK) msg = message_new_root(m, err)
+         if (err == CAPNP_OK) jn = message_join_init(msg, err)
+         if (err == CAPNP_OK) call join_question_id_set(jn, qids(i), err)
+         if (err == CAPNP_OK) tgt = join_target_init(jn, err)
+         if (err == CAPNP_OK) then
+            select case (caps(i)%kind)
+            case (RPC_CAP_IMPORT)
+               call message_target_imported_cap_set(tgt, caps(i)%id, err)
+            case (RPC_CAP_PIPELINE)
+               pa = message_target_promised_answer_init(tgt, err)
+               if (err == CAPNP_OK) call promised_answer_question_id_set(pa, caps(i)%id, err)
+               if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(caps(i)%nops, int64), err)
+               if (err == CAPNP_OK) then
+                  do k = 0, caps(i)%nops - 1
+                     op%p = capnp_list_get_struct(ops, k, err)
+                     if (err /= CAPNP_OK) exit
+                     call promised_answer_op_get_pointer_field_set(op, caps(i)%ops(k), err)
+                     if (err /= CAPNP_OK) exit
+                  end do
+               end if
+            case default
+               err = CAPNP_ERR_ARG
+            end select
+         end if
+         if (err == CAPNP_OK) kp = join_key_part_new(m, err)
+         if (err == CAPNP_OK) call join_key_part_join_id_set(kp, join_id, err)
+         if (err == CAPNP_OK) call join_key_part_part_count_set(kp, size(caps), err)
+         if (err == CAPNP_OK) call join_key_part_part_num_set(kp, i - 1, err)
+         if (err == CAPNP_OK) call join_key_part_set(jn, kp%p, err)
+         if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+         call capnp_message_free(m)
+         if (err /= CAPNP_OK) then
+            call release_question(conn, qids(i))
+            qids(i) = -1_int64
+            call finish_sent_joins(conn, qids, i - 1)
+            return
+         end if
+      end do
+   end subroutine rpc_join_send
+
+   !> Finish Join parts that already left the vat when a later part fails.
+   subroutine finish_sent_joins(conn, qids, nsent)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      integer, intent(in) :: nsent
+      integer :: i, ferr
+      do i = 1, nsent
+         if (qids(i) >= 0_int64) call rpc_finish_send(conn, qids(i), .false., ferr)
+      end do
+   end subroutine finish_sent_joins
+
+   !> Give back every question a failed Join wait still holds.
+   subroutine release_join_questions(conn, qids)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      integer :: i, q, ferr
+      logical :: gone
+      gone = conn%dead .or. .not. associated(conn%transport)
+      do i = 1, size(qids)
+         q = int(qids(i))
+         if (q < 0 .or. q >= MAXQ) cycle
+         if (.not. conn%questions(q)%used) cycle
+         if (gone) then
+            if (conn%questions(q)%returned) &
+               call capnp_message_free(conn%questions(q)%retmsg)
+            call question_slot_clear(conn%questions(q))
+         else if (conn%questions(q)%returned) then
+            call rpc_finish_send(conn, qids(i), .false., ferr)
+         else
+            call rpc_request_cancellation(conn, qids(i), ferr)
+         end if
+      end do
+   end subroutine release_join_questions
+
+   subroutine clear_joins(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer :: i
+      do i = 0, MAXJOINS - 1
+         conn%joins(i) = rpc_join_slot_t()
+      end do
+   end subroutine clear_joins
+
+   !> Collect a complete Join result set. `joined` is the single
+   !> capability carried by a successful set; a failed set returns
+   !> `succeeded=.false.` and RPC_CAP_NONE.
+   subroutine rpc_join_wait(conn, qids, joined, succeeded, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      type(rpc_cap_t), intent(out) :: joined
+      logical, intent(out) :: succeeded
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: content, cap_ptr
+      type(join_result_t) :: jr
+      type(rpc_cap_t) :: candidate
+      integer :: i, ferr, ncap
+      joined = rpc_cap_t()
+      succeeded = size(qids) > 0
+      ncap = 0
+      err = CAPNP_OK
+      do i = 1, size(qids)
+         call rpc_wait(conn, qids(i), err)
+         if (err /= CAPNP_OK) exit
+         call rpc_result_content(conn, qids(i), content, err)
+         if (err /= CAPNP_OK) exit
+         jr%p = content
+         if (.not. join_result_succeeded_get(jr)) succeeded = .false.
+         cap_ptr = join_result_cap_get(jr, err)
+         if (err /= CAPNP_OK) exit
+         if (cap_ptr%kind == CAPNP_PK_CAP) then
+            call rpc_result_cap(conn, qids(i), [0], candidate, err)
+            if (err /= CAPNP_OK) exit
+            joined = candidate
+            ncap = ncap + 1
+         end if
+      end do
+      if (err /= CAPNP_OK) then
+         call release_join_questions(conn, qids)
+         return
+      end if
+      if (succeeded .and. ncap /= 1) then
+         err = CAPNP_ERR_KIND
+         call release_join_questions(conn, qids)
+         return
+      end if
+      if (.not. succeeded) joined = rpc_cap_t()
+      do i = 1, size(qids)
+         call rpc_finish_send(conn, qids(i), succeeded .and. ncap == 1, ferr)
+         if (ferr /= CAPNP_OK .and. err == CAPNP_OK) err = ferr
+      end do
+   end subroutine rpc_join_wait
 
    !> Pump the connection until question qid has returned.
    subroutine rpc_wait(conn, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
+      integer :: q
       err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      ! Cancellation already told the caller there will be no result.
+      ! Waiting here would block until a Return the caller discarded.
+      if (conn%questions(q)%canceled) then
+         conn%abort_reason = 'call canceled'
+         err = RPC_ERR_EXCEPTION
+         return
+      end if
       do
          if (conn%dead) then
             err = RPC_ERR_DEAD
             return
          end if
-         if (conn%questions(int(qid))%returned) exit
+         if (conn%questions(q)%returned) exit
          call rpc_pump_once(conn, err)
          if (err /= CAPNP_OK) return
       end do
@@ -661,6 +1221,10 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK) then
+         cap%membrane => conn%questions(int(qid))%membrane
+         cap%membrane_reverse = conn%questions(int(qid))%membrane_reverse
+      end if
    end subroutine rpc_result_cap
 
    !> Tell the peer we are done with a question. retain_caps=.true. keeps
@@ -673,19 +1237,74 @@ contains
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(finish_t) :: f
+      integer :: q
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call capnp_message_init_builder(m, err)
       if (err /= CAPNP_OK) return
       msg = message_new_root(m, err)
       f = message_finish_init(msg, err)
       call finish_question_id_set(f, qid, err)
       call finish_release_result_caps_set(f, .not. retain_caps, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      call finish_require_early_cancellation_workaround_set(f, .false., err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
-      if (conn%questions(int(qid))%used) then
-         call capnp_message_free(conn%questions(int(qid))%retmsg)
-         call question_slot_clear(conn%questions(int(qid)))
+      if (conn%questions(q)%used) then
+         call capnp_message_free(conn%questions(q)%retmsg)
+         call question_slot_clear(conn%questions(q))
       end if
    end subroutine rpc_finish_send
+
+   !> Request cancellation by sending Finish before a Return. Modern
+   !> peers receive requireEarlyCancellationWorkaround=false, matching
+   !> Cap'n Proto 1.0 and newer. Whether delivered application code is
+   !> interruptible remains the callee's static method policy.
+   subroutine rpc_request_cancellation(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      integer :: q
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      f = message_finish_init(msg, err)
+      call finish_question_id_set(f, qid, err)
+      call finish_release_result_caps_set(f, .true., err)
+      call finish_require_early_cancellation_workaround_set(f, .false., err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+      if (err /= CAPNP_OK) return
+      if (.not. conn%questions(q)%used) return
+      if (conn%questions(q)%returned) then
+         call capnp_message_free(conn%questions(q)%retmsg)
+         call question_slot_clear(conn%questions(q))
+      else
+         ! Reserve the id until the matching Return arrives. Reusing it
+         ! earlier delivers that Return to whatever call takes the id.
+         conn%questions(q)%canceled = .true.
+      end if
+   end subroutine rpc_request_cancellation
 
    !> Clear a question slot.
    !>
@@ -699,6 +1318,9 @@ contains
       type(rpc_question_slot_t), intent(inout) :: slot
       slot%used = .false.
       slot%returned = .false.
+      slot%canceled = .false.
+      slot%membrane => null()
+      slot%membrane_reverse = .false.
    end subroutine question_slot_clear
 
    !> Clear an answer slot; see question_slot_clear.
@@ -726,7 +1348,7 @@ contains
       rel = message_release_init(msg, err)
       call release_id_set(rel, cap%id, err)
       call release_reference_count_set(rel, 1_int64, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
    end subroutine rpc_release_send
 
@@ -737,8 +1359,28 @@ contains
    subroutine rpc_stream_init(stream, window)
       type(rpc_stream_t), intent(out) :: stream
       integer, intent(in), optional :: window
-      if (present(window)) stream%window = max(1, min(window, 64))
+      if (present(window)) stream%window = max(1, window)
    end subroutine rpc_stream_init
+
+   !> Bytes on the wire for one message: framing header plus segment
+   !> bodies. This is what the stream window counts.
+   function framed_message_bytes(m) result(n)
+      type(capnp_message_t), intent(in) :: m
+      integer :: n
+      integer(int64) :: total
+      integer :: i
+      total = ((1_int64 + int(m%nsegs, int64))*4_int64 + 7_int64)/8_int64*8_int64
+      if (allocated(m%segs)) then
+         do i = 1, m%nsegs
+            total = total + m%segs(i)%len
+         end do
+      end if
+      if (total > int(huge(n), int64)) then
+         n = huge(n)
+      else
+         n = int(total)
+      end if
+   end function framed_message_bytes
 
    !> Send a prepared stream call (from a generated _begin) without
    !> waiting for its return. Blocks only when the window is full, and
@@ -749,6 +1391,7 @@ contains
       type(capnp_message_t), intent(inout) :: m
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
+      integer :: bytes
       err = CAPNP_OK
       if (stream%failed) then
          call capnp_message_free(m)
@@ -756,17 +1399,24 @@ contains
          err = RPC_ERR_EXCEPTION
          return
       end if
-      if (stream%nout >= stream%window) then
+      do while (stream%nout > 0 .and. &
+                (stream%nout >= 64 .or. stream%used_bytes >= stream%window))
          call retire_oldest(conn, stream, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(m)
             call release_question(conn, qid)
             return
          end if
-      end if
+      end do
+      bytes = framed_message_bytes(m)
       call rpc_call_send(conn, m, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call release_question(conn, qid)
+         return
+      end if
       stream%qids(stream%nout) = qid
+      stream%sizes(stream%nout) = bytes
+      stream%used_bytes = stream%used_bytes + bytes
       stream%nout = stream%nout + 1
    end subroutine rpc_stream_send
 
@@ -790,20 +1440,44 @@ contains
       if (stream%failed .and. err == CAPNP_OK) err = RPC_ERR_EXCEPTION
    end subroutine rpc_stream_finish
 
+   !> Request cancellation of every outstanding stream call and discard
+   !> the local window. This is useful for abandoning a producer; a
+   !> remote method that does not opt into cancellation may still run to
+   !> completion, as in capnp-C++.
+   subroutine rpc_stream_cancel(conn, stream, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      integer, intent(out) :: err
+      integer :: i, cerr
+      err = CAPNP_OK
+      do i = 0, stream%nout - 1
+         call rpc_request_cancellation(conn, stream%qids(i), cerr)
+         if (cerr /= CAPNP_OK .and. err == CAPNP_OK) err = cerr
+      end do
+      stream%nout = 0
+      stream%qids = -1_int64
+      stream%sizes = 0
+      stream%used_bytes = 0
+      stream%failed = .true.
+   end subroutine rpc_stream_cancel
+
    subroutine retire_oldest(conn, stream, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_stream_t), intent(inout) :: stream
       integer, intent(out) :: err
       type(capnp_ptr_t) :: content
       integer(int64) :: qid
-      integer :: i, werr
+      integer :: i, werr, bytes
       err = CAPNP_OK
       if (stream%nout == 0) return
       qid = stream%qids(0)
+      bytes = stream%sizes(0)
       do i = 0, stream%nout - 2
          stream%qids(i) = stream%qids(i + 1)
+         stream%sizes(i) = stream%sizes(i + 1)
       end do
       stream%nout = stream%nout - 1
+      stream%used_bytes = stream%used_bytes - bytes
       call rpc_wait(conn, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(conn, qid, content, werr)
@@ -881,6 +1555,7 @@ contains
          if (.not. conn%exports(i)%used) then
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
+            call retain_server(srv)
             conn%exports(i)%srv => srv
             eid = i
             return
@@ -904,8 +1579,11 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
-      call rpc_recv_message(conn%fd, m, err)
+      call rpc_recv_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
+         ! No Return is coming for an abandoned Join, so the slot must
+         ! not wait for a Finish that the dead peer will never send.
+         call clear_joins(conn)
          conn%dead = .true.
          err = RPC_ERR_DEAD
          return
@@ -967,7 +1645,7 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
-      call px_poll_in(conn%fd, timeout_ms, readable, err)
+      call conn%transport%poll_in(timeout_ms, readable, err)
       if (err /= CAPNP_OK .or. .not. readable) return
       call rpc_pump_once(conn, err)
       handled = err == CAPNP_OK
@@ -1014,6 +1692,10 @@ contains
          if (err == CAPNP_OK) then
             call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, idx), err)
             call flush_cap_table(conn, ctx, err)
+         end if
+         if (err /= CAPNP_OK) then
+            call rollback_staged(conn, ctx)
+            call fill_exception(r, 'export failed', err)
          end if
       end if
       call finish_answer(conn, qid, rm, ctx, err)
@@ -1072,10 +1754,15 @@ contains
          dispatched = .true.
       end select
       if (.not. dispatched .or. derr /= CAPNP_OK) then
+         call discard_unexported_wrappers(ctx)
          ! Rebuild the union as an exception return.
          call fill_exception(r, 'method raised error', err)
       else
          call flush_cap_table(conn, ctx, err)
+         if (err /= CAPNP_OK) then
+            call rollback_staged(conn, ctx)
+            call fill_exception(r, 'export failed', err)
+         end if
       end if
       call finish_answer(conn, qid, rm, ctx, err)
    end subroutine handle_call
@@ -1239,6 +1926,41 @@ contains
       end do
    end function rpc_pending_introductions
 
+   !> Open the connection named by an outstanding third-party
+   !> introduction. The returned connection is ready for rpc_accept_send;
+   !> successful acceptance must be followed by rpc_introduction_done on
+   !> the introducing connection so its vine can be released.
+   subroutine rpc_introduction_dial(conn, nonce, introduced, bootstrap, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: nonce
+      type(rpc_conn_t), intent(inout), target :: introduced
+      class(rpc_server_t), pointer, intent(in) :: bootstrap
+      integer, intent(out) :: err
+      integer :: fd, i
+      logical :: allow
+      err = CAPNP_ERR_BOUNDS
+      do i = 0, MAXINTRO - 1
+         if (.not. conn%introductions(i)%used) cycle
+         if (conn%introductions(i)%nonce /= nonce) cycle
+         allow = .true.
+         if (associated(conn%dial_allow)) then
+            call conn%dial_allow( &
+               conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
+               conn%introductions(i)%port, allow)
+         end if
+         if (.not. allow) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call px_tcp_connect_host( &
+            conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
+            conn%introductions(i)%port, fd, err, timeout_ms=conn%dial_timeout_ms)
+         if (err /= CAPNP_OK) return
+         call rpc_conn_init(introduced, fd, bootstrap)
+         return
+      end do
+   end subroutine rpc_introduction_dial
+
    !> Finish the pickup for `nonce`: releases the vine, which the sender
    !> treats as the signal to close its Provide. Call this only once the
    !> third party has actually handed the capability over; releasing
@@ -1333,9 +2055,13 @@ contains
             conn%vat%provisions(i)%nonce = nonce
             conn%vat%provisions(i)%srv => conn%exports(eid)%srv
             conn%vat%provisions(i)%eid = eid
+            conn%vat%provisions(i)%source_eid = eid
+            conn%vat%provisions(i)%host => conn
             conn%vat%provisions(i)%qid = qid
             conn%vat%provisions(i)%embargoed = .false.
-            ! The recipient holds a reference once it accepts.
+            ! Pin the source export for the life of the arrangement. The
+            ! recipient takes its own export, and its own object reference
+            ! when the server is an owned membrane.
             conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
             call send_empty_answer(conn, qid, err)
             return
@@ -1356,7 +2082,7 @@ contains
       type(provision_id_t) :: pid
       type(capnp_ptr_t) :: pp
       integer(int64) :: qid, nonce
-      integer :: i, eid
+      integer :: i, eid, new_eid
 
       ac = message_accept_get(msg, err)
       if (err /= CAPNP_OK) return
@@ -1376,21 +2102,25 @@ contains
          if (conn%vat%provisions(i)%used .and. .not. conn%vat%provisions(i)%embargoed &
              .and. conn%vat%provisions(i)%nonce == nonce) then
             ! Export it here: the id the introducer used belongs to its
-            ! own connection and means nothing on this one.
-            eid = export_server(conn, conn%vat%provisions(i)%srv)
-            if (eid < 0) then
+            ! own connection and means nothing on this one. A new slot
+            ! takes its own reference on an owned membrane.
+            new_eid = export_server(conn, conn%vat%provisions(i)%srv)
+            if (new_eid < 0) then
                call send_answer_exception(conn, qid, 'accept: export table full', err)
                return
             end if
-            conn%vat%provisions(i)%eid = eid
+            eid = new_eid
+            conn%vat%provisions(i)%eid = new_eid
             if (accept_embargo_get(ac)) then
                ! Claimed, but the Return waits: the recipient has calls
                ! in flight through the introducer, and answering now
                ! would let one sent straight to us overtake them. The
-               ! introducer lifts it with Disembargo.provide.
+               ! introducer lifts it with Disembargo.provide. The pin
+               ! stays until that Return is sent.
                conn%vat%provisions(i)%embargoed = .true.
                conn%vat%provisions(i)%accept_qid = qid
             else
+               call release_provision_pin(conn%vat%provisions(i))
                conn%vat%provisions(i) = rpc_provision_slot_t()
             end if
             exit
@@ -1455,6 +2185,7 @@ contains
          if (conn%vat%provisions(i)%qid /= provide_qid) cycle
          qid = conn%vat%provisions(i)%accept_qid
          eid = conn%vat%provisions(i)%eid
+         call release_provision_pin(conn%vat%provisions(i))
          conn%vat%provisions(i) = rpc_provision_slot_t()
          call send_accepted_cap(conn, qid, eid, err)
          return
@@ -1712,6 +2443,10 @@ contains
          call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
          if (err /= CAPNP_OK) return
          conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+         ! Finish(releaseResultCaps) drops this reference. The cap was
+         ! not staged, so record it the way a flushed export is recorded.
+         ctx%nexp = 1
+         ctx%staged_eids(0) = eid
          call join_result_cap_set(jr, rpc_make_cap_ptr(rm, 0), err)
          if (err /= CAPNP_OK) return
       end if
@@ -1765,7 +2500,7 @@ contains
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
       integer :: q, i
-      call rpc_send_message(conn%fd, rm, err)
+      call rpc_send_message(conn%transport, rm, err)
       q = int(qid)
       if (q >= 0 .and. q < MAXQ .and. err == CAPNP_OK) then
          if (conn%answers(q)%used) call capnp_message_free(conn%answers(q)%retmsg)
@@ -1809,6 +2544,17 @@ contains
          call capnp_message_free(m)
          return
       end if
+      ! A Return racing with a Finish for a canceled question is legal.
+      ! The id was kept reserved so it could not be reused; the Return
+      ! ends that reservation and is not delivered to a later call.
+      if (.not. conn%questions(q)%used .or. conn%questions(q)%canceled) then
+         err = CAPNP_OK
+         call capnp_message_free(m)
+         if (q >= 0 .and. q < MAXQ) then
+            if (conn%questions(q)%used) call question_slot_clear(conn%questions(q))
+         end if
+         return
+      end if
       ! Own the Return bytes in the question slot.
       call capnp_serialize_bytes(m, bytes, err)
       if (err == CAPNP_OK) then
@@ -1820,17 +2566,58 @@ contains
       call capnp_message_free(m)
    end subroutine handle_return
 
+   !> Finish of a Provide question drops the arrangement, including one
+   !> whose question id never fit in the answer table.
+   subroutine release_finished_provide(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      integer :: i, ae
+      integer(int64) :: aq
+      err = CAPNP_OK
+      if (.not. associated(conn%vat)) return
+      do i = 0, MAXPROV - 1
+         if (.not. conn%vat%provisions(i)%used) cycle
+         if (conn%vat%provisions(i)%qid /= qid) cycle
+         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
+         if (conn%vat%provisions(i)%embargoed) then
+            ae = conn%vat%provisions(i)%eid
+            aq = conn%vat%provisions(i)%accept_qid
+            call release_provision_pin(conn%vat%provisions(i))
+            conn%vat%provisions(i) = rpc_provision_slot_t()
+            if (ae >= 0) call drop_export(conn, ae, 1)
+            call send_answer_exception(conn, aq, 'provide finished', err)
+         else
+            call release_provision_pin(conn%vat%provisions(i))
+            conn%vat%provisions(i) = rpc_provision_slot_t()
+         end if
+         return
+      end do
+   end subroutine release_finished_provide
+
    subroutine handle_finish(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
       type(finish_t) :: f
+      integer(int64) :: qid
       integer :: q, i, eid
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
-      q = int(finish_question_id_get(f))
-      if (q < 0 .or. q >= MAXQ) return
-      if (.not. conn%answers(q)%used) return
+      qid = finish_question_id_get(f)
+      call release_finished_provide(conn, qid, err)
+      do i = 0, MAXJOINS - 1
+         if (.not. conn%joins(i)%used) cycle
+         if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
+            conn%joins(i) = rpc_join_slot_t()
+            return
+         end if
+      end do
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      q = int(qid)
+      if (.not. conn%answers(q)%used) then
+         return
+      end if
       if (finish_release_result_caps_get(f)) then
          do i = 0, conn%answers(q)%nexp - 1
             eid = conn%answers(q)%exports(i)
@@ -1857,12 +2644,16 @@ contains
    subroutine drop_export(conn, eid, count)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid, count
+      class(*), pointer :: held
+      if (eid < 0 .or. eid >= MAXE) return
       if (.not. conn%exports(eid)%used) return
       conn%exports(eid)%refcount = conn%exports(eid)%refcount - count
       if (conn%exports(eid)%refcount <= 0) then
+         held => conn%exports(eid)%srv
          conn%exports(eid)%used = .false.
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
+         call release_server(held)
       end if
    end subroutine drop_export
 
@@ -1919,7 +2710,7 @@ contains
                                                  promised_answer_question_id_get(pa), err)
          end block
       end if
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, rm, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
       call capnp_message_free(rm)
    end subroutine handle_disembargo
 
@@ -1948,7 +2739,7 @@ contains
       call capnp_set_which(root, 0, MESSAGE_UNIMPLEMENTED_TAG, err)
       c = capnp_copy(rm, msg%p, err)
       if (err == CAPNP_OK) call capnp_setp(root, 0, c, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%fd, rm, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
       call capnp_message_free(rm)
    end subroutine send_unimplemented
 

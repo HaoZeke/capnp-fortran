@@ -29,12 +29,45 @@ module test_rpc_handoff
 
    integer(int64), parameter :: NONCE = 24301_int64
 
+   !> Permits every call. The handoff case needs a membrane so the
+   !> capability Bob exports is an owned wrapper, which is the object
+   !> drop_export frees.
+   type, extends(rpc_membrane_policy_t) :: allow_policy_t
+      integer :: seen = 0
+   contains
+      procedure :: inbound_call => allow_inbound
+      procedure :: outbound_call => allow_outbound
+   end type allow_policy_t
+
 contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("handoff", run_handoff)]
+      testsuite = [ &
+         new_unittest("handoff", run_handoff), &
+         new_unittest("handoff membrane ref", run_membrane_handoff) &
+         ]
    end subroutine collect_rpc_handoff
+
+   subroutine allow_inbound(self, interface_id, method_id, err)
+      class(allow_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%seen = self%seen + 1
+      err = CAPNP_OK
+      if (method_id < 0) err = int(interface_id)
+   end subroutine allow_inbound
+
+   subroutine allow_outbound(self, interface_id, method_id, err)
+      class(allow_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%seen = self%seen + 1
+      err = CAPNP_OK
+      if (method_id < 0) err = int(interface_id)
+   end subroutine allow_outbound
 
    subroutine check_(error, cond, name)
       type(error_type), allocatable, intent(inout) :: error
@@ -103,31 +136,29 @@ contains
       type(adder_srv_t), target :: sidecar
       class(rpc_server_t), pointer :: boot
       type(rpc_introduction_t) :: learned(4)
-      type(rpc_cap_t) :: bootcap, claimed, sidecap
+      type(rpc_cap_t) :: bootcap, claimed, sidecap, alice_cap
       type(capnp_ptr_t) :: content
-      integer :: ab, ba, cb, bc, ac, ca, err, n
-      integer(int64) :: provide_qid, claim, replay, qcall
+      integer :: ab, ba, bc, ac, ca, listen_fd, bob_port, err, n
+      integer(int64) :: provide_qid, claim, replay, qcall, after_release
       type(capnp_message_t), target :: m
       type(payload_t) :: params
       type(capnp_ptr_t) :: s
 
       call px_socketpair(ab, ba, err)
       call check_(error, err == CAPNP_OK, 'handoff: alice-bob pair')
-      call px_socketpair(cb, bc, err)
-      call check_(error, err == CAPNP_OK, 'handoff: carol-bob pair')
       call px_socketpair(ac, ca, err)
       call check_(error, err == CAPNP_OK, 'handoff: alice-carol pair')
+      call px_tcp_listen(0, listen_fd, err)
+      call check_(error, err == CAPNP_OK, 'handoff: bob listener')
+      call px_tcp_bound_port(listen_fd, bob_port, err)
+      call check_(error, err == CAPNP_OK .and. bob_port > 0, 'handoff: listener port')
       if (allocated(error)) return
 
       boot => null()
       call rpc_conn_init(alice_to_bob, ab, boot)
-      call rpc_conn_init(carol_to_bob, cb, boot)
       call rpc_conn_init(alice_to_carol, ac, boot)
       boot => hosted
       call rpc_conn_init(bob_to_alice, ba, boot)
-      sidecar%base = 1000_int64
-      boot => sidecar
-      call rpc_conn_init(bob_to_carol, bc, boot)
       boot => carols
       call rpc_conn_init(carol_to_alice, ca, boot)
 
@@ -135,7 +166,6 @@ contains
       ! makes on hers is claimable on Carol's.
       bob_vat => bob_vat_store
       call rpc_conn_set_vat(bob_to_alice, bob_vat)
-      call rpc_conn_set_vat(bob_to_carol, bob_vat)
 
       ! Alice bootstraps, so Bob exports the capability to her.
       call rpc_bootstrap_send(alice_to_bob, bootcap, err)
@@ -152,23 +182,35 @@ contains
       call check_(error, err == CAPNP_OK, 'handoff: provide answered')
       call check_(error, rpc_pending_provisions(bob_to_alice) == 1, &
                   'handoff: arrangement recorded')
-      ! The same vat, seen through its other connection.
-      call check_(error, rpc_pending_provisions(bob_to_carol) == 1, &
-                  'handoff: the vat''s other connection sees it')
 
       ! 2. Alice tells Carol where to go. Carol records the introduction
-      !    rather than dialling: reaching Bob is the network's job, and
-      !    here the connection already exists.
-      call tell_where_to_go(ac, 90_int64, '10.0.0.1', 5000, NONCE, 7_int64, err)
+      !    before the network layer dials it.
+      call tell_where_to_go(ac, 90_int64, '127.0.0.1', bob_port, NONCE, 7_int64, err)
       call check_(error, err == CAPNP_OK, 'handoff: introduction sent')
       call rpc_pump_once(carol_to_alice, err)
       n = rpc_pending_introductions(carol_to_alice, learned)
       call check_(error, n == 1, 'handoff: introduction recorded')
       if (allocated(error)) return
       call check_(error, learned(1)%nonce == NONCE, 'handoff: introduction nonce')
-      call check_(error, learned(1)%host(1:learned(1)%host_len) == '10.0.0.1', &
+      call check_(error, learned(1)%host(1:learned(1)%host_len) == '127.0.0.1', &
                   'handoff: introduction host')
-      call check_(error, learned(1)%port == 5000, 'handoff: introduction port')
+      call check_(error, learned(1)%port == bob_port, 'handoff: introduction port')
+
+      ! The network-layer VatId is actionable: Carol dials Bob using the
+      ! address in ThirdPartyCapId, then Bob accepts it as another
+      ! connection belonging to the same vat.
+      boot => null()
+      call rpc_introduction_dial(carol_to_alice, NONCE, carol_to_bob, boot, err)
+      call check_(error, err == CAPNP_OK, 'handoff: introduction dialed')
+      call px_tcp_accept(listen_fd, bc, err)
+      call check_(error, err == CAPNP_OK, 'handoff: bob accepted Carol')
+      sidecar%base = 1000_int64
+      boot => sidecar
+      call rpc_conn_init(bob_to_carol, bc, boot)
+      call rpc_conn_set_vat(bob_to_carol, bob_vat)
+      call check_(error, rpc_pending_provisions(bob_to_carol) == 1, &
+                  'handoff: the vat''s new connection sees it')
+      call px_close(listen_fd)
 
       ! Carol bootstraps Bob first, so her connection's export 0 is the
       ! sidecar and the handed-over capability cannot land on 0 too.
@@ -176,6 +218,16 @@ contains
       call rpc_pump_once(bob_to_carol, err)
       call rpc_wait(carol_to_bob, sidecap%id, err)
       call check_(error, err == CAPNP_OK, 'handoff: carol bootstrapped the sidecar')
+
+      ! The provision holds a reference to Alice's export. Releasing her
+      ! import while that arrangement is open must not drop it.
+      alice_cap%kind = RPC_CAP_IMPORT
+      alice_cap%id = 0_int64
+      call rpc_release_send(alice_to_bob, alice_cap, err)
+      call rpc_pump_once(bob_to_alice, err)
+      call check_(error, bob_to_alice%exports(0)%used, &
+                  'handoff: open provision pins the source export')
+      if (allocated(error)) return
 
       ! 3. Carol presents the nonce to Bob, over her own connection. She
       !    was never told which export id Alice used, and it would mean
@@ -223,6 +275,17 @@ contains
       call check_(error, rpc_pending_introductions(carol_to_alice) == 0, &
                   'handoff: vine dropped')
 
+      ! Accept consumes the provision and drops its pin. Alice already
+      ! released her own reference, so the source export is gone and a
+      ! second Provide of that id is rejected.
+      call rpc_provide_send(alice_to_bob, 0_int64, '127.0.0.1', bob_port, &
+                            NONCE + 1_int64, after_release, err)
+      call rpc_pump_once(bob_to_alice, err)
+      call rpc_wait(alice_to_bob, after_release, err)
+      call rpc_result_content(alice_to_bob, after_release, content, err)
+      call check_(error, err == RPC_ERR_EXCEPTION, &
+                  'handoff: accepted provision does not pin source export')
+
       call rpc_conn_close(alice_to_bob)
       call rpc_conn_close(bob_to_alice)
       call rpc_conn_close(carol_to_bob)
@@ -230,5 +293,107 @@ contains
       call rpc_conn_close(alice_to_carol)
       call rpc_conn_close(carol_to_alice)
    end subroutine run_handoff
+
+   !> Hand off an owned membrane wrapper and call it after the introducer
+   !> has released her reference. Both connections then close. Without a
+   !> reference on the provision and on the accepted export, the second
+   !> drop frees the wrapper twice and the call dispatches into it.
+   subroutine run_membrane_handoff(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: bob_vat_store
+      type(rpc_vat_t), pointer :: bob_vat
+      type(rpc_conn_t), target :: alice, bob_alice, carol, bob_carol
+      type(echo_srv_t), target :: inner
+      type(rpc_membrane_server_t), target :: wrapped
+      type(allow_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: boot, inner_p
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: bootcap, minted, claimed
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer :: ab, ba, cb, bc, err
+      integer(int64) :: qb, qm, provide_qid, claim, qcall
+
+      call px_socketpair(ab, ba, err)
+      call check_(error, err == CAPNP_OK, 'membrane handoff: alice pair')
+      call px_socketpair(cb, bc, err)
+      call check_(error, err == CAPNP_OK, 'membrane handoff: carol pair')
+      if (allocated(error)) return
+
+      inner_p => inner
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped, inner_p, policy)
+      boot => null()
+      call rpc_conn_init(alice, ab, boot)
+      call rpc_conn_init(carol, cb, boot)
+      boot => wrapped
+      call rpc_conn_init(bob_alice, ba, boot)
+      call rpc_conn_init(bob_carol, bc, boot)
+      bob_vat => bob_vat_store
+      call rpc_conn_set_vat(bob_alice, bob_vat)
+      call rpc_conn_set_vat(bob_carol, bob_vat)
+
+      call rpc_bootstrap_send(alice, bootcap, err)
+      qb = bootcap%id
+      call rpc_pump_once(bob_alice, err)
+      call rpc_wait(alice, qb, err)
+      call rpc_result_cap(alice, qb, [integer ::], bootcap, err)
+      call check_(error, err == CAPNP_OK, 'membrane handoff: bootstrap')
+      if (allocated(error)) return
+
+      ! Method 1 mints an adder. The membrane wraps it in an owned server.
+      call capnp_message_init_builder(m, err)
+      call rpc_call_begin(alice, bootcap, ECHO_IFACE, 1, m, params, qm, err)
+      s = capnp_new_struct(m, 1, 0, err)
+      call capnp_set_i64(s, 0_int64, 100_int64, err)
+      call payload_content_set(params, s, err)
+      call rpc_call_send(alice, m, err)
+      call rpc_pump_once(bob_alice, err)
+      call rpc_wait(alice, qm, err)
+      call rpc_result_cap(alice, qm, [0], minted, err)
+      call check_(error, err == CAPNP_OK .and. minted%kind == RPC_CAP_IMPORT, &
+                  'membrane handoff: minted cap')
+      if (allocated(error)) return
+
+      call rpc_provide_send(alice, minted%id, '127.0.0.1', 9, NONCE + 7_int64, &
+                            provide_qid, err)
+      call rpc_pump_once(bob_alice, err)
+      call rpc_wait(alice, provide_qid, err)
+      call check_(error, err == CAPNP_OK .and. rpc_pending_provisions(bob_alice) == 1, &
+                  'membrane handoff: provision recorded')
+
+      ! Alice drops her reference before Carol accepts. The provision must
+      ! keep the wrapper alive.
+      call rpc_finish_send(alice, qm, .false., err)
+      call rpc_pump_once(bob_alice, err)
+      call rpc_finish_send(alice, qb, .false., err)
+      call rpc_pump_once(bob_alice, err)
+
+      call rpc_accept_send(carol, NONCE + 7_int64, .false., claim, err)
+      call rpc_pump_once(bob_carol, err)
+      call rpc_wait(carol, claim, err)
+      call rpc_result_cap(carol, claim, [integer ::], claimed, err)
+      call check_(error, err == CAPNP_OK .and. claimed%kind == RPC_CAP_IMPORT, &
+                  'membrane handoff: accept survived the release')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, err)
+      call rpc_call_begin(carol, claimed, ECHO_IFACE, 0, m, params, qcall, err)
+      s = capnp_new_struct(m, 1, 0, err)
+      call capnp_set_i64(s, 0_int64, 5_int64, err)
+      call payload_content_set(params, s, err)
+      call rpc_call_send(carol, m, err)
+      call rpc_pump_once(bob_carol, err)
+      call rpc_wait(carol, qcall, err)
+      call rpc_result_content(carol, qcall, content, err)
+      call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
+                  'membrane handoff: claimed wrapper still answers')
+
+      call rpc_conn_close(alice)
+      call rpc_conn_close(bob_alice)
+      call rpc_conn_close(carol)
+      call rpc_conn_close(bob_carol)
+   end subroutine run_membrane_handoff
 
 end module test_rpc_handoff

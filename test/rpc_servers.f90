@@ -32,9 +32,10 @@ contains
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
       type(capnp_ptr_t) :: s
+      type(capnp_ptr_t) :: owner
       type(adder_srv_t), pointer :: ad
       class(rpc_server_t), pointer :: sp
-      character(len=:), allocatable :: txt
+      character(len=:), allocatable :: txt, owner_name
       integer :: idx
       err = CAPNP_OK
       associate (server => self)
@@ -46,9 +47,17 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
+         owner = capnp_getp(ctx%params, 0, err)
+         if (err /= CAPNP_OK) return
          s = capnp_new_struct(ctx%rmsg, 0, 1, err)
          if (err /= CAPNP_OK) return
-         call capnp_set_text(s, 0, 'sturdy:echo-main', err)
+         if (owner%kind == CAPNP_PK_NULL) then
+            call capnp_set_text(s, 0, 'sturdy:echo-main', err)
+         else
+            call capnp_get_text(owner, 0, owner_name, err)
+            if (err /= CAPNP_OK) return
+            call capnp_set_text(s, 0, 'sturdy:echo-main:'//owner_name, err)
+         end if
          if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
          return
       end if

@@ -14,6 +14,19 @@ public:
 		ctx.getResults().setSum(p.getA() + p.getB());
 		return kj::READY_NOW;
 	}
+
+	kj::Promise<void> waitForever(WaitForeverContext) override {
+		return kj::Promise<void>(kj::NEVER_DONE).attach(
+			kj::defer([this]() { ++canceledCalls; }));
+	}
+
+	kj::Promise<void> cancellationCount(CancellationCountContext ctx) override {
+		ctx.getResults().setCount(canceledCalls);
+		return kj::READY_NOW;
+	}
+
+private:
+	uint32_t canceledCalls = 0;
 };
 
 int main(int argc, char **argv) {

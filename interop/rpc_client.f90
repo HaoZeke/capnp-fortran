@@ -18,7 +18,7 @@ program rpc_client
    type(payload_t) :: params
    type(capnp_ptr_t) :: s, content
    character(len=16) :: arg
-   integer(int64) :: q1, q2
+   integer(int64) :: q1, q2, qcancel, qcount
    integer :: port, fd, err, i, nfail
 
    nfail = 0
@@ -75,8 +75,28 @@ program rpc_client
    call check_(err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 15_int64, &
                'settled add sum == 15')
 
+   ! A C++ method marked allowCancellation never completes by itself.
+   ! Finish must cancel it, and the next ordered call observes that the
+   ! server-side promise was dropped.
+   call rpc_call_begin(conn, adder, ADDER_IFACE, 1, m, params, qcancel, err)
+   s = capnp_new_struct(m, 0, 0, err)
+   call payload_content_set(params, s, err)
+   call rpc_call_send(conn, m, err)
+   call rpc_request_cancellation(conn, qcancel, err)
+   call check_(err == CAPNP_OK, 'cancellation requested')
+
+   call rpc_call_begin(conn, adder, ADDER_IFACE, 2, m, params, qcount, err)
+   s = capnp_new_struct(m, 0, 0, err)
+   call payload_content_set(params, s, err)
+   call rpc_call_send(conn, m, err)
+   call rpc_wait(conn, qcount, err)
+   call rpc_result_content(conn, qcount, content, err)
+   call check_(err == CAPNP_OK .and. capnp_get_u32(content, 0_int64) == 1, &
+               'C++ peer canceled the opted-in request')
+
    call rpc_finish_send(conn, q1, .false., err)
    call rpc_finish_send(conn, q2, .false., err)
+   call rpc_finish_send(conn, qcount, .false., err)
    call rpc_finish_send(conn, bootcap%id, .true., err)
    call rpc_conn_close(conn)
 

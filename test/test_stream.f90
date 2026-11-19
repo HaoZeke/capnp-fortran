@@ -55,10 +55,11 @@ contains
       call rpc_pump_once(srv, err)
       call check_(error, err == CAPNP_OK, 'stream: bootstrap')
 
-      ! Five chunks of growing size through a window of 2. The server
-      ! drains until quiet after each client action: retiring a window
-      ! slot emits a Finish alongside the next Call, so fixed one-pump
-      ! accounting would starve.
+      ! Five chunks through a 2-byte window. The first call is sent even
+      ! though its frame is larger than the window; every later call
+      ! retires the oldest before it is sent. The server drains until
+      ! quiet after each client action so that retirement can read the
+      ! Return.
       call rpc_stream_init(stream, window=2)
       sent = 0_int64
       do i = 1, 5
@@ -99,6 +100,44 @@ contains
       call writer_write_begin(cli, client, m, wparams, qid, err)
       call rpc_stream_send(cli, stream, m, qid, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'stream: post-failure send fails fast')
+
+      ! A 2-byte window retires before the second send, so the first
+      ! question is finished rather than left in flight beside the new one.
+      call rpc_stream_init(stream, window=2)
+      call writer_write_begin(cli, client, m, wparams, qid, err)
+      allocate (chunk(8))
+      chunk = 1_int8
+      call writer_write_params_chunk_set(wparams, chunk, err)
+      call rpc_stream_send(cli, stream, m, qid, err)
+      sent = qid
+      call drain(srv)
+      call writer_write_begin(cli, client, m, wparams, qid, err)
+      call writer_write_params_chunk_set(wparams, chunk, err)
+      call rpc_stream_send(cli, stream, m, qid, err)
+      deallocate (chunk)
+      call check_(error, .not. cli%questions(int(sent))%used, &
+                  'stream: byte window retires the first call')
+      call check_(error, stream%nout == 1, 'stream: only the new call is in flight')
+      call drain(srv)
+      call rpc_stream_finish(cli, stream, err)
+      call check_(error, err == CAPNP_OK, 'stream: retired window finishes')
+      call drain(srv)
+
+      call rpc_stream_init(stream, window=65536)
+      call writer_write_begin(cli, client, m, wparams, qid, err)
+      call rpc_stream_send(cli, stream, m, qid, err)
+      sent = qid
+      call rpc_stream_cancel(cli, stream, err)
+      call check_(error, err == CAPNP_OK .and. cli%questions(int(sent))%canceled, &
+                  'stream: cancel reserves the question')
+      call writer_write_begin(cli, client, m, wparams, qid, err)
+      call rpc_stream_send(cli, stream, m, qid, err)
+      call check_(error, err == RPC_ERR_EXCEPTION .and. .not. cli%questions(int(qid))%used, &
+                  'stream: send after cancel fails and releases its question')
+      call drain(srv)
+      call rpc_pump_once(cli, err)
+      call check_(error, .not. cli%questions(int(sent))%used, &
+                  'stream: the canceled return frees the question')
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)

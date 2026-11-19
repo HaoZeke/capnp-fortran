@@ -17,6 +17,24 @@ module test_rpc
    private
    public :: collect_rpc
 
+   type, extends(rpc_membrane_policy_t) :: counting_membrane_policy_t
+      integer :: inbound_calls = 0
+      integer :: outbound_calls = 0
+      logical :: block = .false.
+   contains
+      procedure :: inbound_call => counting_inbound_call
+      procedure :: outbound_call => counting_outbound_call
+   end type counting_membrane_policy_t
+
+   type, extends(rpc_byte_stream_t) :: fail_stream_t
+      integer :: accept_sends = 0
+   contains
+      procedure :: send_all => fail_stream_send
+      procedure :: recv_all => fail_stream_recv
+      procedure :: poll_in => fail_stream_poll
+      procedure :: close => fail_stream_close
+   end type fail_stream_t
+
    type(rpc_conn_t), target :: cli, srv
    type(echo_srv_t), target :: echo
    class(rpc_server_t), pointer :: boot
@@ -38,6 +56,34 @@ contains
       if (allocated(error)) return
       call check(error, cond, name)
    end subroutine check_
+
+   subroutine counting_inbound_call(self, interface_id, method_id, err)
+      class(counting_membrane_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%inbound_calls = self%inbound_calls + 1
+      if (method_id < 0) self%inbound_calls = self%inbound_calls + int(interface_id)
+      if (self%block) then
+         err = RPC_ERR_EXCEPTION
+      else
+         err = CAPNP_OK
+      end if
+   end subroutine counting_inbound_call
+
+   subroutine counting_outbound_call(self, interface_id, method_id, err)
+      class(counting_membrane_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%outbound_calls = self%outbound_calls + 1
+      if (method_id < 0) self%outbound_calls = self%outbound_calls + int(interface_id)
+      if (self%block) then
+         err = RPC_ERR_EXCEPTION
+      else
+         err = CAPNP_OK
+      end if
+   end subroutine counting_outbound_call
 
    subroutine run_rpc(error)
       type(error_type), allocatable, intent(out) :: error
@@ -73,7 +119,20 @@ contains
       if (.not. allocated(error)) call t_join_same_capability(error)
       if (.not. allocated(error)) call t_join_unresolvable_part(error)
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
+      if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
+      if (.not. allocated(error)) call t_join_send_unwinds(error)
+      if (.not. allocated(error)) call t_join_finish_releases_cap(error)
+      if (.not. allocated(error)) call t_abandoned_join_cleared(error)
+      if (.not. allocated(error)) call t_finish_provide_qid(error)
+      if (.not. allocated(error)) call t_request_cancellation(error)
+      if (.not. allocated(error)) call t_cancel_reserves_qid(error)
+      if (.not. allocated(error)) call t_send_failure_releases_qid(error)
+      if (.not. allocated(error)) call t_membrane(error)
+      if (.not. allocated(error)) call t_export_table_full(error)
+      if (.not. allocated(error)) call t_pluggable_transport(error)
+      if (.not. allocated(error)) call t_frame_word_limit(error)
+      if (.not. allocated(error)) call t_dial_guard(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -116,6 +175,24 @@ contains
       call rpc_send_message(cli%fd, m, e)
       call capnp_message_free(m)
    end subroutine send_join_part
+
+   subroutine send_finish(qid, e)
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      f = message_finish_init(msg, e)
+      if (e == CAPNP_OK) call finish_question_id_set(f, qid, e)
+      if (e == CAPNP_OK) call finish_release_result_caps_set(f, .true., e)
+      if (e == CAPNP_OK) call finish_require_early_cancellation_workaround_set(f, .false., e)
+      if (e == CAPNP_OK) call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_finish
 
    !> Read one Return off the client socket and unpack its JoinResult.
    subroutine recv_join_result(ansid, jid, succeeded, has_cap, e)
@@ -667,6 +744,33 @@ contains
       call check_(error, .not. cap1 .and. .not. cap2, 'join: no cap for a failed set')
    end subroutine t_join_all_parts_unresolvable
 
+   !> The client API sends a complete remote Join and settles the one
+   !> capability carried by its successful result set.
+   subroutine t_join_client_api(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: caps(2), joined
+      integer(int64) :: qids(2)
+      integer :: a, b, n
+      logical :: succeeded
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join client: server has a live export')
+      if (allocated(error)) return
+      caps%kind = RPC_CAP_IMPORT
+      caps%id = int(a, int64)
+      call rpc_join_send(cli, caps, 19_int64, qids, err)
+      call check_(error, err == CAPNP_OK .and. all(qids >= 0_int64), &
+                  'join client: complete set sent')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+      call rpc_join_wait(cli, qids, joined, succeeded, err)
+      call check_(error, err == CAPNP_OK .and. succeeded, &
+                  'join client: equal remote capabilities join')
+      call check_(error, joined%kind == RPC_CAP_IMPORT .and. joined%id == int(a, int64), &
+                  'join client: joined capability settles')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+   end subroutine t_join_client_api
+
    !> An export id the server is not using.
    function free_export_slot() result(idx)
       integer :: idx, i
@@ -684,6 +788,8 @@ contains
    subroutine t_join_incomplete_set_is_silent(error)
       type(error_type), allocatable, intent(inout) :: error
       integer :: a, b, n
+      integer(int64) :: ansid, jid
+      logical :: succeeded, has_cap
       logical :: readable
       call two_live_exports(a, b, n)
       if (allocated(error)) return
@@ -697,7 +803,614 @@ contains
       call px_poll_in(cli%fd, 50, readable, err)
       call check_(error, err == CAPNP_OK, 'join: poll for a premature reply')
       call check_(error, .not. readable, 'join: incomplete set draws no reply')
+
+      call send_finish(720_int64, err)
+      call check_(error, err == CAPNP_OK, 'join: cancellation finish sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'join: cancellation finish processed')
+
+      ! Cancellation must free the incomplete Join state, allowing the
+      ! same join id to begin a differently sized complete set.
+      call send_join_part(721_int64, a, 13_int64, 1, 0, err)
+      call rpc_pump_once(srv, err)
+      call recv_join_result(ansid, jid, succeeded, has_cap, err)
+      call check_(error, err == CAPNP_OK, 'join: canceled replacement result read')
+      call check_(error, ansid == 721_int64, 'join: canceled replacement answer id')
+      call check_(error, jid == 13_int64, 'join: canceled replacement join id')
+      call check_(error, succeeded, 'join: canceled replacement succeeds')
+      call check_(error, has_cap, 'join: canceled replacement carries cap')
    end subroutine t_join_incomplete_set_is_silent
+
+   !> A later Join part that cannot be sent must Finish the parts already
+   !> on the wire and return the question that never left.
+   subroutine t_join_send_unwinds(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: caps(2)
+      integer(int64) :: qids(2)
+      integer :: a, b, n, i
+      logical :: held
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join unwind: server has a live export')
+      if (allocated(error)) return
+      caps(1)%kind = RPC_CAP_IMPORT
+      caps(1)%id = int(a, int64)
+      caps(2) = rpc_cap_t()
+      call rpc_join_send(cli, caps, 77_int64, qids, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'join unwind: bad part is an argument error')
+      call check_(error, qids(1) >= 0_int64 .and. .not. cli%questions(int(qids(1)))%used, &
+                  'join unwind: sent part is finished locally')
+      call check_(error, qids(2) < 0_int64, 'join unwind: unsent part is not reserved')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+      held = .false.
+      do i = 0, 7
+         if (srv%joins(i)%used .and. srv%joins(i)%join_id == 77_int64) held = .true.
+      end do
+      call check_(error, .not. held, 'join unwind: Finish frees the server slot')
+   end subroutine t_join_send_unwinds
+
+   !> Finish(releaseResultCaps) drops the export reference a Join result added.
+   subroutine t_join_finish_releases_cap(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap, caps(1)
+      integer(int64) :: qboot, qids(1)
+      integer :: fa, fb, e, before
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'join release: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK .and. sconn%exports(0)%used, 'join release: bootstrap')
+      if (allocated(error)) return
+      before = sconn%exports(0)%refcount
+      caps(1) = cap
+      call rpc_join_send(cconn, caps, 4_int64, qids, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qids(1), e)
+      call rpc_finish_send(cconn, qids(1), .false., e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, sconn%exports(0)%used, 'join release: original export remains')
+      call check_(error, sconn%exports(0)%refcount == before, &
+                  'join release: Finish drops the result reference')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_join_finish_releases_cap
+
+   !> A peer that dies mid-join does not leave the join slot occupied.
+   subroutine t_abandoned_join_cleared(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(join_key_part_t) :: kp
+      integer :: fa, fb, e, i
+      logical :: held
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'join death: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      jn = message_join_init(msg, e)
+      call join_question_id_set(jn, 5_int64, e)
+      tgt = join_target_init(jn, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      kp = join_key_part_new(m, e)
+      call join_key_part_join_id_set(kp, 9_int64, e)
+      call join_key_part_part_count_set(kp, 2, e)
+      call join_key_part_part_num_set(kp, 0, e)
+      call join_key_part_set(jn, kp%p, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      held = .false.
+      do i = 0, 7
+         if (sconn%joins(i)%used) held = .true.
+      end do
+      call check_(error, held, 'join death: partial set is recorded')
+      if (allocated(error)) return
+      call rpc_conn_close(cconn)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == RPC_ERR_DEAD, 'join death: peer close is reported')
+      held = .false.
+      do i = 0, 7
+         if (sconn%joins(i)%used) held = .true.
+      end do
+      call check_(error, .not. held, 'join death: slot freed without Finish')
+      call rpc_conn_close(sconn)
+   end subroutine t_abandoned_join_cleared
+
+   !> Finish names a Provide question that does not fit in the answer table.
+   subroutine t_finish_provide_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(provide_t) :: pv
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(vat_id_t) :: vat
+      type(finish_t) :: f
+      integer(int64) :: qboot
+      integer :: fa, fb, e, before, refs
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'provide finish: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'provide finish: bootstrap')
+      if (allocated(error)) return
+      before = rpc_pending_provisions(sconn)
+      refs = sconn%exports(0)%refcount
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      pv = message_provide_init(msg, e)
+      call provide_question_id_set(pv, 100_int64, e)
+      tgt = provide_target_init(pv, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      rid = recipient_id_new(m, e)
+      call recipient_id_nonce_set(rid, 4242_int64, e)
+      vat = recipient_id_vat_init(rid, e)
+      call vat_id_host_set(vat, '127.0.0.1', e)
+      call vat_id_port_set(vat, 9, e)
+      call provide_recipient_set(pv, rid%p, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call rpc_recv_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call check_(error, rpc_pending_provisions(sconn) == before + 1, &
+                  'provide finish: arrangement is pending')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      f = message_finish_init(msg, e)
+      call finish_question_id_set(f, 100_int64, e)
+      call finish_release_result_caps_set(f, .true., e)
+      call finish_require_early_cancellation_workaround_set(f, .false., e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, rpc_pending_provisions(sconn) == before, &
+                  'provide finish: Finish releases the arrangement')
+      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
+                  'provide finish: only the pin is dropped')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_provide_qid
+
+   !> Cancellation is a Finish sent before Return, with the legacy early
+   !> cancellation workaround disabled as required by modern peers.
+   subroutine t_request_cancellation(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: target
+      type(capnp_message_t), target :: m, wire
+      type(message_t) :: msg
+      type(payload_t) :: params
+      type(finish_t) :: finish
+      integer(int64) :: qid
+      integer :: a, b, n
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'cancel: server has a live export')
+      if (allocated(error)) return
+      target%kind = RPC_CAP_IMPORT
+      target%id = int(a, int64)
+      call rpc_call_begin(cli, target, ECHO_IFACE, 0, m, params, qid, err)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, err), err)
+      call rpc_call_send(cli, m, err)
+      call rpc_request_cancellation(cli, qid, err)
+      call check_(error, err == CAPNP_OK, 'cancel: Finish sent')
+
+      ! Drain the Call and inspect the following Finish without dispatching
+      ! the call, which models cancellation before application delivery.
+      call rpc_recv_message(srv%fd, wire, err)
+      call capnp_message_free(wire)
+      call rpc_recv_message(srv%fd, wire, err)
+      msg = message_read_root(wire, err)
+      call check_(error, message_which(msg) == MESSAGE_FINISH_TAG, &
+                  'cancel: request is Finish')
+      finish = message_finish_get(msg, err)
+      call check_(error, finish_question_id_get(finish) == qid, &
+                  'cancel: question id')
+      call check_(error, finish_release_result_caps_get(finish), &
+                  'cancel: result caps released')
+      call check_(error, .not. finish_require_early_cancellation_workaround_get(finish), &
+                  'cancel: modern cancellation semantics')
+      call check_(error, cli%questions(int(qid))%used .and. &
+                  cli%questions(int(qid))%canceled, &
+                  'cancel: question reserved until its return')
+      call capnp_message_free(wire)
+
+      call rpc_finish_send(cli, -1_int64, .false., err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'cancel: invalid finish id rejected')
+      call rpc_request_cancellation(cli, -1_int64, err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'cancel: invalid cancellation id rejected')
+   end subroutine t_request_cancellation
+
+   !> A canceled question keeps its id until the late Return arrives, so
+   !> that Return cannot become the result of the next call.
+   subroutine t_cancel_reserves_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qboot, q1, q2
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'cancel id: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'cancel id: bootstrap')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q1, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'a', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_request_cancellation(cconn, q1, e)
+      call check_(error, e == CAPNP_OK .and. cconn%questions(int(q1))%canceled, &
+                  'cancel id: first call reserved')
+      call rpc_wait(cconn, q1, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, 'cancel id: wait does not block')
+      call rpc_wait(cconn, -1_int64, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'cancel id: wait rejects a negative id')
+      call rpc_wait(cconn, 64_int64, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'cancel id: wait rejects an out of range id')
+
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q2, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 7_int64, e)
+      call capnp_set_text(s, 0, 'b', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call check_(error, q2 /= q1, 'cancel id: new call does not reuse the id')
+      if (allocated(error)) return
+
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q2, e)
+      call rpc_result_content(cconn, q2, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 14_int64, &
+                  'cancel id: late return is not the new result')
+      call check_(error, .not. cconn%questions(int(q1))%used, &
+                  'cancel id: return releases the reserved id')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_cancel_reserves_qid
+
+   subroutine fail_stream_send(self, bytes, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      if (self%accept_sends > 0) then
+         self%accept_sends = self%accept_sends - 1
+         err = CAPNP_OK
+         if (size(bytes) < 0) err = CAPNP_ERR_IO
+      else
+         err = CAPNP_ERR_IO
+      end if
+   end subroutine fail_stream_send
+
+   subroutine fail_stream_recv(self, bytes, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      err = CAPNP_ERR_IO
+      if (size(bytes) < 0) self%accept_sends = 0
+   end subroutine fail_stream_recv
+
+   subroutine fail_stream_poll(self, timeout_ms, readable, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer, intent(in) :: timeout_ms
+      logical, intent(out) :: readable
+      integer, intent(out) :: err
+      readable = .false.
+      err = CAPNP_OK
+      if (timeout_ms < 0) self%accept_sends = 0
+   end subroutine fail_stream_poll
+
+   subroutine fail_stream_close(self)
+      class(fail_stream_t), intent(inout) :: self
+      self%accept_sends = 0
+   end subroutine fail_stream_close
+
+   !> A question allocated for a call or bootstrap that never leaves the
+   !> vat must not stay reserved, or the table fills after repeated errors.
+   subroutine t_send_failure_releases_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(fail_stream_t), target :: broken
+      type(rpc_conn_t), target :: cconn
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qid
+      integer :: i, e
+      local_boot => null()
+      broken%accept_sends = 0
+      call rpc_conn_init_stream(cconn, broken, local_boot)
+      qid = 0_int64
+      do i = 1, 65
+         call rpc_bootstrap_send(cconn, cap, e)
+      end do
+      call check_(error, e == CAPNP_ERR_IO, 'send fail: bootstrap reports the stream')
+      call check_(error, .not. cconn%questions(0)%used, &
+                  'send fail: bootstrap does not keep the question')
+      cap = rpc_cap_t()
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, qid, e)
+      call check_(error, e == CAPNP_ERR_ARG .and. qid < 0_int64, &
+                  'send fail: bad target releases its question')
+      call check_(error, .not. cconn%questions(0)%used, &
+                  'send fail: question table still empty')
+      call rpc_conn_close(cconn)
+   end subroutine t_send_failure_releases_qid
+
+   !> A membrane checks calls, recursively wraps result capabilities,
+   !> blocks client-side calls through an explicit wrapper, and revokes
+   !> every server capability sharing its policy.
+   subroutine t_membrane(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: mcli, msrv
+      type(echo_srv_t), target :: inner_server
+      type(rpc_membrane_server_t), target :: wrapped_server
+      type(counting_membrane_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, mboot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: root, adder, blocked
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qb, qm, qa
+      integer :: ma, mb, e
+      logical :: handled
+
+      call px_socketpair(ma, mb, e)
+      call check_(error, e == CAPNP_OK, 'membrane: socketpair')
+      if (allocated(error)) return
+      inner => inner_server
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped_server, inner, policy)
+      mboot => wrapped_server
+      call rpc_conn_init(msrv, mb, mboot)
+      mboot => null()
+      call rpc_conn_init(mcli, ma, mboot)
+
+      call rpc_bootstrap_send(mcli, root, e)
+      qb = root%id
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qb, e)
+      call rpc_result_cap(mcli, qb, [integer ::], root, e)
+      call rpc_finish_send(mcli, qb, .true., e)
+      call rpc_pump_once(msrv, e)
+
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, qm, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 100_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qm, e)
+      call rpc_result_cap(mcli, qm, [0], adder, e)
+      call check_(error, e == CAPNP_OK .and. policy_store%inbound_calls == 1, &
+                  'membrane: root call checked')
+
+      call rpc_call_begin(mcli, adder, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 5_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qa, e)
+      call rpc_result_content(mcli, qa, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
+                  'membrane: recursive result capability works')
+      call rpc_finish_send(mcli, qm, .true., e)
+      call rpc_pump_once(msrv, e)
+      call rpc_finish_send(mcli, qa, .false., e)
+      call rpc_pump_once(msrv, e)
+      call check_(error, policy_store%inbound_calls == 2, &
+                  'membrane: recursive result capability checked')
+
+      policy_store%block = .true.
+      blocked = rpc_membrane_cap(adder, policy)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. qa < 0_int64, &
+                  'membrane: client wrapper blocks before send')
+      blocked = rpc_membrane_cap(adder, policy, reverse=.true.)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  policy_store%outbound_calls == 1, &
+                  'membrane: reverse wrapper checks outbound calls')
+      policy_store%block = .false.
+
+      ! A pipelined capability must carry the question's membrane, so a
+      ! revoke stops the call before it is written to the socket.
+      blocked = rpc_membrane_cap(adder, policy)
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call payload_content_set(params, s, e)
+      call capnp_message_free(m)
+      blocked = rpc_pipeline_cap(mcli, qa, [0])
+
+      call rpc_membrane_revoke(policy_store, 'test membrane revoked')
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. qa < 0_int64, &
+                  'membrane: revoked pipeline does not send')
+      call rpc_pump_poll(msrv, 20, handled, e)
+      call check_(error, e == CAPNP_OK .and. .not. handled, &
+                  'membrane: server saw no pipelined call')
+      call rpc_call_begin(mcli, adder, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qa, e)
+      call rpc_result_content(mcli, qa, content, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, &
+                  'membrane: revocation reaches recursive wrappers')
+      call rpc_finish_send(mcli, qa, .false., e)
+      call rpc_pump_once(msrv, e)
+
+      call rpc_conn_close(mcli)
+      call rpc_conn_close(msrv)
+   end subroutine t_membrane
+
+   !> A cap-returning call against a full export table is an exception,
+   !> and the membrane wrapper built for that call is not left allocated.
+   subroutine t_export_table_full(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: mcli, msrv
+      type(echo_srv_t), target :: inner_server
+      type(rpc_membrane_server_t), target :: wrapped_server
+      type(counting_membrane_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, mboot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: root
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: q
+      integer :: ma, mb, e, i, nused
+      call px_socketpair(ma, mb, e)
+      call check_(error, e == CAPNP_OK, 'export full: socketpair')
+      if (allocated(error)) return
+      inner => inner_server
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped_server, inner, policy)
+      mboot => wrapped_server
+      call rpc_conn_init(msrv, mb, mboot)
+      mboot => null()
+      call rpc_conn_init(mcli, ma, mboot)
+      call rpc_bootstrap_send(mcli, root, e)
+      q = root%id
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_cap(mcli, q, [integer ::], root, e)
+      call rpc_finish_send(mcli, q, .true., e)
+      call rpc_pump_once(msrv, e)
+      do i = 1, 63
+         call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, q, e)
+         s = capnp_new_struct(m, 1, 0, e)
+         call capnp_set_i64(s, 0_int64, int(i, int64), e)
+         call payload_content_set(params, s, e)
+         call rpc_call_send(mcli, m, e)
+         call rpc_pump_once(msrv, e)
+         call rpc_wait(mcli, q, e)
+         call rpc_result_content(mcli, q, content, e)
+         if (e /= CAPNP_OK) exit
+         call rpc_finish_send(mcli, q, .true., e)
+         call rpc_pump_once(msrv, e)
+      end do
+      call check_(error, e == CAPNP_OK, 'export full: table filled')
+      if (allocated(error)) return
+      nused = 0
+      do i = 0, size(msrv%exports) - 1
+         if (msrv%exports(i)%used) nused = nused + 1
+      end do
+      call check_(error, nused == size(msrv%exports), 'export full: every slot is live')
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, q, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 9_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_content(mcli, q, content, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, 'export full: mint is an exception')
+      nused = 0
+      do i = 0, size(msrv%exports) - 1
+         if (msrv%exports(i)%used) nused = nused + 1
+      end do
+      call check_(error, nused == size(msrv%exports), 'export full: no partial export kept')
+      call rpc_finish_send(mcli, q, .false., e)
+      call rpc_pump_once(msrv, e)
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 3_int64, e)
+      call capnp_set_text(s, 0, 'z', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, q, e)
+      call rpc_result_content(mcli, q, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 6_int64, &
+                  'export full: later call still answers')
+      call rpc_conn_close(mcli)
+      call rpc_conn_close(msrv)
+   end subroutine t_export_table_full
+
+   !> Connections can own an abstract byte stream rather than depending
+   !> on the integer descriptor adapter in the RPC core.
+   subroutine t_pluggable_transport(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_fd_stream_t), target :: astream, bstream
+      type(rpc_conn_t), target :: aconn, bconn
+      type(echo_srv_t), target :: stream_server
+      class(rpc_server_t), pointer :: stream_boot
+      type(rpc_cap_t) :: cap
+      integer :: e
+      call rpc_socketpair_streams(astream, bstream, e)
+      call check_(error, e == CAPNP_OK, 'transport: stream socketpair')
+      if (allocated(error)) return
+      stream_boot => null()
+      call rpc_conn_init_stream(aconn, astream, stream_boot)
+      stream_boot => stream_server
+      call rpc_conn_init_stream(bconn, bstream, stream_boot)
+      call rpc_bootstrap_send(aconn, cap, e)
+      call rpc_pump_once(bconn, e)
+      call rpc_wait(aconn, cap%id, e)
+      call check_(error, e == CAPNP_OK, 'transport: bootstrap over byte stream')
+      call rpc_conn_close(aconn)
+      call rpc_conn_close(bconn)
+      call check_(error, astream%fd == PX_BAD_FD .and. bstream%fd == PX_BAD_FD, &
+                  'transport: adapter close owns descriptors')
+   end subroutine t_pluggable_transport
 
    !> Bootstrap, then a call on the still-promised bootstrap cap
    !> (pipelining), then settle the cap and call again.
@@ -754,6 +1467,8 @@ contains
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 10_int64, &
                   'rpc: settled call')
 
+      call rpc_finish_send(cli, q0, .true., err)
+      call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, q1, .false., err)
       call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, q2, .false., err)
@@ -785,7 +1500,7 @@ contains
       call check_(error, err == CAPNP_OK, 'rpc: make-adder dispatched')
 
       ! Pipeline: add(5) on the promised adder at results ptr field 0.
-      adder_p = rpc_pipeline_cap(qm, [0])
+      adder_p = rpc_pipeline_cap(cli, qm, [0])
       call rpc_call_begin(cli, adder_p, ECHO_IFACE, 0, m, params, qp, err)
       s = capnp_new_struct(m, 1, 0, err)
       call capnp_set_i64(s, 0_int64, 5_int64, err)
@@ -800,6 +1515,10 @@ contains
       call rpc_result_content(cli, qp, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
                   'rpc: pipelined add result')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qp, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Settle the adder and call it directly.
       call rpc_result_cap(cli, qm, [0], adder, err)
@@ -814,6 +1533,8 @@ contains
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 107_int64, &
                   'rpc: settled adder call')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Retain the adder import across the finish of its origin question.
       call rpc_finish_send(cli, qm, .true., err)
@@ -828,6 +1549,8 @@ contains
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 101_int64, &
                   'rpc: retained cap survives finish')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! Release the adder; a call afterwards must raise an exception.
       call rpc_release_send(cli, adder, err)
@@ -841,6 +1564,8 @@ contains
       call rpc_wait(cli, qs, err)
       call rpc_result_content(cli, qs, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: released cap raises')
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_cap_result_and_pipeline
 
    !> Unknown method ids surface as exception returns.
@@ -863,6 +1588,10 @@ contains
       call rpc_wait(cli, qx, err)
       call rpc_result_content(cli, qx, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: bad method raises')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qx, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_exception
 
    !> The obsolete save/delete messages are gone from the protocol, so
@@ -1156,26 +1885,36 @@ contains
    subroutine t_persistent_save(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_cap_t) :: bootcap
-      type(capnp_message_t), target :: m
-      type(payload_t) :: params
-      type(capnp_ptr_t) :: s, content
+      type(capnp_message_t), target :: m, owner_msg
+      type(capnp_ptr_t) :: owner, sturdy_ref, save_results
       integer(int64) :: qb, qs
       character(len=:), allocatable :: ref
       call rpc_bootstrap_send(cli, bootcap, err)
       qb = bootcap%id
       call rpc_pump_once(srv, err)
-      call rpc_call_begin(cli, bootcap, RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE, &
-                          m, params, qs, err)
-      s = capnp_new_struct(m, 0, 0, err)
-      call payload_content_set(params, s, err)
+
+      ! Persistent<SturdyRef, Owner>.save carries an application-defined
+      ! owner in SaveParams.sealFor.
+      call capnp_message_init_builder(owner_msg, err)
+      owner = capnp_new_struct(owner_msg, 0, 1, err)
+      call capnp_set_root(owner_msg, owner, err)
+      call capnp_set_text(owner, 0, 'alice', err)
+      call rpc_persistent_save_begin(cli, bootcap, m, owner, qs, err)
       call rpc_call_send(cli, m, err)
       call rpc_pump_once(srv, err)
       call rpc_wait(cli, qb, err)
-      call rpc_wait(cli, qs, err)
-      call rpc_result_content(cli, qs, content, err)
+      call rpc_persistent_save_wait(cli, qs, sturdy_ref, err)
       call check_(error, err == CAPNP_OK, 'rpc: save returned')
-      call capnp_get_text(content, 0, ref, err)
-      call check_(error, err == CAPNP_OK .and. ref == 'sturdy:echo-main', 'rpc: sturdy ref')
+      call check_(error, sturdy_ref%kind == CAPNP_PK_LIST, 'rpc: sturdy ref pointer returned')
+      call rpc_result_content(cli, qs, save_results, err)
+      call capnp_get_text(save_results, 0, ref, err)
+      call check_(error, err == CAPNP_OK .and. ref == 'sturdy:echo-main:alice', &
+                  'rpc: sealed sturdy ref')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qs, .false., err)
+      call rpc_pump_once(srv, err)
+      call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
    !> Resolve messages come back as unimplemented (the vat keeps using
@@ -1225,6 +1964,10 @@ contains
       call rpc_wait(cli, qy, err)
       call rpc_result_content(cli, qy, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: sendResultsTo.yourself raises')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
+      call rpc_finish_send(cli, qy, .false., err)
+      call rpc_pump_once(srv, err)
 
       ! takeFromOtherQuestion Return -> exception with reason, not
       ! ERR_KIND. The peer (impersonated on the raw fd) redirects a live
@@ -1247,6 +1990,8 @@ contains
       call rpc_result_content(cli, qy, content, err)
       call check_(error, err == RPC_ERR_EXCEPTION, 'rpc: tail-call return raises cleanly')
       call check_(error, index(rpc_conn_reason(cli), 'tail-call') > 0, 'rpc: tail-call reason')
+      call rpc_finish_send(cli, qy, .false., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_resolve_and_tail_calls
 
    !> A senderPromise capTable entry settles into a usable import, per
@@ -1286,6 +2031,8 @@ contains
       call rpc_result_cap(cli, qb, [integer ::], cap, err)
       call check_(error, err == CAPNP_OK .and. cap%kind == RPC_CAP_IMPORT .and. &
                   cap%id == 5_int64, 'rpc: senderPromise settles as import')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_sender_promise_import
 
    !> Level 1 embargo: a senderLoopback Disembargo is answered by the
@@ -1404,6 +2151,8 @@ contains
       call rpc_pump_once(srv, err)
       call rpc_wait(cli, qb, err)
       call check_(error, err == CAPNP_OK, 'rpc: bootstrap after receiverLoopback')
+      call rpc_finish_send(cli, qb, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_disembargo_receiver_loopback_absorbed
 
    !> Poll-driven pumping: a quiet connection times out with
@@ -1419,6 +2168,90 @@ contains
       call check_(error, err == CAPNP_OK .and. handled, 'poll: pending message handled')
       call rpc_wait(cli, bootcap%id, err)
       call check_(error, err == CAPNP_OK, 'poll: answer arrived')
+      call rpc_finish_send(cli, bootcap%id, .true., err)
+      call rpc_pump_once(srv, err)
    end subroutine t_pump_poll
+
+   !> A segment table that claims more words than the traversal limit is
+   !> rejected before the body is read or allocated.
+   subroutine t_frame_word_limit(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_message_t) :: m
+      integer(int8) :: hdr(0:7)
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'frame limit: socketpair')
+      if (allocated(error)) return
+      hdr = 0_int8
+      ! One segment whose size word is traversal_words + 1 (0x00800001).
+      hdr(4) = 1_int8
+      hdr(6) = int(z'80', int8)
+      call px_send_all(fa, hdr, e)
+      call rpc_recv_message(fb, m, e)
+      call check_(error, e == CAPNP_ERR_TRAVERSAL, 'frame limit: oversized segment rejected')
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_frame_word_limit
+
+   subroutine deny_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = .false.
+      if (port < 0 .and. len(host) < 0) allow = .true.
+   end subroutine deny_dial
+
+   subroutine allow_local_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = host == '127.0.0.1' .and. port > 0
+   end subroutine allow_local_dial
+
+   !> A dial hook can refuse an introduction, and a timeout returns
+   !> instead of blocking. The default hook still reaches a local listener.
+   subroutine t_dial_guard(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: holder, introduced
+      class(rpc_server_t), pointer :: boot
+      integer :: fa, fb, lfd, port, acc, e
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      call px_tcp_listen(0, lfd, e)
+      call px_tcp_bound_port(lfd, port, e)
+      call check_(error, e == CAPNP_OK .and. port > 0, 'dial: listener')
+      if (allocated(error)) return
+      boot => null()
+      call rpc_conn_init(holder, fa, boot)
+      holder%introductions(0)%used = .true.
+      holder%introductions(0)%nonce = 55_int64
+      holder%introductions(0)%host = '127.0.0.1'
+      holder%introductions(0)%host_len = 9
+      holder%introductions(0)%port = port
+      holder%dial_allow => deny_dial
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e == CAPNP_ERR_ARG, 'dial: hook refusal is an argument error')
+      call px_poll_in(lfd, 100, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, 'dial: refused hook does not connect')
+
+      holder%dial_allow => allow_local_dial
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e == CAPNP_OK, 'dial: allowed local connect')
+      call px_poll_in(lfd, 500, readable, e)
+      call check_(error, readable, 'dial: listener sees the allowed connect')
+      call px_tcp_accept(lfd, acc, e)
+      call px_close(acc)
+      call rpc_conn_close(introduced)
+
+      holder%introductions(0)%host = '192.0.2.1'
+      holder%introductions(0)%port = 81
+      holder%dial_allow => null()
+      holder%dial_timeout_ms = 300
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e /= CAPNP_OK, 'dial: timeout or refusal returns')
+      call rpc_conn_close(holder)
+      call px_close(fb)
+      call px_close(lfd)
+   end subroutine t_dial_guard
 
 end module test_rpc
