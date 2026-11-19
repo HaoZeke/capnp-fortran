@@ -960,7 +960,8 @@ contains
       integer(int64) :: c1, c2, rate
       real :: elapsed
       integer, parameter :: nch = 160000
-      integer, parameter :: nbytes = 100000
+      integer, parameter :: ntext = 640000
+      integer, parameter :: nbytes = 640000
       call load_codec(error, schema)
       if (allocated(error)) return
       idx = capnp_dyn_find(schema, 'Sample', err)
@@ -990,21 +991,21 @@ contains
       call check_(error, elapsed < 1.0, clock_msg('json string', elapsed))
       call capnp_message_free(msg)
       nt = len(tpfx)
-      allocate (character(len=nt + 4*nch + 1) :: tx)
+      allocate (character(len=nt + 4*ntext + 1) :: tx)
       tx(1:nt) = tpfx
-      do i = 1, nch
+      do i = 1, ntext
          tx(nt + 4*(i - 1) + 1:nt + 4*i) = '"a" '
       end do
-      tx(nt + 4*nch + 1:nt + 4*nch + 1) = ')'
+      tx(nt + 4*ntext + 1:nt + 4*ntext + 1) = ')'
       call system_clock(c1, rate)
-      call capnp_text_decode(schema, idx, tx(1:nt + 4*nch + 1), msg, err)
+      call capnp_text_decode(schema, idx, tx(1:nt + 4*ntext + 1), msg, err)
       call system_clock(c2)
       elapsed = 0.0
       if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
       call check_(error, err == CAPNP_OK, 'linear: adjacent text decodes')
       root = capnp_root(msg, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
-      call check_(error, err == CAPNP_OK .and. got == repeat('a', nch), 'linear: adjacent text bytes')
+      call check_(error, err == CAPNP_OK .and. got == repeat('a', ntext), 'linear: adjacent text bytes')
       call check_(error, elapsed < 1.0, clock_msg('adjacent text', elapsed))
       call capnp_message_free(msg)
       call capnp_message_init_builder(msg, err)
