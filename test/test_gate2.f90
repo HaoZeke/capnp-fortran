@@ -30,6 +30,7 @@ program test_gate2
    call case_27()
    call case_28()
    call case_29()
+   call case_30()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -847,4 +848,52 @@ contains
          achar(10) // &
          'rm -rf "$d"; exit $r')
    end subroutine case_29
+
+   subroutine case_30()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "body=' // &
+         achar(39) // &
+         '(v = 1)' // &
+         achar(39) // &
+         '; exec(' // &
+         achar(39) // &
+         'for i in range(100):\n body=\"(v = 1, kid = \"+body+\")\"' // &
+         achar(39) // &
+         '); open(' // &
+         achar(39) // &
+         '/tmp/g2-node.capnp' // &
+         achar(39) // &
+         ',' // &
+         achar(39) // &
+         'w' // &
+         achar(39) // &
+         ').write(' // &
+         achar(39) // &
+         '@0x8e1e4a11b22c3d4e;' // &
+         achar(39) // &
+         '+chr(10)+' // &
+         achar(39) // &
+         'struct Node { v @0 :Int32; kid @1 :Node; }' // &
+         achar(39) // &
+         '+chr(10)); open(' // &
+         achar(39) // &
+         '/tmp/g2-nest.in' // &
+         achar(39) // &
+         ',' // &
+         achar(39) // &
+         'w' // &
+         achar(39) // &
+         ').write(body+chr(10))"; "$CAP" convert text:text /tmp/g2-nod' // &
+         'e.capnp Node < /tmp/g2-nest.in > /tmp/g2-nest.o; echo $? > /' // &
+         'tmp/g2-nest.e1; capnp convert text:text /tmp/g2-node.capnp N' // &
+         'ode < /tmp/g2-nest.in > /tmp/g2-nest.r; echo $? > /tmp/g2-ne' // &
+         'st.e2; cmp -s /tmp/g2-nest.o /tmp/g2-nest.r && cmp -s /tmp/g' // &
+         '2-nest.e1 /tmp/g2-nest.e2')
+   end subroutine case_30
 end program test_gate2
