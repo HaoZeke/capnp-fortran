@@ -70,7 +70,7 @@ and capnp-C++:
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | partial (project-specific network layer; both halves and three-vat tests) |
-| RPC level 4 (`Join`, reference equality) | no | no | partial (two-party extension; no C++ parity) |
+| RPC level 4 (`Join`, reference equality) | no | no | yes (two-party Join; C++ replies unimplemented) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
@@ -137,10 +137,12 @@ alone; equal export ids then mean the same object, and exactly one
 `JoinResult` carries the joined capability. Upstream C++ has no `Join`
 case at all -- it falls through to the default branch and replies
 `unimplemented` -- so this is the one place the family is ahead of the
-reference implementation rather than catching up to it. Generics and
-reflection sit outside both this project's and capnpc-c's generated-code
-scope; the wire format carries generic types either way, so messages
-produced by C++ users of those features still read correctly here.
+reference implementation rather than catching up to it. Generics are
+generated as brand-resolved instantiations, and reflection is the
+dynamic API; the generated reflection metadata is annotation constants
+only. capnpc-c generates neither. The wire format carries generic types
+either way, so messages produced by C++ users of those features still
+read correctly here.
 
 ## Changelog
 
