@@ -1,5 +1,5 @@
-!> Shared scalar formatting, escaping, schema defaults, and builder allocation
-!> for the text and JSON codecs.
+!> Shared scalar formatting, escaping, schema defaults, builder allocation,
+!> and generic brand resolution for the text and JSON codecs.
 !>
 !> Float text matches KJ's DoubleToBuffer / FloatToBuffer (snprintf %.*g,
 !> then one extra retry, then the redundant exponent '+' stripped). Integer
@@ -12,7 +12,7 @@ module capnp_codec
       ieee_quiet_nan, ieee_value
    use capnp
    use capnp_schema
-   use capnp_dynamic, only: capnp_dyn_schema_t
+   use capnp_dynamic, only: capnp_dyn_schema_t, capnp_dyn_brand_t, capnp_dyn_load_brand
    implicit none
    private
 
@@ -30,6 +30,21 @@ module capnp_codec
    public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
    public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
    public :: capnp_put_signed, capnp_put_unsigned
+   public :: capnp_brand_env_t, capnp_brand_enter, capnp_brand_resolve
+
+   type :: brand_param_t
+      logical :: bound = .false.
+      type(capnp_ptr_t) :: typ
+   end type brand_param_t
+
+   type :: brand_scope_t
+      integer(int64) :: id = 0_int64
+      type(brand_param_t), allocatable :: params(:)
+   end type brand_scope_t
+
+   type :: capnp_brand_env_t
+      type(brand_scope_t), allocatable :: scopes(:)
+   end type capnp_brand_env_t
 
    interface
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
@@ -438,17 +453,19 @@ contains
       q = capnp_new_struct(m, dw, pw, err)
    end function capnp_codec_new_struct
 
-   function capnp_codec_alloc_list(parent, et, n, schema, err) result(lst)
+   function capnp_codec_alloc_list(parent, et, n, schema, err, env) result(lst)
       type(capnp_ptr_t), intent(in) :: parent, et
       integer, intent(in) :: n
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(out) :: err
+      type(capnp_brand_env_t), intent(in), optional :: env
       type(capnp_ptr_t) :: lst, rt
       type(capnp_message_t), pointer :: m
       integer :: tw, idx, dw, pw, es
       m => parent%msg
       err = CAPNP_OK
       rt = et
+      if (present(env)) rt = capnp_brand_resolve(env, et)
       tw = type_which(rt)
       if (tw == TYPE_STRUCT) then
          idx = capnp_codec_find_id(schema, type_type_id(rt))
@@ -484,6 +501,94 @@ contains
       case default; es = -1
       end select
    end function capnp_codec_elem_esize
+
+   function capnp_brand_resolve(env, t) result(rt)
+      type(capnp_brand_env_t), intent(in) :: env
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_ptr_t) :: rt
+      integer(int64) :: sid
+      integer :: pidx, i, step
+      logical :: hit
+      rt = t
+      if (.not. allocated(env%scopes)) return
+      do step = 1, 16
+         if (type_which(rt) /= TYPE_ANY_POINTER) return
+         if (type_anyptr_which(rt) /= ANYPTR_PARAMETER) return
+         sid = type_param_scope_id(rt)
+         pidx = type_param_index(rt) + 1
+         hit = .false.
+         do i = 1, size(env%scopes)
+            if (env%scopes(i)%id /= sid) cycle
+            if (allocated(env%scopes(i)%params)) then
+               if (pidx >= 1 .and. pidx <= size(env%scopes(i)%params)) then
+                  if (env%scopes(i)%params(pidx)%bound) then
+                     rt = env%scopes(i)%params(pidx)%typ
+                     hit = .true.
+                  end if
+               end if
+            end if
+            exit
+         end do
+         if (.not. hit) return
+      end do
+   end function capnp_brand_resolve
+
+   subroutine capnp_brand_enter(parent_env, t, child_env, err)
+      type(capnp_brand_env_t), intent(in) :: parent_env
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_brand_env_t), intent(out) :: child_env
+      integer, intent(out) :: err
+      type(capnp_dyn_brand_t) :: b
+      type(brand_scope_t) :: entry
+      type(brand_scope_t), allocatable :: grown(:)
+      integer :: i, j, k, nb, nsc, pos
+      err = CAPNP_OK
+      if (allocated(parent_env%scopes)) then
+         nsc = size(parent_env%scopes)
+         allocate (child_env%scopes(nsc))
+         child_env%scopes = parent_env%scopes
+      else
+         allocate (child_env%scopes(0))
+      end if
+      call capnp_dyn_load_brand(t, b, err)
+      if (err /= CAPNP_OK) return
+      if (.not. allocated(b%scopes)) return
+      do i = 1, size(b%scopes)
+         if (b%scopes(i)%inherited) cycle
+         entry%id = b%scopes(i)%id
+         if (allocated(entry%params)) deallocate (entry%params)
+         if (allocated(b%scopes(i)%bindings)) then
+            nb = size(b%scopes(i)%bindings)
+         else
+            nb = 0
+         end if
+         allocate (entry%params(nb))
+         do j = 1, nb
+            if (b%scopes(i)%bindings(j)%unbound) then
+               entry%params(j)%bound = .false.
+            else
+               entry%params(j)%bound = .true.
+               entry%params(j)%typ = capnp_brand_resolve(parent_env, b%scopes(i)%bindings(j)%type)
+            end if
+         end do
+         pos = 0
+         do k = 1, size(child_env%scopes)
+            if (child_env%scopes(k)%id == entry%id) then
+               pos = k
+               exit
+            end if
+         end do
+         if (pos > 0) then
+            child_env%scopes(pos) = entry
+         else
+            nsc = size(child_env%scopes)
+            allocate (grown(nsc + 1))
+            if (nsc > 0) grown(1:nsc) = child_env%scopes
+            grown(nsc + 1) = entry
+            call move_alloc(grown, child_env%scopes)
+         end if
+      end do
+   end subroutine capnp_brand_enter
 
    function capnp_def_bool(dv) result(d)
       type(capnp_ptr_t), intent(in) :: dv
