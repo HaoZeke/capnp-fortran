@@ -170,7 +170,10 @@ contains
       end if
       p = capnp_new_struct(msg, node_struct_data_words(schema%nodes(idx)), &
                            node_struct_pointer_count(schema%nodes(idx)), err)
-      if (err == CAPNP_OK) call capnp_set_root(msg, p, err)
+      if (err == CAPNP_OK) then
+         call capnp_set_root(msg, p, err)
+         if (err == CAPNP_OK) p%schema_id = node_id(schema%nodes(idx))
+      end if
    end function capnp_dyn_new_root
 
    !> The named field's schema entry within struct node idx; searches
@@ -719,6 +722,10 @@ contains
       ! The default object lives in the schema message. Handing that
       ! pointer back would let a write change every later default.
       call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
+      if (err == CAPNP_OK .and. type_which(t) == TYPE_STRUCT .and. &
+          q%kind == CAPNP_PK_STRUCT) then
+         q%schema_id = type_type_id(t)
+      end if
    end function capnp_dyn_getp
 
    !> Copy a schema default into the caller's builder and, when the slot
@@ -989,13 +996,70 @@ contains
       call capnp_set_data(p, int(field_slot_offset(f)), bytes, err)
    end subroutine capnp_dyn_set_data
 
+   !> True when value is a struct of the field's schema. A non-zero schema
+   !> id must match the field, and the layout must match the node.
+   function dyn_struct_ok(schema, t, value) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: t, value
+      logical :: ok
+      integer(int64) :: sid
+      integer :: nidx
+      ok = .false.
+      if (value%kind /= CAPNP_PK_STRUCT) return
+      sid = type_type_id(t)
+      if (value%schema_id /= 0_int64 .and. value%schema_id /= sid) return
+      nidx = dyn_node_by_id(schema, sid)
+      if (nidx /= 0) then
+         if (value%dwords /= node_struct_data_words(schema%nodes(nidx))) return
+         if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) return
+      end if
+      ok = .true.
+   end function dyn_struct_ok
+
+   !> True when a list's element size matches the field's element type.
+   function dyn_list_ok(schema, elem, value) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: elem, value
+      logical :: ok
+      integer :: nidx
+      ok = .false.
+      if (value%kind /= CAPNP_PK_LIST) return
+      select case (type_which(elem))
+      case (TYPE_VOID)
+         ok = value%esize == CAPNP_SZ_VOID
+      case (TYPE_BOOL)
+         ok = value%esize == CAPNP_SZ_BIT
+      case (TYPE_INT8, TYPE_UINT8)
+         ok = value%esize == CAPNP_SZ_BYTE
+      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM)
+         ok = value%esize == CAPNP_SZ_TWO
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32)
+         ok = value%esize == CAPNP_SZ_FOUR
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64)
+         ok = value%esize == CAPNP_SZ_EIGHT
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE, &
+            TYPE_CAPABILITY)
+         ok = value%esize == CAPNP_SZ_PTR
+      case (TYPE_STRUCT)
+         if (value%esize /= CAPNP_SZ_COMPOSITE) return
+         nidx = dyn_node_by_id(schema, type_type_id(elem))
+         ok = .true.
+         if (nidx /= 0) then
+            if (value%dwords /= node_struct_data_words(schema%nodes(nidx))) ok = .false.
+            if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) ok = .false.
+         end if
+      case default
+         ok = .true.
+      end select
+   end function dyn_list_ok
+
    subroutine capnp_dyn_setp(schema, idx, p, fname, value, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p, value
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, elem
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -1005,12 +1069,24 @@ contains
             TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
          if (value%kind /= CAPNP_PK_NULL) then
             select case (type_which(t))
-            case (TYPE_STRUCT, TYPE_ANY_STRUCT)
+            case (TYPE_STRUCT)
+               if (.not. dyn_struct_ok(schema, t, value)) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_ANY_STRUCT)
                if (value%kind /= CAPNP_PK_STRUCT) then
                   err = CAPNP_ERR_KIND
                   return
                end if
-            case (TYPE_LIST, TYPE_ANY_LIST)
+            case (TYPE_LIST)
+               elem = type_list_element(t, err)
+               if (err /= CAPNP_OK) return
+               if (.not. dyn_list_ok(schema, elem, value)) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_ANY_LIST)
                if (value%kind /= CAPNP_PK_LIST) then
                   err = CAPNP_ERR_KIND
                   return
@@ -1138,7 +1214,9 @@ contains
       if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
-      if (err == CAPNP_OK) call capnp_setp(p, int(field_slot_offset(f)), value, err)
+      if (err /= CAPNP_OK) return
+      value%schema_id = node_id(schema%nodes(nidx))
+      call capnp_setp(p, int(field_slot_offset(f)), value, err)
    end function capnp_dyn_init_struct
 
    function capnp_dyn_init_list(schema, idx, p, fname, n, err) result(value)
