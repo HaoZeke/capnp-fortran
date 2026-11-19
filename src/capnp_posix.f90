@@ -24,6 +24,12 @@ module capnp_posix
    integer(c_int), parameter :: SOL_SOCKET = 1
    integer(c_int), parameter :: SO_REUSEADDR = 2
    integer(c_short), parameter :: POLLIN = 1_c_short
+   integer(c_short), parameter :: POLLOUT = 4_c_short
+   integer(c_short), parameter :: POLLERR = 8_c_short
+   integer(c_int), parameter :: F_GETFL = 3_c_int
+   integer(c_int), parameter :: F_SETFL = 4_c_int
+   integer(c_int), parameter :: O_NONBLOCK = 2048_c_int
+   integer(c_int), parameter :: SO_ERROR = 4_c_int
 
    type, bind(c) :: c_pollfd
       integer(c_int) :: fd
@@ -140,6 +146,20 @@ module capnp_posix
          integer(c_int), value :: timeout_ms
          integer(c_int) :: nready
       end function c_poll
+
+      function c_fcntl(fd, cmd, arg) bind(c, name='fcntl') result(rc)
+         import :: c_int
+         integer(c_int), value :: fd, cmd, arg
+         integer(c_int) :: rc
+      end function c_fcntl
+
+      function c_getsockopt(fd, level, optname, optval, optlen) &
+         bind(c, name='getsockopt') result(rc)
+         import :: c_int, c_ptr
+         integer(c_int), value :: fd, level, optname
+         type(c_ptr), value :: optval, optlen
+         integer(c_int) :: rc
+      end function c_getsockopt
    end interface
 
 contains
@@ -290,12 +310,15 @@ contains
    !> Connect to a numeric IPv4 address. Vat identifiers remain
    !> network-layer data; DNS or directory lookup can be performed by the
    !> application before calling this adapter.
-   subroutine px_tcp_connect_host(host, port, fd, err)
+   subroutine px_tcp_connect_host(host, port, fd, err, timeout_ms)
       character(len=*), intent(in) :: host
       integer, intent(in) :: port
       integer, intent(out) :: fd, err
+      integer, intent(in), optional :: timeout_ms
       type(c_sockaddr_in), target :: sa
-      integer(c_int) :: sfd
+      type(c_pollfd), target :: pfd
+      integer(c_int) :: sfd, flags
+      integer(c_int), target :: soerr, optlen
       character(kind=c_char), allocatable, target :: hostz(:)
       integer :: i, n
       err = CAPNP_OK
@@ -319,7 +342,41 @@ contains
          return
       end if
       sa%sin_zero = 0_c_int8_t
+      if (.not. present(timeout_ms)) then
+         if (c_connect(sfd, c_loc(sa), 16_c_int) /= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+         fd = int(sfd)
+         return
+      end if
+      flags = c_fcntl(sfd, F_GETFL, 0_c_int)
+      if (flags < 0_c_int .or. &
+          c_fcntl(sfd, F_SETFL, ior(flags, O_NONBLOCK)) < 0_c_int) then
+         err = CAPNP_ERR_IO
+         call px_close(int(sfd))
+         return
+      end if
       if (c_connect(sfd, c_loc(sa), 16_c_int) /= 0_c_int) then
+         pfd%fd = sfd
+         pfd%events = ior(POLLOUT, POLLERR)
+         pfd%revents = 0_c_short
+         if (c_poll(c_loc(pfd), 1_c_long, int(timeout_ms, c_int)) <= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+         soerr = 0_c_int
+         optlen = 4_c_int
+         if (c_getsockopt(sfd, SOL_SOCKET, SO_ERROR, c_loc(soerr), c_loc(optlen)) /= 0_c_int &
+             .or. soerr /= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+      end if
+      if (c_fcntl(sfd, F_SETFL, flags) < 0_c_int) then
          err = CAPNP_ERR_IO
          call px_close(int(sfd))
          return
