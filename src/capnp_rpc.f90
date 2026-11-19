@@ -865,17 +865,27 @@ contains
 
    !> A capability reached by pointer-field hops into a question's
    !> not-yet-returned results: promise pipelining.
-   function rpc_pipeline_cap(qid, field_indices) result(cap)
+   function rpc_pipeline_cap(conn, qid, field_indices) result(cap)
+      type(rpc_conn_t), intent(in) :: conn
       integer(int64), intent(in) :: qid
       integer, intent(in) :: field_indices(:)
       type(rpc_cap_t) :: cap
-      integer :: i
+      integer :: i, q
       cap%kind = RPC_CAP_PIPELINE
       cap%id = qid
       cap%nops = min(size(field_indices), MAXOPS)
       do i = 1, cap%nops
          cap%ops(i - 1) = field_indices(i)
       end do
+      ! Same inheritance as rpc_result_cap: a revoke must stop pipelined
+      ! calls, not only calls on the settled import.
+      q = int(qid)
+      if (q >= 0 .and. q < MAXQ) then
+         if (conn%questions(q)%used) then
+            cap%membrane => conn%questions(q)%membrane
+            cap%membrane_reverse = conn%questions(q)%membrane_reverse
+         end if
+      end if
    end function rpc_pipeline_cap
 
    !> Send every part of a two-party Join. The receiver waits for all

@@ -1047,6 +1047,7 @@ contains
       type(capnp_ptr_t) :: s, content
       integer(int64) :: qb, qm, qa
       integer :: ma, mb, e
+      logical :: handled
 
       call px_socketpair(ma, mb, e)
       call check_(error, e == CAPNP_OK, 'membrane: socketpair')
@@ -1101,7 +1102,24 @@ contains
                   'membrane: reverse wrapper checks outbound calls')
       policy_store%block = .false.
 
+      ! A pipelined capability must carry the question's membrane, so a
+      ! revoke stops the call before it is written to the socket.
+      blocked = rpc_membrane_cap(adder, policy)
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call payload_content_set(params, s, e)
+      call capnp_message_free(m)
+      blocked = rpc_pipeline_cap(mcli, qa, [0])
+
       call rpc_membrane_revoke(policy_store, 'test membrane revoked')
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. qa < 0_int64, &
+                  'membrane: revoked pipeline does not send')
+      call rpc_pump_poll(msrv, 20, handled, e)
+      call check_(error, e == CAPNP_OK .and. .not. handled, &
+                  'membrane: server saw no pipelined call')
       call rpc_call_begin(mcli, adder, ECHO_IFACE, 0, m, params, qa, e)
       s = capnp_new_struct(m, 1, 0, e)
       call payload_content_set(params, s, e)
@@ -1229,7 +1247,7 @@ contains
       call check_(error, err == CAPNP_OK, 'rpc: make-adder dispatched')
 
       ! Pipeline: add(5) on the promised adder at results ptr field 0.
-      adder_p = rpc_pipeline_cap(qm, [0])
+      adder_p = rpc_pipeline_cap(cli, qm, [0])
       call rpc_call_begin(cli, adder_p, ECHO_IFACE, 0, m, params, qp, err)
       s = capnp_new_struct(m, 1, 0, err)
       call capnp_set_i64(s, 0_int64, 5_int64, err)
