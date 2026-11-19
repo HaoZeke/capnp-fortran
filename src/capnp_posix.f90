@@ -31,6 +31,9 @@ module capnp_posix
    integer(c_int), parameter :: F_SETFL = 4_c_int
    integer(c_int), parameter :: O_NONBLOCK = 2048_c_int
    integer(c_int), parameter :: SO_ERROR = 4_c_int
+   ! errno value for a connect still in progress. Anything else has already
+   ! failed, and SO_ERROR will not carry it.
+   integer(c_int), parameter :: EINPROGRESS = 115_c_int
 
    type, bind(c) :: c_pollfd
       integer(c_int) :: fd
@@ -169,6 +172,14 @@ module capnp_posix
    end interface
 
 contains
+
+   function px_errno() result(v)
+      integer(c_int) :: v
+      integer(c_int), pointer :: ep
+      call c_f_pointer(c_errno_location(), ep)
+      v = ep
+   end function px_errno
+
 
    !> Connected AF_UNIX stream pair; the loopback transport for tests.
    subroutine px_socketpair(fd_a, fd_b, err)
@@ -328,7 +339,7 @@ contains
       integer, intent(in), optional :: timeout_ms
       type(c_sockaddr_in), target :: sa
       type(c_pollfd), target :: pfd
-      integer(c_int) :: sfd, flags
+      integer(c_int) :: sfd, flags, cerr
       integer(c_int), target :: soerr, optlen
       character(kind=c_char), allocatable, target :: hostz(:)
       integer :: i, n
@@ -370,6 +381,14 @@ contains
          return
       end if
       if (c_connect(sfd, c_loc(sa), 16_c_int) /= 0_c_int) then
+         ! ENETUNREACH and other hard errors are finished. Only a connect
+         ! that is still in progress is completed through poll and SO_ERROR.
+         cerr = px_errno()
+         if (cerr /= EINPROGRESS .and. cerr /= EINTR) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
          pfd%fd = sfd
          pfd%events = ior(POLLOUT, POLLERR)
          pfd%revents = 0_c_short
