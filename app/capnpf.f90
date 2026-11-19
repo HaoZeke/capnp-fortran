@@ -208,7 +208,6 @@ contains
       character(len=*), intent(in) :: text, to
       type(capnp_message_t), target :: msg
       integer :: beg, topos, from, err, unit
-      integer(int8), allocatable :: framed(:)
       from = 1
       open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
             action='write', status='old', iostat=err)
@@ -377,7 +376,6 @@ contains
       logical, intent(in) :: short
       integer :: idx, best, i, err, nlen
       character(len=:), allocatable :: trial, rest, text
-      type(capnp_ptr_t) :: typ, val
       logical :: as_json
       idx = 0
       best = 0
