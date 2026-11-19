@@ -4,7 +4,6 @@
 program capnpf
    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, c_size_t, &
       c_null_char, c_associated, c_intptr_t, c_long
-   use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
    use capnp
    use capnp_schema
    use capnp_codec
@@ -81,7 +80,7 @@ contains
 
       n = command_argument_count()
       if (n < 1) then
-         call print_usage(error_unit)
+         call print_usage(2, err)
          rc = 1
          return
       end if
@@ -89,10 +88,12 @@ contains
       do while (i <= n)
          call take_arg(i, arg)
          if (trim(arg) == '--help' .or. trim(arg) == '-h') then
-            call print_usage(output_unit)
+            call print_usage(1, err)
+            if (err /= CAPNP_OK) rc = 1
             return
          else if (trim(arg) == '--version') then
-            write (output_unit, '(a)') "Cap'n Proto (capnpf) version 0.3.1"
+            call write_fd_line(1, "Cap'n Proto (capnpf) version 0.3.1", err)
+            if (err /= CAPNP_OK) rc = 1
             return
          else if (trim(arg) == '--short') then
             short = .true.
@@ -146,7 +147,8 @@ contains
          else if (len(cmd) == 0) then
             cmd = trim(arg)
             if (cmd == 'help') then
-               call print_usage(output_unit)
+               call print_usage(1, err)
+               if (err /= CAPNP_OK) rc = 1
                return
             end if
          else if (cmd == 'convert' .and. len(spec) == 0) then
@@ -195,7 +197,7 @@ contains
          end if
          if (needs_schema(from_fmt) .or. needs_schema(to_fmt)) then
             if (len(schema_path) == 0 .or. len(name) == 0) then
-               call print_usage(error_unit)
+               call print_usage(2, err)
                rc = 1
                return
             end if
@@ -219,7 +221,7 @@ contains
       end if
 
       if (len(schema_path) == 0 .or. len(name) == 0) then
-         call print_usage(error_unit)
+         call print_usage(2, err)
          rc = 1
          return
       end if
@@ -274,17 +276,22 @@ contains
       call capnp_dyn_free(schema)
    end subroutine main_run
 
-   subroutine print_usage(u)
-      integer, intent(in) :: u
-      write (u, '(a)') 'usage: capnpf encode|decode|convert|eval [options] <schema> <type|name>'
-      write (u, '(a)') '  convert <from>:<to> [<schema> <type>]'
-      write (u, '(a)') 'formats: binary packed flat flat-packed canonical text json'
+   subroutine print_usage(fd, err)
+      integer, intent(in) :: fd
+      integer, intent(out) :: err
+      call write_fd_line(fd, &
+         'usage: capnpf encode|decode|convert|eval [options] <schema> <type|name>', err)
+      if (err /= CAPNP_OK) return
+      call write_fd_line(fd, '  convert <from>:<to> [<schema> <type>]', err)
+      if (err /= CAPNP_OK) return
+      call write_fd_line(fd, 'formats: binary packed flat flat-packed canonical text json', err)
    end subroutine print_usage
 
    subroutine fail(msg, rc)
       character(len=*), intent(in) :: msg
       integer, intent(out) :: rc
-      write (error_unit, '(a)') 'capnpf: '//msg
+      integer :: ignored
+      call write_fd_line(2, 'capnpf: '//msg, ignored)
       rc = 1
    end subroutine fail
 
@@ -749,14 +756,22 @@ contains
             call fail('text encode failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
       else if (to == 'json') then
          call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
       else
          call write_binary_message(msg, to, seg_words, outb, err)
          if (err /= CAPNP_OK) then
@@ -773,6 +788,14 @@ contains
    subroutine write_stdout(buf, err)
       integer(int8), intent(in), target :: buf(:)
       integer, intent(out) :: err
+      call write_fd(1, buf, err)
+   end subroutine write_stdout
+
+   !> Write raw bytes to a file descriptor, including a short count.
+   subroutine write_fd(fd, buf, err)
+      integer, intent(in) :: fd
+      integer(int8), intent(in), target :: buf(:)
+      integer, intent(out) :: err
       integer(c_intptr_t) :: addr
       integer(c_size_t) :: left
       integer(c_long) :: nw
@@ -785,7 +808,7 @@ contains
       left = int(size(buf), c_size_t)
       do while (left > 0_c_size_t)
          p = transfer(addr, p)
-         nw = c_write(1_c_int, p, left)
+         nw = c_write(int(fd, c_int), p, left)
          if (nw <= 0_c_long) then
             err = CAPNP_ERR_IO
             return
@@ -793,7 +816,32 @@ contains
          addr = addr + int(nw, c_intptr_t)
          left = left - int(nw, c_size_t)
       end do
-   end subroutine write_stdout
+   end subroutine write_fd
+
+   !> Write one text line and a newline. A full stdout is an I/O error.
+   subroutine write_fd_line(fd, text, err)
+      integer, intent(in) :: fd
+      character(len=*), intent(in) :: text
+      integer, intent(out) :: err
+      integer(int8), allocatable, target :: buf(:)
+      integer :: i, n, u, stat
+      n = len(text)
+      allocate (buf(n + 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 1, n
+         u = iachar(text(i:i))
+         if (u >= 128) then
+            buf(i) = int(u - 256, int8)
+         else
+            buf(i) = int(u, int8)
+         end if
+      end do
+      buf(n + 1) = 10_int8
+      call write_fd(fd, buf, err)
+   end subroutine write_fd_line
 
    subroutine write_binary_message(msg, to, seg_words, outb, err)
       type(capnp_message_t), intent(inout), target :: msg
@@ -1103,7 +1151,11 @@ contains
                   call fail('eval failed', rc)
                   return
                end if
-               write (output_unit, '(a)') text
+               call write_fd_line(1, text, err)
+               if (err /= CAPNP_OK) then
+                  call fail('cannot write stdout', rc)
+                  return
+               end if
             end if
             return
          end if
@@ -1284,7 +1336,8 @@ contains
             call fail('eval failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
       end if
    end subroutine walk_struct_eval
 
@@ -1314,7 +1367,11 @@ contains
             call fail('eval failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
          return
       end if
       call step_index(rest, pos, ix, err)
@@ -1370,7 +1427,8 @@ contains
             call fail('eval failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
       end if
    end subroutine walk_list_eval
 
@@ -1395,7 +1453,11 @@ contains
             call fail('text encode failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
          return
       end if
       if (fmt == 'json') then
@@ -1404,7 +1466,11 @@ contains
             call fail('json encode failed', rc)
             return
          end if
-         write (output_unit, '(a)') text
+         call write_fd_line(1, text, err)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+            return
+         end if
          return
       end if
       if (node_struct_is_group(sch%nodes(idx))) then
