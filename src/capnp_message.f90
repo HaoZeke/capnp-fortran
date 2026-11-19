@@ -71,6 +71,9 @@ module capnp_message
       integer(int64) :: schema_id = 0_int64
       integer(int64) :: dbits = -1_int64
       integer :: depth = 0
+      !> Reader views of schema defaults. Writers refuse these so a
+      !> default shared with the schema cannot be mutated.
+      logical :: frozen = .false.
       type(capnp_message_t), pointer :: msg => null()
    end type capnp_ptr_t
 
@@ -374,6 +377,7 @@ contains
          return
       end select
       call resolve_at(p%msg, p%seg, slot, p%depth + 1, q, err)
+      if (p%frozen) q%frozen = .true.
    end function capnp_getp
 
    !> Struct element i of a struct list. Composite lists give the real
@@ -539,6 +543,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: slot
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (.not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
@@ -702,6 +710,10 @@ contains
       integer(int8), intent(in), optional :: default
       integer(int8) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int8
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -735,6 +747,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 8, err)
       if (err /= CAPNP_OK) return
       call cp_put_i8 (p%msg%segs(p%seg)%bytes, base, v)
@@ -797,6 +813,10 @@ contains
       integer(int16), intent(in), optional :: default
       integer(int16) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int16
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -830,6 +850,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 16, err)
       if (err /= CAPNP_OK) return
       call cp_put_i16 (p%msg%segs(p%seg)%bytes, base, v)
@@ -892,6 +916,10 @@ contains
       integer(int32), intent(in), optional :: default
       integer(int32) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -925,6 +953,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 32, err)
       if (err /= CAPNP_OK) return
       call cp_put_i32 (p%msg%segs(p%seg)%bytes, base, v)
@@ -987,6 +1019,10 @@ contains
       integer(int64), intent(in), optional :: default
       integer(int64) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1020,6 +1056,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 64, err)
       if (err /= CAPNP_OK) return
       call cp_put_i64 (p%msg%segs(p%seg)%bytes, base, v)
@@ -1086,6 +1126,10 @@ contains
       integer(int16) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int16
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1125,6 +1169,10 @@ contains
       integer(int32) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1164,6 +1212,10 @@ contains
       integer(int64) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1203,6 +1255,10 @@ contains
       real(real32), intent(in), optional :: default
       integer(int32) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = cp_f32_bits(default)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1254,6 +1310,10 @@ contains
       real(real64), intent(in), optional :: default
       integer(int64) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = cp_f64_bits(default)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1314,6 +1374,10 @@ contains
       integer(int64) :: byte
       integer :: bit
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = .false.
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1362,6 +1426,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: byte
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (p%kind /= CAPNP_PK_LIST .or. p%esize /= CAPNP_SZ_BIT .or. &
           .not. associated(p%msg)) then
          err = CAPNP_ERR_KIND
@@ -1433,7 +1501,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       integer(int64) :: j
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1472,7 +1540,7 @@ contains
       integer(int8), intent(in) :: bytes(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1523,6 +1591,10 @@ contains
       character(len=*), intent(in) :: str
       integer, intent(out) :: err
       type(capnp_ptr_t) :: el
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (p%kind /= CAPNP_PK_LIST) then
          err = CAPNP_ERR_KIND
          return
@@ -1679,7 +1751,7 @@ contains
       integer(int64) :: slot
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (.not. p%msg%is_builder) then
+      if (p%frozen .or. .not. p%msg%is_builder) then
          err = CAPNP_ERR_ARG
          q = capnp_ptr_t()
          return
