@@ -27,6 +27,7 @@ contains
            new_unittest("empty-list-amplify", test_empty_list_amplify), &
            new_unittest("composite-list", test_composite_list), &
            new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
+           new_unittest("frozen-list-element", test_frozen_list_element), &
            new_unittest("composite-list-adversarial", test_bad_composite), &
            new_unittest("nested-struct", test_nested_struct), &
            new_unittest("far-pointer", test_far_pointer), &
@@ -647,6 +648,28 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_composite_count_unsigned
+
+   !> A struct element of a frozen list must refuse writes.
+   subroutine test_frozen_list_element(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst, el
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      call check(error, err == CAPNP_OK)
+      if (allocated(error)) return
+      lst = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call check(error, err == CAPNP_OK)
+      if (allocated(error)) return
+      lst%frozen = .true.
+      el = capnp_list_get_struct(lst, 0, err)
+      call check(error, err == CAPNP_OK .and. el%frozen, 'frozen element carries the flag')
+      if (allocated(error)) return
+      call capnp_set_i32(el, 0_int64, 7_int32, err)
+      call check(error, err == CAPNP_ERR_ARG .and. capnp_get_i32(el, 0_int64) == 0_int32, &
+                 'frozen list element refuses a write')
+      call capnp_message_free(msg)
+   end subroutine test_frozen_list_element
 
    !> A composite list whose tag is not a struct, or whose element count
    !> does not fit the declared words, is rejected.
