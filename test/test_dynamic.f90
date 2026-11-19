@@ -34,7 +34,8 @@ contains
                    new_unittest("dynamic-assign-types", run_assign_types), &
                    new_unittest("dynamic-group-union", run_group_union), &
                    new_unittest("dynamic-union-clear", run_union_clear), &
-                   new_unittest("dynamic-scalars", run_scalars)]
+                   new_unittest("dynamic-scalars", run_scalars), &
+                   new_unittest("dynamic-reader-default", run_reader_default)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -745,5 +746,51 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_union_clear
+
+   !> A reader of a pointer default must not alias the schema message.
+   subroutine run_reader_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(sink_t) :: sink
+      type(capnp_ptr_t) :: root, origin, again
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call check_(error, sink_idx > 0 .and. vec_idx > 0, 'reader-default: nodes')
+
+      call capnp_message_init_builder(built, err)
+      sink = sink_new_root(built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT, &
+                  'reader-default: view')
+      call check_(error, .not. associated(origin%msg, schema%cgr), &
+                  'reader-default: view is not the schema')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'reader-default: reads 1.5')
+      call capnp_dyn_set_f64(schema, vec_idx, origin, 'x', 99.0_real64, err)
+      call check_(error, err /= CAPNP_OK, 'reader-default: write is refused')
+      again = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      x = capnp_dyn_get_f64(schema, vec_idx, again, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'reader-default: schema default stays 1.5')
+
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_reader_default
 
 end module test_dynamic
