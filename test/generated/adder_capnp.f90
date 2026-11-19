@@ -176,7 +176,8 @@ contains
             type(adder_add_params_t) :: params
             type(adder_add_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%add(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)

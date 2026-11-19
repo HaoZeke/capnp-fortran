@@ -4,6 +4,9 @@ module schema__stream_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_STREAM_CAPNP_ANNOTATION_NAMESPACE_KIND = 12
+   character(len=*), parameter :: SCHEMA_STREAM_CAPNP_ANNOTATION_NAMESPACE = 'capnp'
+
    integer, parameter :: STREAM_RESULT_DWORDS = 0
    integer, parameter :: STREAM_RESULT_PWORDS = 0
    type :: stream_result_t
