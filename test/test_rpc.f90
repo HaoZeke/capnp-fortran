@@ -119,6 +119,10 @@ contains
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
       if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
+      if (.not. allocated(error)) call t_join_send_unwinds(error)
+      if (.not. allocated(error)) call t_join_finish_releases_cap(error)
+      if (.not. allocated(error)) call t_abandoned_join_cleared(error)
+      if (.not. allocated(error)) call t_finish_provide_qid(error)
       if (.not. allocated(error)) call t_request_cancellation(error)
       if (.not. allocated(error)) call t_cancel_reserves_qid(error)
       if (.not. allocated(error)) call t_send_failure_releases_qid(error)
@@ -811,6 +815,191 @@ contains
       call check_(error, succeeded, 'join: canceled replacement succeeds')
       call check_(error, has_cap, 'join: canceled replacement carries cap')
    end subroutine t_join_incomplete_set_is_silent
+
+   !> A later Join part that cannot be sent must Finish the parts already
+   !> on the wire and return the question that never left.
+   subroutine t_join_send_unwinds(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: caps(2)
+      integer(int64) :: qids(2)
+      integer :: a, b, n, i
+      logical :: held
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join unwind: server has a live export')
+      if (allocated(error)) return
+      caps(1)%kind = RPC_CAP_IMPORT
+      caps(1)%id = int(a, int64)
+      caps(2) = rpc_cap_t()
+      call rpc_join_send(cli, caps, 77_int64, qids, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'join unwind: bad part is an argument error')
+      call check_(error, qids(1) >= 0_int64 .and. .not. cli%questions(int(qids(1)))%used, &
+                  'join unwind: sent part is finished locally')
+      call check_(error, qids(2) < 0_int64, 'join unwind: unsent part is not reserved')
+      call rpc_pump_once(srv, err)
+      call rpc_pump_once(srv, err)
+      held = .false.
+      do i = 0, 7
+         if (srv%joins(i)%used .and. srv%joins(i)%join_id == 77_int64) held = .true.
+      end do
+      call check_(error, .not. held, 'join unwind: Finish frees the server slot')
+   end subroutine t_join_send_unwinds
+
+   !> Finish(releaseResultCaps) drops the export reference a Join result added.
+   subroutine t_join_finish_releases_cap(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap, caps(1)
+      integer(int64) :: qboot, qids(1)
+      integer :: fa, fb, e, before
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'join release: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK .and. sconn%exports(0)%used, 'join release: bootstrap')
+      if (allocated(error)) return
+      before = sconn%exports(0)%refcount
+      caps(1) = cap
+      call rpc_join_send(cconn, caps, 4_int64, qids, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qids(1), e)
+      call rpc_finish_send(cconn, qids(1), .false., e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, sconn%exports(0)%used, 'join release: original export remains')
+      call check_(error, sconn%exports(0)%refcount == before, &
+                  'join release: Finish drops the result reference')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_join_finish_releases_cap
+
+   !> A peer that dies mid-join does not leave the join slot occupied.
+   subroutine t_abandoned_join_cleared(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(join_key_part_t) :: kp
+      integer :: fa, fb, e, i
+      logical :: held
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'join death: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      jn = message_join_init(msg, e)
+      call join_question_id_set(jn, 5_int64, e)
+      tgt = join_target_init(jn, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      kp = join_key_part_new(m, e)
+      call join_key_part_join_id_set(kp, 9_int64, e)
+      call join_key_part_part_count_set(kp, 2, e)
+      call join_key_part_part_num_set(kp, 0, e)
+      call join_key_part_set(jn, kp%p, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      held = .false.
+      do i = 0, 7
+         if (sconn%joins(i)%used) held = .true.
+      end do
+      call check_(error, held, 'join death: partial set is recorded')
+      if (allocated(error)) return
+      call rpc_conn_close(cconn)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == RPC_ERR_DEAD, 'join death: peer close is reported')
+      held = .false.
+      do i = 0, 7
+         if (sconn%joins(i)%used) held = .true.
+      end do
+      call check_(error, .not. held, 'join death: slot freed without Finish')
+      call rpc_conn_close(sconn)
+   end subroutine t_abandoned_join_cleared
+
+   !> Finish names a Provide question that does not fit in the answer table.
+   subroutine t_finish_provide_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(provide_t) :: pv
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(vat_id_t) :: vat
+      type(finish_t) :: f
+      integer(int64) :: qboot
+      integer :: fa, fb, e, before, refs
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'provide finish: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'provide finish: bootstrap')
+      if (allocated(error)) return
+      before = rpc_pending_provisions(sconn)
+      refs = sconn%exports(0)%refcount
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      pv = message_provide_init(msg, e)
+      call provide_question_id_set(pv, 100_int64, e)
+      tgt = provide_target_init(pv, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      rid = recipient_id_new(m, e)
+      call recipient_id_nonce_set(rid, 4242_int64, e)
+      vat = recipient_id_vat_init(rid, e)
+      call vat_id_host_set(vat, '127.0.0.1', e)
+      call vat_id_port_set(vat, 9, e)
+      call provide_recipient_set(pv, rid%p, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call rpc_recv_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call check_(error, rpc_pending_provisions(sconn) == before + 1, &
+                  'provide finish: arrangement is pending')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      f = message_finish_init(msg, e)
+      call finish_question_id_set(f, 100_int64, e)
+      call finish_release_result_caps_set(f, .true., e)
+      call finish_require_early_cancellation_workaround_set(f, .false., e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, rpc_pending_provisions(sconn) == before, &
+                  'provide finish: Finish releases the arrangement')
+      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
+                  'provide finish: only the pin is dropped')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_provide_qid
 
    !> Cancellation is a Finish sent before Return, with the legacy early
    !> cancellation workaround disabled as required by modern peers.
