@@ -77,6 +77,45 @@ else
       depends: [rpc_peer_server, rpc_client_f],
       timeout: 60,
     )
+
+    live_gen = custom_target(
+      'livecap-capnp-cpp',
+      input: '../schema/livecap.capnp',
+      output: ['livecap.capnp.c++', 'livecap.capnp.h'],
+      command: [
+        capnp_tool, 'compile',
+        '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-I' + capnp_include,
+        '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+        '@INPUT@',
+      ],
+    )
+
+    live_server = executable(
+      'live_server',
+      ['live_server.c++', live_gen],
+      dependencies: capnp_rpc_dep,
+      override_options: ['cpp_std=c++17'],
+    )
+
+    live_client_f = executable(
+      'live_client_f',
+      'live_client.f90',
+      link_with: capnp_flib,
+      link_language: 'fortran',
+    )
+
+    test(
+      'rpc_live_count',
+      bash,
+      args: [
+        meson.current_source_dir() / 'run_rpc_interop.sh',
+        live_server.full_path(),
+        live_client_f.full_path(),
+      ],
+      depends: [live_server, live_client_f],
+      timeout: 60,
+    )
   else
     message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
   endif
