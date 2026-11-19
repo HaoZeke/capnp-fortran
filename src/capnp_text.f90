@@ -211,9 +211,9 @@ contains
          call capnp_brand_enter(env, typ, cenv, err)
          if (err /= CAPNP_OK) return
          call enc_struct(schema, idx, q, cenv, ind, MODE_BARE, 0, text, err)
-      case (TYPE_ANY_POINTER, TYPE_ANY_STRUCT, TYPE_ANY_LIST)
+      case (TYPE_ANY_POINTER)
          text = '<opaque pointer>'
-      case (TYPE_INTERFACE, TYPE_CAPABILITY)
+      case (TYPE_INTERFACE)
          text = '<external capability>'
       case default
          err = CAPNP_ERR_KIND
@@ -442,9 +442,9 @@ contains
          call capnp_brand_enter(env, t, cenv, err)
          if (err /= CAPNP_OK) return
          call enc_struct(schema, idx, q, cenv, indent, mode, depth, out, err)
-      case (TYPE_ANY_POINTER, TYPE_ANY_STRUCT, TYPE_ANY_LIST)
+      case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
-      case (TYPE_INTERFACE, TYPE_CAPABILITY)
+      case (TYPE_INTERFACE)
          out = '<external capability>'
       case default
          err = CAPNP_ERR_KIND
@@ -563,9 +563,9 @@ contains
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
          call enc_struct(schema, idx, el, cenv, indent, mode, depth, out, err)
-      case (TYPE_ANY_POINTER, TYPE_ANY_STRUCT, TYPE_ANY_LIST)
+      case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
-      case (TYPE_INTERFACE, TYPE_CAPABILITY)
+      case (TYPE_INTERFACE)
          out = '<external capability>'
       case default
          err = CAPNP_ERR_KIND

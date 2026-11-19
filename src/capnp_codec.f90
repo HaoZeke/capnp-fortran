@@ -431,8 +431,7 @@ contains
       if (err /= CAPNP_OK) return
       tw = type_which(t)
       select case (tw)
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
-            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
          if (p%kind == CAPNP_PK_NULL) then
             y = .false.
          else
@@ -497,8 +496,7 @@ contains
       case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
       case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
       case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE, &
-            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
          es = CAPNP_SZ_PTR
       case default; es = -1
       end select
