@@ -20,6 +20,7 @@ program tester
    use test_rpc_typed, only: collect_rpc_typed
    use test_stream, only: collect_stream
    use test_idents, only: collect_idents
+   use test_regress, only: collect_regress
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -44,7 +45,8 @@ program tester
         new_testsuite("rpc_handoff", collect_rpc_handoff), &
         new_testsuite("rpc_typed", collect_rpc_typed), &
         new_testsuite("stream", collect_stream), &
-        new_testsuite("idents", collect_idents) &
+        new_testsuite("idents", collect_idents), &
+        new_testsuite("regress", collect_regress) &
         ]
 
    call get_argument(1, suite_name)
