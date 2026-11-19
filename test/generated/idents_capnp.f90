@@ -38,8 +38,8 @@ module idents_capnp
 
    integer(int64), parameter :: NOTE_ANNOTATION_ID = -382609556834940135_int64
 
-   integer, parameter :: OUTER_ABCDEFGHIJ_A_E9A_5ba5a808c4964fa6_LD_ANNOTATION_NOTE_KIND = 12
-   character(len=*), parameter :: OUTER_ABCDEFGHIJ_A_E9A_db6c8e0301ae8581_J_FIELD_ANNOTATION_NOTE = 'x'
+   integer, parameter :: OUTER_ABCDEFGHIJ_A_db6c8e0301ae8581_ELD_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: OUTER_ABCDEFGHIJ_A_db6c8e0301ae8581_ELD_ANNOTATION_NOTE = 'x'
 
    integer, parameter :: OUTER_DWORDS = 1
    integer, parameter :: OUTER_PWORDS = 0
@@ -49,7 +49,7 @@ module idents_capnp
 
    integer(int64), parameter :: ABCDEFGHIJ_ABCD_E2A9DC02B84A8E5D_ANNOTATION_ID = -2113916645833798051_int64
 
-   integer, parameter :: ABCDEFGHIJ_ABCD_9D82C2_961a1df7b51a9263_D_E2A9DC02B84A8E5D_KIND = 16
+   integer, parameter :: ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D_KIND = 16
 
    integer, parameter :: ABCDEFGHIJ_ABCD_9D82C251C9BCE896_DWORDS = 1
    integer, parameter :: ABCDEFGHIJ_ABCD_9D82C251C9BCE896_PWORDS = 0
@@ -61,7 +61,7 @@ module idents_capnp
       0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,  &
       1, 0, 0, 0, 90, 0, 0, 0, 102, 114, 111, 109, 45, 98, 114, 97,  &
       110, 100, 0, 0, 0, 0, 0, 0]
-   integer(int8), parameter :: ABCDEFGHIJ_ABCD_9D82C2_11d55e89d2b8a952_2A9DC02B84A8E5D_DEFAULT(0:31) = [integer(int8) :: &
+   integer(int8), parameter :: ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D_DEFAULT(0:31) = [integer(int8) :: &
       0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,  &
       1, 0, 0, 0, 34, 0, 0, 0, 97, 110, 110, 0, 0, 0, 0, 0]
    integer(int8), parameter :: HOLD_DATA_BODY_DEFAULT(0:39) = [integer(int8) :: &
@@ -358,19 +358,19 @@ contains
       call capnp_set_i32(h%p, 0_int64, v, err)
    end subroutine outer_abcdefghij_a_e9a705d75e1893fe_j_abcdefghij_field_set
 
-   function ABCDEFGHIJ_ABCD_9D82C2_c2087f90249e234f_J_ABCD_E2A9DC02B84A8E5D(err) result(o)
+   function ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D(err) result(o)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: o
       type(capnp_message_t), save, target :: cmsg
       logical, save :: loaded = .false.
       err = CAPNP_OK
       if (.not. loaded) then
-         call capnp_deserialize_bytes(ABCDEFGHIJ_ABCD_9D82C2_11d55e89d2b8a952_2A9DC02B84A8E5D_DEFAULT, cmsg, err)
+         call capnp_deserialize_bytes(ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D_DEFAULT, cmsg, err)
          if (err /= CAPNP_OK) return
          loaded = .true.
       end if
       o = capnp_root(cmsg, err)
-   end function ABCDEFGHIJ_ABCD_9D82C2_c2087f90249e234f_J_ABCD_E2A9DC02B84A8E5D
+   end function ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D
 
    function abcdefghij_abcd_9d82c251c9bce896_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg

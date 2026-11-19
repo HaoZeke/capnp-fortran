@@ -53,6 +53,8 @@ module capnpc_emit
    integer, parameter :: F_IDENT_SUFFIX = 9
    ! `_read_root` is glued onto an instantiation stem after clamping.
    integer, parameter :: F_INST_TAIL = 10
+   ! `_DEFAULT` is the longest suffix glued onto an annotation stem.
+   integer, parameter :: F_ANNOT_TAIL = 8
 
 contains
 
@@ -786,13 +788,17 @@ contains
       integer :: idx
       idx = find_node(annotation_id(a))
       if (idx == 0) then
-         o = ident_fit(upcase(target)//'_ANNOTATION_'//u64_hex(annotation_id(a)))
+         o = ident_fit(upcase(target)//'_ANNOTATION_'//u64_hex(annotation_id(a)), &
+                    F_IDENT_MAX - F_ANNOT_TAIL)
          err = CAPNP_OK
          return
       end if
       call node_fname(g_nodes(idx)%p, an, err)
       if (err /= CAPNP_OK) return
-      o = ident_fit(upcase(target)//'_ANNOTATION_'//upcase(an))
+      ! One clamp of the full symbol. _KIND and _DEFAULT are literal
+      ! tails of this stem, so a second hash cannot split them.
+      o = ident_fit(upcase(target)//'_ANNOTATION_'//upcase(an), &
+                    F_IDENT_MAX - F_ANNOT_TAIL)
    end subroutine annotation_symbol
 
    subroutine emit_annotation_node_decl(np, err)
@@ -817,8 +823,9 @@ contains
       integer :: k
       err = CAPNP_OK
       k = value_which(v)
-      call w('   integer, parameter :: '//ident_const(name//'_KIND')//' = '// &
-             itoa(int(k, int64)))
+      ! `name` already reserves F_ANNOT_TAIL, so _KIND is not hashed again.
+      call w('   integer, parameter :: '//name//'_KIND'// &
+             ' = '//itoa(int(k, int64)))
       select case (k)
       case (TYPE_VOID)
       case (TYPE_BOOL)
@@ -851,7 +858,7 @@ contains
             call note_blob(name, db)
          end if
       case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
-         has = register_default_blob(name, v)
+         has = register_default_blob(name, v, blob=name//'_DEFAULT')
       case default
          err = CAPNP_ERR_KIND
          return
@@ -882,7 +889,7 @@ contains
          call w('      logical, save :: loaded = .false.')
          call w('      err = CAPNP_OK')
          call w('      if (.not. loaded) then')
-         call w('         call capnp_deserialize_bytes('//blob_name(name)//', cmsg, err)')
+         call w('         call capnp_deserialize_bytes('//name//'_DEFAULT, cmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         loaded = .true.')
          call w('      end if')
@@ -1230,9 +1237,10 @@ contains
 
    !> Serialize a Value's default object into a standalone message blob and
    !> register it (pass 1). Returns whether a non-null default exists.
-   function register_default_blob(an, dv) result(has)
+   function register_default_blob(an, dv, blob) result(has)
       character(len=*), intent(in) :: an
       type(capnp_ptr_t), intent(in) :: dv
+      character(len=*), intent(in), optional :: blob
       logical :: has
       type(capnp_message_t), target :: tmp
       type(capnp_ptr_t) :: dobj, c
@@ -1256,7 +1264,11 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_serialize_bytes(tmp, bytes, err)
       if (err /= CAPNP_OK) return
-      call note_blob(blob_name(an), bytes)
+      if (present(blob)) then
+         call note_blob(blob, bytes)
+      else
+         call note_blob(blob_name(an), bytes)
+      end if
       call capnp_message_free(tmp)
    end function register_default_blob
 
