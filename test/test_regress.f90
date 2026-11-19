@@ -1065,6 +1065,13 @@ contains
       call f32_match_encode(error, schema, idx, '(x = -0)')
       call f32_match_encode(error, schema, idx, '(x = -0x0)')
       call f32_match_encode(error, schema, idx, '(x = -00)')
+      call f32_match_encode(error, schema, idx, '(x = 3.4028235677973366e38)')
+      call f32_match_encode(error, schema, idx, '(x = -3.4028235677973366e38)')
+      call f32_match_encode(error, schema, idx, '(x = 1.1756341303441039e-38)')
+      call f32_match_encode(error, schema, idx, '(x = 1.1757738398009971e-38)')
+      call f32_match_encode(error, schema, idx, '(x = 1.1760532587147835e-38)')
+      call f32_match_encode(error, schema, idx, '(x = -1.176472387085463e-38)')
+      call f32_match_encode(error, schema, idx, '(x = -0.0)')
       call capnp_dyn_free(schema)
    end subroutine run_f32_text
 

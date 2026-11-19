@@ -959,7 +959,7 @@ contains
       real(real32), intent(out) :: fv
       integer, intent(out) :: err
       integer(int64) :: iv, uv
-      character(len=:), allocatable :: dec
+      real(real64) :: d
       err = CAPNP_OK
       fv = 0.0_real32
       if (has_alpha_non_hex(tok)) then
@@ -973,23 +973,27 @@ contains
          return
       end if
       if (float_from_int(tok)) then
+         ! Integer tokens are int64 or uint64, then narrowed. -0 is +0.
          if (tok(1:1) == '-') then
             call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
             if (err /= CAPNP_OK) return
-            if (iv == 0_int64) then
-               fv = 0.0_real32
-            else
-               call capnp_fmt_i64(iv, dec)
-               call capnp_parse_f32(dec, fv, err)
-            end if
+            fv = real(iv, real32)
          else
             call capnp_parse_u64(tok, uv, err, allow_octal=.true.)
             if (err /= CAPNP_OK) return
-            call capnp_fmt_u64(uv, dec)
-            call capnp_parse_f32(dec, fv, err)
+            ! One rounding to float32. A value with the high bit set is
+            ! shifted, keeping a sticky low bit, and then doubled.
+            if (uv >= 0_int64) then
+               fv = real(uv, real32)
+            else
+               fv = real(ior(ishft(uv, -1), iand(uv, 1_int64)), real32)*2.0_real32
+            end if
          end if
       else
-         call capnp_parse_f32(tok, fv, err)
+         ! A decimal literal is parsed as double, then cast to float32.
+         call capnp_parse_f64(tok, d, err)
+         if (err /= CAPNP_OK) return
+         fv = real(d, real32)
       end if
    end subroutine parse_text_f32
 
