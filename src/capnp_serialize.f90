@@ -51,16 +51,23 @@ contains
    end subroutine capnp_serialize_bytes
 
    !> Parse a framed byte buffer into a reader message (segments copied).
-   subroutine capnp_deserialize_bytes(bytes, msg, err, traversal_words, depth_limit)
+   !> options sets the traversal budget and nesting limit. Explicit
+   !> traversal_words and depth_limit override the matching field.
+   subroutine capnp_deserialize_bytes(bytes, msg, err, traversal_words, depth_limit, options)
       integer(int8), intent(in) :: bytes(0:)
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
       integer, intent(in), optional :: depth_limit
-      integer(int64) :: pos, n
+      type(capnp_reader_options_t), intent(in), optional :: options
+      integer(int64) :: pos, n, nwords
       integer :: i, nsegs
       call capnp_message_free(msg)
       if (size(bytes, kind=int64) == 0_int64) then
+         if (present(options)) then
+            msg%traversal_words = options%traversal_words
+            msg%depth_limit = options%nesting_limit
+         end if
          if (present(traversal_words)) msg%traversal_words = traversal_words
          if (present(depth_limit)) msg%depth_limit = depth_limit
          msg%is_builder = .false.
@@ -71,13 +78,18 @@ contains
       end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
+      if (present(options)) then
+         msg%traversal_words = options%traversal_words
+         msg%depth_limit = options%nesting_limit
+      end if
       if (present(traversal_words)) msg%traversal_words = traversal_words
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
       allocate (msg%segs(nsegs))
       do i = 1, nsegs
-         n = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))*CAPNP_WORD_BYTES
+         nwords = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))
+         n = nwords*CAPNP_WORD_BYTES
          if (pos + n > size(bytes, kind=int64)) then
             err = CAPNP_ERR_FRAMING
             return
@@ -94,16 +106,21 @@ contains
    !> Zero-copy variant (capn_init_mem parity): segments alias slices of the
    !> caller's buffer, which must be a target and outlive the message. The
    !> message is a reader; builders always own their storage.
-   subroutine capnp_deserialize_view(bytes, msg, err, traversal_words, depth_limit)
+   subroutine capnp_deserialize_view(bytes, msg, err, traversal_words, depth_limit, options)
       integer(int8), intent(in), target :: bytes(0:)
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
       integer, intent(in), optional :: depth_limit
-      integer(int64) :: pos, n
+      type(capnp_reader_options_t), intent(in), optional :: options
+      integer(int64) :: pos, n, nwords
       integer :: i, nsegs
       call capnp_message_free(msg)
       if (size(bytes, kind=int64) == 0_int64) then
+         if (present(options)) then
+            msg%traversal_words = options%traversal_words
+            msg%depth_limit = options%nesting_limit
+         end if
          if (present(traversal_words)) msg%traversal_words = traversal_words
          if (present(depth_limit)) msg%depth_limit = depth_limit
          msg%is_builder = .false.
@@ -114,13 +131,18 @@ contains
       end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
+      if (present(options)) then
+         msg%traversal_words = options%traversal_words
+         msg%depth_limit = options%nesting_limit
+      end if
       if (present(traversal_words)) msg%traversal_words = traversal_words
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
       allocate (msg%segs(nsegs))
       do i = 1, nsegs
-         n = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))*CAPNP_WORD_BYTES
+         nwords = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))
+         n = nwords*CAPNP_WORD_BYTES
          if (pos + n > size(bytes, kind=int64)) then
             err = CAPNP_ERR_FRAMING
             return

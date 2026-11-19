@@ -60,7 +60,8 @@ contains
            new_unittest("depth-limit", test_depth_limit), &
            new_unittest("depth-limit-nested", test_depth_limit_nested), &
            new_unittest("nest-limit-64", test_nest_limit_64), &
-           new_unittest("far-depth-one", test_far_depth_one)]
+           new_unittest("far-depth-one", test_far_depth_one), &
+           new_unittest("reader-options", test_reader_options)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -1988,15 +1989,19 @@ contains
    subroutine test_traversal_limit(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
-      type(capnp_ptr_t) :: root, r
+      type(capnp_ptr_t) :: root
       integer(int8), allocatable :: bytes(:)
       integer :: err
       call capnp_message_init_builder(msg, err)
       root = capnp_new_struct(msg, 64, 0, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
+      ! A flat reader keeps the segment. The 64-word struct fails when the
+      ! root is resolved, which is where the traversal budget is charged.
       call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=4_int64)
-      r = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'guards: flat read keeps the segment')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_ERR_TRAVERSAL, 'guards: traversal limit enforced')
       if (allocated(error)) return
       call capnp_message_free(msg)
@@ -2216,5 +2221,316 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_far_depth_one
+
+   !> A segment table under the default eight mebiword budget is rejected
+   !> when the caller passes a smaller reader budget, and accepted when the
+   !> caller raises the budget past the default.
+   subroutine test_reader_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, kid, q
+      type(capnp_reader_options_t) :: opt
+      integer(int8) :: hdr(0:7)
+      integer :: err, unit, ios
+      integer(int64) :: total
+      character(len=:), allocatable :: path
+
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err, 50_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: small budget rejects 100 words')
+      if (allocated(error)) return
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err, 100_int64)
+      call check(error, err == CAPNP_OK .and. total == 100_int64, &
+                  'options: budget equal to the sum is allowed')
+      if (allocated(error)) return
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err)
+      call check(error, err == CAPNP_OK, 'options: default budget still accepts 100 words')
+      if (allocated(error)) return
+
+      path = reader_pid_path('reader')
+      hdr = 0_int8
+      hdr(4) = 100_int8
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='readwrite', iostat=ios)
+      call check(error, ios == 0, 'options: open stream')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      write (unit) hdr
+      rewind (unit)
+      opt%traversal_words = 50_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: stream honors a lower budget')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 1000_int64
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: raised budget reaches the body check')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+
+      ! 8388609 words is one past the default budget and still a legal u32.
+      hdr = 0_int8
+      hdr(4) = 1_int8
+      hdr(6) = int(-128, int8)
+      rewind (unit)
+      write (unit) hdr
+      rewind (unit)
+      call capnp_read_message_unit(unit, rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                  'options: default still rejects eight mebiwords plus one')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 8388609_int64
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: a higher budget accepts the table')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      close (unit, status='delete')
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      kid = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(kid, 0_int64, 7_int32, err)
+      call capnp_setp(root, 0, kid, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_write_message(path, msg, err)
+      call check(error, err == CAPNP_OK, 'options: wrote nested message')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      opt%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      opt%nesting_limit = 1
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_OK, 'options: nested message framed')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
+                  'options: root within nesting limit')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      q = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'options: stream nesting limit is one')
+      call close_delete(unit, path)
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+      call reader_flat_and_packed(error)
+      if (allocated(error)) return
+      call reader_over_default(error)
+   end subroutine test_reader_options
+
+   !> Fixed-size allocation repeats the first segment (or the object, if
+   !> larger). The default strategy still doubles the previous segment.
+
+   pure function seg_words(msg, idx) result(n)
+      type(capnp_message_t), intent(in) :: msg
+      integer, intent(in) :: idx
+      integer(int64) :: n
+      n = size(msg%segs(idx)%bytes, kind=int64)/CAPNP_WORD_BYTES
+   end function seg_words
+
+   !> Flat deserialize and packed expansion both honor the traversal budget.
+   !> A packed zero-run is rejected before the expanded buffer is allocated.
+   subroutine reader_flat_and_packed(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root
+      type(capnp_reader_options_t) :: opt
+      integer(int8), allocatable :: bytes(:), bomb(:), packed(:)
+      integer(int8) :: hdr(0:7)
+      integer :: err, i, unit, ios
+      character(len=:), allocatable :: path
+      allocate (bytes(0:7))
+      bytes = 0_int8
+      bytes(4) = 100_int8
+      opt%traversal_words = 50_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat bytes check the body first')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat view checks the body first')
+      if (allocated(error)) return
+      opt%traversal_words = 100_int64
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat bytes at the budget reach the body')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat view at the budget reaches the body')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(msg, err, first_words=4_int64)
+      root = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(root, 0_int64, 9_int32, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, err == CAPNP_OK, 'options: serialized a small struct')
+      if (allocated(error)) return
+      opt%traversal_words = 0_int64
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_OK, 'options: zero budget still reads the table')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: zero budget rejects a struct')
+      if (allocated(error)) return
+      opt%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i32(root, 0_int64) == 9_int32, &
+                 'options: flat bytes keep the field')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i32(root, 0_int64) == 9_int32, &
+                 'options: flat view keeps the field')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      ! A 1-segment header declaring 20*256 words followed by 20 zero-runs
+      ! of 00 FF exceeds a 10-word budget before body allocation.
+      allocate (bomb(0:41))
+      bomb(0) = 32_int8
+      bomb(1) = 20_int8
+      do i = 0, 19
+         bomb(2 + 2*i) = 0_int8
+         bomb(3 + 2*i) = -1_int8
+      end do
+      opt%traversal_words = 10_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_deserialize_packed_bytes(bomb, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed zero-run stops at the budget')
+      if (allocated(error)) return
+      path = reader_pid_path('packed')
+      call capnp_write_file(path, bomb, err)
+      call capnp_read_message_packed(path, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed file stops at the budget')
+      call unlink_path(path)
+      if (allocated(error)) return
+
+      hdr = 0_int8
+      hdr(4) = 100_int8
+      call capnp_pack(hdr, packed, err)
+      call check(error, err == CAPNP_OK, 'options: packed the segment table')
+      if (allocated(error)) return
+      path = reader_pid_path('punit')
+      call capnp_write_file(path, packed, err)
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      call check(error, ios == 0, 'options: open packed stream')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      opt%traversal_words = 50_int64
+      call capnp_read_message_packed_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed stream honors a lower budget')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 100_int64
+      call capnp_read_message_packed_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING .or. err == CAPNP_ERR_PACKED, &
+                 'options: packed stream at the budget reaches the body')
+      call close_delete(unit, path)
+      call capnp_message_free(rmsg)
+   end subroutine reader_flat_and_packed
+
+   !> One word past the default 8 Mi budget. A flat reader accepts it and
+   !> the root data word is readable. A two-word budget fails at the root.
+   subroutine reader_over_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: rmsg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable, target :: big(:)
+      integer(int64), parameter :: nwords = 8388609_int64
+      integer(int64) :: nbytes
+      integer :: err
+      nbytes = 8_int64 + nwords*CAPNP_WORD_BYTES
+      allocate (big(0:nbytes - 1))
+      big = 0_int8
+      big(4) = 1_int8
+      big(6) = int(-128, int8)
+      call cp_put_i64(big, 8_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(big, 16_int64, 42_int64)
+      call capnp_deserialize_bytes(big, rmsg, err)
+      call check(error, err == CAPNP_OK, 'options: flat bytes past eight mebiwords')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: root past eight mebiwords')
+      if (allocated(error)) return
+      call capnp_deserialize_view(big, rmsg, err)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: view past eight mebiwords')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(big, rmsg, err, traversal_words=2_int64)
+      call check(error, err == CAPNP_OK, 'options: small budget keeps the large table')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: two words stop the large root')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(big, rmsg, err, traversal_words=3_int64)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: three words read the large root')
+      call capnp_message_free(rmsg)
+   end subroutine reader_over_default
+
+   function reader_pid_path(tag) result(path)
+      character(len=*), intent(in) :: tag
+      character(len=:), allocatable :: path
+      character(len=16) :: buf
+      interface
+         function c_getpid() bind(c, name='getpid') result(pid)
+            use iso_c_binding, only: c_int
+            integer(c_int) :: pid
+         end function c_getpid
+      end interface
+      write (buf, '(i0)') int(c_getpid())
+      path = '/tmp/capnpf-wire-'//trim(buf)//'-'//tag//'.bin'
+   end function reader_pid_path
+
+   subroutine close_delete(unit, path)
+      integer, intent(in) :: unit
+      character(len=*), intent(in) :: path
+      integer :: ios
+      close (unit, status='delete', iostat=ios)
+      if (ios /= 0) call unlink_path(path)
+   end subroutine close_delete
+
+   subroutine unlink_path(path)
+      character(len=*), intent(in) :: path
+      integer :: u, ios
+      if (len(path) == 0) return
+      open (newunit=u, file=path, status='old', iostat=ios)
+      if (ios == 0) close (u, status='delete', iostat=ios)
+   end subroutine unlink_path
 
 end module test_wire
