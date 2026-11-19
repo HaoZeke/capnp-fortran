@@ -37,8 +37,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - Text and JSON strings, and hex or base64 data, are copied into one
   buffer. A buffer that cannot grow reports an allocation error.
 - `capnpf decode`, `convert`, and `encode` exit 1 when stdout cannot be
-  written. `--help`, `--version`, and `eval` exit 0 in that case, and a
-  write interrupted by a signal is retried.
+  written. The help and version options, and text eval, exit 0 in that
+  case. JSON, binary, and packed eval exit 1. A write interrupted by a
+  signal is retried.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.

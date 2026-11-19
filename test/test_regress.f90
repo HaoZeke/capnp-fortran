@@ -1241,7 +1241,16 @@ contains
                    'io: json convert')
       call io_ok(error, '"$CAP" --help', 'io: help')
       call io_ok(error, '"$CAP" --version', 'io: version')
-      call io_ok(error, '"$CAP" eval schema/kitchen.capnp answer', 'io: eval')
+      call io_ok(error, '"$CAP" eval schema/kitchen.capnp answer', 'io: text eval')
+      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && "$CAP" eval -I "$INC" -ojson schema/codec.capnp evalConst', &
+         'io: json eval')
+      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && "$CAP" eval -I "$INC" -b schema/codec.capnp evalConst', &
+         'io: binary eval')
+      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && "$CAP" eval -I "$INC" -p schema/codec.capnp evalConst', &
+         'io: packed eval')
       call io_fail(error, 'printf "(x = 1, y = 0, z = 0)\n" | "$CAP" encode schema/common.capnp Vec3', &
                    'io: binary encode')
       call check_(error, sh(cap_setup()//' && "$CAP" decode schema/common.capnp Vec3 < ' &
