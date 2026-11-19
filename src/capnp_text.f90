@@ -21,6 +21,11 @@ module capnp_text
       character(len=:), allocatable :: s
    end type piece_t
 
+   type :: buf_t
+      character(len=:), allocatable :: s
+      integer :: n = 0
+   end type buf_t
+
    type :: scan_t
       character(len=:), allocatable :: s
       integer :: i = 1
@@ -29,7 +34,8 @@ module capnp_text
 
 contains
 
-   subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env)
+   subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env, &
+                                 traversal_words)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -37,14 +43,24 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
       type(capnp_brand_env_t), intent(in), optional :: brand_env
+      integer(int64), intent(in), optional :: traversal_words
       type(capnp_brand_env_t) :: env
       integer :: ind
+      integer(int64) :: limit
       err = CAPNP_OK
       text = ''
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
       end if
+      if (idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) limit = traversal_words
+      call guard_traversal(p, limit, err)
+      if (err /= CAPNP_OK) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
@@ -57,18 +73,25 @@ contains
       call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode
 
-   subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty)
+   subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty, &
+                                      traversal_words)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       type(capnp_brand_env_t), intent(in) :: env
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      integer(int64), intent(in), optional :: traversal_words
       integer :: ind
+      integer(int64) :: limit
       ind = 1
       if (present(pretty)) then
          if (.not. pretty) ind = 0
       end if
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) limit = traversal_words
+      call guard_traversal(lst, limit, err)
+      if (err /= CAPNP_OK) return
       call enc_list(schema, et, lst, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode_list
 
@@ -92,7 +115,11 @@ contains
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -300,9 +327,11 @@ contains
          if (err /= CAPNP_OK) return
          call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth + 1, val, err)
          if (err /= CAPNP_OK) return
-         call push(items, n, nm//' = '//val)
+         call push(items, n, nm//' = '//val, err)
+         if (err /= CAPNP_OK) return
       end do
-      call join_items(items, n, indent, mode, .true., body)
+      call join_items(items, n, indent, mode, .true., body, err)
+      if (err /= CAPNP_OK) return
       out = '('//body//')'
    end subroutine enc_struct
 
@@ -479,9 +508,11 @@ contains
       do i = 0_int64, nlen - 1_int64
          call enc_element(schema, et, lst, i, env, next_ind(indent), MODE_BARE, depth + 1, el, err)
          if (err /= CAPNP_OK) return
-         call push(items, n, el)
+         call push(items, n, el, err)
+         if (err /= CAPNP_OK) return
       end do
-      call join_items(items, n, indent, mode, .false., body)
+      call join_items(items, n, indent, mode, .false., body, err)
+      if (err /= CAPNP_OK) return
       out = '['//body//']'
    end subroutine enc_list
 
@@ -946,35 +977,20 @@ contains
       integer, intent(out) :: ord
       integer, intent(out) :: err
       character(len=:), allocatable :: tok
-      integer(int64) :: iv
       err = CAPNP_OK
       ord = 0
       call skip_ws(sc)
       if (peek(sc) == '(') then
          sc%i = sc%i + 1
-         call read_numeric(sc, tok, err)
-         if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
+         call read_ident(sc, tok, err)
          if (err /= CAPNP_OK) return
          call expect_ch(sc, ')', err)
          if (err /= CAPNP_OK) return
-         if (iv < 0_int64 .or. iv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         ord = int(iv)
+         ord = enum_by_name(schema, type_type_id(t), tok, err)
          return
       end if
       if (is_num_start(peek(sc))) then
-         call read_numeric(sc, tok, err)
-         if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
-         if (err /= CAPNP_OK) return
-         if (iv < 0_int64 .or. iv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         ord = int(iv)
+         err = CAPNP_ERR_ARG
          return
       end if
       call read_ident(sc, tok, err)
@@ -1051,16 +1067,28 @@ contains
       end if
    end function next_ind
 
-   subroutine push(items, n, s)
+   subroutine push(items, n, s, err)
       type(piece_t), allocatable, intent(inout) :: items(:)
       integer, intent(inout) :: n
       character(len=*), intent(in) :: s
+      integer, intent(out) :: err
       type(piece_t), allocatable :: tmp(:)
-      integer :: cap
-      if (.not. allocated(items)) allocate (items(8))
+      integer :: cap, stat
+      err = CAPNP_OK
+      if (.not. allocated(items)) then
+         allocate (items(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
       if (n >= size(items)) then
          cap = size(items)*2
-         allocate (tmp(cap))
+         allocate (tmp(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          if (n > 0) tmp(1:n) = items(1:n)
          call move_alloc(tmp, items)
       end if
@@ -1068,14 +1096,17 @@ contains
       items(n)%s = s
    end subroutine push
 
-   subroutine join_items(items, n, indent, mode, is_record, out)
+   subroutine join_items(items, n, indent, mode, is_record, out, err)
       type(piece_t), allocatable, intent(in) :: items(:)
       integer, intent(in) :: n, indent, mode
       logical, intent(in) :: is_record
       character(len=:), allocatable, intent(out) :: out
+      integer, intent(out) :: err
       integer :: i, total
       logical :: inline
       character(len=:), allocatable :: sp, delim
+      type(buf_t) :: buf
+      err = CAPNP_OK
       out = ''
       if (n <= 0) return
       inline = indent == 0
@@ -1090,25 +1121,102 @@ contains
          if (is_record .and. total > 64) inline = .false.
       end if
       if (inline) then
-         out = items(1)%s
+         call buf_add(buf, items(1)%s, err)
+         if (err /= CAPNP_OK) return
          do i = 2, n
-            out = out//', '//items(i)%s
+            call buf_add(buf, ', '//items(i)%s, err)
+            if (err /= CAPNP_OK) return
          end do
+         call buf_take(buf, out)
          return
       end if
       sp = repeat(' ', indent*2)
       delim = ','//achar(10)//sp
       if (mode == MODE_BARE) then
-         out = ' '
+         call buf_add(buf, ' ', err)
       else
-         out = achar(10)//sp
+         call buf_add(buf, achar(10)//sp, err)
       end if
-      out = out//items(1)%s
+      if (err /= CAPNP_OK) return
+      call buf_add(buf, items(1)%s, err)
+      if (err /= CAPNP_OK) return
       do i = 2, n
-         out = out//delim//items(i)%s
+         call buf_add(buf, delim//items(i)%s, err)
+         if (err /= CAPNP_OK) return
       end do
-      out = out//' '
+      call buf_add(buf, ' ', err)
+      if (err /= CAPNP_OK) return
+      call buf_take(buf, out)
    end subroutine join_items
+
+   subroutine buf_add(buf, piece, err)
+      type(buf_t), intent(inout) :: buf
+      character(len=*), intent(in) :: piece
+      integer, intent(out) :: err
+      integer :: need, cap, stat
+      character(len=:), allocatable :: tmp
+      err = CAPNP_OK
+      need = buf%n + len(piece)
+      if (need < buf%n) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (.not. allocated(buf%s)) then
+         cap = max(need, 64)
+         allocate (character(len=cap) :: buf%s, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      else if (need > len(buf%s)) then
+         cap = len(buf%s)
+         do while (cap < need)
+            if (cap > ishft(huge(cap), -1)) then
+               cap = need
+               exit
+            end if
+            cap = cap*2
+         end do
+         allocate (character(len=cap) :: tmp, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         if (buf%n > 0) tmp(1:buf%n) = buf%s(1:buf%n)
+         call move_alloc(tmp, buf%s)
+      end if
+      if (len(piece) > 0) buf%s(buf%n + 1:need) = piece
+      buf%n = need
+   end subroutine buf_add
+
+   subroutine buf_take(buf, out)
+      type(buf_t), intent(in) :: buf
+      character(len=:), allocatable, intent(out) :: out
+      if (.not. allocated(buf%s) .or. buf%n <= 0) then
+         out = ''
+      else
+         out = buf%s(1:buf%n)
+      end if
+   end subroutine buf_take
+
+   !> Builders are exempt from the reader charge, so the encoder applies
+   !> the same default word budget before it walks the tree.
+   subroutine guard_traversal(p, limit, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: limit
+      integer, intent(out) :: err
+      integer(int64) :: words
+      err = CAPNP_OK
+      if (limit < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. associated(p%msg)) return
+      if (.not. p%msg%is_builder) return
+      words = capnp_total_size(p, err)
+      if (err /= CAPNP_OK) return
+      if (words > limit) err = CAPNP_ERR_TRAVERSAL
+   end subroutine guard_traversal
 
    subroutine skip_ws(sc)
       type(scan_t), intent(inout) :: sc
@@ -1119,8 +1227,10 @@ contains
          if (c == ' ' .or. c == achar(9) .or. c == achar(10) .or. c == achar(13)) then
             sc%i = sc%i + 1
          else if (c == '#') then
-            do while (sc%i <= sc%n .and. sc%s(sc%i:sc%i) /= achar(10))
+            do
                sc%i = sc%i + 1
+               if (sc%i > sc%n) return
+               if (sc%s(sc%i:sc%i) == achar(10)) exit
             end do
          else
             return
@@ -1180,7 +1290,11 @@ contains
       tok = ''
       call skip_ws(sc)
       a = sc%i
-      if (peek(sc) == '+' .or. peek(sc) == '-') sc%i = sc%i + 1
+      if (peek(sc) == '+') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (peek(sc) == '-') sc%i = sc%i + 1
       if (is_ident_start(peek(sc))) then
          sc%i = sc%i + 1
          do while (is_ident_cont(peek(sc)))
@@ -1205,9 +1319,12 @@ contains
       character(len=1) :: c
       err = CAPNP_OK
       nd = 0
+      if (peek(sc) == '.') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (sc%i < sc%n) then
-         if (sc%s(sc%i:sc%i) == '0' .and. &
-             (sc%s(sc%i + 1:sc%i + 1) == 'x' .or. sc%s(sc%i + 1:sc%i + 1) == 'X')) then
+         if (sc%s(sc%i:sc%i) == '0' .and. sc%s(sc%i + 1:sc%i + 1) == 'x') then
             sc%i = sc%i + 2
             if (capnp_hex_digit(peek(sc)) < 0) then
                err = CAPNP_ERR_ARG
