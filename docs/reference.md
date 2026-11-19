@@ -150,15 +150,20 @@ External constants and embedded files are not accepted.
 ## JSON (`capnp_json`)
 
 `use capnp_json`. `capnp_json_encode` and `capnp_json_decode` follow the
-defaults in capnp/compat/json.h. Field names are the schema names unless
-`$Json.name` renames them. 64-bit integers are decimal strings. Data is a
-JSON array of byte values, or a base64 string under `$Json.base64`, or
-lowercase hex under `$Json.hex`. Enums are names (`$Json.name` on an
-enumerant is honored) and unknown ordinals are numbers. NaN and infinities
-are `"NaN"`, `"Infinity"`, and `"-Infinity"`. Null pointers are omitted;
-primitives and groups are written. Only the active union arm appears.
-Unknown JSON fields are ignored on decode. Pretty output matches
-`capnp convert binary:json`; pass `pretty=.false.` for `--short`.
+defaults and annotations in `capnp/compat/json.h`. Field, group, union, and
+enumerant names are the schema names unless `$Json.name` renames them.
+`$Json.flatten` inlines sub-structs, groups, and discriminated union
+variants with an optional `prefix`; `$Json.discriminator` tags unions with
+an explicit variant field and optional `valueName`. 64-bit integers are
+decimal strings. Data is a JSON array of byte values, or a base64 string
+under `$Json.base64`, or lowercase hex under `$Json.hex`. Enums are names
+and unknown ordinals are numbers. NaN and infinities are `"NaN"`,
+`"Infinity"`, and `"-Infinity"`. Null pointers are omitted outside unions;
+primitives, groups, and the active union arm are written, with non-union
+fields emitted before the union arm. Unknown JSON fields are ignored on
+decode. Pretty output matches `capnp convert binary:json`; pass
+`pretty=.false.` for `--short`, and use `capnp_json_span` to step through
+multi-value JSON streams.
 
 ## capnpf
 
@@ -167,15 +172,17 @@ Unknown JSON fields are ignored on decode. Pretty output matches
 and loads that CodeGeneratorRequest.
 
 ```
-capnpf encode SCHEMA TYPE
-capnpf decode SCHEMA TYPE [--packed] [--flat] [--short]
-capnpf convert FROM:TO SCHEMA TYPE [--short]
-capnpf eval SCHEMA NAME [--short] [-ojson]
+capnpf encode [-I DIR] [--packed] [--flat] [--segment-size=N] SCHEMA TYPE
+capnpf decode [-I DIR] [--packed] [--flat] [--short] SCHEMA TYPE
+capnpf convert [-I DIR] [--short] [--segment-size=N] FROM:TO [SCHEMA TYPE]
+capnpf eval [-I DIR] [--short] [-b|-p|--flat|-o FORMAT] SCHEMA NAME
 ```
 
-`FROM` and `TO` are `binary`, `packed`, `flat`, `canonical`, `text`, or
-`json`. `eval` prints a const, `Type.field` (the field default),
-`const.field`, or `const.list[index]`.
+`FROM`, `TO`, and `FORMAT` are `binary`, `packed`, `flat`, `flat-packed`,
+`canonical`, `text`, or `json` (`SCHEMA TYPE` may be omitted on `convert`
+when neither side is `text` or `json`). `eval` traverses constants, nested
+constants, struct field defaults, groups, and arbitrarily deep `.field` and
+`[index]` paths, and emits struct targets in any supported format.
 
 ## Canonical form (`capnp_canonical`)
 
