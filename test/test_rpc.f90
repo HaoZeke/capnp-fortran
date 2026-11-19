@@ -1156,26 +1156,32 @@ contains
    subroutine t_persistent_save(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_cap_t) :: bootcap
-      type(capnp_message_t), target :: m
-      type(payload_t) :: params
-      type(capnp_ptr_t) :: s, content
+      type(capnp_message_t), target :: m, owner_msg
+      type(capnp_ptr_t) :: owner, sturdy_ref, save_results
       integer(int64) :: qb, qs
       character(len=:), allocatable :: ref
       call rpc_bootstrap_send(cli, bootcap, err)
       qb = bootcap%id
       call rpc_pump_once(srv, err)
-      call rpc_call_begin(cli, bootcap, RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE, &
-                          m, params, qs, err)
-      s = capnp_new_struct(m, 0, 0, err)
-      call payload_content_set(params, s, err)
+
+      ! Persistent<SturdyRef, Owner>.save carries an application-defined
+      ! owner in SaveParams.sealFor.
+      call capnp_message_init_builder(owner_msg, err)
+      owner = capnp_new_struct(owner_msg, 0, 1, err)
+      call capnp_set_root(owner_msg, owner, err)
+      call capnp_set_text(owner, 0, 'alice', err)
+      call rpc_persistent_save_begin(cli, bootcap, m, owner, qs, err)
       call rpc_call_send(cli, m, err)
       call rpc_pump_once(srv, err)
       call rpc_wait(cli, qb, err)
-      call rpc_wait(cli, qs, err)
-      call rpc_result_content(cli, qs, content, err)
+      call rpc_persistent_save_wait(cli, qs, sturdy_ref, err)
       call check_(error, err == CAPNP_OK, 'rpc: save returned')
-      call capnp_get_text(content, 0, ref, err)
-      call check_(error, err == CAPNP_OK .and. ref == 'sturdy:echo-main', 'rpc: sturdy ref')
+      call check_(error, sturdy_ref%kind == CAPNP_PK_LIST, 'rpc: sturdy ref pointer returned')
+      call rpc_result_content(cli, qs, save_results, err)
+      call capnp_get_text(save_results, 0, ref, err)
+      call check_(error, err == CAPNP_OK .and. ref == 'sturdy:echo-main:alice', &
+                  'rpc: sealed sturdy ref')
+      call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
    !> Resolve messages come back as unimplemented (the vat keeps using
