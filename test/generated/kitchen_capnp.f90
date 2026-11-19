@@ -5,9 +5,20 @@ module kitchen_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE = 'kitchen schema'
+
+   integer(int64), parameter :: NOTE_ANNOTATION_ID = -382609556834940135_int64
+
    integer(int64), parameter :: ANSWER = 42_int64
    real(real64), parameter :: TAU = transfer(4618760256179416344_int64, 1.0_real64)
    character(len=*), parameter :: GREETING = 'hey there'
+   integer, parameter :: SINK_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_ANNOTATION_NOTE = 'sink type'
+
+   integer, parameter :: SINK_FLAG_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_FLAG_ANNOTATION_NOTE = 'flag field'
+
    integer, parameter :: SINK_DWORDS = 2
    integer, parameter :: SINK_PWORDS = 9
    type :: sink_t

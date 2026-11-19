@@ -45,16 +45,17 @@ module capnp_schema
    public :: cgr_nodes, cgr_requested_files
    public :: reqfile_id, reqfile_filename
    public :: node_id, node_display_name, node_prefix_len, node_scope_id, node_which
-   public :: node_nested, node_nested_name, node_nested_id
+   public :: node_nested, node_nested_name, node_nested_id, node_annotations
    public :: node_struct_data_words, node_struct_pointer_count, node_struct_is_group
    public :: node_struct_discriminant_count, node_struct_discriminant_offset
    public :: node_struct_fields, node_enumerants, node_const_type, node_const_value
-   public :: node_interface_methods, method_name
+   public :: node_interface_methods, method_name, method_annotations
    public :: method_param_struct_type, method_result_struct_type
    public :: field_name, field_code_order, field_discriminant, field_which
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
-   public :: field_slot_had_default
-   public :: enumerant_name
+   public :: field_slot_had_default, field_annotations
+   public :: enumerant_name, enumerant_annotations
+   public :: annotation_id, annotation_value, annotation_brand
    public :: type_which, type_list_element, type_type_id
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
@@ -216,6 +217,14 @@ contains
       l = capnp_getp(p, 1, err)
    end function node_nested
 
+   !> Node.annotations: List(Annotation) at pointer slot 2.
+   function node_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 2, err)
+   end function node_annotations
+
    subroutine node_nested_name(nn, s, err)
       type(capnp_ptr_t), intent(in) :: nn
       character(len=:), allocatable, intent(out) :: s
@@ -280,6 +289,14 @@ contains
       type(capnp_ptr_t) :: l
       l = capnp_getp(p, 3, err)
    end function node_interface_methods
+
+   !> Method.annotations: List(Annotation) at pointer slot 2.
+   function method_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 2, err)
+   end function method_annotations
 
    !> Method: name ptr 0, paramStructType u64 at byte 8, resultStructType
    !> u64 at byte 16 (per `capnp compile -ocapnp schema.capnp`).
@@ -378,6 +395,14 @@ contains
       v = capnp_get_bool(p, 128_int64)
    end function field_slot_had_default
 
+   !> Field.annotations: List(Annotation) at pointer slot 1.
+   function field_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 1, err)
+   end function field_annotations
+
    ! --- Enumerant: 1 data word, 2 ptrs -----------------------------------
 
    subroutine enumerant_name(p, s, err)
@@ -386,6 +411,36 @@ contains
       integer, intent(out) :: err
       call capnp_get_text(p, 0, s, err)
    end subroutine enumerant_name
+
+   !> Enumerant.annotations: List(Annotation) at pointer slot 1.
+   function enumerant_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 1, err)
+   end function enumerant_annotations
+
+   ! --- Annotation: 1 data word, 2 ptrs ----------------------------------
+
+   function annotation_id(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 0_int64)
+   end function annotation_id
+
+   function annotation_value(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 0, err)
+   end function annotation_value
+
+   function annotation_brand(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 1, err)
+   end function annotation_brand
 
    ! --- Type: 3 data words, 1 ptr ----------------------------------------
 

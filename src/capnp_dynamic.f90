@@ -17,6 +17,9 @@ module capnp_dynamic
    public :: capnp_dyn_get_text, capnp_dyn_getp
    public :: capnp_dyn_set_int, capnp_dyn_set_text
    public :: capnp_dyn_which, capnp_dyn_field_type
+   public :: capnp_dyn_annotation_t, capnp_dyn_node_annotations
+   public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
+   public :: capnp_dyn_method_annotations
 
    !> A loaded compiled schema: the CGR message plus a node index.
    type :: capnp_dyn_schema_t
@@ -24,6 +27,15 @@ module capnp_dynamic
       type(capnp_ptr_t), allocatable :: nodes(:)
       logical :: loaded = .false.
    end type capnp_dyn_schema_t
+
+   !> An annotation use as exposed by the C++ schema API. `value` and
+   !> `brand` are handles into the loaded CodeGeneratorRequest and remain
+   !> valid until capnp_dyn_free() is called on the owning schema.
+   type :: capnp_dyn_annotation_t
+      integer(int64) :: id = 0_int64
+      type(capnp_ptr_t) :: value
+      type(capnp_ptr_t) :: brand
+   end type capnp_dyn_annotation_t
 
 contains
 
@@ -124,6 +136,138 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end subroutine dyn_field
+
+   subroutine dyn_annotations(list, annotations, err)
+      type(capnp_ptr_t), intent(in) :: list
+      type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: a
+      integer(int64) :: i, n
+      err = CAPNP_OK
+      n = capnp_list_len(list)
+      allocate (annotations(n))
+      do i = 0_int64, n - 1_int64
+         a = capnp_list_get_struct(list, int(i), err)
+         if (err /= CAPNP_OK) return
+         annotations(i + 1)%id = annotation_id(a)
+         annotations(i + 1)%value = annotation_value(a, err)
+         if (err /= CAPNP_OK) return
+         annotations(i + 1)%brand = annotation_brand(a, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine dyn_annotations
+
+   !> Annotations applied directly to a schema node, including files, types,
+   !> constants, interfaces, and annotation declarations.
+   subroutine capnp_dyn_node_annotations(schema, idx, annotations, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: list
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      list = node_annotations(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) then
+         allocate (annotations(0))
+         return
+      end if
+      call dyn_annotations(list, annotations, err)
+   end subroutine capnp_dyn_node_annotations
+
+   !> Annotations applied to a named struct field, including group fields.
+   subroutine capnp_dyn_field_annotations(schema, idx, fname, annotations, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: fname
+      type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f, list
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) then
+         allocate (annotations(0))
+         return
+      end if
+      list = field_annotations(f, err)
+      if (err /= CAPNP_OK) then
+         allocate (annotations(0))
+         return
+      end if
+      call dyn_annotations(list, annotations, err)
+   end subroutine capnp_dyn_field_annotations
+
+   !> Annotations applied to an enumerant selected by its schema name.
+   subroutine capnp_dyn_enumerant_annotations(schema, idx, name, annotations, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: name
+      type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: enums, en, list
+      character(len=:), allocatable :: ename
+      integer(int64) :: i
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
+          node_which(schema%nodes(idx)) /= NODE_ENUM) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      enums = node_enumerants(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) then
+         allocate (annotations(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(enums) - 1_int64
+         en = capnp_list_get_struct(enums, int(i), err)
+         if (err /= CAPNP_OK) exit
+         call enumerant_name(en, ename, err)
+         if (err /= CAPNP_OK) exit
+         if (ename /= name) cycle
+         list = enumerant_annotations(en, err)
+         if (err == CAPNP_OK) call dyn_annotations(list, annotations, err)
+         return
+      end do
+      if (.not. allocated(annotations)) allocate (annotations(0))
+      if (err == CAPNP_OK) err = CAPNP_ERR_ARG
+   end subroutine capnp_dyn_enumerant_annotations
+
+   !> Annotations applied to an interface method selected by its schema name.
+   subroutine capnp_dyn_method_annotations(schema, idx, name, annotations, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: name
+      type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: methods, method, list
+      character(len=:), allocatable :: mname
+      integer(int64) :: i
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
+          node_which(schema%nodes(idx)) /= NODE_INTERFACE) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      methods = node_interface_methods(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) then
+         allocate (annotations(0))
+         return
+      end if
+      do i = 0_int64, capnp_list_len(methods) - 1_int64
+         method = capnp_list_get_struct(methods, int(i), err)
+         if (err /= CAPNP_OK) exit
+         call method_name(method, mname, err)
+         if (err /= CAPNP_OK) exit
+         if (mname /= name) cycle
+         list = method_annotations(method, err)
+         if (err == CAPNP_OK) call dyn_annotations(list, annotations, err)
+         return
+      end do
+      if (.not. allocated(annotations)) allocate (annotations(0))
+      if (err == CAPNP_OK) err = CAPNP_ERR_ARG
+   end subroutine capnp_dyn_method_annotations
 
    !> Wire type tag (TYPE_*) of a named field; TYPE_STRUCT for groups.
    function capnp_dyn_field_type(schema, idx, fname, err) result(tw)
