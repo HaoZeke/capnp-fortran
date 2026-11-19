@@ -10,6 +10,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Reader pointer lookups store one cached copy of each defaulted field on the schema.
+  `capnp_dyn_getp`, `capnp_dyn_get_any_struct`, and `capnp_dyn_get_any_list` take
+  the schema as inout because of that cache. A routine that only holds the schema
+  as in does not compile against them.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.
