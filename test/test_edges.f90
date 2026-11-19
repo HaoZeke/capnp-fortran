@@ -30,6 +30,9 @@ contains
       testsuite = [ &
          new_unittest("cpp-match", run_cpp_match), &
          new_unittest("nest-depth", run_nest_depth), &
+         new_unittest("text-depth", run_text_depth), &
+         new_unittest("segment-sweep", run_segment_sweep), &
+         new_unittest("far-landing-pad", run_far_pad), &
          new_unittest("huge-list", run_huge_list), &
          new_unittest("oversize-flat", run_oversize_flat) &
          ]
@@ -224,6 +227,131 @@ contains
          //' && cmp -s '//tmp//'/nest.ref '//tmp//'/nest.ours'), &
          'edges: depth '//trim(dbuf)//' binary:'//fmt)
    end subroutine one_depth
+
+   !> Text input at 101, 1000, and 1735. 1735 is the deepest nest capnp
+   !> 1.4.0 still accepts on an 8 MiB stack; 1739 is the first depth it
+   !> rejects, by a segmentation fault rather than a nesting counter.
+   subroutine run_text_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sch = &
+         '@0x8e7d6c5b4a392817;'//achar(10)// &
+         'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/node.capnp', sch, err)
+      call check_(error, err == 0, 'text-depth: schema')
+      call text_depth(error, 101)
+      call text_depth(error, 1000)
+      call text_depth(error, 1735)
+   end subroutine run_text_depth
+
+   subroutine text_depth(error, depth)
+      type(error_type), allocatable, intent(inout) :: error
+      integer, intent(in) :: depth
+      character(len=:), allocatable :: text
+      character(len=16) :: buf, dbuf
+      integer :: err, i
+      if (allocated(error)) return
+      text = '(v = 1)'
+      do i = 0, depth - 2
+         write (buf, '(i0)') i
+         text = '(kid = '//text//', v = '//trim(buf)//')'
+      end do
+      call spit(tmp//'/nest.txt', text, err)
+      if (err /= 0) then
+         call test_failed(error, 'text-depth: write')
+         return
+      end if
+      write (dbuf, '(i0)') depth
+      call check_(error, sh(capnpf_setup() &
+         //' && capnp convert text:binary '//tmp//'/node.capnp Node < ' &
+         //tmp//'/nest.txt > '//tmp//'/td.ref 2>'//tmp//'/td.ref.err; echo $? > ' &
+         //tmp//'/td.ref.rc' &
+         //' && "$CAP" convert text:binary '//tmp//'/node.capnp Node < ' &
+         //tmp//'/nest.txt > '//tmp//'/td.ours 2>'//tmp//'/td.ours.err; echo $? > ' &
+         //tmp//'/td.ours.rc' &
+         //' && cmp -s '//tmp//'/td.ref.rc '//tmp//'/td.ours.rc' &
+         //' && grep -qx 0 '//tmp//'/td.ref.rc' &
+         //' && cmp -s '//tmp//'/td.ref '//tmp//'/td.ours'), &
+         'edges: text depth '//trim(dbuf))
+   end subroutine text_depth
+
+   subroutine run_segment_sweep(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sch = &
+         'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+         '@0x9a1b2c3d4e5f6071;'//achar(10)// &
+         'struct All {'//achar(10)// &
+         '  i8 @0 :Int8; u8 @1 :UInt8; i32 @2 :Int32; i64 @3 :Int64; u64 @4 :UInt64;'//achar(10)// &
+         '  f64 @5 :Float64; txt @6 :Text; dat @7 :Data;'//achar(10)// &
+         '  hx @8 :Data $Json.hex; b64 @9 :Data $Json.base64; col @10 :Color;'//achar(10)// &
+         '  li32 @11 :List(Int32);'//achar(10)// &
+         '}'//achar(10)// &
+         'enum Color { red @0; blue @1; }'//achar(10)
+      character(len=*), parameter :: payload = &
+         '{"txt":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",' &
+         //'"li32":[1,2,3,4,5,6,7,8,9,10,11,12]}'
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/all.capnp', sch, err)
+      call check_(error, err == 0, 'sweep: schema')
+      call spit(tmp//'/seg.json', payload, err)
+      call check_(error, err == 0, 'sweep: payload')
+      call check_(error, sh(capnpf_setup() &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && mis=0' &
+         //' && for n in $(seq 1 64); do' &
+         //' capnp convert -I"$INC" --segment-size=$n json:binary '//tmp &
+         //'/all.capnp All < '//tmp//'/seg.json > '//tmp//'/s.ref' &
+         //' && "$CAP" convert -I"$INC" --segment-size=$n json:binary '//tmp &
+         //'/all.capnp All < '//tmp//'/seg.json > '//tmp//'/s.ours' &
+         //' && cmp -s '//tmp//'/s.ref '//tmp//'/s.ours || mis=$((mis+1));' &
+         //' done && test "$mis" = 0'), 'edges: segment-size 1..64')
+   end subroutine run_segment_sweep
+
+   !> Far pointer whose landing pad is the first word of the next segment.
+   !> Segment size 2 fills the root segment with the root pointer and the
+   !> one-word struct, so the text opens a new segment.
+   subroutine run_far_pad(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sch = &
+         '@0xa1b2c3d4e5f60718;'//achar(10)// &
+         'struct Pad { txt @0 :Text; }'//achar(10)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/pad.capnp', sch, err)
+      call check_(error, err == 0, 'pad: schema')
+      call spit(tmp//'/pad.txt', '(txt = "hello")', err)
+      call check_(error, sh(capnpf_setup() &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" --segment-size=2 text:binary '//tmp &
+         //'/pad.capnp Pad < '//tmp//'/pad.txt > '//tmp//'/pad.ref' &
+         //' && "$CAP" convert -I"$INC" --segment-size=2 text:binary '//tmp &
+         //'/pad.capnp Pad < '//tmp//'/pad.txt > '//tmp//'/pad.ours' &
+         //' && cmp -s '//tmp//'/pad.ref '//tmp//'/pad.ours'), &
+         'edges: far landing pad')
+   end subroutine run_far_pad
 
    subroutine run_huge_list(error)
       type(error_type), allocatable, intent(out) :: error
