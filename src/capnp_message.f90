@@ -1373,8 +1373,21 @@ contains
    ! NUL; Data is a bare byte list.
    ! ------------------------------------------------------------------
 
+   !> Text bytes include a trailing NUL. A missing NUL is malformed.
+   function text_has_nul(q) result(ok)
+      type(capnp_ptr_t), intent(in) :: q
+      logical :: ok
+      integer(int64) :: last
+      ok = .false.
+      if (.not. associated(q%msg)) return
+      if (q%nelem < 1_int64) return
+      last = q%off + q%nelem - 1_int64
+      ok = cp_u8(q%msg%segs(q%seg)%bytes(last)) == 0
+   end function text_has_nul
+
    !> Text at pointer field i of p. Missing/null yields an empty string with
    !> err = CAPNP_OK, matching default-text-is-empty semantics.
+   !> A byte list whose last byte is not NUL is malformed text.
    subroutine capnp_get_text(p, i, str, err)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: i
@@ -1386,6 +1399,10 @@ contains
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
       if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -1606,7 +1623,11 @@ contains
       view => null()
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -1625,7 +1646,11 @@ contains
       n = 0_int64
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
