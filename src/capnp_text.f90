@@ -1564,18 +1564,54 @@ contains
       end do
    end subroutine read_data
 
+   !> Grow the bracket stack. capnp 1.4.0 accepts nests far past 64, up to
+   !> the process stack, so a fixed buffer would reject those inputs.
+   subroutine push_bracket(stk, depth, ch, err)
+      character(len=1), allocatable, intent(inout) :: stk(:)
+      integer, intent(inout) :: depth
+      character(len=1), intent(in) :: ch
+      integer, intent(out) :: err
+      character(len=1), allocatable :: grown(:)
+      integer :: n, stat
+      err = CAPNP_OK
+      if (.not. allocated(stk)) then
+         allocate (stk(16), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
+      if (depth >= size(stk)) then
+         n = size(stk)*2
+         if (n < depth + 1) n = depth + 1
+         allocate (grown(n), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown(1:size(stk)) = stk
+         call move_alloc(grown, stk)
+      end if
+      depth = depth + 1
+      stk(depth) = ch
+   end subroutine push_bracket
+
    function count_items(s, at) result(n)
       character(len=*), intent(in) :: s
       integer, intent(in) :: at
       integer :: n
-      integer :: i, depth
+      integer :: i, depth, perr
       logical :: in_str, in_cmt, item
       character(len=1) :: c
-      character(len=1) :: stk(MAX_DEPTH + 4)
+      character(len=1), allocatable :: stk(:)
       n = 0
       i = at + 1
-      depth = 1
-      stk(1) = '['
+      depth = 0
+      call push_bracket(stk, depth, '[', perr)
+      if (perr /= CAPNP_OK) then
+         n = -1
+         return
+      end if
       in_str = .false.
       in_cmt = .false.
       item = .false.
@@ -1606,12 +1642,11 @@ contains
             in_str = .true.
             item = .true.
          else if (c == '(' .or. c == '[') then
-            if (depth >= size(stk)) then
+            call push_bracket(stk, depth, c, perr)
+            if (perr /= CAPNP_OK) then
                n = -1
                return
             end if
-            depth = depth + 1
-            stk(depth) = c
             item = .true.
          else if (c == ')' .or. c == ']') then
             if ((c == ')' .and. stk(depth) /= '(') .or. (c == ']' .and. stk(depth) /= '[')) then
@@ -1647,7 +1682,7 @@ contains
       integer :: i, depth
       logical :: in_str, in_cmt
       character(len=1) :: c
-      character(len=1) :: stk(MAX_DEPTH + 4)
+      character(len=1), allocatable :: stk(:)
       err = CAPNP_OK
       to = beg
       i = beg
@@ -1679,12 +1714,8 @@ contains
          else if (c == '"') then
             in_str = .true.
          else if (c == '(' .or. c == '[') then
-            if (depth >= size(stk)) then
-               err = CAPNP_ERR_DEPTH
-               return
-            end if
-            depth = depth + 1
-            stk(depth) = c
+            call push_bracket(stk, depth, c, err)
+            if (err /= CAPNP_OK) return
          else if (c == ')' .or. c == ']') then
             if (depth <= 0) then
                err = CAPNP_ERR_ARG
