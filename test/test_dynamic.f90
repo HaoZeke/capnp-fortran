@@ -48,7 +48,8 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, service_idx, box_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx
+      integer :: dynamic_idx, choice_idx, service_idx, box_idx, tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
