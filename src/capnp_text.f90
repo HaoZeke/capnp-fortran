@@ -309,7 +309,7 @@ contains
       logical :: show
       err = CAPNP_OK
       out = ''
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -515,7 +515,7 @@ contains
       integer :: n
       err = CAPNP_OK
       out = ''
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(lst)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -637,7 +637,7 @@ contains
       character(len=:), allocatable :: name
       integer :: fd
       err = CAPNP_OK
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -657,6 +657,11 @@ contains
          if (err /= CAPNP_OK) return
          call expect_ch(sc, '=', err)
          if (err /= CAPNP_OK) return
+         ! `=-1` is one operator, not an equals sign and a unary minus.
+         if (is_op_char(peek(sc))) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
          call capnp_codec_find_field(schema, idx, name, f, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
@@ -743,7 +748,7 @@ contains
       type(capnp_ptr_t) :: lst, et
       integer :: n, i, at
       err = CAPNP_OK
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(parent)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -1312,35 +1317,58 @@ contains
       name = sc%s(a:sc%i - 1)
    end subroutine read_ident
 
+   !> Encode follows the message limit. A builder has none; a reader keeps
+   !> the limit it was opened with. A handle with no message uses 64.
+   pure function depth_cap(p) result(lim)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: lim
+      lim = MAX_DEPTH
+      if (associated(p%msg)) lim = p%msg%depth_limit
+   end function depth_cap
+
+   !> Characters that form one operator token when they sit next to `=`.
+   pure function is_op_char(ch) result(y)
+      character(len=1), intent(in) :: ch
+      logical :: y
+      y = index('!$%&*+-./:<=>?@^|~', ch) > 0
+   end function is_op_char
+
    subroutine read_numeric(sc, tok, err)
       type(scan_t), intent(inout) :: sc
       character(len=:), allocatable, intent(out) :: tok
       integer, intent(out) :: err
       integer :: a
+      logical :: neg
       err = CAPNP_OK
       tok = ''
+      neg = .false.
       call skip_ws(sc)
-      a = sc%i
       if (peek(sc) == '+') then
          err = CAPNP_ERR_ARG
          return
       end if
-      if (peek(sc) == '-') sc%i = sc%i + 1
+      if (peek(sc) == '-') then
+         neg = .true.
+         sc%i = sc%i + 1
+         call skip_ws(sc)
+      end if
+      a = sc%i
       if (is_ident_start(peek(sc))) then
          sc%i = sc%i + 1
          do while (is_ident_cont(peek(sc)))
             sc%i = sc%i + 1
          end do
          tok = sc%s(a:sc%i - 1)
-         return
+      else
+         call scan_number(sc, err)
+         if (err /= CAPNP_OK) return
+         if (sc%i <= a) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         tok = sc%s(a:sc%i - 1)
       end if
-      call scan_number(sc, err)
-      if (err /= CAPNP_OK) return
-      if (sc%i <= a) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      tok = sc%s(a:sc%i - 1)
+      if (neg) tok = '-'//tok
    end subroutine read_numeric
 
    subroutine scan_number(sc, err)
@@ -1463,7 +1491,7 @@ contains
       err = CAPNP_OK
       call skip_ws(sc)
       if (sc%i + 2 <= sc%n) then
-         if ((sc%s(sc%i:sc%i + 2) == '0x"' .or. sc%s(sc%i:sc%i + 2) == '0X"')) then
+         if (sc%s(sc%i:sc%i + 2) == '0x"') then
             sc%i = sc%i + 3
             cap = 8
             allocate (tmp(0:cap - 1), stat=stat)
@@ -1506,10 +1534,10 @@ contains
                n = n + 1
             end do
             if (n == 0) then
-               allocate (raw(0), stat=stat)
-            else
-               allocate (raw(0:n - 1), stat=stat)
+               err = CAPNP_ERR_ARG
+               return
             end if
+            allocate (raw(0:n - 1), stat=stat)
             if (stat /= 0) then
                err = CAPNP_ERR_ALLOC
                return
