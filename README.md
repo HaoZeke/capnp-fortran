@@ -62,17 +62,17 @@ and capnp-C++:
 | Deep copy / cross-message set | no | yes | yes |
 | Orphans (disown/adopt) | no | yes | yes |
 | Canonical form | yes (0.3.0) | yes | yes (byte-parity tested) |
-| Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
+| Code generator plugin (`capnp compile -o`) | yes | yes | partial (`capnpc-fortran`; annotations are not yet generated) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves, three-vat tested) |
-| RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
+| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | partial (project-specific network layer; both halves and three-vat tests) |
+| RPC level 4 (`Join`, reference equality) | no | no | partial (two-party extension; no C++ parity) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
-| Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
-| Generics in generated code | no | yes | brand-resolved instantiations (direct, list-element, list-binding, nested) |
-| Dynamic reflection API | no | yes | yes (`capnp_dynamic`, by-name read/write) |
+| Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
+| Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
+| Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
@@ -145,6 +145,14 @@ produced by C++ users of those features still read correctly here.
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Install
+
+Install [Pixi](https://pixi.sh/latest/installation/) before running the Pixi
+commands when it is not already on `PATH`:
+
+```console
+$ curl -fsSL https://pixi.sh/install.sh | bash
+$ export PATH="$HOME/.pixi/bin:$PATH"
+```
 
 With [fpm](https://fpm.fortran-lang.org), to build this repository:
 
