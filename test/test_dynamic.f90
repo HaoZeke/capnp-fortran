@@ -146,6 +146,22 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'flag field', 'dyn: field annotation value')
       call capnp_message_init_builder(kmsg, err)
       sink = sink_new_root(kmsg, err)
+      q = capnp_dyn_getp(kschema, sink_idx, sink%p, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT .and. &
+                  abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'x', err) - 1.5_real64) < 1.0e-15_real64, &
+                  'dyn: struct pointer default')
+      q = capnp_dyn_getp(kschema, sink_idx, sink%p, 'scores', err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_LIST .and. &
+                  capnp_list_len(q) == 3_int64 .and. capnp_list_get_i64(q, 2_int64, err) == 4_int64, &
+                  'dyn: list pointer default')
+      q = capnp_new_struct(kmsg, 0, 0, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(kschema, sink_idx, q, 'count', err) == -7_int64, &
+                  'dyn: scalar schema evolution default')
+      q = capnp_dyn_getp(kschema, sink_idx, q, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT .and. &
+                  abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'z', err) + 3.5_real64) < 1.0e-15_real64, &
+                  'dyn: pointer schema evolution default')
       call capnp_dyn_set_bool(kschema, sink_idx, sink%p, 'flag', .false., err)
       call capnp_dyn_set_f64(kschema, sink_idx, sink%p, 'ratio', 3.5_real64, err)
       data = [-34_int8, -83_int8, -66_int8]
