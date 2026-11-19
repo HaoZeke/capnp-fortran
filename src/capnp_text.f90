@@ -146,7 +146,7 @@ contains
       case (TYPE_STRUCT)
          q = value_pointer(val, err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(typ))
+         idx = capnp_codec_find_id(schema, type_type_id(typ))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -219,7 +219,7 @@ contains
          f = capnp_list_get_struct(fl, i, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
-         show = field_present(f, p, err)
+         show = capnp_codec_field_present(f, p, err)
          if (err /= CAPNP_OK) return
          if (fd /= NO_DISCRIMINANT) then
             if (fd /= active) cycle
@@ -251,7 +251,7 @@ contains
       err = CAPNP_OK
       out = ''
       if (field_which(f) == FIELD_GROUP) then
-         idx = find_id(schema, field_group_type_id(f))
+         idx = capnp_codec_find_id(schema, field_group_type_id(f))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -269,37 +269,37 @@ contains
       case (TYPE_VOID)
          out = 'void'
       case (TYPE_BOOL)
-         if (capnp_get_bool(p, off, default=def_bool(dv))) then
+         if (capnp_get_bool(p, off, default=capnp_def_bool(dv))) then
             out = 'true'
          else
             out = 'false'
          end if
       case (TYPE_INT8)
-         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=def_i8(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=capnp_def_i8(dv)), int64), out)
       case (TYPE_INT16)
-         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=def_i16(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=capnp_def_i16(dv)), int64), out)
       case (TYPE_INT32)
-         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=def_i32(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=capnp_def_i32(dv)), int64), out)
       case (TYPE_INT64)
-         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=def_i64(dv)), out)
+         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), out)
       case (TYPE_UINT8)
-         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=def_u8(dv)), int64), out)
+         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=capnp_def_u8(dv)), int64), out)
       case (TYPE_UINT16, TYPE_ENUM)
-         ord = int(capnp_get_u16(p, off*2_int64, default=def_u16(dv)))
+         ord = int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv)))
          if (tw == TYPE_ENUM) then
             call enum_text(schema, type_type_id(t), ord, out, err)
          else
             call capnp_fmt_u64(int(ord, int64), out)
          end if
       case (TYPE_UINT32)
-         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=def_u32(dv)), out)
+         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=capnp_def_u32(dv)), out)
       case (TYPE_UINT64)
-         bits = capnp_get_i64(p, off*8_int64, default=def_i64(dv))
+         bits = capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv))
          call capnp_fmt_u64(bits, out)
       case (TYPE_FLOAT32)
-         call capnp_fmt_f32(capnp_get_f32(p, off*4_int64, default=def_f32(dv)), out)
+         call capnp_fmt_f32(capnp_get_f32(p, off*4_int64, default=capnp_def_f32(dv)), out)
       case (TYPE_FLOAT64)
-         call capnp_fmt_f64(capnp_get_f64(p, off*8_int64, default=def_f64(dv)), out)
+         call capnp_fmt_f64(capnp_get_f64(p, off*8_int64, default=capnp_def_f64(dv)), out)
       case (TYPE_TEXT)
          q = capnp_getp(p, int(off), err)
          if (err /= CAPNP_OK) return
@@ -331,7 +331,7 @@ contains
       case (TYPE_STRUCT)
          q = capnp_getp(p, int(off), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(t))
+         idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -441,7 +441,7 @@ contains
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(et))
+         idx = capnp_codec_find_id(schema, type_type_id(et))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -482,7 +482,7 @@ contains
          if (err /= CAPNP_OK) return
          call expect_ch(sc, '=', err)
          if (err /= CAPNP_OK) return
-         call find_field(schema, idx, name, f, err)
+         call capnp_codec_find_field(schema, idx, name, f, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
          if (fd /= NO_DISCRIMINANT) then
@@ -516,7 +516,7 @@ contains
       integer(int64) :: off
       err = CAPNP_OK
       if (field_which(f) == FIELD_GROUP) then
-         idx = find_id(schema, field_group_type_id(f))
+         idx = capnp_codec_find_id(schema, field_group_type_id(f))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -534,14 +534,14 @@ contains
          if (err /= CAPNP_OK) return
          call parse_list(schema, et, p, int(off), sc, depth, err)
       case (TYPE_STRUCT)
-         idx = find_id(schema, type_type_id(t))
+         idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
          dw = node_struct_data_words(schema%nodes(idx))
          pw = node_struct_pointer_count(schema%nodes(idx))
-         q = new_struct(p, dw, pw, err)
+         q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
@@ -570,7 +570,7 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      lst = alloc_list(parent, et, n, schema, err)
+      lst = capnp_codec_alloc_list(parent, et, n, schema, err)
       if (err /= CAPNP_OK) return
       call capnp_setp(parent, slot, lst, err)
       if (err /= CAPNP_OK) return
@@ -617,7 +617,7 @@ contains
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
-         idx = find_id(schema, type_type_id(et))
+         idx = capnp_codec_find_id(schema, type_type_id(et))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
@@ -693,20 +693,20 @@ contains
          if (in_list) then
             call capnp_list_set_bool(p, ix, bv, err)
          else
-            call capnp_set_bool(p, off, bv, err, default=def_bool(dv))
+            call capnp_set_bool(p, off, bv, err, default=capnp_def_bool(dv))
          end if
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
          call capnp_parse_i64(tok, iv, err)
          if (err /= CAPNP_OK) return
-         call put_signed(p, off, tw, iv, in_list, ix, dv, err)
+         call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
       case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
          call capnp_parse_u64(tok, uv, err)
          if (err /= CAPNP_OK) return
-         call put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
+         call capnp_put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
       case (TYPE_FLOAT32, TYPE_FLOAT64)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
@@ -722,13 +722,13 @@ contains
             if (in_list) then
                call capnp_list_set_f32(p, ix, real(fv, real32), err)
             else
-               call capnp_set_f32(p, off*4_int64, real(fv, real32), err, default=def_f32(dv))
+               call capnp_set_f32(p, off*4_int64, real(fv, real32), err, default=capnp_def_f32(dv))
             end if
          else
             if (in_list) then
                call capnp_list_set_f64(p, ix, fv, err)
             else
-               call capnp_set_f64(p, off*8_int64, fv, err, default=def_f64(dv))
+               call capnp_set_f64(p, off*8_int64, fv, err, default=capnp_def_f64(dv))
             end if
          end if
       case (TYPE_TEXT)
@@ -753,110 +753,12 @@ contains
          if (in_list) then
             call capnp_list_set_i16(p, ix, capnp_as_i16(ord), err)
          else
-            call capnp_set_u16(p, off*2_int64, int(ord, int32), err, default=def_u16(dv))
+            call capnp_set_u16(p, off*2_int64, int(ord, int32), err, default=capnp_def_u16(dv))
          end if
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine store_scalar
-
-   subroutine put_signed(p, off, tw, iv, in_list, ix, dv, err)
-      type(capnp_ptr_t), intent(in) :: p, dv
-      integer(int64), intent(in) :: off, iv, ix
-      integer, intent(in) :: tw
-      logical, intent(in) :: in_list
-      integer, intent(out) :: err
-      err = CAPNP_OK
-      select case (tw)
-      case (TYPE_INT8)
-         if (iv < -128_int64 .or. iv > 127_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i8(p, ix, int(iv, int8), err)
-         else
-            call capnp_set_i8(p, off, int(iv, int8), err, default=def_i8(dv))
-         end if
-      case (TYPE_INT16)
-         if (iv < -32768_int64 .or. iv > 32767_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i16(p, ix, int(iv, int16), err)
-         else
-            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=def_i16(dv))
-         end if
-      case (TYPE_INT32)
-         if (iv < -2147483648_int64 .or. iv > 2147483647_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i32(p, ix, int(iv, int32), err)
-         else
-            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=def_i32(dv))
-         end if
-      case (TYPE_INT64)
-         if (in_list) then
-            call capnp_list_set_i64(p, ix, iv, err)
-         else
-            call capnp_set_i64(p, off*8_int64, iv, err, default=def_i64(dv))
-         end if
-      case default
-         err = CAPNP_ERR_KIND
-      end select
-   end subroutine put_signed
-
-   subroutine put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
-      type(capnp_ptr_t), intent(in) :: p, dv
-      integer(int64), intent(in) :: off, uv, ix
-      integer, intent(in) :: tw
-      logical, intent(in) :: in_list
-      integer, intent(out) :: err
-      err = CAPNP_OK
-      select case (tw)
-      case (TYPE_UINT8)
-         if (uv < 0_int64 .or. uv > 255_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i8(p, ix, capnp_as_i8(int(uv)), err)
-         else
-            call capnp_set_u8(p, off, int(uv, int16), err, default=def_u8(dv))
-         end if
-      case (TYPE_UINT16)
-         if (uv < 0_int64 .or. uv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i16(p, ix, capnp_as_i16(int(uv)), err)
-         else
-            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=def_u16(dv))
-         end if
-      case (TYPE_UINT32)
-         if (uv < 0_int64 .or. uv > 4294967295_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (in_list) then
-            call capnp_list_set_i32(p, ix, capnp_as_i32u(uv), err)
-         else
-            call capnp_set_u32(p, off*4_int64, uv, err, default=def_u32(dv))
-         end if
-      case (TYPE_UINT64)
-         if (in_list) then
-            call capnp_list_set_i64(p, ix, uv, err)
-         else
-            call capnp_set_i64(p, off*8_int64, uv, err, default=def_i64(dv))
-         end if
-      case default
-         err = CAPNP_ERR_KIND
-      end select
-   end subroutine put_unsigned
 
    subroutine parse_enum(schema, t, sc, ord, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -901,30 +803,6 @@ contains
       ord = enum_by_name(schema, type_type_id(t), tok, err)
    end subroutine parse_enum
 
-   function field_present(f, p, err) result(y)
-      type(capnp_ptr_t), intent(in) :: f, p
-      integer, intent(out) :: err
-      logical :: y
-      type(capnp_ptr_t) :: t, q
-      integer :: tw
-      err = CAPNP_OK
-      y = .false.
-      if (field_which(f) == FIELD_GROUP) then
-         y = .true.
-         return
-      end if
-      t = field_slot_type(f, err)
-      if (err /= CAPNP_OK) return
-      tw = type_which(t)
-      select case (tw)
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_ANY_POINTER, TYPE_INTERFACE)
-         q = capnp_getp(p, int(field_slot_offset(f)), err)
-         y = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
-      case default
-         y = .true.
-      end select
-   end function field_present
-
    subroutine enum_text(schema, tid, ord, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer(int64), intent(in) :: tid
@@ -936,7 +814,7 @@ contains
       integer :: idx, n
       err = CAPNP_OK
       out = ''
-      idx = find_id(schema, tid)
+      idx = capnp_codec_find_id(schema, tid)
       if (idx /= 0) then
          el = node_enumerants(schema%nodes(idx), err)
          if (err /= CAPNP_OK) return
@@ -963,7 +841,7 @@ contains
       integer :: idx, i, n
       err = CAPNP_OK
       ord = -1
-      idx = find_id(schema, tid)
+      idx = capnp_codec_find_id(schema, tid)
       if (idx == 0) then
          err = CAPNP_ERR_ARG
          return
@@ -983,170 +861,6 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end function enum_by_name
-
-   subroutine find_field(schema, idx, name, f, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx
-      character(len=*), intent(in) :: name
-      type(capnp_ptr_t), intent(out) :: f
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: fl
-      character(len=:), allocatable :: nm
-      integer :: i, n
-      err = CAPNP_OK
-      fl = node_struct_fields(schema%nodes(idx), err)
-      if (err /= CAPNP_OK) return
-      n = int(capnp_list_len(fl))
-      do i = 0, n - 1
-         f = capnp_list_get_struct(fl, i, err)
-         if (err /= CAPNP_OK) return
-         call field_name(f, nm, err)
-         if (err /= CAPNP_OK) return
-         if (nm == name) return
-      end do
-      err = CAPNP_ERR_ARG
-   end subroutine find_field
-
-   function find_id(schema, id) result(idx)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer(int64), intent(in) :: id
-      integer :: idx, i
-      idx = 0
-      if (.not. schema%loaded) return
-      do i = 1, size(schema%nodes)
-         if (node_id(schema%nodes(i)) == id) then
-            idx = i
-            return
-         end if
-      end do
-   end function find_id
-
-   function new_struct(p, dw, pw, err) result(q)
-      type(capnp_ptr_t), intent(in) :: p
-      integer, intent(in) :: dw, pw
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: q
-      type(capnp_message_t), pointer :: m
-      m => p%msg
-      q = capnp_new_struct(m, dw, pw, err)
-   end function new_struct
-
-   function alloc_list(parent, et, n, schema, err) result(lst)
-      type(capnp_ptr_t), intent(in) :: parent, et
-      integer, intent(in) :: n
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: lst
-      type(capnp_message_t), pointer :: m
-      integer :: tw, idx, dw, pw, es
-      m => parent%msg
-      err = CAPNP_OK
-      tw = type_which(et)
-      select case (tw)
-      case (TYPE_STRUCT)
-         idx = find_id(schema, type_type_id(et))
-         if (idx == 0) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         dw = node_struct_data_words(schema%nodes(idx))
-         pw = node_struct_pointer_count(schema%nodes(idx))
-         lst = capnp_new_composite_list(m, int(n, int64), dw, pw, err)
-      case default
-         es = elem_esize(tw)
-         if (es < 0) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
-         lst = capnp_new_list(m, es, int(n, int64), err)
-      end select
-   end function alloc_list
-
-   pure function elem_esize(tw) result(es)
-      integer, intent(in) :: tw
-      integer :: es
-      select case (tw)
-      case (TYPE_VOID); es = CAPNP_SZ_VOID
-      case (TYPE_BOOL); es = CAPNP_SZ_BIT
-      case (TYPE_INT8, TYPE_UINT8); es = CAPNP_SZ_BYTE
-      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
-      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
-      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
-         es = CAPNP_SZ_PTR
-      case default; es = -1
-      end select
-   end function elem_esize
-
-   function def_bool(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      logical :: d
-      d = .false.
-      if (dv%kind /= CAPNP_PK_NULL) d = value_bool(dv)
-   end function def_bool
-
-   function def_i8(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int8) :: d
-      d = 0_int8
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i8(dv)
-   end function def_i8
-
-   function def_i16(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int16) :: d
-      d = 0_int16
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i16(dv)
-   end function def_i16
-
-   function def_i32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int32) :: d
-      d = 0_int32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i32(dv)
-   end function def_i32
-
-   function def_i64(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int64) :: d
-      d = 0_int64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i64(dv)
-   end function def_i64
-
-   function def_u8(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int16) :: d
-      d = 0_int16
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u8(dv)
-   end function def_u8
-
-   function def_u16(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int32) :: d
-      d = 0_int32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u16(dv)
-   end function def_u16
-
-   function def_u32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int64) :: d
-      d = 0_int64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u32(dv)
-   end function def_u32
-
-   function def_f32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      real(real32) :: d
-      d = 0.0_real32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_f32(dv)
-   end function def_f32
-
-   function def_f64(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      real(real64) :: d
-      d = 0.0_real64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_f64(dv)
-   end function def_f64
 
    pure function next_ind(indent) result(n)
       integer, intent(in) :: indent
@@ -1316,23 +1030,23 @@ contains
          if (sc%s(sc%i:sc%i) == '0' .and. &
              (sc%s(sc%i + 1:sc%i + 1) == 'x' .or. sc%s(sc%i + 1:sc%i + 1) == 'X')) then
             sc%i = sc%i + 2
-            if (hex_val(peek(sc)) < 0) then
+            if (capnp_hex_digit(peek(sc)) < 0) then
                err = CAPNP_ERR_ARG
                return
             end if
-            do while (hex_val(peek(sc)) >= 0)
+            do while (capnp_hex_digit(peek(sc)) >= 0)
                sc%i = sc%i + 1
             end do
             return
          end if
       end if
-      do while (dec_val(peek(sc)) >= 0)
+      do while (capnp_dec_digit(peek(sc)) >= 0)
          sc%i = sc%i + 1
          nd = nd + 1
       end do
       if (peek(sc) == '.') then
          sc%i = sc%i + 1
-         do while (dec_val(peek(sc)) >= 0)
+         do while (capnp_dec_digit(peek(sc)) >= 0)
             sc%i = sc%i + 1
             nd = nd + 1
          end do
@@ -1342,11 +1056,11 @@ contains
          sc%i = sc%i + 1
          c = peek(sc)
          if (c == '+' .or. c == '-') sc%i = sc%i + 1
-         if (dec_val(peek(sc)) < 0) then
+         if (capnp_dec_digit(peek(sc)) < 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         do while (dec_val(peek(sc)) >= 0)
+         do while (capnp_dec_digit(peek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
       end if
@@ -1418,9 +1132,9 @@ contains
                   sc%i = sc%i + 1
                   exit
                end if
-               d1 = hex_val(peek(sc))
+               d1 = capnp_hex_digit(peek(sc))
                sc%i = sc%i + 1
-               d2 = hex_val(peek(sc))
+               d2 = capnp_hex_digit(peek(sc))
                if (d1 < 0 .or. d2 < 0) then
                   err = CAPNP_ERR_ARG
                   return
@@ -1599,29 +1313,5 @@ contains
       logical :: y
       y = (c >= '0' .and. c <= '9') .or. c == '+' .or. c == '-' .or. c == '.'
    end function is_num_start
-
-   pure function dec_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else
-         d = -1
-      end if
-   end function dec_val
-
-   pure function hex_val(c) result(d)
-      character(len=1), intent(in) :: c
-      integer :: d
-      if (c >= '0' .and. c <= '9') then
-         d = iachar(c) - iachar('0')
-      else if (c >= 'a' .and. c <= 'f') then
-         d = iachar(c) - iachar('a') + 10
-      else if (c >= 'A' .and. c <= 'F') then
-         d = iachar(c) - iachar('A') + 10
-      else
-         d = -1
-      end if
-   end function hex_val
 
 end module capnp_text
