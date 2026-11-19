@@ -16,6 +16,7 @@ module capnp_arena
    public :: capnp_segment_t, capnp_message_t
    public :: capnp_message_init_builder, capnp_message_free
    public :: capnp_arena_alloc, capnp_arena_alloc_in
+   public :: capnp_arena_take_pad
    public :: capnp_segment_view
    public :: capnp_builder_options_t
    public :: capnp_grown_segment_bytes
@@ -30,6 +31,10 @@ module capnp_arena
       integer(int8), pointer :: bytes(:) => null()
       integer(int64) :: len = 0_int64
       logical :: owned = .false.
+      !> Word 0 of a segment opened for an object that did not fit in the
+      !> previous one. The far pointer's landing pad is that word, and the
+      !> object starts at word 1, matching capnp 1.4.0.
+      logical :: far_pad = .false.
    end type capnp_segment_t
 
    type :: capnp_message_t
@@ -44,6 +49,15 @@ module capnp_arena
       !> Preferred later-segment size in words. Zero means "exactly the request"
       !> when the strategy is fixed size. Heuristic growth does not read this.
       integer(int64) :: segment_words = CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS
+      !> Next heuristic segment size in words. MallocMessageBuilder starts
+      !> this at the first segment's size and adds each later segment's
+      !> allocated size, so the series is 1024, 1024, 2048, 4096, ...
+      integer(int64) :: next_words = CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS
+      !> Landing pads reserved immediately before an object, for a far
+      !> pointer that has not been written yet. Word indexes, 0-based.
+      integer, allocatable :: pad_seg(:)
+      integer(int64), allocatable :: pad_word(:)
+      integer :: npad = 0
    end type capnp_message_t
 
 contains
@@ -97,8 +111,12 @@ contains
          return
       end if
       msg%is_builder = .true.
+      ! Builders match MallocMessageBuilder: no nesting cap. Readers keep
+      ! the default of 64 unless the caller passes a reader option.
+      msg%depth_limit = huge(0)
       msg%alloc_strategy = strategy
       msg%segment_words = preferred
+      msg%next_words = cap
       allocate (msg%segs(4))
       msg%nsegs = 1
       call seg_reserve(msg%segs(1), cap*CAPNP_WORD_BYTES, err)
@@ -140,42 +158,91 @@ contains
       msg%depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
       msg%alloc_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
       msg%segment_words = DEFAULT_FIRST_WORDS
+      msg%next_words = DEFAULT_FIRST_WORDS
+      if (allocated(msg%pad_seg)) deallocate (msg%pad_seg)
+      if (allocated(msg%pad_word)) deallocate (msg%pad_word)
+      msg%npad = 0
    end subroutine capnp_message_free
 
-   !> Allocate nwords zeroed words. Tries the last segment; if the run does
-   !> not fit its remaining capacity, appends a fresh segment. Returns the
-   !> segment index and byte offset of the run.
-   subroutine capnp_arena_alloc(msg, nwords, seg_idx, byte_off, err)
+   !> Allocate nwords zeroed words. Without from_seg, tries the last
+   !> segment and otherwise appends one. With from_seg, follows
+   !> MallocMessageBuilder: the pointer's own segment first (a near
+   !> pointer), then the latest segment with a landing-pad word in front
+   !> of the object, then a new segment whose first word is that pad.
+   !> Returns the segment index and byte offset of the object.
+   subroutine capnp_arena_alloc(msg, nwords, seg_idx, byte_off, err, from_seg)
       type(capnp_message_t), intent(inout) :: msg
       integer(int64), intent(in) :: nwords
       integer, intent(out) :: seg_idx
       integer(int64), intent(out) :: byte_off
       integer, intent(out) :: err
+      integer, intent(in), optional :: from_seg
       integer(int64) :: need, cap
+      logical :: force_new
       err = CAPNP_OK
       seg_idx = 0
       byte_off = 0_int64
+      force_new = .false.
       if (.not. msg%is_builder .or. nwords < 0_int64 .or. nwords > MAX_SEGMENT_WORDS) then
          err = CAPNP_ERR_ARG
          return
       end if
       need = nwords*CAPNP_WORD_BYTES
-      associate (last => msg%segs(msg%nsegs))
-         if (last%len + need <= size(last%bytes, kind=int64)) then
-            byte_off = last%len
-            last%bytes(last%len:last%len + need - 1) = 0_int8
-            last%len = last%len + need
-            seg_idx = msg%nsegs
-            return
+      if (present(from_seg)) then
+         if (from_seg >= 1 .and. from_seg <= msg%nsegs) then
+            if (seg_try(msg%segs(from_seg), nwords, byte_off)) then
+               seg_idx = from_seg
+               return
+            end if
          end if
-      end associate
-      cap = next_segment_bytes(msg, need)
+         ! The object did not fit beside the pointer. The next try is one
+         ! extra word so the landing pad can sit immediately in front.
+         if (nwords < MAX_SEGMENT_WORDS .and. msg%nsegs >= 1) then
+            if (seg_try(msg%segs(msg%nsegs), nwords + 1_int64, byte_off)) then
+               seg_idx = msg%nsegs
+               call note_pad(msg, seg_idx, byte_off/CAPNP_WORD_BYTES, err)
+               if (err /= CAPNP_OK) return
+               byte_off = byte_off + CAPNP_WORD_BYTES
+               return
+            end if
+         end if
+         force_new = .true.
+      end if
+      if (.not. force_new) then
+         associate (last => msg%segs(msg%nsegs))
+            if (last%len + need <= size(last%bytes, kind=int64)) then
+               byte_off = last%len
+               if (need > 0_int64) last%bytes(last%len:last%len + need - 1) = 0_int8
+               last%len = last%len + need
+               seg_idx = msg%nsegs
+               return
+            end if
+         end associate
+      end if
+      ! The new segment leads with the far-pointer landing pad, then the
+      ! object. The segment is sized for both, as capnp 1.4.0 does.
+      if (nwords < MAX_SEGMENT_WORDS) then
+         cap = next_segment_bytes(msg, need + CAPNP_WORD_BYTES)
+      else
+         cap = next_segment_bytes(msg, need)
+      end if
       call msg_append_segment(msg, cap, err)
       if (err /= CAPNP_OK) return
+      if (msg%alloc_strategy /= CAPNP_ALLOC_FIXED_SIZE) then
+         call bump_next_words(msg, cap/CAPNP_WORD_BYTES)
+      end if
       seg_idx = msg%nsegs
-      byte_off = 0_int64
-      msg%segs(seg_idx)%bytes(0:need - 1) = 0_int8
-      msg%segs(seg_idx)%len = need
+      if (nwords < MAX_SEGMENT_WORDS .and. &
+          size(msg%segs(seg_idx)%bytes, kind=int64) >= need + CAPNP_WORD_BYTES) then
+         byte_off = CAPNP_WORD_BYTES
+         msg%segs(seg_idx)%bytes(0:need + CAPNP_WORD_BYTES - 1) = 0_int8
+         msg%segs(seg_idx)%len = need + CAPNP_WORD_BYTES
+         msg%segs(seg_idx)%far_pad = .true.
+      else
+         byte_off = 0_int64
+         msg%segs(seg_idx)%bytes(0:need - 1) = 0_int8
+         msg%segs(seg_idx)%len = need
+      end if
    end subroutine capnp_arena_alloc
 
    !> Allocate nwords zeroed words inside a specific segment, growing it when
@@ -224,6 +291,7 @@ contains
             tmp(i)%bytes => msg%segs(i)%bytes
             tmp(i)%len = msg%segs(i)%len
             tmp(i)%owned = msg%segs(i)%owned
+            tmp(i)%far_pad = msg%segs(i)%far_pad
             msg%segs(i)%bytes => null()
          end do
          call move_alloc(tmp, msg%segs)
@@ -251,10 +319,45 @@ contains
          cap = max(need, preferred*CAPNP_WORD_BYTES)
          if (cap > MAX_SEGMENT_WORDS*CAPNP_WORD_BYTES) cap = MAX_SEGMENT_WORDS*CAPNP_WORD_BYTES
       else
-         cap = capnp_grown_segment_bytes( &
-            size(msg%segs(msg%nsegs)%bytes, kind=int64), need)
+         cap = heuristic_segment_bytes(msg%next_words, need)
       end if
    end function next_segment_bytes
+
+   !> Bytes for the next heuristic segment. preferred_words is the running
+   !> nextSize; need is the request in bytes. The allocated size is the
+   !> larger of the two, and it never passes the segment cap.
+   pure function heuristic_segment_bytes(preferred_words, need) result(cap)
+      integer(int64), intent(in) :: preferred_words, need
+      integer(int64) :: cap, words, req
+      words = preferred_words
+      if (words < 0_int64) words = 0_int64
+      if (words > MAX_SEGMENT_WORDS) words = MAX_SEGMENT_WORDS
+      if (need > 0_int64) then
+         req = (need + CAPNP_WORD_BYTES - 1_int64)/CAPNP_WORD_BYTES
+      else
+         req = 0_int64
+      end if
+      if (req > words) words = req
+      if (words > MAX_SEGMENT_WORDS) words = MAX_SEGMENT_WORDS
+      if (words < 1_int64) words = 1_int64
+      cap = words*CAPNP_WORD_BYTES
+   end function heuristic_segment_bytes
+
+   !> nextSize += allocated, saturating at the segment cap. This is the
+   !> step MallocMessageBuilder takes after every segment except the first.
+   subroutine bump_next_words(msg, allocated_words)
+      type(capnp_message_t), intent(inout) :: msg
+      integer(int64), intent(in) :: allocated_words
+      integer(int64) :: add
+      add = allocated_words
+      if (add < 0_int64) add = 0_int64
+      if (msg%next_words < 0_int64) msg%next_words = 0_int64
+      if (add >= MAX_SEGMENT_WORDS .or. msg%next_words > MAX_SEGMENT_WORDS - add) then
+         msg%next_words = MAX_SEGMENT_WORDS
+      else
+         msg%next_words = msg%next_words + add
+      end if
+   end subroutine bump_next_words
 
    !> Next heuristic segment size in bytes. prev_bytes is the previous
    !> capacity and need is the request. The result is at least need when
@@ -315,5 +418,83 @@ contains
       seg%bytes => tmp
       seg%owned = .true.
    end subroutine seg_reserve
+
+   !> Take nwords from the unused tail of seg. A zero-word request
+   !> succeeds without moving the tail, including when the segment is full.
+   function seg_try(seg, nwords, byte_off) result(ok)
+      type(capnp_segment_t), intent(inout) :: seg
+      integer(int64), intent(in) :: nwords
+      integer(int64), intent(out) :: byte_off
+      logical :: ok
+      integer(int64) :: need, cap
+      ok = .false.
+      byte_off = 0_int64
+      if (.not. associated(seg%bytes) .or. nwords < 0_int64) return
+      need = nwords*CAPNP_WORD_BYTES
+      cap = size(seg%bytes, kind=int64)
+      if (seg%len < 0_int64 .or. seg%len > cap) return
+      if (need > cap - seg%len) return
+      byte_off = seg%len
+      if (need > 0_int64) seg%bytes(seg%len:seg%len + need - 1) = 0_int8
+      seg%len = seg%len + need
+      ok = .true.
+   end function seg_try
+
+   subroutine note_pad(msg, seg, word, err)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: word
+      integer, intent(out) :: err
+      integer, allocatable :: snew(:)
+      integer(int64), allocatable :: wnew(:)
+      integer :: n, stat
+      err = CAPNP_OK
+      if (.not. allocated(msg%pad_seg)) then
+         allocate (msg%pad_seg(8), msg%pad_word(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         msg%npad = 0
+      else if (msg%npad >= size(msg%pad_seg)) then
+         n = size(msg%pad_seg)*2
+         allocate (snew(n), wnew(n), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         snew(1:msg%npad) = msg%pad_seg(1:msg%npad)
+         wnew(1:msg%npad) = msg%pad_word(1:msg%npad)
+         call move_alloc(snew, msg%pad_seg)
+         call move_alloc(wnew, msg%pad_word)
+      end if
+      msg%npad = msg%npad + 1
+      msg%pad_seg(msg%npad) = seg
+      msg%pad_word(msg%npad) = word
+   end subroutine note_pad
+
+   !> Claim a landing pad recorded in front of an object. found is false
+   !> when no such pad is waiting.
+   function capnp_arena_take_pad(msg, seg, word, pad_off) result(found)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: word
+      integer(int64), intent(out) :: pad_off
+      logical :: found
+      integer :: i
+      found = .false.
+      pad_off = 0_int64
+      if (word < 0_int64 .or. msg%npad < 1) return
+      do i = 1, msg%npad
+         if (msg%pad_seg(i) == seg .and. msg%pad_word(i) == word) then
+            pad_off = word*CAPNP_WORD_BYTES
+            msg%pad_seg(i) = msg%pad_seg(msg%npad)
+            msg%pad_word(i) = msg%pad_word(msg%npad)
+            msg%npad = msg%npad - 1
+            found = .true.
+            return
+         end if
+      end do
+   end function capnp_arena_take_pad
 
 end module capnp_arena

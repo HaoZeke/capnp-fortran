@@ -932,7 +932,9 @@ contains
    end subroutine test_reader_options
 
    !> Fixed-size allocation repeats the first segment (or the object, if
-   !> larger). The default strategy still doubles the previous segment.
+   !> larger). Heuristic growth follows MallocMessageBuilder: the second
+   !> segment repeats the first size, and each later one adds the size
+   !> just allocated.
    subroutine test_builder_options(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
@@ -950,7 +952,11 @@ contains
       a = capnp_new_struct(msg, 2, 0, err)
       call check(error, err == CAPNP_OK .and. msg%nsegs == 2, 'builder: default spills')
       if (allocated(error)) return
-      call check(error, seg_words(msg, 2) == 8_int64, 'builder: default later segment doubles')
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: second segment repeats the first size')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 8_int64, &
+                  'builder: third segment adds the previous size')
       if (allocated(error)) return
       call capnp_message_free(msg)
 
@@ -959,7 +965,7 @@ contains
       call capnp_message_init_builder(msg, err, options=opt)
       a = capnp_new_struct(msg, 2, 0, err)
       a = capnp_new_struct(msg, 2, 0, err)
-      call check(error, seg_words(msg, 2) == 8_int64, 'builder: heuristic matches the default')
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: heuristic matches the default')
       if (allocated(error)) return
       call capnp_message_free(msg)
 
@@ -972,7 +978,8 @@ contains
       call check(error, seg_words(msg, 2) == 4_int64, 'builder: fixed repeats the first size')
       if (allocated(error)) return
       a = capnp_new_struct(msg, 5, 0, err)
-      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 5_int64, &
+      ! The new segment holds the landing pad plus the five data words.
+      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 6_int64, &
                   'builder: fixed grows to fit one object')
       if (allocated(error)) return
       call capnp_message_free(msg)
@@ -984,7 +991,8 @@ contains
       if (allocated(error)) return
       a = capnp_new_struct(msg, 1, 0, err)
       a = capnp_new_struct(msg, 3, 0, err)
-      call check(error, seg_words(msg, 2) == 1_int64 .and. seg_words(msg, 3) == 3_int64, &
+      ! Each spill adds the landing pad, so the segments are 2 and 4 words.
+      call check(error, seg_words(msg, 2) == 2_int64 .and. seg_words(msg, 3) == 4_int64, &
                   'builder: zero fixed size isolates each object')
       if (allocated(error)) return
       call capnp_message_free(msg)

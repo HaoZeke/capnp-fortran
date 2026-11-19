@@ -12,7 +12,7 @@ module capnp_message
    use capnp_endian
    use capnp_pointer
    use capnp_arena, only: capnp_message_t, capnp_segment_t, &
-                          capnp_arena_alloc, capnp_arena_alloc_in
+                          capnp_arena_alloc, capnp_arena_alloc_in, capnp_arena_take_pad
    implicit none
    private
 
@@ -448,10 +448,11 @@ contains
    ! Builder: object allocation and pointer writing
    ! ------------------------------------------------------------------
 
-   function capnp_new_struct(msg, dwords, pwords, err) result(p)
+   function capnp_new_struct(msg, dwords, pwords, err, from_seg) result(p)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: dwords, pwords
       integer, intent(out) :: err
+      integer, intent(in), optional :: from_seg
       type(capnp_ptr_t) :: p
       integer :: seg
       integer(int64) :: off
@@ -460,7 +461,7 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      call capnp_arena_alloc(msg, int(dwords + pwords, int64), seg, off, err)
+      call capnp_arena_alloc(msg, int(dwords + pwords, int64), seg, off, err, from_seg)
       if (err /= CAPNP_OK) return
       p%msg => msg
       p%kind = CAPNP_PK_STRUCT
@@ -474,11 +475,12 @@ contains
    !> List(Text)/List(Data)/List(AnyPointer) use esize=CAPNP_SZ_PTR (wire C=6),
    !> matching Cap'n Proto C++ and encoding.html. Struct lists use
    !> capnp_new_composite_list (wire C=7).
-   function capnp_new_list(msg, esize, count, err) result(p)
+   function capnp_new_list(msg, esize, count, err, from_seg) result(p)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: esize
       integer(int64), intent(in) :: count
       integer, intent(out) :: err
+      integer, intent(in), optional :: from_seg
       type(capnp_ptr_t) :: p
       integer :: seg, sb
       integer(int64) :: off, nwords
@@ -489,7 +491,7 @@ contains
          return
       end if
       nwords = (int(sb, int64)*count + 63_int64)/64_int64
-      call capnp_arena_alloc(msg, nwords, seg, off, err)
+      call capnp_arena_alloc(msg, nwords, seg, off, err, from_seg)
       if (err /= CAPNP_OK) return
       p%msg => msg
       p%kind = CAPNP_PK_LIST
@@ -500,11 +502,12 @@ contains
    end function capnp_new_list
 
    !> New list of structs (always encoded composite, tag word included).
-   function capnp_new_composite_list(msg, count, dwords, pwords, err) result(p)
+   function capnp_new_composite_list(msg, count, dwords, pwords, err, from_seg) result(p)
       type(capnp_message_t), intent(inout), target :: msg
       integer(int64), intent(in) :: count
       integer, intent(in) :: dwords, pwords
       integer, intent(out) :: err
+      integer, intent(in), optional :: from_seg
       type(capnp_ptr_t) :: p
       integer :: seg
       integer(int64) :: off, nwords
@@ -514,7 +517,7 @@ contains
          return
       end if
       nwords = 1_int64 + count*int(dwords + pwords, int64)
-      call capnp_arena_alloc(msg, nwords, seg, off, err)
+      call capnp_arena_alloc(msg, nwords, seg, off, err, from_seg)
       if (err /= CAPNP_OK) return
       call cp_put_i64(msg%segs(seg)%bytes, off, &
                       wp_make_struct(int(count, int32), int(dwords, int32), int(pwords, int32)))
@@ -623,7 +626,7 @@ contains
          ! (capnp C++ set() semantics), then link locally.
          block
             type(capnp_ptr_t) :: c
-            c = capnp_copy(msg, q, err)
+            c = capnp_copy(msg, q, err, sseg)
             if (err /= CAPNP_OK) return
             call write_ptr_slot(msg, sseg, slot, c, err)
          end block
@@ -636,10 +639,19 @@ contains
       if (q%seg == sseg) then
          call cp_put_i64(msg%segs(sseg)%bytes, slot, local_ptr_word(q, slot/8_int64))
       else
-         ! Landing pad in q's segment holds the local pointer; the slot gets
-         ! a single far pointer to the pad. Wire segment ids are 0-based.
-         call capnp_arena_alloc_in(msg, q%seg, 1_int64, pad_off, err)
-         if (err /= CAPNP_OK) return
+         ! A pad reserved in front of the object is used first. Otherwise
+         ! word 0 of a segment opened for this object is that pad. Any
+         ! other far pointer allocates one. Wire segment ids are 0-based.
+         if (capnp_arena_take_pad(msg, q%seg, object_start_word(q) - 1_int64, pad_off)) then
+            err = CAPNP_OK
+         else if (msg%segs(q%seg)%far_pad .and. object_start_word(q) == 1_int64) then
+            pad_off = 0_int64
+            msg%segs(q%seg)%far_pad = .false.
+            err = CAPNP_OK
+         else
+            call capnp_arena_alloc_in(msg, q%seg, 1_int64, pad_off, err)
+            if (err /= CAPNP_OK) return
+         end if
          call cp_put_i64(msg%segs(q%seg)%bytes, pad_off, local_ptr_word(q, pad_off/8_int64))
          call cp_put_i64(msg%segs(sseg)%bytes, slot, &
                          wp_make_far(.false., pad_off/8_int64, int(q%seg - 1, int64)))
@@ -1800,18 +1812,22 @@ contains
    ! basis of orphan adoption.
    ! ------------------------------------------------------------------
 
-   recursive function capnp_copy(msg, src, err) result(q)
+   recursive function capnp_copy(msg, src, err, from_seg) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
       integer, intent(out) :: err
+      integer, intent(in), optional :: from_seg
       type(capnp_ptr_t) :: q
-      q = copy_depth(msg, src, 0, err)
+      integer :: seg
+      seg = 1
+      if (present(from_seg)) seg = from_seg
+      q = copy_depth(msg, src, 0, seg, err)
    end function capnp_copy
 
-   recursive function copy_depth(msg, src, depth, err) result(q)
+   recursive function copy_depth(msg, src, depth, from_seg, err) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
-      integer, intent(in) :: depth
+      integer, intent(in) :: depth, from_seg
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: r, c
@@ -1830,13 +1846,13 @@ contains
          q%kind = CAPNP_PK_CAP
          q%capidx = src%capidx
       case (CAPNP_PK_STRUCT)
-         q = capnp_new_struct(msg, src%dwords, src%pwords, err)
+         q = capnp_new_struct(msg, src%dwords, src%pwords, err, from_seg)
          if (err /= CAPNP_OK) return
          call copy_struct_body(q, src, depth, err)
       case (CAPNP_PK_LIST)
          select case (src%esize)
          case (CAPNP_SZ_COMPOSITE)
-            q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, err)
+            q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, err, from_seg)
             if (err /= CAPNP_OK) return
             do i = 0_int64, src%nelem - 1_int64
                c = capnp_list_get_struct(q, int(i), err)
@@ -1847,18 +1863,18 @@ contains
                if (err /= CAPNP_OK) return
             end do
          case (CAPNP_SZ_PTR)
-            q = capnp_new_list(msg, CAPNP_SZ_PTR, src%nelem, err)
+            q = capnp_new_list(msg, CAPNP_SZ_PTR, src%nelem, err, from_seg)
             if (err /= CAPNP_OK) return
             do i = 0_int64, src%nelem - 1_int64
                r = capnp_getp(src, int(i), err)
                if (err /= CAPNP_OK) return
-               c = copy_depth(msg, r, depth + 1, err)
+               c = copy_depth(msg, r, depth + 1, q%seg, err)
                if (err /= CAPNP_OK) return
                call capnp_setp(q, int(i), c, err)
                if (err /= CAPNP_OK) return
             end do
          case default
-            q = capnp_new_list(msg, src%esize, src%nelem, err)
+            q = capnp_new_list(msg, src%esize, src%nelem, err, from_seg)
             if (err /= CAPNP_OK) return
             nb = (int(capnp_list_step_bits(src%esize), int64)*src%nelem + 7_int64)/8_int64
             if (nb > 0_int64) then
@@ -1889,7 +1905,7 @@ contains
          r = capnp_getp(src, i, err)
          if (err /= CAPNP_OK) return
          if (r%kind == CAPNP_PK_NULL) cycle
-         c = copy_depth(dst%msg, r, depth + 1, err)
+         c = copy_depth(dst%msg, r, depth + 1, dst%seg, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(dst, i, c, err)
          if (err /= CAPNP_OK) return
