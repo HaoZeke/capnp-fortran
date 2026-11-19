@@ -251,11 +251,9 @@ contains
       if (present(allow_octal)) oct = allow_octal
       call split_sign(tok, neg, body, err)
       if (err /= CAPNP_OK) return
-      if (neg) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
       call parse_u64_body(body, v, oct, err)
+      if (err /= CAPNP_OK) return
+      if (neg .and. v /= 0_int64) err = CAPNP_ERR_ARG
    end subroutine capnp_parse_u64
 
    subroutine capnp_cescape_text(str, out, err)
@@ -387,11 +385,7 @@ contains
                i = i + 1
                noct = noct + 1
             end do
-            if (v > 255) then
-               err = CAPNP_ERR_ARG
-               out = ''
-               return
-            end if
+            v = iand(v, 255)
             m = m + 1
             buf(m:m) = achar(v)
             cycle
@@ -1052,11 +1046,9 @@ contains
       hi = iand(shiftr(x, 32), 4294967295_int64)
       lo = iand(x, 4294967295_int64)
       t = lo*mul + int(d, int64)
-      m = hi*mul + shiftr(t, 32)
-      if (m > 4294967295_int64) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
+      ! Text integers wrap the magnitude mod 2^64, then the target type
+      ! range-checks the result. A value past 2^64-1 keeps the low 64 bits.
+      m = iand(hi*mul + shiftr(t, 32), 4294967295_int64)
       x = ior(shiftl(m, 32), iand(t, 4294967295_int64))
    end subroutine u64_mul_add
 
