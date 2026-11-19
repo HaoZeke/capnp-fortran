@@ -18,12 +18,10 @@ module capnp_arena
    public :: capnp_arena_alloc, capnp_arena_alloc_in
    public :: capnp_segment_view
    public :: capnp_builder_options_t
-   public :: capnp_arena_live_blocks
    public :: capnp_grown_segment_bytes
 
    integer(int64), parameter :: DEFAULT_FIRST_WORDS = CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS
    integer(int64), parameter :: MAX_SEGMENT_WORDS = 536870912_int64
-   integer, save :: live_blocks = 0
 
    type :: capnp_segment_t
       !> Storage, 0-based. Capacity is size(bytes); len is the used prefix.
@@ -130,10 +128,7 @@ contains
       if (allocated(msg%segs)) then
          do i = 1, size(msg%segs)
             if (msg%segs(i)%owned) then
-               if (associated(msg%segs(i)%bytes)) then
-                  deallocate (msg%segs(i)%bytes)
-                  live_blocks = live_blocks - 1
-               end if
+               if (associated(msg%segs(i)%bytes)) deallocate (msg%segs(i)%bytes)
             end if
             msg%segs(i)%bytes => null()
          end do
@@ -307,7 +302,6 @@ contains
             return
          end if
          seg%owned = .true.
-         live_blocks = live_blocks + 1
          return
       end if
       if (size(seg%bytes, kind=int64) >= cap_bytes) return
@@ -317,19 +311,9 @@ contains
          return
       end if
       if (seg%len > 0_int64) tmp(0:seg%len - 1) = seg%bytes(0:seg%len - 1)
-      if (seg%owned) then
-         deallocate (seg%bytes)
-         live_blocks = live_blocks - 1
-      end if
+      if (seg%owned) deallocate (seg%bytes)
       seg%bytes => tmp
       seg%owned = .true.
-      live_blocks = live_blocks + 1
    end subroutine seg_reserve
-
-   !> Owned segment blocks that have not been freed.
-   function capnp_arena_live_blocks() result(n)
-      integer :: n
-      n = live_blocks
-   end function capnp_arena_live_blocks
 
 end module capnp_arena

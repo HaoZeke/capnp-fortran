@@ -176,8 +176,10 @@ emitted before the union arm. An unknown discriminator string does not
 select an arm. A known tag clears the arm it selects, so a member written
 earlier does not survive. Plain member keys in that object are still
 applied in document order, and a value that appears before the tag is
-applied after it. A repeated known tag is rejected. A void arm accepts
-any payload. A non-string discriminator is rejected. Unknown JSON fields
+applied after it. A repeated known tag is rejected. A void value accepts
+any payload. A flattened struct is reused for later keys in the same
+object, and a nested flattened union keeps the tag it already saw.
+A non-string discriminator is rejected. Unknown JSON fields
 are ignored on decode. Pretty output matches `capnp convert binary:json`; pass
 `pretty=.false.` for `--short`, and use `capnp_json_span` to step through
 multi-value JSON streams. A high UTF-16 surrogate followed by a low

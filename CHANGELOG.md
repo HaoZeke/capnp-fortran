@@ -29,11 +29,13 @@ Pre-1.0 minor releases may include breaking API changes.
   cap, and packed input is not expanded past the traversal budget.
 - Float32 text matches capnp 1.4.0 on glibc: subnormals are printed with
   eight digits, an integer token `-0` decodes as +0, and a decimal
-  literal is parsed as a double and then cast to float32.
+  literal is parsed as a double and then cast to float32. An integer
+  token is converted to float32 in one rounding.
 - JSON union keys are applied in document order. An unknown discriminator
   does not select an arm, but a plain member key in the same object still
-  does. A repeated known tag is rejected, and a void arm accepts any
-  payload.
+  does. A repeated known tag is rejected, and a void value accepts any
+  payload. A flattened struct is reused for later keys in the same
+  object, and a nested flattened union keeps the tag it already saw.
 - Text and JSON strings, and hex or base64 data, are copied into one
   buffer. A buffer that cannot grow reports an allocation error.
 - `capnpf decode`, `convert`, and `encode` exit 1 when stdout cannot be

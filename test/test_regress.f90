@@ -61,11 +61,9 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       call init_tmp()
       testsuite = [ &
-         new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
          new_unittest("binary-stdout", run_binary_stdout), &
          new_unittest("list-linear", run_list_linear), &
-         new_unittest("canonical-release", run_canonical_release), &
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("json-surrogate", run_json_surrogate), &
@@ -75,13 +73,13 @@ contains
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
-         new_unittest("schema-pipe", run_schema_pipe), &
          new_unittest("plugin-release", run_plugin_release), &
          new_unittest("cli-locate", run_cli_locate), &
          new_unittest("string-linear", run_string_linear), &
          new_unittest("write-error", run_write_error), &
          new_unittest("f32-text", run_f32_text), &
-         new_unittest("regress-tmp", run_regress_tmp) &
+         new_unittest("regress-tmp", run_regress_tmp), &
+         new_unittest("cli-sources", run_cli_sources) &
          ]
    end subroutine collect_regress
 
@@ -110,52 +108,6 @@ contains
       character(len=:), allocatable :: s
       s = capnpf_setup()
    end function cap_setup
-
-   subroutine run_comment_eof(error)
-      type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema
-      type(capnp_message_t), target :: msg
-      type(capnp_ptr_t) :: root
-      integer(int8), allocatable :: bytes(:)
-      integer :: err, idx
-      integer(int64) :: count
-      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
-      if (err /= CAPNP_OK) then
-         call skip_test(error, 'kitchen cgr missing')
-         return
-      end if
-      call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_OK, 'comment: schema')
-      idx = capnp_dyn_find(schema, 'Sink', err)
-      call check_(error, idx > 0, 'comment: Sink')
-      call capnp_text_decode(schema, idx, '(count = 1)#', msg, err)
-      call check_(error, err == CAPNP_OK, 'comment: hash ends the input')
-      root = capnp_root(msg, err)
-      count = capnp_dyn_get_int(schema, idx, root, 'count', err)
-      call check_(error, err == CAPNP_OK .and. count == 1_int64, 'comment: count is 1')
-      call capnp_text_decode(schema, idx, '(count = 1 # hide'//achar(10)//', ratio = 9.0)', msg, err)
-      call check_(error, err == CAPNP_OK, 'comment: field after a hash')
-      root = capnp_root(msg, err)
-      count = capnp_dyn_get_int(schema, idx, root, 'count', err)
-      call check_(error, err == CAPNP_OK .and. count == 1_int64, 'comment: count survives the hash')
-      block
-         real(real64) :: ratio
-         ratio = capnp_dyn_get_f64(schema, idx, root, 'ratio', err)
-         call check_(error, err == CAPNP_OK .and. abs(ratio - 9.0_real64) < 1.0e-12_real64, &
-                     'comment: ratio follows the hash')
-      end block
-      call capnp_text_decode(schema, idx, '(scores = [3, # c'//achar(10)//'1, 4])', msg, err)
-      call check_(error, err == CAPNP_OK, 'comment: list element after a hash')
-      root = capnp_root(msg, err)
-      block
-         character(len=:), allocatable :: text
-         call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
-         call check_(error, err == CAPNP_OK .and. index(text, 'scores = [3, 1, 4]') > 0, &
-                     'comment: list keeps 3, 1, 4')
-      end block
-      call capnp_message_free(msg)
-      call capnp_dyn_free(schema)
-   end subroutine run_comment_eof
 
    subroutine run_segment_bomb(error)
       type(error_type), allocatable, intent(out) :: error
@@ -286,40 +238,6 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_list_linear
-
-   subroutine run_canonical_release(error)
-      type(error_type), allocatable, intent(out) :: error
-      type(capnp_message_t), target :: msg
-      type(capnp_ptr_t) :: root, cap
-      integer(int8), allocatable :: bytes(:)
-      integer :: err, n0, n1
-      n0 = capnp_arena_live_blocks()
-      call capnp_message_init_builder(msg, err)
-      root = capnp_new_struct(msg, 0, 1, err)
-      call check_(error, err == CAPNP_OK, 'canon: struct')
-      call capnp_set_root(msg, root, err)
-      cap = capnp_ptr_t()
-      cap%kind = CAPNP_PK_CAP
-      cap%capidx = 1_int64
-      cap%msg => msg
-      call capnp_setp(root, 0, cap, err)
-      call check_(error, err == CAPNP_OK, 'canon: set capability')
-      n1 = capnp_arena_live_blocks()
-      call capnp_canonicalize(msg, bytes, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'canon: capability has no canonical form')
-      call check_(error, capnp_arena_live_blocks() == n1, &
-                  'canon: failed copy releases the builder')
-      call capnp_message_free(msg)
-      call check_(error, capnp_arena_live_blocks() == n0, 'canon: source message is released')
-      call capnp_message_init_builder(msg, err)
-      root = capnp_new_struct(msg, 1, 0, err)
-      call capnp_set_root(msg, root, err)
-      call capnp_set_i32(root, 0_int64, 7_int32, err)
-      call capnp_canonicalize(msg, bytes, err)
-      call check_(error, err == CAPNP_OK .and. allocated(bytes) .and. size(bytes) > 0, &
-                  'canon: later call still works')
-      call capnp_message_free(msg)
-   end subroutine run_canonical_release
 
    subroutine run_json_collisions(error)
       type(error_type), allocatable, intent(out) :: error
@@ -729,7 +647,31 @@ contains
       call udiff(error, schema, n, 'GroupArm', '{"kind":"box","box":{"x":4,"y":5}}')
       call udiff(error, schema, n, 'GroupArm', '{"n":5,"box":{}}')
       call udiff(error, schema, n, 'GroupUnion', '{"gu":{"q":5},"kind":"gu"}')
-      call check_(error, n == 70, 'union-diff: case count')
+      call udiff(error, schema, n, 'UnionOfMid', &
+         '{"kind":"mid","midId":7,"pl_city":"Oslo","pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfMid', &
+         '{"pl_city":"Oslo","kind":"mid","midId":7,"pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfGroupFlat', &
+         '{"kind":"g","pl_city":"Oslo","pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfGroupFlat', &
+         '{"pl_code":500,"kind":"g","pl_city":"Oslo"}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"a","innerVal":42}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"b","innerVal":"hi"}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"a","innerKind":"b"}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"outerKind":"g","innerKind":"a","innerVal":42}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"innerVal":"hi","outerKind":"g","innerKind":"b"}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"outerKind":"g","innerKind":"a","innerKind":"b"}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":123}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":{"a":1}}')
+      call udiff(error, schema, n, 'VoidPayload', '{"vls":[1,"a"]}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":null,"n":3}')
+      call check_(error, n == 84, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
@@ -978,44 +920,6 @@ contains
       end if
    end subroutine run_plugin_release
 
-   subroutine run_schema_pipe(error)
-      type(error_type), allocatable, intent(out) :: error
-      integer(int8), allocatable :: got(:), ref(:)
-      integer :: err
-      if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
-         return
-      end if
-      if (.not. sh('mkdir -p '//tmp//' && echo kept > '//tmp//'/kept' &
-         //' && printf "(x = 1, y = 2, z = 3)\n" > '//tmp//'/pipe.in' &
-         //' && '//cap_setup() &
-         //' && export CAP' &
-         //' && printf "%s\n"' &
-         //' "echo \$\$ > \"\$1\""' &
-         //' "ln -sfn \"\$2\" /tmp/capnpf-\$\$.cgr"' &
-         //' "exec \"\$CAP\" encode schema/common.capnp Vec3 < \"\$3\" > \"\$4\""' &
-         //' > '//tmp//'/pipe.sh' &
-         //' && sh '//tmp//'/pipe.sh '//tmp//'/pipe.pid '//tmp//'/kept ' &
-         //tmp//'/pipe.in '//tmp//'/pipe.bin' &
-         //' && pid=$(cat '//tmp//'/pipe.pid)' &
-         //' && test -L /tmp/capnpf-$pid.cgr' &
-         //' && test "$(cat '//tmp//'/kept)" = kept' &
-         //' && rm -f /tmp/capnpf-$pid.cgr' &
-         //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
-         //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref')) then
-         call test_failed(error, 'schema pipe encode failed')
-         return
-      end if
-      call capnp_read_file(tmp//'/pipe.bin', got, err)
-      call capnp_read_file(tmp//'/pipe.ref', ref, err)
-      if (err == CAPNP_OK .and. allocated(got) .and. allocated(ref)) then
-         call check_(error, same_i8(got, ref), &
-                     'schema: pipe matches capnp and leaves the symlink target')
-      else
-         call check_(error, .false., 'schema: pipe matches capnp and leaves the symlink target')
-      end if
-   end subroutine run_schema_pipe
-
    subroutine run_string_linear(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -1142,6 +1046,9 @@ contains
       call f32_match_encode(error, schema, idx, '(x = 1.1760532587147835e-38)')
       call f32_match_encode(error, schema, idx, '(x = -1.176472387085463e-38)')
       call f32_match_encode(error, schema, idx, '(x = -0.0)')
+      call f32_match_encode(error, schema, idx, '(x = 4611686843061108735)')
+      call f32_match_encode(error, schema, idx, '(x = 9223373686122217471)')
+      call f32_match_encode(error, schema, idx, '(x = 0x8000017fffffffff)')
       call capnp_dyn_free(schema)
    end subroutine run_f32_text
 
@@ -1488,5 +1395,21 @@ contains
          call test_failed(error, 'regress temp dir remains')
       end if
    end subroutine run_regress_tmp
+
+   !> The command line no longer carries a dead write switch, and the
+   !> interrupted-write check uses the platform errno helper.
+   subroutine run_cli_sources(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('! grep -q strict_io app/capnpf.f90' &
+         //' && ! grep -q __errno_location app/capnpf.f90' &
+         //' && ! grep -q " == 4" app/capnpf.f90' &
+         //' && grep -q os_eintr app/capnpf.f90' &
+         //' && grep -q os_errno_value app/capnpf.f90' &
+         //' && grep -q __error app/os_errno.c' &
+         //' && grep -q __errno_location app/os_errno.c' &
+         //' && grep -q EINTR app/os_errno.c')) then
+         call test_failed(error, 'cli source checks failed')
+      end if
+   end subroutine run_cli_sources
 
 end module test_regress

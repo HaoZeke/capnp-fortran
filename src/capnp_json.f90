@@ -840,6 +840,7 @@ contains
       end select
    end subroutine emit_jval
 
+   !> Forget union tags recorded for the decode that is about to start.
    subroutine union_seen_reset()
       union_seen_n = 0
    end subroutine union_seen_reset
@@ -1173,12 +1174,12 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            call union_note(p, disc, err)
-            if (err /= CAPNP_OK) return
             call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
             call clear_field(schema, f, p, env, err)
+            if (err /= CAPNP_OK) return
+            call union_note(p, disc, err)
             if (err /= CAPNP_OK) return
             have_child = .false.
             tag_set = .true.
@@ -2054,6 +2055,9 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine parse_array
 
+   !> Characters inside the quotes at sc%i. That is an upper bound on the
+   !> decoded string, so a short value does not allocate the rest of the
+   !> document. An unclosed quote uses the remaining input.
    subroutine quoted_span(sc, cap, err)
       type(scan_t), intent(in) :: sc
       integer, intent(out) :: cap
