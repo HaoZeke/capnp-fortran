@@ -148,8 +148,23 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: p
       p = capnp_ptr_t()
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
-          node_which(schema%nodes(idx)) /= NODE_STRUCT) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx < 1) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -172,7 +187,11 @@ contains
       character(len=:), allocatable :: nm
       integer(int64) :: i
       err = CAPNP_OK
-      if (.not. schema%loaded .or. .not. allocated(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -334,7 +353,22 @@ contains
       type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: list
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx < 1) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          allocate (annotations(0))
          return
@@ -378,8 +412,27 @@ contains
       type(capnp_ptr_t) :: enums, en, list
       character(len=:), allocatable :: ename
       integer(int64) :: i
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
-          node_which(schema%nodes(idx)) /= NODE_ENUM) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx < 1) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_ENUM) then
          err = CAPNP_ERR_ARG
          allocate (annotations(0))
          return
@@ -413,8 +466,27 @@ contains
       type(capnp_ptr_t) :: methods, method, list
       character(len=:), allocatable :: mname
       integer(int64) :: i
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
-          node_which(schema%nodes(idx)) /= NODE_INTERFACE) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx < 1) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         allocate (annotations(0))
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_INTERFACE) then
          err = CAPNP_ERR_ARG
          allocate (annotations(0))
          return
@@ -699,7 +771,19 @@ contains
       disc_off = -1_int64
       n_union = 0
       named = present(group)
-      if (idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx < 1) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
