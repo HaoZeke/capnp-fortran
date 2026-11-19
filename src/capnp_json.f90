@@ -3053,11 +3053,15 @@ contains
       integer :: need, cap, stat
       character(len=:), allocatable :: tmp
       err = CAPNP_OK
-      need = buf%n + len(piece)
-      if (need < buf%n) then
+      if (buf%n < 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
+      if (len(piece) > huge(need) - buf%n) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      need = buf%n + len(piece)
       if (.not. allocated(buf%s)) then
          cap = max(need, 64)
          allocate (character(len=cap) :: buf%s, stat=stat)
