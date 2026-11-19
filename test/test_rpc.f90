@@ -267,6 +267,24 @@ contains
       call capnp_message_free(m)
    end subroutine send_join_part
 
+   subroutine send_finish(qid, e)
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      f = message_finish_init(msg, e)
+      if (e == CAPNP_OK) call finish_question_id_set(f, qid, e)
+      if (e == CAPNP_OK) call finish_release_result_caps_set(f, .true., e)
+      if (e == CAPNP_OK) call finish_require_early_cancellation_workaround_set(f, .false., e)
+      if (e == CAPNP_OK) call rpc_send_message(cli%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_finish
+
    !> Read one Return off the client socket and unpack its JoinResult.
    subroutine recv_join_result(ansid, jid, succeeded, has_cap, e)
       integer(int64), intent(out) :: ansid, jid
@@ -862,6 +880,8 @@ contains
    subroutine t_join_incomplete_set_is_silent(error)
       type(error_type), allocatable, intent(inout) :: error
       integer :: a, b, n
+      integer(int64) :: ansid, jid
+      logical :: succeeded, has_cap
       logical :: readable
       call two_live_exports(a, b, n)
       if (allocated(error)) return
@@ -875,6 +895,20 @@ contains
       call px_poll_in(cli%fd, 50, readable, err)
       call check_(error, err == CAPNP_OK, 'join: poll for a premature reply')
       call check_(error, .not. readable, 'join: incomplete set draws no reply')
+
+      call send_finish(720_int64, err)
+      call check_(error, err == CAPNP_OK, 'join: cancellation finish sent')
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'join: cancellation finish processed')
+
+      ! Cancellation must free the incomplete Join state, allowing the
+      ! same join id to begin a differently sized complete set.
+      call send_join_part(721_int64, a, 13_int64, 1, 0, err)
+      call rpc_pump_once(srv, err)
+      call recv_join_result(ansid, jid, succeeded, has_cap, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 721_int64 .and. &
+                  jid == 13_int64 .and. succeeded .and. has_cap, &
+                  'join: cancellation frees pending join state')
    end subroutine t_join_incomplete_set_is_silent
 
    !> Cancellation is a Finish sent before Return, with the legacy early

@@ -105,10 +105,10 @@ contains
       type(adder_srv_t), target :: sidecar
       class(rpc_server_t), pointer :: boot
       type(rpc_introduction_t) :: learned(4)
-      type(rpc_cap_t) :: bootcap, claimed, sidecap
+      type(rpc_cap_t) :: bootcap, claimed, sidecap, alice_cap
       type(capnp_ptr_t) :: content
       integer :: ab, ba, bc, ac, ca, listen_fd, bob_port, err, n
-      integer(int64) :: provide_qid, claim, replay, qcall
+      integer(int64) :: provide_qid, claim, replay, qcall, after_release
       type(capnp_message_t), target :: m
       type(payload_t) :: params
       type(capnp_ptr_t) :: s
@@ -233,6 +233,20 @@ contains
       call check_(error, err == CAPNP_OK, 'handoff: pickup finished')
       call check_(error, rpc_pending_introductions(carol_to_alice) == 0, &
                   'handoff: vine dropped')
+
+      ! Accepting on Carol's connection must not pin Alice's old export.
+      ! After Alice releases it, a second Provide against that id is rejected.
+      alice_cap%kind = RPC_CAP_IMPORT
+      alice_cap%id = 0_int64
+      call rpc_release_send(alice_to_bob, alice_cap, err)
+      call rpc_pump_once(bob_to_alice, err)
+      call rpc_provide_send(alice_to_bob, 0_int64, '127.0.0.1', bob_port, &
+                            NONCE + 1_int64, after_release, err)
+      call rpc_pump_once(bob_to_alice, err)
+      call rpc_wait(alice_to_bob, after_release, err)
+      call rpc_result_content(alice_to_bob, after_release, content, err)
+      call check_(error, err == RPC_ERR_EXCEPTION, &
+                  'handoff: accepted provision does not pin source export')
 
       call rpc_conn_close(alice_to_bob)
       call rpc_conn_close(bob_to_alice)
