@@ -78,6 +78,8 @@ PY
 fresh)
   "$bin" "$root/test/fixtures/dynamic.cgr.bin"
   diff -q "$out/schema/dynamic_capnp.f90" "$root/test/generated/dynamic_capnp.f90"
+  "$bin" "$root/test/fixtures/adder.cgr.bin"
+  diff -q "$out/schema/adder_capnp.f90" "$root/test/generated/adder_capnp.f90"
   ;;
 *)
   echo "usage: codegen_check.sh multifile|suffix|annot|fresh" >&2
