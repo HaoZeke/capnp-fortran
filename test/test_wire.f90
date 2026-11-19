@@ -20,6 +20,7 @@ contains
            new_unittest("text-data", test_text_data), &
            new_unittest("lists", test_lists), &
            new_unittest("composite-list", test_composite_list), &
+           new_unittest("composite-list-adversarial", test_bad_composite), &
            new_unittest("nested-struct", test_nested_struct), &
            new_unittest("far-pointer", test_far_pointer), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
@@ -308,6 +309,76 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_composite_list
+
+   !> A composite list whose tag is not a struct, or whose element count
+   !> does not fit the declared words, is rejected.
+   subroutine test_bad_composite(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst, r, rl
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call cp_put_i64(msg%segs(lst%seg)%bytes, lst%off - 8_int64, &
+                      wp_make_list(0_int32, CAPNP_SZ_BYTE, 1_int64))
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      r = capnp_root(rmsg, err)
+      rl = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_KIND, 'clist: non-struct tag')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call cp_put_i64(msg%segs(lst%seg)%bytes, lst%off - 8_int64, &
+                      wp_make_struct(-1_int32, 1_int32, 0_int32))
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      r = capnp_root(rmsg, err)
+      rl = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, 'clist: element count overruns words')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_composite_list(msg, 100_int64, 0, 0, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=2_int64)
+      r = capnp_root(rmsg, err)
+      rl = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'clist: empty elements still count')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(root%seg)%bytes, root%off, &
+                      wp_make_struct(100000_int32, 1_int32, 0_int32))
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      r = capnp_root(rmsg, err)
+      rl = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, 'wire: pointer past the segment')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_bad_composite
    subroutine test_nested_struct(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg

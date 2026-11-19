@@ -221,7 +221,7 @@ contains
       integer(int64), intent(in) :: w
       type(capnp_ptr_t), intent(out) :: p
       integer, intent(out) :: err
-      integer(int64) :: cnt, content_bytes, tag
+      integer(int64) :: cnt, content_bytes, tag, stride
       integer :: es, sb
 
       err = CAPNP_OK
@@ -246,13 +246,21 @@ contains
          p%seg = seg
          p%off = base + 8_int64
          p%esize = es
-         p%nelem = int(wp_offset(tag), int64)
+         ! The tag's offset field is an unsigned element count, not a
+         ! signed pointer offset. A high bit is a large count.
+         p%nelem = ibits(tag, 2, 30)
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
-         ! Element count must fit the declared content words.
-         if (p%nelem*int(p%dwords + p%pwords, int64) > cnt) then
-            err = CAPNP_ERR_BOUNDS
-            p%kind = CAPNP_PK_NULL
+         stride = int(p%dwords, int64) + int(p%pwords, int64)
+         if (stride > 0_int64) then
+            if (p%nelem > cnt/stride) then
+               err = CAPNP_ERR_BOUNDS
+               p%kind = CAPNP_PK_NULL
+            end if
+         else if (p%nelem > 0_int64) then
+            ! Zero-sized elements carry no words, so the count itself is
+            ! the amplification. Charge one word per claimed element.
+            if (.not. charge(msg, p%nelem*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       else
          sb = capnp_list_step_bits(es)
