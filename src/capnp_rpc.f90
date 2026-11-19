@@ -395,9 +395,7 @@ contains
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
       end do
-      do i = 0, MAXJOINS - 1
-         conn%joins(i) = rpc_join_slot_t()
-      end do
+      call clear_joins(conn)
    end subroutine rpc_conn_close
 
    !> Inquiry getters over connection state, so callers need not touch
@@ -913,28 +911,34 @@ contains
          qids(i) = alloc_qid(conn)
          if (qids(i) < 0_int64) then
             err = CAPNP_ERR_ALLOC
+            call finish_sent_joins(conn, qids, i - 1)
             return
          end if
          call capnp_message_init_builder(m, err)
-         if (err /= CAPNP_OK) return
-         msg = message_new_root(m, err)
-         jn = message_join_init(msg, err)
-         call join_question_id_set(jn, qids(i), err)
-         tgt = join_target_init(jn, err)
-         select case (caps(i)%kind)
-         case (RPC_CAP_IMPORT)
-            call message_target_imported_cap_set(tgt, caps(i)%id, err)
-         case (RPC_CAP_PIPELINE)
-            pa = message_target_promised_answer_init(tgt, err)
-            call promised_answer_question_id_set(pa, caps(i)%id, err)
-            ops = promised_answer_transform_init(pa, int(caps(i)%nops, int64), err)
-            do k = 0, caps(i)%nops - 1
-               op%p = capnp_list_get_struct(ops, k, err)
-               call promised_answer_op_get_pointer_field_set(op, caps(i)%ops(k), err)
-            end do
-         case default
-            err = CAPNP_ERR_ARG
-         end select
+         if (err == CAPNP_OK) msg = message_new_root(m, err)
+         if (err == CAPNP_OK) jn = message_join_init(msg, err)
+         if (err == CAPNP_OK) call join_question_id_set(jn, qids(i), err)
+         if (err == CAPNP_OK) tgt = join_target_init(jn, err)
+         if (err == CAPNP_OK) then
+            select case (caps(i)%kind)
+            case (RPC_CAP_IMPORT)
+               call message_target_imported_cap_set(tgt, caps(i)%id, err)
+            case (RPC_CAP_PIPELINE)
+               pa = message_target_promised_answer_init(tgt, err)
+               if (err == CAPNP_OK) call promised_answer_question_id_set(pa, caps(i)%id, err)
+               if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(caps(i)%nops, int64), err)
+               if (err == CAPNP_OK) then
+                  do k = 0, caps(i)%nops - 1
+                     op%p = capnp_list_get_struct(ops, k, err)
+                     if (err /= CAPNP_OK) exit
+                     call promised_answer_op_get_pointer_field_set(op, caps(i)%ops(k), err)
+                     if (err /= CAPNP_OK) exit
+                  end do
+               end if
+            case default
+               err = CAPNP_ERR_ARG
+            end select
+         end if
          if (err == CAPNP_OK) kp = join_key_part_new(m, err)
          if (err == CAPNP_OK) call join_key_part_join_id_set(kp, join_id, err)
          if (err == CAPNP_OK) call join_key_part_part_count_set(kp, size(caps), err)
@@ -942,9 +946,56 @@ contains
          if (err == CAPNP_OK) call join_key_part_set(jn, kp%p, err)
          if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
          call capnp_message_free(m)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call release_question(conn, qids(i))
+            qids(i) = -1_int64
+            call finish_sent_joins(conn, qids, i - 1)
+            return
+         end if
       end do
    end subroutine rpc_join_send
+
+   !> Finish Join parts that already left the vat when a later part fails.
+   subroutine finish_sent_joins(conn, qids, nsent)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      integer, intent(in) :: nsent
+      integer :: i, ferr
+      do i = 1, nsent
+         if (qids(i) >= 0_int64) call rpc_finish_send(conn, qids(i), .false., ferr)
+      end do
+   end subroutine finish_sent_joins
+
+   !> Give back every question a failed Join wait still holds.
+   subroutine release_join_questions(conn, qids)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qids(:)
+      integer :: i, q, ferr
+      logical :: gone
+      gone = conn%dead .or. .not. associated(conn%transport)
+      do i = 1, size(qids)
+         q = int(qids(i))
+         if (q < 0 .or. q >= MAXQ) cycle
+         if (.not. conn%questions(q)%used) cycle
+         if (gone) then
+            if (conn%questions(q)%returned) &
+               call capnp_message_free(conn%questions(q)%retmsg)
+            call question_slot_clear(conn%questions(q))
+         else if (conn%questions(q)%returned) then
+            call rpc_finish_send(conn, qids(i), .false., ferr)
+         else
+            call rpc_request_cancellation(conn, qids(i), ferr)
+         end if
+      end do
+   end subroutine release_join_questions
+
+   subroutine clear_joins(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer :: i
+      do i = 0, MAXJOINS - 1
+         conn%joins(i) = rpc_join_slot_t()
+      end do
+   end subroutine clear_joins
 
    !> Collect a complete Join result set. `joined` is the single
    !> capability carried by a successful set; a failed set returns
@@ -966,22 +1017,27 @@ contains
       err = CAPNP_OK
       do i = 1, size(qids)
          call rpc_wait(conn, qids(i), err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit
          call rpc_result_content(conn, qids(i), content, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit
          jr%p = content
          if (.not. join_result_succeeded_get(jr)) succeeded = .false.
          jcap = join_result_cap_get(jr, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit
          if (jcap%kind /= 0) then
             call rpc_result_cap(conn, qids(i), [0], candidate, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit
             joined = candidate
             ncap = ncap + 1
          end if
       end do
+      if (err /= CAPNP_OK) then
+         call release_join_questions(conn, qids)
+         return
+      end if
       if (succeeded .and. ncap /= 1) then
          err = CAPNP_ERR_KIND
+         call release_join_questions(conn, qids)
          return
       end if
       if (.not. succeeded) joined = rpc_cap_t()
@@ -1464,6 +1520,9 @@ contains
       end if
       call rpc_recv_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
+         ! No Return is coming for an abandoned Join, so the slot must
+         ! not wait for a Finish that the dead peer will never send.
+         call clear_joins(conn)
          conn%dead = .true.
          err = RPC_ERR_DEAD
          return
@@ -2326,6 +2385,10 @@ contains
          call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
          if (err /= CAPNP_OK) return
          conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+         ! Finish(releaseResultCaps) drops this reference. The cap was
+         ! not staged, so record it the way a flushed export is recorded.
+         ctx%nexp = 1
+         ctx%staged_eids(0) = eid
          call join_result_cap_set(jr, rpc_make_cap_ptr(rm, 0), err)
          if (err /= CAPNP_OK) return
       end if
@@ -2552,6 +2615,35 @@ contains
       call capnp_message_free(m)
    end subroutine handle_return
 
+   !> Finish of a Provide question drops the arrangement, including one
+   !> whose question id never fit in the answer table.
+   subroutine release_finished_provide(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      integer :: i, ae
+      integer(int64) :: aq
+      err = CAPNP_OK
+      if (.not. associated(conn%vat)) return
+      do i = 0, MAXPROV - 1
+         if (.not. conn%vat%provisions(i)%used) cycle
+         if (conn%vat%provisions(i)%qid /= qid) cycle
+         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
+         if (conn%vat%provisions(i)%embargoed) then
+            ae = conn%vat%provisions(i)%eid
+            aq = conn%vat%provisions(i)%accept_qid
+            call release_provision_pin(conn%vat%provisions(i))
+            conn%vat%provisions(i) = rpc_provision_slot_t()
+            if (ae >= 0) call drop_export(conn, ae, 1)
+            call send_answer_exception(conn, aq, 'provide finished', err)
+         else
+            call release_provision_pin(conn%vat%provisions(i))
+            conn%vat%provisions(i) = rpc_provision_slot_t()
+         end if
+         return
+      end do
+   end subroutine release_finished_provide
+
    subroutine handle_finish(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
@@ -2562,6 +2654,7 @@ contains
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
+      call release_finished_provide(conn, qid, err)
       do i = 0, MAXJOINS - 1
          if (.not. conn%joins(i)%used) cycle
          if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
