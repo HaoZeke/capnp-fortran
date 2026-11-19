@@ -10,9 +10,10 @@
 !> $Json.flatten inlines sub-structs, groups, and discriminated union
 !> variants with an optional prefix. $Json.discriminator tags unions
 !> with an explicit variant field and optional valueName. An unknown
-!> discriminator string leaves the union unchanged and does not apply
-!> other union fields in that object. A non-string discriminator is
-!> rejected. NaN and infinities are the strings "NaN", "Infinity", and
+!> discriminator string does not select an arm. Plain member keys in
+!> that object are still applied in document order. A repeated known
+!> tag is rejected, and a void arm accepts any payload. A non-string
+!> discriminator is rejected. NaN and infinities are the strings "NaN", "Infinity", and
 !> "-Infinity". A high surrogate followed by a low surrogate is one
 !> scalar, and an unquoted integer past 2^53 keeps its exact value.
 !> These two reads differ from capnp 1.4.0 only by adding precision or
@@ -34,6 +35,11 @@ module capnp_json
    integer(int64), parameter :: ANN_B64 = int(z'D7D879450A253E4B', int64)
    integer(int64), parameter :: ANN_HEX = int(z'F061E22F0AE5C7B5', int64)
    integer, parameter :: MAX_DEPTH = 64
+   integer, parameter :: UNION_SEEN_MAX = 64
+   integer, save :: union_seen_n = 0
+   integer, save :: union_seen_seg(UNION_SEEN_MAX)
+   integer(int64), save :: union_seen_off(UNION_SEEN_MAX)
+   integer, save :: union_seen_disc(UNION_SEEN_MAX)
    integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
    integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
    integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
@@ -170,6 +176,7 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
+      call union_seen_reset()
       call fill_struct(schema, idx, obj, env, no_disc, root, 0, err)
    end subroutine capnp_json_decode
 
@@ -830,6 +837,48 @@ contains
       end select
    end subroutine emit_jval
 
+   subroutine union_seen_reset()
+      union_seen_n = 0
+   end subroutine union_seen_reset
+
+   !> True when this struct's union discriminant was already selected
+   !> while decoding the same object. Flattened keys arrive one at a
+   !> time, so the mark has to outlive a single call.
+   function union_was_seen(p, disc) result(yes)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: disc
+      logical :: yes
+      integer :: i
+      yes = .false.
+      do i = 1, union_seen_n
+         if (union_seen_seg(i) == p%seg .and. union_seen_off(i) == p%off .and. &
+             union_seen_disc(i) == disc) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function union_was_seen
+
+   subroutine union_note(p, disc, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: disc
+      integer, intent(out) :: err
+      integer :: i
+      err = CAPNP_OK
+      do i = 1, union_seen_n
+         if (union_seen_seg(i) == p%seg .and. union_seen_off(i) == p%off .and. &
+             union_seen_disc(i) == disc) return
+      end do
+      if (union_seen_n >= UNION_SEEN_MAX) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      union_seen_n = union_seen_n + 1
+      union_seen_seg(union_seen_n) = p%seg
+      union_seen_off(union_seen_n) = p%off
+      union_seen_disc(union_seen_n) = disc
+   end subroutine union_note
+
    recursive subroutine fill_struct(schema, idx, p, env, parent_disc, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
@@ -858,8 +907,8 @@ contains
       type(capnp_ptr_t) :: fl, f, al, raw_t, t, q
       type(capnp_brand_env_t) :: cenv
       type(disc_opts_t) :: opts, gdisc, no_disc
-      character(len=:), allocatable :: nm, raw_nm, fpfx, dkey, vkey
-      integer :: i, nf, gidx, sidx, kidx, vidx, dw, pw, plen
+      character(len=:), allocatable :: nm, raw_nm, fpfx, dkey
+      integer :: i, nf, gidx, sidx, kidx, dw, pw
       logical :: is_flat, hit
       err = CAPNP_OK
       if (depth > MAX_DEPTH) then
@@ -910,12 +959,16 @@ contains
                call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', jv, depth + 1, hit, err)
                if (err /= CAPNP_OK) return
                if (.not. hit) cycle
-               dw = node_struct_data_words(schema%nodes(sidx))
-               pw = node_struct_pointer_count(schema%nodes(sidx))
-               q = capnp_codec_new_struct(p, dw, pw, err)
+               q = capnp_getp(p, int(field_slot_offset(f)), err)
                if (err /= CAPNP_OK) return
-               call capnp_setp(p, int(field_slot_offset(f)), q, err)
-               if (err /= CAPNP_OK) return
+               if (q%kind /= CAPNP_PK_STRUCT) then
+                  dw = node_struct_data_words(schema%nodes(sidx))
+                  pw = node_struct_pointer_count(schema%nodes(sidx))
+                  q = capnp_codec_new_struct(p, dw, pw, err)
+                  if (err /= CAPNP_OK) return
+                  call capnp_setp(p, int(field_slot_offset(f)), q, err)
+                  if (err /= CAPNP_OK) return
+               end if
                call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, depth + 1, err)
                if (err /= CAPNP_OK) return
             end if
@@ -947,100 +1000,201 @@ contains
          end if
       end if
 
-      if (opts%active .and. len(dkey) > 0 .and. find_jkey(jv, dkey, kidx)) then
-         if (jv%kids(kidx)%k /= JK_STR) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         if (.not. find_union_json_field(schema, idx, jv%kids(kidx)%str, f)) return
-         call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
-                               field_discriminant(f), err)
+      call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err)
+   end subroutine fill_struct_pfx
+
+   !> Apply union keys in document order, the way kj JsonCodec walks an
+   !> object. A known tag selects an arm without clearing its storage.
+   !> A second known tag is an error. An unknown tag selects nothing, and
+   !> plain member keys still decode. valueName and flattened-union keys
+   !> that appear before the tag are retried after it.
+   recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      character(len=*), intent(in) :: pfx, dkey
+      type(disc_opts_t), intent(in) :: opts
+      type(jval), intent(in) :: jv
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: child
+      type(capnp_brand_env_t) :: cenv
+      integer, allocatable :: pend(:), nxt(:)
+      integer :: nk, np, nnext, i, guard, stat, child_which, disc
+      logical :: deferred, progressed, tag_set, have_child
+      err = CAPNP_OK
+      if (.not. allocated(jv%kids)) return
+      nk = size(jv%kids)
+      disc = int(node_struct_discriminant_offset(schema%nodes(idx)))
+      tag_set = union_was_seen(p, disc)
+      have_child = .false.
+      child_which = -1
+      allocate (pend(nk), nxt(nk), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      np = 0
+      do i = 1, nk
+         call apply_key(i, deferred)
          if (err /= CAPNP_OK) return
-         call flatten_opts(f, is_flat, fpfx, err)
-         if (err /= CAPNP_OK) return
-         if (opts%has_val .and. is_flat) then
-            err = CAPNP_ERR_ARG
-            return
+         if (deferred) then
+            np = np + 1
+            pend(np) = i
          end if
-         if (is_flat) then
-            if (field_which(f) == FIELD_GROUP) then
-               gidx = capnp_codec_find_id(schema, field_group_type_id(f))
-               if (gidx == 0) then
-                  err = CAPNP_ERR_ARG
-                  return
-               end if
-               call field_name(f, raw_nm, err)
-               if (err /= CAPNP_OK) return
-               al = field_annotations(f, err)
-               if (err /= CAPNP_OK) return
-               call read_disc_opts(al, gdisc, err)
-               if (err /= CAPNP_OK) return
-               call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, depth + 1, err)
-               if (err /= CAPNP_OK) return
+      end do
+      do guard = 1, nk
+         if (np == 0) exit
+         progressed = .false.
+         nnext = 0
+         do i = 1, np
+            call apply_key(pend(i), deferred)
+            if (err /= CAPNP_OK) return
+            if (deferred) then
+               nnext = nnext + 1
+               nxt(nnext) = pend(i)
             else
-               raw_t = field_slot_type(f, err)
-               if (err /= CAPNP_OK) return
-               t = capnp_brand_resolve(env, raw_t)
-               if (type_which(t) /= TYPE_STRUCT) then
-                  err = CAPNP_ERR_KIND
-                  return
-               end if
-               sidx = capnp_codec_find_id(schema, type_type_id(t))
-               if (sidx == 0) then
-                  err = CAPNP_ERR_ARG
-                  return
-               end if
-               call capnp_brand_enter(env, t, cenv, err)
-               if (err /= CAPNP_OK) return
-               dw = node_struct_data_words(schema%nodes(sidx))
-               pw = node_struct_pointer_count(schema%nodes(sidx))
-               q = capnp_codec_new_struct(p, dw, pw, err)
-               if (err /= CAPNP_OK) return
-               call capnp_setp(p, int(field_slot_offset(f)), q, err)
-               if (err /= CAPNP_OK) return
-               call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, depth + 1, err)
-               if (err /= CAPNP_OK) return
+               progressed = .true.
             end if
-         else
-            if (field_which(f) == FIELD_SLOT) then
-               raw_t = field_slot_type(f, err)
-               if (err /= CAPNP_OK) return
-               t = capnp_brand_resolve(env, raw_t)
-               if (type_which(t) == TYPE_VOID) then
-                  if (opts%has_val) then
-                     if (find_jkey(jv, pfx//opts%val_name, vidx)) then
-                        if (jv%kids(vidx)%k /= JK_NULL) err = CAPNP_ERR_ARG
-                     end if
-                  end if
-                  return
-               end if
-            end if
-            if (opts%has_val) then
-               vkey = pfx//opts%val_name
-            else
-               vkey = pfx//jv%kids(kidx)%str
-            end if
-            if (find_jkey(jv, vkey, vidx)) then
-               call fill_field(schema, f, p, env, jv%kids(vidx), depth + 1, err)
-               if (err /= CAPNP_OK) return
-            end if
-         end if
-      else if (.not. (opts%active .and. opts%has_val)) then
+         end do
+         if (.not. progressed) exit
+         pend(1:nnext) = nxt(1:nnext)
+         np = nnext
+      end do
+   contains
+      recursive subroutine apply_key(ki, defer)
+         integer, intent(in) :: ki
+         logical, intent(out) :: defer
+         type(capnp_ptr_t) :: f, al, raw_t, t, q
+         type(disc_opts_t) :: gdisc, no_disc
+         type(jval) :: one
+         character(len=:), allocatable :: key, local, raw_nm, fpfx, vkey
+         integer :: plen, w, dw, pw, gidx, sidx
+         logical :: is_flat, owned
+         defer = .false.
+         key = ''
+         if (allocated(jv%kids(ki)%key)) key = jv%kids(ki)%key
          plen = len(pfx)
-         do i = 1, size(jv%kids)
-            if (len(jv%kids(i)%key) < plen) cycle
-            if (plen > 0) then
-               if (jv%kids(i)%key(1:plen) /= pfx) cycle
+         if (len(dkey) > 0 .and. key == dkey) then
+            if (jv%kids(ki)%k /= JK_STR) then
+               err = CAPNP_ERR_ARG
+               return
             end if
-            if (.not. find_union_json_field(schema, idx, jv%kids(i)%key(plen + 1:), f)) cycle
+            if (.not. find_union_json_field(schema, idx, jv%kids(ki)%str, f)) return
+            if (tag_set) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            call union_note(p, disc, err)
+            if (err /= CAPNP_OK) return
             call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
-            call fill_field(schema, f, p, env, jv%kids(i), depth + 1, err)
+            tag_set = .true.
+            return
+         end if
+         if (opts%has_val) then
+            vkey = pfx//opts%val_name
+            if (key == vkey) then
+               if (.not. tag_set) then
+                  defer = .true.
+                  return
+               end if
+               if (.not. active_union_field(schema, idx, p, f)) then
+                  err = CAPNP_ERR_ARG
+                  return
+               end if
+               if (union_arm_void(f, env)) return
+               call fill_field(schema, f, p, env, jv%kids(ki), depth + 1, err)
+               return
+            end if
+         else if (plen <= len(key)) then
+            if (plen == 0 .or. key(1:plen) == pfx) then
+               local = key(plen + 1:)
+               if (find_union_json_field(schema, idx, local, f)) then
+                  call flatten_opts(f, is_flat, fpfx, err)
+                  if (err /= CAPNP_OK) return
+                  if (.not. is_flat) then
+                     call capnp_set_which(p, &
+                        int(node_struct_discriminant_offset(schema%nodes(idx))), &
+                        field_discriminant(f), err)
+                     if (err /= CAPNP_OK) return
+                     if (union_arm_void(f, env)) return
+                     call fill_field(schema, f, p, env, jv%kids(ki), depth + 1, err)
+                     return
+                  end if
+               end if
+            end if
+         end if
+         call flat_union_owns(schema, idx, env, pfx, key, depth, owned, err)
+         if (err /= CAPNP_OK .or. .not. owned) return
+         if (.not. tag_set) then
+            defer = .true.
+            return
+         end if
+         if (.not. active_union_field(schema, idx, p, f)) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call flatten_opts(f, is_flat, fpfx, err)
+         if (err /= CAPNP_OK) return
+         if (.not. is_flat) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         one%k = JK_OBJ
+         allocate (one%kids(1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         one%kids(1) = jv%kids(ki)
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = capnp_codec_find_id(schema, field_group_type_id(f))
+            if (gidx == 0) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            call field_name(f, raw_nm, err)
             if (err /= CAPNP_OK) return
-         end do
-      end if
-   end subroutine fill_struct_pfx
+            al = field_annotations(f, err)
+            if (err /= CAPNP_OK) return
+            call read_disc_opts(al, gdisc, err)
+            if (err /= CAPNP_OK) return
+            call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, one, depth + 1, err)
+            return
+         end if
+         w = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+         if (have_child .and. w /= child_which) have_child = .false.
+         raw_t = field_slot_type(f, err)
+         if (err /= CAPNP_OK) return
+         t = capnp_brand_resolve(env, raw_t)
+         if (type_which(t) /= TYPE_STRUCT) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         sidx = capnp_codec_find_id(schema, type_type_id(t))
+         if (sidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
+         if (.not. have_child) then
+            dw = node_struct_data_words(schema%nodes(sidx))
+            pw = node_struct_pointer_count(schema%nodes(sidx))
+            q = capnp_codec_new_struct(p, dw, pw, err)
+            if (err /= CAPNP_OK) return
+            call capnp_setp(p, int(field_slot_offset(f)), q, err)
+            if (err /= CAPNP_OK) return
+            child = q
+            child_which = w
+            have_child = .true.
+         end if
+         call fill_struct_pfx(schema, sidx, child, cenv, pfx//fpfx, no_disc, '', one, &
+                              depth + 1, err)
+      end subroutine apply_key
+   end subroutine decode_union_keys
 
    recursive subroutine struct_matches_any(schema, idx, env, pfx, parent_disc, union_decl, jv, &
                                            depth, hit, err)
@@ -1129,7 +1283,15 @@ contains
                hit = .true.
                return
             end if
-            if (opts%has_val) return
+         end if
+         ! valueName is a key of this union even when the tag is absent
+         ! from this object. Member names are not, once valueName is set.
+         if (opts%has_val) then
+            if (find_jkey(jv, pfx//opts%val_name, kidx)) then
+               hit = .true.
+               return
+            end if
+            return
          end if
       end if
       do i = 0, nf - 1
@@ -1284,7 +1446,7 @@ contains
       tw = type_which(t)
       select case (tw)
       case (TYPE_VOID)
-         if (jv%k /= JK_NULL) err = CAPNP_ERR_ARG
+         ! Any JSON value is void, as in capnp's Void type.
       case (TYPE_BOOL)
          if (jv%k /= JK_BOOL) then
             err = CAPNP_ERR_ARG
@@ -2496,6 +2658,110 @@ contains
          end if
       end do
    end function find_jkey
+
+   function active_union_field(schema, idx, p, f) result(y)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_ptr_t), intent(out) :: f
+      logical :: y
+      type(capnp_ptr_t) :: fl
+      integer :: w, i, n, err
+      y = .false.
+      w = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(fl))
+      do i = 0, n - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         if (field_discriminant(f) == w) then
+            y = .true.
+            return
+         end if
+      end do
+   end function active_union_field
+
+   function union_arm_void(f, env) result(y)
+      type(capnp_ptr_t), intent(in) :: f
+      type(capnp_brand_env_t), intent(in) :: env
+      logical :: y
+      type(capnp_ptr_t) :: raw_t, t
+      integer :: err
+      y = .false.
+      if (field_which(f) /= FIELD_SLOT) return
+      raw_t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
+      y = type_which(t) == TYPE_VOID
+   end function union_arm_void
+
+   subroutine flat_union_owns(schema, idx, env, pfx, key, depth, owned, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth
+      type(capnp_brand_env_t), intent(in) :: env
+      character(len=*), intent(in) :: pfx, key
+      logical, intent(out) :: owned
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f, al, raw_t, t
+      type(capnp_brand_env_t) :: cenv
+      type(disc_opts_t) :: gdisc, no_disc
+      type(jval) :: one
+      character(len=:), allocatable :: raw_nm, fpfx
+      integer :: i, n, gidx, sidx, stat
+      logical :: is_flat, hit
+      owned = .false.
+      err = CAPNP_OK
+      if (len(key) == 0) return
+      one%k = JK_OBJ
+      allocate (one%kids(1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      one%kids(1)%k = JK_NULL
+      one%kids(1)%key = key
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(fl))
+      do i = 0, n - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         if (field_discriminant(f) == NO_DISCRIMINANT) cycle
+         call flatten_opts(f, is_flat, fpfx, err)
+         if (err /= CAPNP_OK) return
+         if (.not. is_flat) cycle
+         hit = .false.
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = capnp_codec_find_id(schema, field_group_type_id(f))
+            if (gidx == 0) cycle
+            call field_name(f, raw_nm, err)
+            if (err /= CAPNP_OK) return
+            al = field_annotations(f, err)
+            if (err /= CAPNP_OK) return
+            call read_disc_opts(al, gdisc, err)
+            if (err /= CAPNP_OK) return
+            call struct_matches_any(schema, gidx, env, pfx//fpfx, gdisc, raw_nm, one, &
+                                    depth + 1, hit, err)
+         else
+            raw_t = field_slot_type(f, err)
+            if (err /= CAPNP_OK) return
+            t = capnp_brand_resolve(env, raw_t)
+            if (type_which(t) /= TYPE_STRUCT) cycle
+            sidx = capnp_codec_find_id(schema, type_type_id(t))
+            if (sidx == 0) cycle
+            call capnp_brand_enter(env, t, cenv, err)
+            if (err /= CAPNP_OK) return
+            call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', one, &
+                                    depth + 1, hit, err)
+         end if
+         if (err /= CAPNP_OK) return
+         if (hit) then
+            owned = .true.
+            return
+         end if
+      end do
+   end subroutine flat_union_owns
 
    function find_union_json_field(schema, idx, key, f) result(y)
       type(capnp_dyn_schema_t), intent(in) :: schema

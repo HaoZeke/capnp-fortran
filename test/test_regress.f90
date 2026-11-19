@@ -29,6 +29,7 @@ contains
          new_unittest("json-surrogate", run_json_surrogate), &
          new_unittest("json-exact-int", run_json_exact_int), &
          new_unittest("json-null-disc", run_json_null_disc), &
+         new_unittest("json-union-diff", run_json_union_diff), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
@@ -585,12 +586,132 @@ contains
       tail = capnp_dyn_get_int(schema, tidx, root, 'tail', err)
       call check_(error, err == CAPNP_OK .and. tail == 9_int64, 'null-disc: tail kept')
       seq = capnp_dyn_get_int(schema, tidx, root, 'count', err)
-      call check_(error, err /= CAPNP_OK, 'null-disc: unknown tag does not select count')
+      call check_(error, err == CAPNP_OK .and. seq == 3_int64, &
+                  'null-disc: unknown tag still selects count')
       call capnp_json_decode(schema, tidx, '{"kind":1}', decoded, err)
       call check_(error, err /= CAPNP_OK, 'null-disc: non-string tag is rejected')
       call capnp_message_free(decoded)
       call capnp_dyn_free(schema)
    end subroutine run_json_null_disc
+
+   !> Every case is capnp 1.4.0 json:canonical versus our decoder.
+   subroutine run_json_union_diff(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: n
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      n = 0
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"future","count":7}')
+      call udiff(error, schema, n, 'TaggedEvent', &
+         '{"kind":"future","message":"hi","count":2,"seq":3,"tail":9}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"","count":2}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"Count","count":2}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle","count":3}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"count":3,"kind":"idle"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"note","message":5}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"message","message":5}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"message","message":"hi"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"message":"hi"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"idle":5}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","kind":"idle"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle","kind":"count","count":4}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":1}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":null}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"seq":1,"tail":2}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"future"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"count":3,"kind":"future"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"moved","city":"Oslo","code":5}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"city":"Oslo","kind":"moved","code":5}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle","city":"Oslo"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"city":"Oslo"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","count":8,"count":9}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"future","kind":"count","count":4}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","kind":"future","count":4}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"future","kind":"nope"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle","kind":"idle"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"moved","code":5,"city":"Oslo"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"unknown":1,"count":2}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","count":"6"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"message"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","message":"x","count":4}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"city":"A","kind":"moved","city":"B"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"kind":"moved","city":"A","city":"B"}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"empty","payload":1}')
+      call udiff(error, schema, n, 'ValueEvent', '{"payload":4,"type":"num","payload":5}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"num","payload":4,"payload":5}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"num","payload":5}')
+      call udiff(error, schema, n, 'ValueEvent', '{"payload":5}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"text_tag","payload":"hi"}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"renamed","payload":"hi"}')
+      call udiff(error, schema, n, 'ValueEvent', '{"num":4}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"empty","payload":null}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"loc","payload":{"city":"Lima","code":1}}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":1}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"empty","payload":{"a":1}}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"num","payload":"4"}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"loc","payload":1}')
+      call udiff(error, schema, n, 'ValueEvent', '{"payload":"A","type":"text_tag","payload":"B"}')
+      call udiff(error, schema, n, 'ValueEvent', '{"type":"text_tag","payload":"A","payload":"B"}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"future","fast":4}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"custom","fast":3}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"fast","c_city":"x"}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"custom","c_city":"Riga","c_code":1}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"c_city":"Riga","mode":"custom","c_code":1}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"fast":3,"c_city":"x"}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"fast":3,"mode":"custom"}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"custom","c_city":"x","fast":3}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"custom","fast":3,"c_city":"x"}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"ext":{"tag":"off","body":"r"}}')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"ext":{"body":"A","tag":"on","body":"B"}}')
+      call check_(error, n == 62, 'union-diff: case count')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_union_diff
+
+   subroutine udiff(error, schema, n, tname, js)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(inout) :: n
+      character(len=*), intent(in) :: tname, js
+      type(capnp_message_t), target :: decoded
+      integer(int8), allocatable :: ours(:), ref(:)
+      integer :: err, idx
+      logical :: cpp_ok, ours_ok
+      n = n + 1
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, tname, err)
+      if (idx <= 0) then
+         call test_failed(error, 'union-diff: missing '//tname)
+         return
+      end if
+      call spit(tmp//'/uj.json', js, err)
+      cpp_ok = sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp '//tname &
+         //' < '//tmp//'/uj.json > '//tmp//'/uj.can 2>'//tmp//'/uj.err')
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      ours_ok = err == CAPNP_OK
+      if (cpp_ok .neqv. ours_ok) then
+         call test_failed(error, 'union-diff: status '//tname//' '//js)
+         call capnp_message_free(decoded)
+         return
+      end if
+      if (.not. ours_ok) then
+         call capnp_message_free(decoded)
+         return
+      end if
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/uj.can', ref, err)
+      if (err /= CAPNP_OK .or. .not. allocated(ours) .or. .not. allocated(ref) .or. &
+          size(ours) /= size(ref) .or. .not. all(ours == ref)) then
+         call test_failed(error, 'union-diff: bytes '//tname//' '//js)
+      end if
+      call capnp_message_free(decoded)
+   end subroutine udiff
 
    subroutine check_file_text(error, text, path, label)
       type(error_type), allocatable, intent(inout) :: error
