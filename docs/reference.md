@@ -147,6 +147,36 @@ default). `capnp_text_span` finds the next top-level value in a stream.
 
 External constants and embedded files are not accepted.
 
+## JSON (`capnp_json`)
+
+`use capnp_json`. `capnp_json_encode` and `capnp_json_decode` follow the
+defaults in capnp/compat/json.h. Field names are the schema names unless
+`$Json.name` renames them. 64-bit integers are decimal strings. Data is a
+JSON array of byte values, or a base64 string under `$Json.base64`, or
+lowercase hex under `$Json.hex`. Enums are names (`$Json.name` on an
+enumerant is honored) and unknown ordinals are numbers. NaN and infinities
+are `"NaN"`, `"Infinity"`, and `"-Infinity"`. Null pointers are omitted;
+primitives and groups are written. Only the active union arm appears.
+Unknown JSON fields are ignored on decode. Pretty output matches
+`capnp convert binary:json`; pass `pretty=.false.` for `--short`.
+
+## capnpf
+
+`capnpf` is the command-line counterpart of `capnp encode`, `decode`,
+`convert`, and `eval`. It compiles the schema with `capnp compile -o-`
+and loads that CodeGeneratorRequest.
+
+```
+capnpf encode SCHEMA TYPE
+capnpf decode SCHEMA TYPE [--packed] [--flat] [--short]
+capnpf convert FROM:TO SCHEMA TYPE [--short]
+capnpf eval SCHEMA NAME [--short] [-ojson]
+```
+
+`FROM` and `TO` are `binary`, `packed`, `flat`, `canonical`, `text`, or
+`json`. `eval` prints a const, `Type.field` (the field default),
+`const.field`, or `const.list[index]`.
+
 ## Canonical form (`capnp_canonical`)
 
 `capnp_canonicalize (msg, bytes, err)` produces the canonical single

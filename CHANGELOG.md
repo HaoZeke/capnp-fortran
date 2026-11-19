@@ -12,6 +12,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 - Text-format encode and decode (`capnp_text`), matching `capnp decode` /
   `capnp encode` for structs, lists, unions, groups, enums, and Data.
+- JSON encode and decode (`capnp_json`) with the `capnp/compat/json.h`
+  defaults, including `$Json.name`, `$Json.base64`, and `$Json.hex`.
+- `capnpf`, a command-line encode, decode, convert, and eval tool.
 
 ### Fixed
 
