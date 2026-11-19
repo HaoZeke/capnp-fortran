@@ -39,7 +39,7 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      type(capnp_ptr_t) :: bindings(0:3)
+      type(capnp_ptr_t), allocatable :: bindings(:)
       integer :: nbind = 0
    end type inst_t
    type(inst_t) :: g_insts(64)
@@ -1685,6 +1685,27 @@ contains
 
    ! --- brand instantiations ---------------------------------------------------
 
+   !> Append one brand binding, growing the 0-based array as needed.
+   subroutine bind_store(arr, n, item, err)
+      type(capnp_ptr_t), allocatable, intent(inout) :: arr(:)
+      integer, intent(inout) :: n
+      type(capnp_ptr_t), intent(in) :: item
+      integer, intent(out) :: err
+      type(capnp_ptr_t), allocatable :: grown(:)
+      integer :: hi
+      err = CAPNP_OK
+      if (.not. allocated(arr)) then
+         allocate (arr(0:7))
+      else if (n > ubound(arr, 1)) then
+         hi = ubound(arr, 1)
+         allocate (grown(0:hi + hi + 1))
+         grown(0:hi) = arr
+         call move_alloc(grown, arr)
+      end if
+      arr(n) = item
+      n = n + 1
+   end subroutine bind_store
+
    !> Instantiation handle name for a branded struct Type, registering
    !> the instantiation on first sight. '' when the use is unbranded.
    subroutine inst_name_for(t, gidx, o, err)
@@ -1692,8 +1713,8 @@ contains
       integer, intent(in) :: gidx
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: b, scopes, sc, binds, bd
-      type(capnp_ptr_t) :: btypes(0:3)
+      type(capnp_ptr_t) :: b, scopes, sc, binds, bd, bt
+      type(capnp_ptr_t), allocatable :: btypes(:)
       character(len=:), allocatable :: gname, part
       integer(int64) :: i, j
       integer :: n, k, bidx
@@ -1712,29 +1733,30 @@ contains
          if (scope_which(sc) /= SCOPE_BIND) cycle
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
-         do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
+         do j = 0_int64, capnp_list_len(binds) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)
             if (err /= CAPNP_OK) return
             if (binding_which(bd) == BINDING_BOUND_TYPE) then
-               btypes(n) = binding_type(bd, err)
+               bt = binding_type(bd, err)
                if (err /= CAPNP_OK) return
                ! A binding that is itself a parameter of the generic being
                ! instantiated resolves through the current instantiation,
                ! so nested branded uses (Box(T) inside Nest(T)) settle.
                if (g_cur_inst > 0) then
-                  if (type_which(btypes(n)) == TYPE_ANY_POINTER) then
-                     if (type_anyptr_which(btypes(n)) == ANYPTR_PARAMETER) then
-                        if (type_param_scope_id(btypes(n)) == &
+                  if (type_which(bt) == TYPE_ANY_POINTER) then
+                     if (type_anyptr_which(bt) == ANYPTR_PARAMETER) then
+                        if (type_param_scope_id(bt) == &
                             g_nodes(g_insts(g_cur_inst)%gidx)%id .and. &
-                            type_param_index(btypes(n)) < g_insts(g_cur_inst)%nbind) &
-                           btypes(n) = g_insts(g_cur_inst)%bindings(type_param_index(btypes(n)))
+                            type_param_index(bt) < g_insts(g_cur_inst)%nbind) &
+                           bt = g_insts(g_cur_inst)%bindings(type_param_index(bt))
                      end if
                   end if
                end if
             else
-               btypes(n) = capnp_ptr_t() ! unbound: stays AnyPointer
+               bt = capnp_ptr_t() ! unbound: stays AnyPointer
             end if
-            n = n + 1
+            call bind_store(btypes, n, bt, err)
+            if (err /= CAPNP_OK) return
          end do
       end do
       if (n == 0) return
@@ -1766,9 +1788,8 @@ contains
       g_insts(g_ninsts)%gidx = gidx
       g_insts(g_ninsts)%name = o
       g_insts(g_ninsts)%nbind = n
-      do k = 0, n - 1
-         g_insts(g_ninsts)%bindings(k) = btypes(k)
-      end do
+      allocate (g_insts(g_ninsts)%bindings(0:n - 1))
+      g_insts(g_ninsts)%bindings(0:n - 1) = btypes(0:n - 1)
    end subroutine inst_name_for
 
    !> Name fragment for one binding type. Lists recurse into their
