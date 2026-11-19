@@ -1119,8 +1119,10 @@ contains
          if (c == ' ' .or. c == achar(9) .or. c == achar(10) .or. c == achar(13)) then
             sc%i = sc%i + 1
          else if (c == '#') then
-            do while (sc%i <= sc%n .and. sc%s(sc%i:sc%i) /= achar(10))
+            do
                sc%i = sc%i + 1
+               if (sc%i > sc%n) return
+               if (sc%s(sc%i:sc%i) == achar(10)) exit
             end do
          else
             return
