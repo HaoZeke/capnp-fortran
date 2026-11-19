@@ -1,11 +1,33 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
 #   multifile | suffix | annot | fresh
+# The plugin and the module directory come from the environment, set by
+# the unit test to the binary it is running. Searching the build tree
+# would accept a stale profile.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-bin=$(find "$root/build" -name capnpc-fortran -type f | head -1)
-test -n "$bin"
-moddir=$(dirname "$(find "$root/build" -name capnp.mod | head -1)")
+bin=${CAPNP_FORTRAN_BIN:-}
+moddir=${CAPNP_FORTRAN_MODDIR:-}
+if [ -z "$bin" ] || [ -z "$moddir" ]; then
+  echo "CAPNP_FORTRAN_BIN and CAPNP_FORTRAN_MODDIR are required" >&2
+  exit 2
+fi
+case "$bin" in
+  /*) ;;
+  *) bin="$root/$bin" ;;
+esac
+case "$moddir" in
+  /*) ;;
+  *) moddir="$root/$moddir" ;;
+esac
+if [ ! -x "$bin" ]; then
+  echo "plugin is not executable: $bin" >&2
+  exit 2
+fi
+if [ ! -d "$moddir" ]; then
+  echo "module directory is missing: $moddir" >&2
+  exit 2
+fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 cd "$out"
