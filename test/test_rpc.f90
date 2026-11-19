@@ -19,6 +19,15 @@ module test_rpc
    private
    public :: collect_rpc
 
+   type, extends(rpc_membrane_policy_t) :: counting_membrane_policy_t
+      integer :: inbound_calls = 0
+      integer :: outbound_calls = 0
+      logical :: block = .false.
+   contains
+      procedure :: inbound_call => counting_inbound_call
+      procedure :: outbound_call => counting_outbound_call
+   end type counting_membrane_policy_t
+
    type(rpc_conn_t), target :: cli, srv
    type(echo_srv_t), target :: echo
    class(rpc_server_t), pointer :: boot
@@ -150,6 +159,32 @@ contains
       call px_close(fb)
    end subroutine t_recv_all_retries_eintr
 
+   subroutine counting_inbound_call(self, interface_id, method_id, err)
+      class(counting_membrane_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%inbound_calls = self%inbound_calls + 1
+      if (self%block) then
+         err = RPC_ERR_EXCEPTION
+      else
+         err = CAPNP_OK
+      end if
+   end subroutine counting_inbound_call
+
+   subroutine counting_outbound_call(self, interface_id, method_id, err)
+      class(counting_membrane_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      self%outbound_calls = self%outbound_calls + 1
+      if (self%block) then
+         err = RPC_ERR_EXCEPTION
+      else
+         err = CAPNP_OK
+      end if
+   end subroutine counting_outbound_call
+
    subroutine run_rpc(error)
       type(error_type), allocatable, intent(out) :: error
       call px_socketpair(fda, fdb, err)
@@ -187,6 +222,7 @@ contains
       if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
       if (.not. allocated(error)) call t_request_cancellation(error)
+      if (.not. allocated(error)) call t_membrane(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -881,6 +917,92 @@ contains
                   'cancel: local question released')
       call capnp_message_free(wire)
    end subroutine t_request_cancellation
+
+   !> A membrane checks calls, recursively wraps result capabilities,
+   !> blocks client-side calls through an explicit wrapper, and revokes
+   !> every server capability sharing its policy.
+   subroutine t_membrane(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: mcli, msrv
+      type(echo_srv_t), target :: inner_server
+      type(rpc_membrane_server_t), target :: wrapped_server
+      type(counting_membrane_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, mboot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: root, adder, blocked
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qb, qm, qa
+      integer :: ma, mb, e
+
+      call px_socketpair(ma, mb, e)
+      call check_(error, e == CAPNP_OK, 'membrane: socketpair')
+      if (allocated(error)) return
+      inner => inner_server
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped_server, inner, policy)
+      mboot => wrapped_server
+      call rpc_conn_init(msrv, mb, mboot)
+      mboot => null()
+      call rpc_conn_init(mcli, ma, mboot)
+
+      call rpc_bootstrap_send(mcli, root, e)
+      qb = root%id
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qb, e)
+      call rpc_result_cap(mcli, qb, [integer ::], root, e)
+
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, qm, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 100_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qm, e)
+      call rpc_result_cap(mcli, qm, [0], adder, e)
+      call check_(error, e == CAPNP_OK .and. policy_store%inbound_calls == 1, &
+                  'membrane: root call checked')
+
+      call rpc_call_begin(mcli, adder, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 5_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qa, e)
+      call rpc_result_content(mcli, qa, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 105_int64, &
+                  'membrane: recursive result capability works')
+      call check_(error, policy_store%inbound_calls == 2, &
+                  'membrane: recursive result capability checked')
+
+      policy_store%block = .true.
+      blocked = rpc_membrane_cap(adder, policy)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. qa < 0_int64, &
+                  'membrane: client wrapper blocks before send')
+      blocked = rpc_membrane_cap(adder, policy, reverse=.true.)
+      call rpc_call_begin(mcli, blocked, ECHO_IFACE, 0, m, params, qa, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  policy_store%outbound_calls == 1, &
+                  'membrane: reverse wrapper checks outbound calls')
+      policy_store%block = .false.
+
+      call rpc_membrane_revoke(policy_store, 'test membrane revoked')
+      call rpc_call_begin(mcli, adder, ECHO_IFACE, 0, m, params, qa, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qa, e)
+      call rpc_result_content(mcli, qa, content, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, &
+                  'membrane: revocation reaches recursive wrappers')
+
+      call rpc_conn_close(mcli)
+      call rpc_conn_close(msrv)
+   end subroutine t_membrane
 
    !> Bootstrap, then a call on the still-promised bootstrap cap
    !> (pipelining), then settle the cap and call again.

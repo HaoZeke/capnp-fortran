@@ -49,6 +49,8 @@ module capnp_rpc
    private
 
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
+   public :: rpc_membrane_policy_t, rpc_membrane_server_t
+   public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
    public :: rpc_conn_init, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
@@ -98,12 +100,25 @@ module capnp_rpc
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
    integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
 
+   !> Policy shared by every wrapper belonging to one membrane. Reusing
+   !> the same object gives all wrapped capabilities one revocation
+   !> switch, matching capnp-C++ MembranePolicy identity.
+   type, abstract :: rpc_membrane_policy_t
+      logical :: revoked = .false.
+      character(len=:), allocatable :: revoke_reason
+   contains
+      procedure(rpc_membrane_check_ifc), deferred :: inbound_call
+      procedure(rpc_membrane_check_ifc), deferred :: outbound_call
+   end type rpc_membrane_policy_t
+
    !> Client-side reference to a remote capability.
    type :: rpc_cap_t
       integer :: kind = RPC_CAP_NONE
       integer(int64) :: id = 0_int64 ! import id, or question id for pipelines
       integer :: nops = 0
       integer :: ops(0:MAXOPS - 1) = 0 ! getPointerField indices
+      class(rpc_membrane_policy_t), pointer :: membrane => null()
+      logical :: membrane_reverse = .false.
    end type rpc_cap_t
 
    !> Unlimited-polymorphic holder so ctx and conn can reference servers
@@ -132,6 +147,17 @@ module capnp_rpc
       procedure(rpc_dispatch_ifc), deferred :: dispatch
    end type rpc_server_t
 
+   !> Server capability crossing a membrane. Calls are checked in the
+   !> crossing direction and capabilities staged in results are wrapped
+   !> recursively in the same membrane.
+   type, extends(rpc_server_t) :: rpc_membrane_server_t
+      class(rpc_server_t), pointer :: inner => null()
+      class(rpc_membrane_policy_t), pointer :: policy => null()
+      logical :: reverse = .false.
+   contains
+      procedure :: dispatch => membrane_dispatch
+   end type rpc_membrane_server_t
+
    abstract interface
       subroutine rpc_dispatch_ifc(self, ctx, err)
          import :: rpc_server_t, rpc_call_ctx_t
@@ -139,6 +165,14 @@ module capnp_rpc
          type(rpc_call_ctx_t), intent(inout) :: ctx
          integer, intent(out) :: err
       end subroutine rpc_dispatch_ifc
+
+      subroutine rpc_membrane_check_ifc(self, interface_id, method_id, err)
+         import :: rpc_membrane_policy_t, int64
+         class(rpc_membrane_policy_t), intent(inout) :: self
+         integer(int64), intent(in) :: interface_id
+         integer, intent(in) :: method_id
+         integer, intent(out) :: err
+      end subroutine rpc_membrane_check_ifc
    end interface
 
    type :: rpc_export_slot_t
@@ -156,6 +190,8 @@ module capnp_rpc
       logical :: used = .false.
       logical :: returned = .false.
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
+      class(rpc_membrane_policy_t), pointer :: membrane => null()
+      logical :: membrane_reverse = .false.
    end type rpc_question_slot_t
 
    type :: rpc_answer_slot_t
@@ -338,6 +374,118 @@ contains
    end function rpc_cap_is_settled
 
    ! ------------------------------------------------------------------
+   ! Membranes
+   ! ------------------------------------------------------------------
+
+   !> Wrap a client capability for use outside a membrane. Set reverse
+   !> when the original capability is outside and the result is for use
+   !> inside.
+   function rpc_membrane_cap(cap, policy, reverse) result(wrapped)
+      type(rpc_cap_t), intent(in) :: cap
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in), optional :: reverse
+      type(rpc_cap_t) :: wrapped
+      wrapped = cap
+      wrapped%membrane => policy
+      wrapped%membrane_reverse = .false.
+      if (present(reverse)) wrapped%membrane_reverse = reverse
+   end function rpc_membrane_cap
+
+   !> Initialize a server wrapper. `inner` and `policy` must outlive the
+   !> wrapper and every result capability exported through it.
+   subroutine rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      type(rpc_membrane_server_t), intent(out) :: wrapper
+      class(rpc_server_t), pointer, intent(in) :: inner
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in), optional :: reverse
+      wrapper%inner => inner
+      wrapper%policy => policy
+      wrapper%reverse = .false.
+      if (present(reverse)) wrapper%reverse = reverse
+   end subroutine rpc_membrane_server_init
+
+   !> Revoke every client and server wrapper sharing this policy.
+   subroutine rpc_membrane_revoke(policy, reason)
+      class(rpc_membrane_policy_t), intent(inout) :: policy
+      character(len=*), intent(in), optional :: reason
+      policy%revoked = .true.
+      if (present(reason)) then
+         policy%revoke_reason = reason
+      else
+         policy%revoke_reason = 'membrane revoked'
+      end if
+   end subroutine rpc_membrane_revoke
+
+   subroutine membrane_check(policy, reverse, interface_id, method_id, err)
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in) :: reverse
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      if (.not. associated(policy)) then
+         err = CAPNP_ERR_ARG
+      else if (policy%revoked) then
+         err = RPC_ERR_EXCEPTION
+      else if (reverse) then
+         call policy%outbound_call(interface_id, method_id, err)
+      else
+         call policy%inbound_call(interface_id, method_id, err)
+      end if
+   end subroutine membrane_check
+
+   !> A nested membrane calls this again through the inner server.
+   recursive subroutine membrane_dispatch(self, ctx, err)
+      class(rpc_membrane_server_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      integer :: i
+      if (.not. associated(self%inner) .or. .not. associated(self%policy)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call membrane_check(self%policy, self%reverse, ctx%interface_id, &
+                          ctx%method_id, err)
+      if (err /= CAPNP_OK) return
+      call self%inner%dispatch(ctx, err)
+      if (err /= CAPNP_OK) return
+      do i = 0, ctx%nexp - 1
+         call membrane_wrap_server_ref(ctx%staged(i)%s, self%policy, &
+                                       self%reverse, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine membrane_dispatch
+
+   !> Wrap a result capability crossing the membrane. A wrapper crossing
+   !> back through the same policy is unwrapped instead of doubled.
+   subroutine membrane_wrap_server_ref(srv, policy, reverse, err)
+      class(*), pointer, intent(inout) :: srv
+      class(rpc_membrane_policy_t), pointer, intent(in) :: policy
+      logical, intent(in) :: reverse
+      integer, intent(out) :: err
+      type(rpc_membrane_server_t), pointer :: wrapper
+      class(rpc_server_t), pointer :: inner
+      err = CAPNP_OK
+      select type (existing => srv)
+      type is (rpc_membrane_server_t)
+         if (associated(existing%policy, policy) .and. &
+             existing%reverse .neqv. reverse) then
+            srv => existing%inner
+            return
+         end if
+      end select
+      select type (typed => srv)
+      class is (rpc_server_t)
+         inner => typed
+      class default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      allocate (wrapper)
+      call rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      srv => wrapper
+   end subroutine membrane_wrap_server_ref
+
+   ! ------------------------------------------------------------------
    ! Client side
    ! ------------------------------------------------------------------
 
@@ -351,6 +499,8 @@ contains
          if (.not. conn%questions(k)%used) then
             conn%questions(k)%used = .true.
             conn%questions(k)%returned = .false.
+            conn%questions(k)%membrane => null()
+            conn%questions(k)%membrane_reverse = .false.
             conn%next_qid = int(k + 1, int64)
             qid = int(k, int64)
             return
@@ -517,11 +667,24 @@ contains
       type(capnp_ptr_t) :: ops
       integer :: i
       err = CAPNP_OK
+      if (associated(target%membrane)) then
+         call membrane_check(target%membrane, target%membrane_reverse, &
+                             interface_id, method_id, err)
+         if (err /= CAPNP_OK) then
+            if (target%membrane%revoked .and. &
+                allocated(target%membrane%revoke_reason)) &
+               conn%abort_reason = target%membrane%revoke_reason
+            qid = -1_int64
+            return
+         end if
+      end if
       qid = alloc_qid(conn)
       if (qid < 0_int64) then
          err = CAPNP_ERR_ALLOC
          return
       end if
+      conn%questions(int(qid))%membrane => target%membrane
+      conn%questions(int(qid))%membrane_reverse = target%membrane_reverse
       call capnp_message_init_builder(m, err)
       if (err /= CAPNP_OK) return
       msg = message_new_root(m, err)
@@ -838,6 +1001,10 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK) then
+         cap%membrane => conn%questions(int(qid))%membrane
+         cap%membrane_reverse = conn%questions(int(qid))%membrane_reverse
+      end if
    end subroutine rpc_result_cap
 
    !> Tell the peer we are done with a question. retain_caps=.true. keeps
@@ -907,6 +1074,8 @@ contains
       type(rpc_question_slot_t), intent(inout) :: slot
       slot%used = .false.
       slot%returned = .false.
+      slot%membrane => null()
+      slot%membrane_reverse = .false.
    end subroutine question_slot_clear
 
    !> Clear an answer slot; see question_slot_clear.
