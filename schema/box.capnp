@@ -21,3 +21,12 @@ struct BoxUse {
   listBox @3 :Box(List(Text));
   nest @4 :Nest(Text);
 }
+
+struct Q(A, B, C, D, E) {
+  a @0 :A;
+  e @1 :E;
+}
+
+struct QUse {
+  q @0 :Q(Text, Text, Text, Text, Data);
+}
