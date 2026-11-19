@@ -295,7 +295,6 @@ contains
       integer, intent(out) :: err
       integer :: disc
       err = CAPNP_OK
-      if (field_which(f) == FIELD_GROUP) return
       disc = field_discriminant(f)
       if (disc == NO_DISCRIMINANT) return
       if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
