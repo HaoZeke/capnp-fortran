@@ -969,6 +969,11 @@ contains
    !> Resolved pointer field (Text, Data, List, struct, anyPointer). For
    !> groups the parent handle itself addresses the members, so groups
    !> return p unchanged.
+   !>
+   !> Reader pointer lookups store one cached copy of each defaulted field on the schema.
+   !> schema is therefore intent(inout). A routine that only holds the
+   !> schema as intent(in) cannot call this, nor capnp_dyn_get_any_struct
+   !> or capnp_dyn_get_any_list, which share the same cache.
    function capnp_dyn_getp(schema, idx, p, fname, err) result(q)
       type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
@@ -1543,6 +1548,9 @@ contains
       call capnp_dyn_setp(schema, idx, p, fname, value, err)
    end subroutine capnp_dyn_set_capability
 
+   !> Struct view of an anyPointer field. schema is intent(inout) because
+   !> a missing value is filled from the reader default cache. See
+   !> capnp_dyn_getp.
    function capnp_dyn_get_any_struct(schema, idx, p, fname, err) result(value)
       type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
@@ -1568,6 +1576,9 @@ contains
       if (value%kind /= CAPNP_PK_STRUCT) err = CAPNP_ERR_KIND
    end function capnp_dyn_get_any_struct
 
+   !> List view of an anyPointer field. schema is intent(inout) because
+   !> a missing value is filled from the reader default cache. See
+   !> capnp_dyn_getp.
    function capnp_dyn_get_any_list(schema, idx, p, fname, err) result(value)
       type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
