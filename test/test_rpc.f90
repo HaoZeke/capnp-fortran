@@ -951,6 +951,11 @@ contains
       call check_(error, .not. cli%questions(int(qid))%used, &
                   'cancel: local question released')
       call capnp_message_free(wire)
+
+      call rpc_finish_send(cli, -1_int64, .false., err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'cancel: invalid finish id rejected')
+      call rpc_request_cancellation(cli, -1_int64, err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'cancel: invalid cancellation id rejected')
    end subroutine t_request_cancellation
 
    !> A membrane checks calls, recursively wraps result capabilities,
