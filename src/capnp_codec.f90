@@ -23,7 +23,7 @@ module capnp_codec
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
    public :: capnp_quiet_nan
-   public :: capnp_codec_find_id, capnp_codec_find_field
+   public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
 
    interface
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
@@ -393,6 +393,34 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end subroutine capnp_codec_find_field
+
+   function capnp_codec_field_present(f, p, err) result(y)
+      type(capnp_ptr_t), intent(in) :: f, p
+      integer, intent(out) :: err
+      logical :: y
+      type(capnp_ptr_t) :: t, q
+      integer :: tw
+      err = CAPNP_OK
+      y = .false.
+      if (field_which(f) == FIELD_GROUP) then
+         y = .true.
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      tw = type_which(t)
+      select case (tw)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+         if (p%kind == CAPNP_PK_NULL) then
+            y = .false.
+         else
+            q = capnp_getp(p, int(field_slot_offset(f)), err)
+            y = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+         end if
+      case default
+         y = .true.
+      end select
+   end function capnp_codec_field_present
 
    pure function capnp_as_i8(u) result(v)
       integer, intent(in) :: u

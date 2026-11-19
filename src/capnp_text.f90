@@ -219,7 +219,7 @@ contains
          f = capnp_list_get_struct(fl, i, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
-         show = field_present(f, p, err)
+         show = capnp_codec_field_present(f, p, err)
          if (err /= CAPNP_OK) return
          if (fd /= NO_DISCRIMINANT) then
             if (fd /= active) cycle
@@ -900,30 +900,6 @@ contains
       if (err /= CAPNP_OK) return
       ord = enum_by_name(schema, type_type_id(t), tok, err)
    end subroutine parse_enum
-
-   function field_present(f, p, err) result(y)
-      type(capnp_ptr_t), intent(in) :: f, p
-      integer, intent(out) :: err
-      logical :: y
-      type(capnp_ptr_t) :: t, q
-      integer :: tw
-      err = CAPNP_OK
-      y = .false.
-      if (field_which(f) == FIELD_GROUP) then
-         y = .true.
-         return
-      end if
-      t = field_slot_type(f, err)
-      if (err /= CAPNP_OK) return
-      tw = type_which(t)
-      select case (tw)
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_ANY_POINTER, TYPE_INTERFACE)
-         q = capnp_getp(p, int(field_slot_offset(f)), err)
-         y = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
-      case default
-         y = .true.
-      end select
-   end function field_present
 
    subroutine enum_text(schema, tid, ord, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
