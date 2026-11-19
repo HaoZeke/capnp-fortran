@@ -6,7 +6,7 @@ module test_dynamic
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, value_which, value_text
+   use capnp_schema, only: TYPE_TEXT, type_which, value_which, value_text
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__A826_NOTE_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -38,7 +38,8 @@ contains
 
    subroutine run_dynamic(error)
       type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema, kschema, dschema, aschema
+      type(capnp_dyn_schema_t), target :: schema, kschema, dschema, aschema, bschema
+      type(capnp_dyn_brand_t) :: brand
       type(capnp_message_t), target :: msg, bmsg, kmsg, dmsg, amsg
       type(capnp_ptr_t) :: root, people, person, phones, phone, q
       type(capnp_dyn_annotation_t), allocatable :: annotations(:)
@@ -47,7 +48,7 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, box_idx, tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
@@ -266,6 +267,17 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'selected' .and. &
                   capnp_dyn_which(aschema, choice_idx, people, err) == 1, 'dyn: select and text union')
 
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      call check_(error, err == CAPNP_OK, 'dyn: box cgr reads')
+      call capnp_dyn_load(bschema, bytes, err)
+      box_idx = capnp_dyn_find(bschema, 'BoxUse', err)
+      q = capnp_dyn_field_schema(bschema, box_idx, 'textBox', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      call check_(error, err == CAPNP_OK .and. size(brand%scopes) > 0 .and. &
+                  size(brand%scopes(1)%bindings) > 0 .and. &
+                  type_which(brand%scopes(1)%bindings(1)%type) == TYPE_TEXT, &
+                  'dyn: arbitrary text brand binding')
+
       call capnp_message_free(msg)
       call capnp_message_free(bmsg)
       call capnp_message_free(kmsg)
@@ -275,6 +287,7 @@ contains
       call capnp_dyn_free(kschema)
       call capnp_dyn_free(dschema)
       call capnp_dyn_free(aschema)
+      call capnp_dyn_free(bschema)
    end subroutine run_dynamic
 
 end module test_dynamic
