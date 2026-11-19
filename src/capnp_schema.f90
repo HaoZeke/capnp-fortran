@@ -39,9 +39,6 @@ module capnp_schema
    integer, parameter, public :: TYPE_STRUCT = 16
    integer, parameter, public :: TYPE_INTERFACE = 17
    integer, parameter, public :: TYPE_ANY_POINTER = 18
-   integer, parameter, public :: TYPE_ANY_STRUCT = 25
-   integer, parameter, public :: TYPE_ANY_LIST = 26
-   integer, parameter, public :: TYPE_CAPABILITY = 27
 
    integer, parameter, public :: NO_DISCRIMINANT = 65535
 
@@ -64,7 +61,7 @@ module capnp_schema
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
    public :: value_text, value_enum, value_pointer, value_data
-   public :: type_brand, type_anyptr_which, type_anyptr_kind
+   public :: type_brand, type_anyptr_which, type_anyptr_kind, type_uncon_which
    public :: type_param_scope_id, type_param_index
    public :: brand_scopes, scope_scope_id, scope_which, scope_bindings
    public :: binding_which, binding_type
@@ -82,6 +79,12 @@ module capnp_schema
    integer, parameter, public :: ANYPTR_KIND_STRUCT = 1
    integer, parameter, public :: ANYPTR_KIND_LIST = 2
    integer, parameter, public :: ANYPTR_KIND_CAPABILITY = 3
+   ! anyPointer.unconstrained inner tag (u16 at byte 10). These are not
+   ! Type union tags: 25, 26 and 27 are the field ordinals of that group.
+   integer, parameter, public :: UNCON_ANY = 0
+   integer, parameter, public :: UNCON_STRUCT = 1
+   integer, parameter, public :: UNCON_LIST = 2
+   integer, parameter, public :: UNCON_CAPABILITY = 3
    integer, parameter, public :: SCOPE_BIND = 0
    integer, parameter, public :: SCOPE_INHERIT = 1
    integer, parameter, public :: BINDING_UNBOUND = 0
@@ -112,6 +115,14 @@ contains
       integer :: w
       w = int(capnp_get_u16(p, 10_int64))
    end function type_anyptr_kind
+   !> anyPointer.unconstrained tag (u16 at byte 10): anyKind=0, struct=1,
+   !> list=2, capability=3. The same bits hold parameterIndex when the
+   !> anyPointer tag is parameter, so callers must check the outer tag.
+   function type_uncon_which(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 10_int64))
+   end function type_uncon_which
 
    !> Type.anyPointer.parameter: scopeId u64 at byte 16, parameterIndex
    !> u16 at byte 10.
