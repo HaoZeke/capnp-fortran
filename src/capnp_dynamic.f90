@@ -1130,6 +1130,10 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
@@ -1158,6 +1162,10 @@ contains
       elem = type_list_element(t, err)
       if (err /= CAPNP_OK) return
       if (n < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
