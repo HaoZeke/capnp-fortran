@@ -289,8 +289,10 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'selected' .and. &
                   capnp_dyn_which(aschema, choice_idx, people, err) == 1, 'dyn: select and text union')
       tag = capnp_dyn_get_int(aschema, choice_idx, people, 'number', err)
-      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(aschema, choice_idx, people, err) == 1, &
-                  'dyn: integer read does not select union')
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: inactive union read is rejected')
+      tag = capnp_dyn_which(aschema, choice_idx, people, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1, &
+                  'dyn: inactive read leaves the union on label')
       q = capnp_dyn_init_list(aschema, choice_idx, people, 'items', 2_int64, err)
       call check_(error, err == CAPNP_OK .and. capnp_list_len(q) == 2_int64 .and. &
                   capnp_dyn_which(aschema, choice_idx, people, err) == 2, &
