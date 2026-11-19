@@ -1569,7 +1569,7 @@ contains
       type(scan_t), intent(inout) :: sc
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      integer :: cp, h, k
+      integer :: cp, low
       character(len=1) :: c
       err = CAPNP_OK
       s = ''
@@ -1606,20 +1606,16 @@ contains
          case ('r'); s = s//achar(13)
          case ('t'); s = s//achar(9)
          case ('u')
-            cp = 0
-            do k = 1, 4
-               if (sc%i > sc%n) then
-                  err = CAPNP_ERR_ARG
-                  return
+            call read_u4(sc, cp, err)
+            if (err /= CAPNP_OK) return
+            if (cp >= 55296 .and. cp <= 56319) then
+               if (peek_u4(sc, low)) then
+                  if (low >= 56320 .and. low <= 57343) then
+                     sc%i = sc%i + 6
+                     cp = 65536 + ishft(cp - 55296, 10) + (low - 56320)
+                  end if
                end if
-               h = capnp_hex_digit(sc%s(sc%i:sc%i))
-               if (h < 0) then
-                  err = CAPNP_ERR_ARG
-                  return
-               end if
-               cp = cp*16 + h
-               sc%i = sc%i + 1
-            end do
+            end if
             call append_utf8(s, cp, err)
             if (err /= CAPNP_OK) return
          case default
@@ -1628,6 +1624,45 @@ contains
          end select
       end do
    end subroutine parse_string
+
+   subroutine read_u4(sc, cp, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(out) :: cp
+      integer, intent(out) :: err
+      integer :: h, k
+      err = CAPNP_OK
+      cp = 0
+      do k = 1, 4
+         if (sc%i > sc%n) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         h = capnp_hex_digit(sc%s(sc%i:sc%i))
+         if (h < 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         cp = cp*16 + h
+         sc%i = sc%i + 1
+      end do
+   end subroutine read_u4
+
+   function peek_u4(sc, cp) result(y)
+      type(scan_t), intent(in) :: sc
+      integer, intent(out) :: cp
+      logical :: y
+      integer :: h, k
+      y = .false.
+      cp = 0
+      if (sc%i + 5 > sc%n) return
+      if (sc%s(sc%i:sc%i + 1) /= '\u') return
+      do k = 1, 4
+         h = capnp_hex_digit(sc%s(sc%i + 1 + k:sc%i + 1 + k))
+         if (h < 0) return
+         cp = cp*16 + h
+      end do
+      y = .true.
+   end function peek_u4
 
    subroutine parse_word(sc, jv, err)
       type(scan_t), intent(inout) :: sc
