@@ -65,10 +65,13 @@ before the flush keeps its refcount.
 To opt a capability into level 2 persistence, recognize
 ``ctx%interface_id == RPC_PERSISTENT_IFACE`` in ``dispatch`` and
 answer ``RPC_PERSISTENT_SAVE`` with an application-defined SturdyRef
-(any content the application chooses to write into the results
-struct). Level 3/4 messages (``Provide``, ``Accept``, ``Join``) need
-no application code; the vat answers them with
-``Message.unimplemented`` on its own, matching capnp-C++.
+in pointer field 0 of the results. The request is the generic
+``Persistent<AnyPointer, AnyPointer>.SaveParams`` shape, so pointer
+field 0 contains the optional ``sealFor`` owner. Clients use
+``rpc_persistent_save_begin`` and ``rpc_persistent_save_wait``.
+SturdyRef and Owner are realm-defined. Capnp-C++ does not define a
+universal restore operation or token format, so restoration remains an
+application service in both implementations.
 #+end_export
 
 * Writing a client
@@ -110,6 +113,8 @@ loopbacks for tests, and poll-based readiness.
 | ~rpc_bootstrap_send~    | ~(conn, cap, err)~                                                   | returns a pipeline cap, usable immediately          |
 | ~rpc_call_begin~        | ~(conn, target, interface_id, method_id, m, params, qid, err)~        | fill ~params~ content, then send                    |
 | ~rpc_call_send~         | ~(conn, m, err)~                                                     |                                                      |
+| ~rpc_persistent_save_begin~ | ~(conn, target, m, owner, qid, err)~                           | begin generic ~Persistent.save~; ~owner~ is optional |
+| ~rpc_persistent_save_wait~ | ~(conn, qid, sturdy_ref, err)~                                   | return the realm-defined SturdyRef                    |
 | ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |
