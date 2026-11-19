@@ -134,3 +134,16 @@ struct GroupArm $Json.discriminator(name = "kind") {
     n @2 :Int32;
   }
 }
+
+struct GroupUnion $Json.discriminator(name = "kind") {
+  union {
+    gu :group {
+      union {
+        p @0 :Int32;
+        q @1 :Int32;
+      }
+      r @2 :Int32;
+    }
+    n @3 :Int32;
+  }
+}
