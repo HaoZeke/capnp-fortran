@@ -18,10 +18,9 @@
  *
  * Elem carries a spare (null) pointer slot so this message exercises a
  * two-word element. c-capnproto's generic capn_new_list still down-encodes
- * `ptrs == 0 && datasz <= 8` to a primitive list, but its generated code
- * calls capn_new_struct_list, which is always COMPOSITE. The narrower
- * one-data-word, zero-pointer element that upstream also encodes as
- * COMPOSITE is covered by test_single_word_struct_list below.
+ * `ptrs == 0 && datasz <= 8` to a primitive list. The one-data-word,
+ * zero-pointer element that upstream encodes as COMPOSITE is covered by
+ * test_single_word_struct_list, which writes the composite tag itself.
  */
 
 #include <stdarg.h>
@@ -369,7 +368,7 @@ static void test_canonical_form(void **state)
  * still satisfy a reader (the spec allows the upgrade) while diverging from
  * the reference C++ encoder byte for byte. Upstream `capnp encode` emits
  * COMPOSITE here, so both encoders must too. The expected bytes below are
- * the ones capnp 1.0.2 produces for
+ * the ones capnp 1.4.0 produces for
  *
  *   struct Pt { n @0 :UInt32; }
  *   struct Holder { items @0 :List(Pt); }
@@ -388,6 +387,30 @@ static const uint8_t kUpstreamSingleWordList[] = {
 	0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
+
+/* capn_new_list turns a one-word, zero-pointer element into a primitive
+ * list. Allocate one extra word, write the composite tag there, and
+ * present the rest as the element bodies. The tag's B field is the
+ * element count and its C field is one data word, matching the bytes
+ * capnp encode emits for this shape. */
+static capn_ptr new_composite_word_list(struct capn_segment *seg, int n)
+{
+	capn_ptr p;
+	uint64_t tag, word;
+
+	p = capn_new_list(seg, n + 1, 8, 0);
+	if (!p.data)
+		return p;
+	tag = ((uint64_t)n << 2) | ((uint64_t)1 << 32);
+	word = capn_flip64(tag);
+	memcpy(p.data, &word, sizeof word);
+	p.is_composite_list = 1;
+	p.data += 8;
+	p.len = n;
+	p.datasz = 8;
+	p.ptrs = 0;
+	return p;
+}
 
 static void test_single_word_struct_list(void **state)
 {
@@ -416,8 +439,8 @@ static void test_single_word_struct_list(void **state)
 		fn = written;
 	}
 
-	/* Reference C encoder, through the always-composite entry point that
-	 * capnpc-c emits for List(Struct). */
+	/* Reference C encoder. capn_new_list down-encodes this shape to a
+	 * primitive list, so the composite tag is written by hand. */
 	{
 		struct capn c;
 		capn_ptr root, rs, lst, el;
@@ -426,7 +449,7 @@ static void test_single_word_struct_list(void **state)
 		capn_init_malloc(&c);
 		root = capn_root(&c);
 		rs = capn_new_struct(root.seg, 0, 1);
-		lst = capn_new_struct_list(root.seg, 3, 8, 0);
+		lst = new_composite_word_list(root.seg, 3);
 		for (i = 0; i < 3; i++) {
 			el = capn_getp(lst, i, 0);
 			capn_write32(el, 0, (uint32_t)(i + 1));
