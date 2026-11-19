@@ -21,6 +21,7 @@ contains
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
          new_unittest("list-linear", run_list_linear), &
+         new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded) &
          ]
@@ -173,6 +174,63 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_list_linear
+
+   subroutine run_json_void_missing(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: text, ref
+      integer(int8), allocatable :: bytes(:), ours(:), cref(:)
+      integer :: err, idx
+      integer(int64) :: count
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/clash.capnp', clash_schema(), err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/clash.capnp > '//tmp//'/clash.cgr' &
+         //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp VoidVal > ' &
+         //tmp//'/void.bin' &
+         //' && capnp convert -I"$INC" binary:json --short '//tmp//'/clash.capnp VoidVal < ' &
+         //tmp//'/void.bin > '//tmp//'/void.json' &
+         //' && printf ''{"count":3}'' | capnp convert -I"$INC" json:canonical ' &
+         //tmp//'/clash.capnp MissDisc > '//tmp//'/miss.can')) then
+         call test_failed(error, 'capnp void/missing reference failed')
+         return
+      end if
+      call capnp_read_file(tmp//'/clash.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      call capnp_read_file(tmp//'/void.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      idx = capnp_dyn_find(schema, 'VoidVal', err)
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.false.)
+      call slurp(tmp//'/void.json', ref, err)
+      if (len(ref) > 0) then
+         if (ref(len(ref):len(ref)) == achar(10)) ref = ref(1:len(ref) - 1)
+      end if
+      call check_(error, text == ref .and. index(text, '"payload":null') > 0, &
+                  'json: valueName without name keeps the void')
+      call capnp_message_free(msg)
+      idx = capnp_dyn_find(schema, 'MissDisc', err)
+      call capnp_json_decode(schema, idx, '{"count":3}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'json: missing discriminator still decodes')
+      root = capnp_root(decoded, err)
+      count = capnp_dyn_get_int(schema, idx, root, 'count', err)
+      call check_(error, err == CAPNP_OK .and. count == 3_int64, 'json: count field kept')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/miss.can', cref, err)
+      call check_(error, err == CAPNP_OK .and. size(ours) == size(cref) .and. all(ours == cref), &
+                  'json: missing discriminator matches capnp')
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_void_missing
 
    subroutine run_text_leniency(error)
       type(error_type), allocatable, intent(out) :: error

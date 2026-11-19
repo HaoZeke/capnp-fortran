@@ -304,7 +304,7 @@ contains
                raw_t = field_slot_type(f, err)
                if (err /= CAPNP_OK) return
                t = capnp_brand_resolve(env, raw_t)
-               if (type_which(t) == TYPE_VOID .and. (len(dkey) > 0 .or. opts%has_val)) exit
+               if (type_which(t) == TYPE_VOID .and. len(dkey) > 0) exit
             end if
          end if
          if (is_flat) then
@@ -877,8 +877,7 @@ contains
          end if
       end if
 
-      if (opts%active .and. len(dkey) > 0) then
-         if (.not. find_jkey(jv, dkey, kidx)) return
+      if (opts%active .and. len(dkey) > 0 .and. find_jkey(jv, dkey, kidx)) then
          if (jv%kids(kidx)%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
@@ -1056,8 +1055,11 @@ contains
             dkey = pfx//union_decl
          end if
          if (len(dkey) > 0) then
-            hit = find_jkey(jv, dkey, kidx)
-            return
+            if (find_jkey(jv, dkey, kidx)) then
+               hit = .true.
+               return
+            end if
+            if (opts%has_val) return
          end if
       end if
       do i = 0, nf - 1
