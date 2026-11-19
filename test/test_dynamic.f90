@@ -7,7 +7,7 @@ module test_dynamic
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
-                                type_which, value_which, value_text
+                                type_which, value_which, value_text, node_id
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -58,6 +58,8 @@ contains
       character(len=:), allocatable :: s
       integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx
       integer :: dual_idx, dynamic_idx, choice_idx, service_idx, box_idx
+      integer :: scalar_idx, item_idx, tw
+      integer(int64) :: bound
       integer :: tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
@@ -349,6 +351,22 @@ contains
                   type_which(brand%scopes(1)%bindings(1)%type) == TYPE_LIST .and. &
                   brand%scopes(1)%bindings(1)%resolved_which == TYPE_LIST, &
                   'dyn: list brand resolves beside the raw type')
+      scalar_idx = capnp_dyn_find(aschema, 'Scalars', err)
+      q = capnp_dyn_field_schema(aschema, scalar_idx, 'note', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: text type has no brand')
+      box_idx = capnp_dyn_find(bschema, 'Box', err)
+      q = capnp_dyn_field_schema(bschema, capnp_dyn_find(bschema, 'BoxUse', err), 'textBox', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      call check_(error, capnp_dyn_field_type(bschema, box_idx, 'value', err, brand=brand) == &
+                  TYPE_TEXT, 'dyn: field type follows the text brand')
+      item_idx = capnp_dyn_find(bschema, 'Item', err)
+      q = capnp_dyn_field_schema(bschema, capnp_dyn_find(bschema, 'BagUse', err), 'bag', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      tw = capnp_dyn_field_type(bschema, box_idx, 'value', err, brand=brand, resolved_id=bound)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_LIST .and. item_idx > 0 .and. &
+                  bound == node_id(bschema%nodes(item_idx)), &
+                  'dyn: list element brand is a struct')
 
       call capnp_message_free(msg)
       call capnp_message_free(bmsg)
