@@ -40,6 +40,14 @@ module schema__dynamic_capnp
       type(capnp_ptr_t) :: p
    end type annotated_service_ping_results_t
 
+   integer, parameter :: SHAPE_DWORDS = 2
+   integer, parameter :: SHAPE_PWORDS = 0
+   type :: shape_t
+      type(capnp_ptr_t) :: p
+   end type shape_t
+   integer, parameter :: SHAPE_CIRCLE_TAG = 0
+   integer, parameter :: SHAPE_SQUARE_TAG = 1
+
    integer(int64), parameter :: SCHEMA__A879_METHOD_NOTE_ID = -2113916645833798051_int64
    character(len=*), parameter :: SCHEMA__A879_ANNOTATED_SERVICE_PING_METHOD_NOTE = 'ping method'
    private :: cap_resolve
@@ -364,6 +372,72 @@ contains
          err = CAPNP_ERR_ARG
       end select
    end subroutine annotated_service_dispatch
+
+   function shape_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(shape_t) :: h
+      h%p = capnp_new_struct(msg, SHAPE_DWORDS, SHAPE_PWORDS, err)
+   end function shape_new
+
+   function shape_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(shape_t) :: h
+      h = shape_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function shape_new_root
+
+   function shape_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(shape_t) :: h
+      h%p = capnp_root(msg, err)
+   end function shape_read_root
+
+   function shape_which(h) result(tag)
+      type(shape_t), intent(in) :: h
+      integer :: tag
+      tag = int(capnp_get_u16(h%p, 8_int64))
+   end function shape_which
+
+   subroutine shape_circle_select(h, err)
+      type(shape_t), intent(in) :: h
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 8_int64, 0_int32, err)
+   end subroutine shape_circle_select
+
+   function shape_circle_radius_get(h) result(v)
+      type(shape_t), intent(in) :: h
+      real(real64) :: v
+      v = capnp_get_f64(h%p, 0_int64)
+   end function shape_circle_radius_get
+
+   subroutine shape_circle_radius_set(h, v, err)
+      type(shape_t), intent(in) :: h
+      real(real64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_f64(h%p, 0_int64, v, err)
+   end subroutine shape_circle_radius_set
+
+   subroutine shape_square_select(h, err)
+      type(shape_t), intent(in) :: h
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 8_int64, 1_int32, err)
+   end subroutine shape_square_select
+
+   function shape_square_width_get(h) result(v)
+      type(shape_t), intent(in) :: h
+      real(real64) :: v
+      v = capnp_get_f64(h%p, 0_int64)
+   end function shape_square_width_get
+
+   subroutine shape_square_width_set(h, v, err)
+      type(shape_t), intent(in) :: h
+      real(real64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_f64(h%p, 0_int64, v, err)
+   end subroutine shape_square_width_set
 
    subroutine cap_resolve(ctab, idx, cap, err)
       type(capnp_ptr_t), intent(in) :: ctab
