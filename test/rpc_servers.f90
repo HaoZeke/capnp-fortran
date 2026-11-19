@@ -37,6 +37,8 @@ contains
       character(len=:), allocatable :: txt
       integer :: idx
       err = CAPNP_OK
+      associate (server => self)
+      end associate
       if (ctx%interface_id == RPC_PERSISTENT_IFACE) then
          ! Level 2 persistence hook: save() answers an app-defined
          ! SturdyRef (here a text token) in results ptr 0.

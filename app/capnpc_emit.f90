@@ -320,8 +320,8 @@ contains
       g_blobs(g_nblobs)%bytes = bytes
    end subroutine note_blob
 
-   !> Typed constructor with bare default-kind values: -128 stays legal
-   !> (a bare -128_int8 literal is unary minus on out-of-range 128_int8).
+   !> Typed constructor. The int8 value -128 is spelled with huge()
+   !> because a kind-suffixed 128 does not fit in a signed 8-bit literal.
    subroutine emit_blob_params()
       integer :: i
       integer(int64) :: j, n
@@ -332,7 +332,11 @@ contains
                 itoa(n - 1)//') = [integer(int8) :: &')
          line = '      '
          do j = 1_int64, n
-            line = line//itoa(int(g_blobs(i)%bytes(j), int64))
+            if (g_blobs(i)%bytes(j) == -huge(0_int8) - 1_int8) then
+               line = line//'-huge(0_int8)-1_int8'
+            else
+               line = line//itoa(int(g_blobs(i)%bytes(j), int64))
+            end if
             if (j < n) line = line//', '
             if (mod(j, 16_int64) == 0_int64 .and. j < n) then
                call w(line//' &')
