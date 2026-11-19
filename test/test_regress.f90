@@ -28,6 +28,7 @@ contains
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("json-surrogate", run_json_surrogate), &
          new_unittest("json-exact-int", run_json_exact_int), &
+         new_unittest("json-null-disc", run_json_null_disc), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
@@ -525,6 +526,85 @@ contains
       call match_capnp_json(error, schema, idx, '{"big":1e2}', 'exact: 1e2 matches capnp')
       call capnp_dyn_free(schema)
    end subroutine run_json_exact_int
+
+   subroutine run_json_null_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: text
+      integer(int64) :: seq, tail
+      integer :: err, uidx, tidx, disc
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      uidx = capnp_dyn_find(schema, 'UnionDefaults', err)
+      tidx = capnp_dyn_find(schema, 'TaggedEvent', err)
+      call check_(error, uidx > 0 .and. tidx > 0, 'null-disc: nodes')
+      do disc = 0, 1
+         call capnp_message_init_builder(msg, err)
+         root = capnp_dyn_new_root(schema, uidx, msg, err)
+         call capnp_set_i32(root, 0_int64, 11_int32, err)
+         call capnp_set_which(root, 2, disc, err)
+         call capnp_set_i32(root, 8_int64, 22_int32, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_write_file(tmp//'/nd.bin', bytes, err)
+         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/nd.bin > '//tmp//'/nd.json')) then
+            call test_failed(error, 'null-disc: capnp convert')
+            call capnp_message_free(msg)
+            call capnp_dyn_free(schema)
+            return
+         end if
+         call capnp_json_encode(schema, uidx, root, text, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK, 'null-disc: encode')
+         call check_file_text(error, text, tmp//'/nd.json', 'null-disc: matches capnp')
+         if (disc == 0) then
+            call check_(error, index(text, '"u0ptr":""') > 0 .and. index(text, '"u0ptr":null') == 0, &
+                        'null-disc: zero arm is an empty string')
+         else
+            call check_(error, index(text, '"u1ptr":"fallback"') > 0, &
+                        'null-disc: null arm keeps its default')
+         end if
+         call capnp_message_free(msg)
+      end do
+      call capnp_json_decode(schema, tidx, &
+                             '{"seq":5,"kind":"nope","tail":9,"count":3}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'null-disc: unknown tag decodes')
+      root = capnp_root(decoded, err)
+      seq = capnp_dyn_get_int(schema, tidx, root, 'seq', err)
+      call check_(error, err == CAPNP_OK .and. seq == 5_int64, 'null-disc: seq kept')
+      tail = capnp_dyn_get_int(schema, tidx, root, 'tail', err)
+      call check_(error, err == CAPNP_OK .and. tail == 9_int64, 'null-disc: tail kept')
+      seq = capnp_dyn_get_int(schema, tidx, root, 'count', err)
+      call check_(error, err /= CAPNP_OK, 'null-disc: unknown tag does not select count')
+      call capnp_json_decode(schema, tidx, '{"kind":1}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'null-disc: non-string tag is rejected')
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_null_disc
+
+   subroutine check_file_text(error, text, path, label)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: text, path, label
+      character(len=:), allocatable :: ref
+      integer :: err
+      if (allocated(error)) return
+      call slurp(path, ref, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, label//': read')
+         return
+      end if
+      if (len(ref) > 0) then
+         if (ref(len(ref):len(ref)) == achar(10)) ref = ref(1:len(ref) - 1)
+      end if
+      call check_(error, text == ref, label)
+   end subroutine check_file_text
 
    subroutine read_int(error, schema, idx, js, fname, expect, label)
       type(error_type), allocatable, intent(inout) :: error
