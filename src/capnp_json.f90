@@ -10,15 +10,15 @@
 !> $Json.flatten inlines sub-structs, groups, and discriminated union
 !> variants with an optional prefix. $Json.discriminator tags unions
 !> with an explicit variant field and optional valueName. An unknown
-!> discriminator string does not select an arm. A known tag clears the
-!> arm it selects, so a member written earlier does not survive. Plain
-!> member keys in that object are still applied in document order. A
-!> repeated known tag is rejected, and a void arm accepts any payload.
-!> A non-string discriminator is rejected. NaN and infinities are the
-!> strings "NaN", "Infinity", and "-Infinity". A high surrogate followed by a low surrogate is one
-!> scalar, and an unquoted integer past 2^53 keeps its exact value.
-!> These two reads differ from capnp 1.4.0 only by adding precision or
-!> correctness, and both accept every input that version accepts.
+!> discriminator string does not select an arm. Plain member keys in
+!> that object are still applied in document order. A repeated known
+!> tag is rejected, and a void arm accepts any payload. A non-string
+!> discriminator is rejected. NaN and infinities are the strings
+!> "NaN", "Infinity", and "-Infinity". A high surrogate followed by
+!> a low surrogate is one scalar, and an unquoted integer past 2^53
+!> keeps its exact value. These two reads differ from capnp 1.4.0
+!> only by adding precision or correctness, and both accept every
+!> input that version accepts.
 module capnp_json
    use capnp
    use capnp_schema
@@ -1004,9 +1004,8 @@ contains
       call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err)
    end subroutine fill_struct_pfx
 
-!> Zero the storage of one field. A known union tag does this after
-!> selecting the arm, which drops a member written earlier in the object.
-!> A void arm has no storage. A group clears each of its fields.
+   !> Zero the storage of one field. A void arm has no storage. A group
+   !> clears each of its fields.
    recursive subroutine clear_field(schema, f, p, env, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
@@ -1072,11 +1071,11 @@ contains
       end select
    end subroutine clear_field
 
-!> Apply union keys in document order, the way kj JsonCodec walks an
-!> object. A known tag clears the arm it selects. A second known tag
-!> is an error. An unknown tag selects nothing, and plain member keys
-!> still decode. valueName and flattened-union keys that appear before
-!> the tag are retried after it.
+   !> Apply union keys in document order, the way kj JsonCodec walks an
+   !> object. A second known tag is an error. An unknown tag selects
+   !> nothing, and plain member keys still decode. valueName and
+   !> flattened-union keys that appear before the tag are retried after
+   !> it.
    recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
@@ -1401,6 +1400,8 @@ contains
          al = field_annotations(f, err)
          if (err /= CAPNP_OK) return
          call read_disc_opts(al, gdisc, err)
+         if (err /= CAPNP_OK) return
+         call clear_field(schema, f, p, env, err)
          if (err /= CAPNP_OK) return
          call fill_struct(schema, idx, p, env, gdisc, jv, depth, err)
          return
