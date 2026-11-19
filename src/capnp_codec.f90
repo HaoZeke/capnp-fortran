@@ -6,8 +6,8 @@
 !> text is plain decimal, hex, or (for Cap'n Proto text literals) octal.
 !> Data and Text escapes match kj::encodeCEscape / kj::decodeCEscape.
 module capnp_codec
-   use, intrinsic :: iso_c_binding, only: c_char, c_double, c_float, c_int, &
-      c_loc, c_null_char, c_ptr, c_size_t, c_associated
+   use, intrinsic :: iso_c_binding, only: c_char, c_double, c_float, &
+      c_loc, c_null_char, c_ptr, c_associated
    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite, &
       ieee_quiet_nan, ieee_value
    use capnp
@@ -47,16 +47,6 @@ module capnp_codec
    end type capnp_brand_env_t
 
    interface
-      function c_snprintf_d(buf, n, fmt, prec, val) bind(c, name="snprintf") &
-         result(rc)
-         import c_char, c_int, c_size_t, c_double
-         character(kind=c_char), intent(out) :: buf(*)
-         integer(c_size_t), value :: n
-         character(kind=c_char), intent(in) :: fmt(*)
-         integer(c_int), value :: prec
-         real(c_double), value :: val
-         integer(c_int) :: rc
-      end function c_snprintf_d
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
          import c_double, c_ptr, c_char
          character(kind=c_char), intent(in) :: nptr(*)
@@ -95,10 +85,10 @@ contains
          end if
          return
       end if
-      call fmt_g(real(x, c_double), 15, s)
+      call fmt_g(x, 15, s)
       call capnp_parse_f64(s, y, err)
       if (err /= CAPNP_OK .or. .not. f64_same(y, x)) &
-         call fmt_g(real(x, c_double), 17, s)
+         call fmt_g(x, 17, s)
    end subroutine capnp_fmt_f64
 
    subroutine capnp_fmt_f32(x, s)
@@ -118,10 +108,10 @@ contains
          end if
          return
       end if
-      call fmt_g(real(x, c_double), 6, s)
+      call fmt_g(real(x, real64), 6, s)
       call capnp_parse_f32(s, y, err)
       if (err /= CAPNP_OK .or. .not. f32_same(y, x)) &
-         call fmt_g(real(x, c_double), 8, s)
+         call fmt_g(real(x, real64), 8, s)
    end subroutine capnp_fmt_f32
 
    subroutine capnp_fmt_i64(v, s)
@@ -883,31 +873,66 @@ contains
    end subroutine capnp_f64_to_i64
 
    subroutine fmt_g(val, prec, s)
-      real(c_double), intent(in) :: val
+      real(real64), intent(in) :: val
       integer, intent(in) :: prec
       character(len=:), allocatable, intent(out) :: s
-      character(kind=c_char) :: buf(64), fmt(6)
-      integer(c_int) :: rc
-      integer :: i, n
-      character(len=64) :: tmp
-      fmt(1) = c_char_'%'
-      fmt(2) = c_char_'.'
-      fmt(3) = c_char_'*'
-      fmt(4) = c_char_'g'
-      fmt(5) = c_null_char
-      fmt(6) = c_char_' '
-      rc = c_snprintf_d(buf, 64_c_size_t, fmt, int(prec, c_int), val)
-      n = 0
-      do i = 1, 63
-         if (buf(i) == c_null_char) exit
-         if (buf(i) == c_char_'+') cycle
-         n = n + 1
-         tmp(n:n) = buf(i)
-      end do
-      if (rc < 0 .or. n == 0) then
-         s = '0'
+      character(len=64) :: raw, fspec, digits, epart
+      character(len=:), allocatable :: sign_s
+      integer :: i, m, dot, ep, exp10, aexp, ios
+      if (neg_bit64(val)) then
+         sign_s = '-'
       else
-         s = tmp(1:n)
+         sign_s = ''
+      end if
+      if (val == 0.0_real64) then
+         s = sign_s//'0'
+         return
+      end if
+      write (fspec, '(a,i0,a)') '(RN, ES32.', prec - 1, 'E4)'
+      write (raw, fspec) abs(val)
+      raw = adjustl(raw)
+      ep = index(raw, 'E')
+      dot = index(raw, '.')
+      m = 0
+      do i = 1, ep - 1
+         if (i == dot) cycle
+         m = m + 1
+         digits(m:m) = raw(i:i)
+      end do
+      exp10 = 0
+      read (raw(ep + 1:), *, iostat=ios) exp10
+      if (ios /= 0) then
+         s = '0'
+         return
+      end if
+      do while (m > 1 .and. digits(m:m) == '0')
+         m = m - 1
+      end do
+      if (exp10 >= -4 .and. exp10 < prec) then
+         if (exp10 >= m - 1) then
+            s = sign_s//digits(1:m)//repeat('0', exp10 - (m - 1))
+         else if (exp10 >= 0) then
+            s = sign_s//digits(1:exp10 + 1)//'.'//digits(exp10 + 2:m)
+         else
+            s = sign_s//'0.'//repeat('0', -exp10 - 1)//digits(1:m)
+         end if
+      else
+         if (m == 1) then
+            s = sign_s//digits(1:1)
+         else
+            s = sign_s//digits(1:1)//'.'//digits(2:m)
+         end if
+         aexp = abs(exp10)
+         if (aexp < 100) then
+            write (epart, '(i2.2)') aexp
+         else
+            write (epart, '(i0)') aexp
+         end if
+         if (exp10 < 0) then
+            s = s//'e-'//trim(epart)
+         else
+            s = s//'e'//trim(epart)
+         end if
       end if
    end subroutine fmt_g
 
