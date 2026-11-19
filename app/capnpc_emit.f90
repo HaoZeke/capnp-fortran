@@ -380,6 +380,26 @@ contains
 
    ! --- entry point -----------------------------------------------------------
 
+   !> Drop per-file generator state. Instantiation bindings are allocated
+   !> into a fixed table; leaving them live makes the next file allocate
+   !> the same slot again and abort.
+   subroutine reset_emit_state()
+      integer :: k
+      do k = 1, g_ninsts
+         if (allocated(g_insts(k)%bindings)) deallocate (g_insts(k)%bindings)
+         if (allocated(g_insts(k)%name)) deallocate (g_insts(k)%name)
+         g_insts(k)%gidx = 0
+         g_insts(k)%nbind = 0
+      end do
+      g_ninsts = 0
+      g_cur_inst = 0
+      do k = 1, g_nblobs
+         if (allocated(g_blobs(k)%name)) deallocate (g_blobs(k)%name)
+         if (allocated(g_blobs(k)%bytes)) deallocate (g_blobs(k)%bytes)
+      end do
+      g_nblobs = 0
+   end subroutine reset_emit_state
+
    !> Emit the module for one requested file node.
    subroutine emit_file(root, file_id, filename, err)
       type(capnp_ptr_t), intent(in) :: root
@@ -412,10 +432,8 @@ contains
       if (err /= CAPNP_OK) return
       g_prefix = prefix
       g_nimports = 0
-      g_nblobs = 0
       g_has_iface = .false.
-      g_ninsts = 0
-      g_cur_inst = 0
+      call reset_emit_state()
 
       ! Pass 1 (dry): walk the procedures to discover cross-file imports and
       ! explicit pointer-default blobs before the header is written.
@@ -1814,6 +1832,8 @@ contains
       g_insts(g_ninsts)%gidx = gidx
       g_insts(g_ninsts)%name = o
       g_insts(g_ninsts)%nbind = n
+      if (allocated(g_insts(g_ninsts)%bindings)) &
+         deallocate (g_insts(g_ninsts)%bindings)
       allocate (g_insts(g_ninsts)%bindings(0:n - 1))
       g_insts(g_ninsts)%bindings(0:n - 1) = btypes(0:n - 1)
    end subroutine inst_name_for
