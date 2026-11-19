@@ -70,7 +70,7 @@ and capnp-C++:
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (`Persistent.save`) | no | partial | yes (`rpc_persistent_save_begin` / `_wait`, app-defined SturdyRef and Owner) |
-| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves, three-vat tested) |
+| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes (two-party Join; C++ replies unimplemented) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
@@ -119,9 +119,11 @@ payload can name a capability that lives in a third vat and hand over a
 vine, an ordinary import through the introducer, so calls work before
 the pickup ever happens. That is the fallback the spec gives receivers
 that cannot reach a third party, and it is why the vine must not be
-released until the pickup succeeds. Dialling the third vat belongs to
-the network layer, so `rpc_pending_introductions` hands the arrangement
-over and `rpc_introduction_done` releases the vine once it is finished.
+released until the pickup succeeds. `rpc_pending_introductions` exposes
+the network-layer VatId, `rpc_introduction_dial` opens its numeric IPv4
+address, and `rpc_introduction_done` releases the vine after a successful
+`Accept`. Applications using DNS or a directory can resolve the VatId
+before supplying their own connection adapter.
 
 `Accept.embargo` is honoured: an embargoed Accept claims the capability
 but is not answered until the introducer sends `Disembargo` with
@@ -135,8 +137,12 @@ The level 3 tests decode frames the reference `capnp` CLI encoded
 layout the vat shares with its own builder but the wire format does not
 would pass every self-built test.
 
-Upstream added level 3 after 1.4.0; `capnp` 1.4.0 has no `Provide` /
-`Accept` handling at all, and main (4bfab51) has it.
+Capnp-C++ 1.4.0 implements `TwoPartyVatNetwork`, whose
+`rpc-twoparty.capnp` IDs intentionally cannot name a third party. It has
+no `Provide` or `Accept` handling, so no live 1.4.0 level 3 peer test is
+possible. Upstream added level 3 later. This project's
+`rpc-threeparty.capnp` is a separate network parameterization rather
+than a claim that it interoperates with C++ 1.4.0 three-party routing.
 
 Level 4 is `Join`: asking whether several capabilities are one object.
 The two-party network defines this fully, and it is implemented here.

@@ -107,7 +107,7 @@ contains
       type(rpc_introduction_t) :: learned(4)
       type(rpc_cap_t) :: bootcap, claimed, sidecap
       type(capnp_ptr_t) :: content
-      integer :: ab, ba, cb, bc, ac, ca, err, n
+      integer :: ab, ba, bc, ac, ca, listen_fd, bob_port, err, n
       integer(int64) :: provide_qid, claim, replay, qcall
       type(capnp_message_t), target :: m
       type(payload_t) :: params
@@ -115,21 +115,19 @@ contains
 
       call px_socketpair(ab, ba, err)
       call check_(error, err == CAPNP_OK, 'handoff: alice-bob pair')
-      call px_socketpair(cb, bc, err)
-      call check_(error, err == CAPNP_OK, 'handoff: carol-bob pair')
       call px_socketpair(ac, ca, err)
       call check_(error, err == CAPNP_OK, 'handoff: alice-carol pair')
+      call px_tcp_listen(0, listen_fd, err)
+      call check_(error, err == CAPNP_OK, 'handoff: bob listener')
+      call px_tcp_bound_port(listen_fd, bob_port, err)
+      call check_(error, err == CAPNP_OK .and. bob_port > 0, 'handoff: listener port')
       if (allocated(error)) return
 
       boot => null()
       call rpc_conn_init(alice_to_bob, ab, boot)
-      call rpc_conn_init(carol_to_bob, cb, boot)
       call rpc_conn_init(alice_to_carol, ac, boot)
       boot => hosted
       call rpc_conn_init(bob_to_alice, ba, boot)
-      sidecar%base = 1000_int64
-      boot => sidecar
-      call rpc_conn_init(bob_to_carol, bc, boot)
       boot => carols
       call rpc_conn_init(carol_to_alice, ca, boot)
 
@@ -137,7 +135,6 @@ contains
       ! makes on hers is claimable on Carol's.
       bob_vat => bob_vat_store
       call rpc_conn_set_vat(bob_to_alice, bob_vat)
-      call rpc_conn_set_vat(bob_to_carol, bob_vat)
 
       ! Alice bootstraps, so Bob exports the capability to her.
       call rpc_bootstrap_send(alice_to_bob, bootcap, err)
@@ -154,23 +151,35 @@ contains
       call check_(error, err == CAPNP_OK, 'handoff: provide answered')
       call check_(error, rpc_pending_provisions(bob_to_alice) == 1, &
                   'handoff: arrangement recorded')
-      ! The same vat, seen through its other connection.
-      call check_(error, rpc_pending_provisions(bob_to_carol) == 1, &
-                  'handoff: the vat''s other connection sees it')
 
       ! 2. Alice tells Carol where to go. Carol records the introduction
-      !    rather than dialling: reaching Bob is the network's job, and
-      !    here the connection already exists.
-      call tell_where_to_go(ac, 90_int64, '10.0.0.1', 5000, NONCE, 7_int64, err)
+      !    before the network layer dials it.
+      call tell_where_to_go(ac, 90_int64, '127.0.0.1', bob_port, NONCE, 7_int64, err)
       call check_(error, err == CAPNP_OK, 'handoff: introduction sent')
       call rpc_pump_once(carol_to_alice, err)
       n = rpc_pending_introductions(carol_to_alice, learned)
       call check_(error, n == 1, 'handoff: introduction recorded')
       if (allocated(error)) return
       call check_(error, learned(1)%nonce == NONCE, 'handoff: introduction nonce')
-      call check_(error, learned(1)%host(1:learned(1)%host_len) == '10.0.0.1', &
+      call check_(error, learned(1)%host(1:learned(1)%host_len) == '127.0.0.1', &
                   'handoff: introduction host')
-      call check_(error, learned(1)%port == 5000, 'handoff: introduction port')
+      call check_(error, learned(1)%port == bob_port, 'handoff: introduction port')
+
+      ! The network-layer VatId is actionable: Carol dials Bob using the
+      ! address in ThirdPartyCapId, then Bob accepts it as another
+      ! connection belonging to the same vat.
+      boot => null()
+      call rpc_introduction_dial(carol_to_alice, NONCE, carol_to_bob, boot, err)
+      call check_(error, err == CAPNP_OK, 'handoff: introduction dialed')
+      call px_tcp_accept(listen_fd, bc, err)
+      call check_(error, err == CAPNP_OK, 'handoff: bob accepted Carol')
+      sidecar%base = 1000_int64
+      boot => sidecar
+      call rpc_conn_init(bob_to_carol, bc, boot)
+      call rpc_conn_set_vat(bob_to_carol, bob_vat)
+      call check_(error, rpc_pending_provisions(bob_to_carol) == 1, &
+                  'handoff: the vat''s new connection sees it')
+      call px_close(listen_fd)
 
       ! Carol bootstraps Bob first, so her connection's export 0 is the
       ! sidecar and the handed-over capability cannot land on 0 too.
