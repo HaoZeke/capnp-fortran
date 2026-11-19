@@ -102,7 +102,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(69))
+      allocate (testsuite(70))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -207,40 +207,42 @@ contains
       testsuite(51)%test => w_disembargo_provide_wrong_conn
       testsuite(52)%name = "rpc-third-party-tail-aborts"
       testsuite(52)%test => w_third_party_tail_aborts
-      testsuite(53)%name = "rpc-call-missing-export"
-      testsuite(53)%test => w_call_missing_export
-      testsuite(54)%name = "rpc-return-unknown-question"
-      testsuite(54)%test => w_return_unknown_question
-      testsuite(55)%name = "rpc-return-after-finish"
-      testsuite(55)%test => w_return_after_finish
-      testsuite(56)%name = "rpc-return-answer-id-64"
-      testsuite(56)%test => w_return_answer_id_64
-      testsuite(57)%name = "rpc-return-high-bit-ignored"
-      testsuite(57)%test => w_return_high_bit_ignored
-      testsuite(58)%name = "rpc-return-falsely-canceled"
-      testsuite(58)%test => w_return_falsely_canceled
-      testsuite(59)%name = "rpc-return-canceled-after-cancel"
-      testsuite(59)%test => w_return_canceled_after_cancel
-      testsuite(60)%name = "rpc-unimplemented-bootstrap"
-      testsuite(60)%test => w_unimplemented_bootstrap
-      testsuite(61)%name = "rpc-no-finish-needed"
-      testsuite(61)%test => w_no_finish_needed
-      testsuite(62)%name = "rpc-unknown-tags"
-      testsuite(62)%test => w_unknown_tags
-      testsuite(63)%name = "rpc-shutdown"
-      testsuite(63)%test => w_shutdown
-      testsuite(64)%name = "posix-recv-eintr-retried"
-      testsuite(64)%test => t_recv_all_retries_eintr
-      testsuite(65)%name = "rpc-framing-511-accepted"
-      testsuite(65)%test => t_framing_511_accepted
-      testsuite(66)%name = "rpc-framing-512-rejected"
-      testsuite(66)%test => t_framing_512_rejected
-      testsuite(67)%name = "rpc-framing-oversized-rejected"
-      testsuite(67)%test => t_framing_oversized_rejected
-      testsuite(68)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(68)%test => t_framing_negative_traversal_rejected
-      testsuite(69)%name = "rpc-framing-short-and-padded"
-      testsuite(69)%test => t_framing_short_and_padded
+      testsuite(53)%name = "rpc-release-live-over"
+      testsuite(53)%test => w_release_live_over
+      testsuite(54)%name = "rpc-call-missing-export"
+      testsuite(54)%test => w_call_missing_export
+      testsuite(55)%name = "rpc-return-unknown-question"
+      testsuite(55)%test => w_return_unknown_question
+      testsuite(56)%name = "rpc-return-after-finish"
+      testsuite(56)%test => w_return_after_finish
+      testsuite(57)%name = "rpc-return-answer-id-64"
+      testsuite(57)%test => w_return_answer_id_64
+      testsuite(58)%name = "rpc-return-high-bit-ignored"
+      testsuite(58)%test => w_return_high_bit_ignored
+      testsuite(59)%name = "rpc-return-falsely-canceled"
+      testsuite(59)%test => w_return_falsely_canceled
+      testsuite(60)%name = "rpc-return-canceled-after-cancel"
+      testsuite(60)%test => w_return_canceled_after_cancel
+      testsuite(61)%name = "rpc-unimplemented-bootstrap"
+      testsuite(61)%test => w_unimplemented_bootstrap
+      testsuite(62)%name = "rpc-no-finish-needed"
+      testsuite(62)%test => w_no_finish_needed
+      testsuite(63)%name = "rpc-unknown-tags"
+      testsuite(63)%test => w_unknown_tags
+      testsuite(64)%name = "rpc-shutdown"
+      testsuite(64)%test => w_shutdown
+      testsuite(65)%name = "posix-recv-eintr-retried"
+      testsuite(65)%test => t_recv_all_retries_eintr
+      testsuite(66)%name = "rpc-framing-511-accepted"
+      testsuite(66)%test => t_framing_511_accepted
+      testsuite(67)%name = "rpc-framing-512-rejected"
+      testsuite(67)%test => t_framing_512_rejected
+      testsuite(68)%name = "rpc-framing-oversized-rejected"
+      testsuite(68)%test => t_framing_oversized_rejected
+      testsuite(69)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(69)%test => t_framing_negative_traversal_rejected
+      testsuite(70)%name = "rpc-framing-short-and-padded"
+      testsuite(70)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -737,6 +739,13 @@ contains
       if (allocated(error)) return
       call t_third_party_tail_aborts(error)
    end subroutine w_third_party_tail_aborts
+
+   subroutine w_release_live_over(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_release_live_over(error)
+   end subroutine w_release_live_over
 
    subroutine w_call_missing_export(error)
       type(error_type), allocatable, intent(out) :: error
@@ -3527,19 +3536,9 @@ contains
       call rpc_wait(cconn, qboot, e)
       live = rpc_membrane_owned_live()
       refs = sconn%exports(0)%refcount
-      call capnp_message_init_builder(m, e)
-      msg = message_new_root(m, e)
-      rel = message_release_init(msg, e)
-      call release_id_set(rel, 0_int64, e)
-      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
-      call rpc_send_message(cconn%fd, m, e)
-      call capnp_message_free(m)
-      call rpc_pump_once(sconn, e)
-      call check_(error, e == CAPNP_ERR_BOUNDS, 'overrelease: too many refs is an error')
-      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
-                  'overrelease: export count is unchanged')
       ! A Release of every remaining ref, including the pin, must not
-      ! free the wrapper the provision still holds.
+      ! free the wrapper the provision still holds. Do that before the
+      ! protocol error: an over-release aborts the connection.
       call capnp_message_init_builder(m, e)
       msg = message_new_root(m, e)
       rel = message_release_init(msg, e)
@@ -3555,6 +3554,17 @@ contains
       call rpc_pump_once(sconn, e)
       call rpc_wait(cconn, qacc, e)
       call check_(error, e == CAPNP_OK, 'overrelease: Accept still resolves')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'overrelease: too many refs is an error')
+      call check_(error, .not. rpc_conn_alive(sconn), 'overrelease: the connection aborts')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_provide_overrelease_keeps_server
@@ -4526,6 +4536,52 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_unimplemented_bootstrap
+
+   !> Releasing more references than an export holds aborts and leaves
+   !> the count unchanged.
+   subroutine t_release_live_over(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(release_t) :: rel
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e, refs
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      refs = sconn%exports(0)%refcount
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
+                  'release: over-release leaves the count')
+      call check_(error, .not. rpc_conn_alive(sconn), 'release: over-release aborts')
+      call rpc_recv_message(cconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'below zero') > 0, 'release: over-release reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_release_live_over
 
    !> A cap-less result carries noFinishNeeded. A result that exports a
    !> capability does not.

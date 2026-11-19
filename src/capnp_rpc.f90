@@ -3366,14 +3366,18 @@ contains
       ! A Release of more refs than the export holds is a protocol
       ! error. Applying it would wrap the subtraction and free the
       ! object while a provision may still name it.
-      if (eid < 0_int64 .or. eid >= int(MAXE, int64)) then
-         err = CAPNP_ERR_BOUNDS
+      if (eid < 0_int64 .or. eid >= int(MAXE, int64) .or. nref < 0_int64) then
+         call abort_conn(conn, 'Tried to release invalid export ID.', err)
          return
       end if
       id = int(eid)
-      if (.not. conn%exports(id)%used .or. nref < 0_int64 .or. &
-          nref > int(conn%exports(id)%refcount, int64)) then
-         err = CAPNP_ERR_BOUNDS
+      if (.not. conn%exports(id)%used) then
+         call abort_conn(conn, 'Tried to release invalid export ID.', err)
+         return
+      end if
+      if (nref > int(conn%exports(id)%refcount, int64)) then
+         call abort_conn(conn, &
+                         "Tried to drop export's refcount below zero.", err)
          return
       end if
       if (nref == 0_int64) return
