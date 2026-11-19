@@ -30,7 +30,8 @@ contains
                    new_unittest("dynamic-malformed-text", run_malformed_text), &
                    new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
                    new_unittest("dynamic-init-null", run_init_null), &
-                   new_unittest("dynamic-assign-types", run_assign_types)]
+                   new_unittest("dynamic-assign-types", run_assign_types), &
+                   new_unittest("dynamic-group-union", run_group_union)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -532,5 +533,35 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_assign_types
+
+   !> Selecting a group arm sets the parent discriminant.
+   subroutine run_group_union(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: shape
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, shape_idx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      shape_idx = capnp_dyn_find(schema, 'Shape', err)
+      call check_(error, err == CAPNP_OK .and. shape_idx > 0, 'group: shape node')
+      call capnp_message_init_builder(msg, err)
+      shape = capnp_dyn_new_root(schema, shape_idx, msg, err)
+      call check_(error, err == CAPNP_OK, 'group: root')
+      tag = capnp_dyn_which(schema, shape_idx, shape, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0, 'group: default arm is circle')
+      call capnp_dyn_select(schema, shape_idx, shape, 'square', err)
+      call check_(error, err == CAPNP_OK, 'group: select square')
+      tag = capnp_dyn_which(schema, shape_idx, shape, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1, 'group: parent discriminant is square')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_group_union
 
 end module test_dynamic

@@ -16,3 +16,14 @@ struct Dynamic {
 interface AnnotatedService {
   ping @0 () -> () $methodNote("ping method");
 }
+
+struct Shape {
+  union {
+    circle :group {
+      radius @0 :Float64;
+    }
+    square :group {
+      width @1 :Float64;
+    }
+  }
+}
