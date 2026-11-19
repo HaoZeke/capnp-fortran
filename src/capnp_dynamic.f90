@@ -14,8 +14,9 @@ module capnp_dynamic
    public :: capnp_dyn_schema_t
    public :: capnp_dyn_load, capnp_dyn_free, capnp_dyn_find
    public :: capnp_dyn_get_int, capnp_dyn_get_f64, capnp_dyn_get_bool
-   public :: capnp_dyn_get_text, capnp_dyn_getp
-   public :: capnp_dyn_set_int, capnp_dyn_set_text
+   public :: capnp_dyn_get_text, capnp_dyn_get_data, capnp_dyn_getp
+   public :: capnp_dyn_set_int, capnp_dyn_set_bool, capnp_dyn_set_f64
+   public :: capnp_dyn_set_text, capnp_dyn_set_data
    public :: capnp_dyn_which, capnp_dyn_field_type
    public :: capnp_dyn_annotation_t, capnp_dyn_node_annotations
    public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
@@ -395,6 +396,26 @@ contains
       call capnp_get_text(p, int(field_slot_offset(f)), s, err)
    end subroutine capnp_dyn_get_text
 
+   subroutine capnp_dyn_get_data(schema, idx, p, fname, bytes, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f, t
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (type_which(t) /= TYPE_DATA) then
+         err = CAPNP_ERR_KIND
+         allocate (bytes(0:-1))
+         return
+      end if
+      call capnp_get_data(p, int(field_slot_offset(f)), bytes, err)
+   end subroutine capnp_dyn_get_data
+
    !> Resolved pointer field (Text, Data, List, struct, anyPointer). For
    !> groups the parent handle itself addresses the members, so groups
    !> return p unchanged.
@@ -527,6 +548,53 @@ contains
       end select
    end subroutine capnp_dyn_set_int
 
+   subroutine capnp_dyn_set_bool(schema, idx, p, fname, v, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      logical, intent(in) :: v
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f, t, dv
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (type_which(t) /= TYPE_BOOL) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_bool(p, field_slot_offset(f), v, err, default=value_bool(dv))
+   end subroutine capnp_dyn_set_bool
+
+   subroutine capnp_dyn_set_f64(schema, idx, p, fname, v, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      real(real64), intent(in) :: v
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f, t, dv
+      integer(int64) :: off
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      off = field_slot_offset(f)
+      select case (type_which(t))
+      case (TYPE_FLOAT32)
+         call capnp_set_f32(p, off*4_int64, real(v, real32), err, default=value_f32(dv))
+      case (TYPE_FLOAT64)
+         call capnp_set_f64(p, off*8_int64, v, err, default=value_f64(dv))
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine capnp_dyn_set_f64
+
    subroutine capnp_dyn_set_text(schema, idx, p, fname, s, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -545,5 +613,24 @@ contains
       end if
       call capnp_set_text(p, int(field_slot_offset(f)), s, err)
    end subroutine capnp_dyn_set_text
+
+   subroutine capnp_dyn_set_data(schema, idx, p, fname, bytes, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer(int8), intent(in) :: bytes(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f, t
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (type_which(t) /= TYPE_DATA) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      call capnp_set_data(p, int(field_slot_offset(f)), bytes, err)
+   end subroutine capnp_dyn_set_data
 
 end module capnp_dynamic

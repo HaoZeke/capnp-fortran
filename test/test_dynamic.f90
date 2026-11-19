@@ -7,8 +7,7 @@ module test_dynamic
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, value_which, value_text
-   use kitchen_capnp, only: sink_t, sink_new_root, sink_flag_set, sink_ratio_set, &
-      SCHEMA__A826_NOTE_ID
+   use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__A826_NOTE_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
@@ -46,7 +45,7 @@ contains
       type(sink_t) :: sink
       type(person_t) :: pe
       type(dual_t) :: dual
-      integer(int8), allocatable :: bytes(:)
+      integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
       integer :: err, book_idx, person_idx, phone_idx, sink_idx, dual_idx, tag, want
       integer :: tag_pri, tag_sec
@@ -146,18 +145,24 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'flag field', 'dyn: field annotation value')
       call capnp_message_init_builder(kmsg, err)
       sink = sink_new_root(kmsg, err)
-      call sink_flag_set(sink, .false., err)
-      call sink_ratio_set(sink, 3.5_real64, err)
-      call check_(error, err == CAPNP_OK, 'dyn: kitchen seed ok')
+      call capnp_dyn_set_bool(kschema, sink_idx, sink%p, 'flag', .false., err)
+      call capnp_dyn_set_f64(kschema, sink_idx, sink%p, 'ratio', 3.5_real64, err)
+      data = [-34_int8, -83_int8, -66_int8]
+      call capnp_dyn_set_data(kschema, sink_idx, sink%p, 'payload', data, err)
+      call check_(error, err == CAPNP_OK, 'dyn: kitchen values set')
       flag = capnp_dyn_get_bool(kschema, sink_idx, sink%p, 'flag', err)
       call check_(error, err == CAPNP_OK .and. .not. flag, 'dyn: get_bool flag')
-      ! Default-true seed path: flip back to true and re-read.
-      call sink_flag_set(sink, .true., err)
+      ! Default-true path: flip back to true and re-read.
+      call capnp_dyn_set_bool(kschema, sink_idx, sink%p, 'flag', .true., err)
       flag = capnp_dyn_get_bool(kschema, sink_idx, sink%p, 'flag', err)
       call check_(error, err == CAPNP_OK .and. flag, 'dyn: get_bool true')
       ratio = capnp_dyn_get_f64(kschema, sink_idx, sink%p, 'ratio', err)
       call check_(error, err == CAPNP_OK .and. abs(ratio - 3.5_real64) < 1.0e-15_real64, &
                   'dyn: get_f64 ratio')
+      call capnp_dyn_get_data(kschema, sink_idx, sink%p, 'payload', data, err)
+      call check_(error, err == CAPNP_OK .and. size(data) == 3 .and. &
+                  data(lbound(data, 1)) == -34_int8 .and. data(ubound(data, 1)) == -66_int8, &
+                  'dyn: get_data payload')
 
       ! Multi-union Dual: set *divergent* tags (primary voidA=0, secondary
       ! intB=1) so a first-union-only dyn_which cannot satisfy both named
