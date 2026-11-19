@@ -240,6 +240,8 @@ contains
       if (.not. allocated(error)) call t_request_cancellation(error)
       if (.not. allocated(error)) call t_cancel_reserves_qid(error)
       if (.not. allocated(error)) call t_send_failure_releases_qid(error)
+      if (.not. allocated(error)) call t_call_send_failure_releases(error)
+      if (.not. allocated(error)) call t_malformed_root_is_freed(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -2673,5 +2675,86 @@ contains
       end do
       call check_(error, .not. held, 'join finish: the set is torn down')
    end subroutine t_join_finish_one_part
+
+   !> A failed rpc_call_send returns the question and every export ref
+   !> the unsent cap table was holding.
+   subroutine t_call_send_failure_releases(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(fail_stream_t), target :: broken
+      type(rpc_conn_t), target :: cconn
+      class(rpc_server_t), pointer :: noboot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qid
+      integer :: e
+      noboot => null()
+      broken%accept_sends = 0
+      call rpc_conn_init_stream(cconn, broken, noboot)
+      cconn%exports(0)%used = .true.
+      cconn%exports(0)%refcount = 1
+      cconn%exports(1)%used = .true.
+      cconn%exports(1)%refcount = 1
+      cconn%exports(2)%used = .true.
+      cconn%exports(2)%refcount = 1
+      cap%kind = RPC_CAP_IMPORT
+      cap%id = 0_int64
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qid, e)
+      call check_(error, e == CAPNP_OK .and. qid >= 0_int64, &
+                  'call send: question reserved')
+      if (allocated(error)) return
+      ctab = payload_cap_table_init(params, 3_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, 0_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 1, e)
+      call cap_descriptor_sender_promise_set(cd, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 2, e)
+      call rpc_write_third_party_cap(cd, '127.0.0.1', 9, 1_int64, 2_int64, e)
+      call rpc_call_send(cconn, m, e)
+      call check_(error, e /= CAPNP_OK, 'call send: transport failure is reported')
+      call check_(error, .not. cconn%questions(int(qid))%used, &
+                  'call send: question is released')
+      call check_(error, .not. cconn%exports(0)%used .and. &
+                  .not. cconn%exports(1)%used .and. .not. cconn%exports(2)%used, &
+                  'call send: hosted, promise and vine refs are dropped')
+      call rpc_conn_close(cconn)
+   end subroutine t_call_send_failure_releases
+
+   !> A frame whose root pointer does not resolve is freed and does not
+   !> kill the connection.
+   subroutine t_malformed_root_is_freed(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int8) :: frame(0:15)
+      integer(int64) :: qboot
+      integer :: fa, fb, e
+      frame = 0_int8
+      frame(4) = 1_int8
+      frame(8) = int(z'90', int8)
+      frame(9) = 1_int8
+      frame(12) = 1_int8
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call px_send_all(fa, frame, e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e /= CAPNP_OK .and. .not. sconn%dead, &
+                  'malformed: bad root is an error and the connection lives')
+      if (allocated(error)) return
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call check_(error, e == CAPNP_OK, 'malformed: a later bootstrap is answered')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_malformed_root_is_freed
 
 end module test_rpc

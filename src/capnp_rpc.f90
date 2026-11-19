@@ -871,9 +871,73 @@ contains
       type(rpc_conn_t), intent(inout) :: conn
       type(capnp_message_t), intent(inout) :: m
       integer, intent(out) :: err
+      integer(int64) :: qid
+      qid = call_question_of(m)
       call rpc_send_message(conn%transport, m, err)
+      if (err /= CAPNP_OK) then
+         call release_unsent_call_caps(conn, m)
+         if (qid >= 0_int64) call release_question(conn, qid)
+      end if
       call capnp_message_free(m)
    end subroutine rpc_call_send
+
+   !> Question id carried by a Call, or -1 when the message is not one.
+   function call_question_of(m) result(qid)
+      type(capnp_message_t), intent(inout), target :: m
+      integer(int64) :: qid
+      type(message_t) :: msg
+      type(call_t) :: c
+      integer :: rerr
+      qid = -1_int64
+      msg = message_read_root(m, rerr)
+      if (rerr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_CALL_TAG) return
+      c = message_call_get(msg, rerr)
+      if (rerr /= CAPNP_OK) return
+      qid = call_question_id_get(c)
+   end function call_question_of
+
+   !> A Call that never reached the peer must not leave the export refs
+   !> its cap table was holding. senderHosted, senderPromise and the
+   !> vine of a thirdPartyHosted descriptor are one ref each.
+   subroutine release_unsent_call_caps(conn, m)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(capnp_message_t), intent(inout), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      type(third_party_cap_descriptor_t) :: tp
+      integer(int64) :: n, i, id
+      integer :: rerr
+      msg = message_read_root(m, rerr)
+      if (rerr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_CALL_TAG) return
+      c = message_call_get(msg, rerr)
+      if (rerr /= CAPNP_OK) return
+      params = call_params_get(c, rerr)
+      if (rerr /= CAPNP_OK) return
+      ctab = payload_cap_table_get(params, rerr)
+      if (rerr /= CAPNP_OK) return
+      n = capnp_list_len(ctab)
+      do i = 0_int64, n - 1_int64
+         cd%p = capnp_list_get_struct(ctab, int(i), rerr)
+         if (rerr /= CAPNP_OK) cycle
+         id = -1_int64
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            id = cap_descriptor_sender_hosted_get(cd)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            id = cap_descriptor_sender_promise_get(cd)
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            tp = cap_descriptor_third_party_hosted_get(cd, rerr)
+            if (rerr == CAPNP_OK) id = third_party_cap_descriptor_vine_id_get(tp)
+         end select
+         if (id >= 0_int64 .and. id < int(MAXE, int64)) &
+            call drop_export(conn, int(id), 1)
+      end do
+   end subroutine release_unsent_call_caps
 
    !> Begin Persistent.save using the generic
    !> Persistent<AnyPointer, AnyPointer> wire layout. `owner` is copied to
@@ -1614,13 +1678,17 @@ contains
       if (err /= CAPNP_OK) then
          ! No Return is coming for an abandoned Join, so the slot must
          ! not wait for a Finish that the dead peer will never send.
+         call capnp_message_free(m)
          call clear_joins(conn)
          conn%dead = .true.
          err = RPC_ERR_DEAD
          return
       end if
       msg = message_read_root(m, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
       select case (message_which(msg))
       case (MESSAGE_BOOTSTRAP_TAG)
          call handle_bootstrap(conn, msg, err)
@@ -2655,8 +2723,16 @@ contains
       else
          call rpc_send_message(conn%transport, rm, err)
       end if
+      if (err /= CAPNP_OK) then
+         ! The peer never saw the exports this answer published.
+         do i = 0, ctx%nexp - 1
+            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+         end do
+         call capnp_message_free(rm)
+         return
+      end if
       q = int(qid)
-      if (q >= 0 .and. q < MAXQ .and. err == CAPNP_OK) then
+      if (q >= 0 .and. q < MAXQ) then
          if (conn%answers(q)%used) call capnp_message_free(conn%answers(q)%retmsg)
          call capnp_serialize_bytes(rm, bytes, err)
          if (err == CAPNP_OK) then
@@ -2682,7 +2758,10 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: q
       r = message_return_get(msg, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
       qid = return_answer_id_get(r)
       if (return_which(r) == RETURN_RESULTS_TAG) then
          block
