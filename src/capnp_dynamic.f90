@@ -45,7 +45,14 @@ module capnp_dynamic
 
    type :: capnp_dyn_brand_binding_t
       logical :: unbound = .false.
+      !> Raw type pointer from the schema brand. Stays as stored.
       type(capnp_ptr_t) :: type
+      !> type_which of the binding after parameter references in this
+      !> brand are followed. -1 when unbound or unresolved.
+      integer :: resolved_which = -1
+      !> Struct, enum, or interface id when the resolved type has one,
+      !> or the element id of a list of those. 0 otherwise.
+      integer(int64) :: resolved_id = 0_int64
    end type capnp_dyn_brand_binding_t
 
    type :: capnp_dyn_brand_scope_t
@@ -285,7 +292,70 @@ contains
             end select
          end do
       end do
+      call dyn_resolve_brand(brand, err)
    end subroutine capnp_dyn_load_brand
+
+   !> Fill resolved_which and resolved_id from each raw binding.
+   subroutine dyn_resolve_brand(brand, err)
+      type(capnp_dyn_brand_t), intent(inout) :: brand
+      integer, intent(out) :: err
+      integer :: i, j
+      err = CAPNP_OK
+      if (.not. allocated(brand%scopes)) return
+      do i = 1, size(brand%scopes)
+         if (.not. allocated(brand%scopes(i)%bindings)) cycle
+         do j = 1, size(brand%scopes(i)%bindings)
+            if (brand%scopes(i)%bindings(j)%unbound) cycle
+            call dyn_resolve_type(brand, brand%scopes(i)%bindings(j)%type, 0, &
+                                  brand%scopes(i)%bindings(j)%resolved_which, &
+                                  brand%scopes(i)%bindings(j)%resolved_id, err)
+            if (err /= CAPNP_OK) return
+         end do
+      end do
+   end subroutine dyn_resolve_brand
+
+   !> Resolve one type, following a parameter to another scope in brand.
+   recursive subroutine dyn_resolve_type(brand, t, depth, which, id, err)
+      type(capnp_dyn_brand_t), intent(in) :: brand
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(in) :: depth
+      integer, intent(out) :: which
+      integer(int64), intent(out) :: id
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: et
+      integer :: i, idx, ew
+      which = -1
+      id = 0_int64
+      err = CAPNP_OK
+      if (depth > 8) return
+      if (t%kind == CAPNP_PK_NULL) return
+      which = type_which(t)
+      select case (which)
+      case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
+         id = type_type_id(t)
+      case (TYPE_LIST)
+         et = type_list_element(t, err)
+         if (err /= CAPNP_OK) return
+         ew = type_which(et)
+         if (ew == TYPE_STRUCT .or. ew == TYPE_ENUM .or. ew == TYPE_INTERFACE) then
+            id = type_type_id(et)
+         end if
+      case (TYPE_ANY_POINTER)
+         if (type_anyptr_which(t) /= ANYPTR_PARAMETER) return
+         if (.not. allocated(brand%scopes)) return
+         idx = type_param_index(t) + 1
+         do i = 1, size(brand%scopes)
+            if (brand%scopes(i)%inherited) cycle
+            if (brand%scopes(i)%id /= type_param_scope_id(t)) cycle
+            if (.not. allocated(brand%scopes(i)%bindings)) return
+            if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) return
+            if (brand%scopes(i)%bindings(idx)%unbound) return
+            call dyn_resolve_type(brand, brand%scopes(i)%bindings(idx)%type, &
+                                  depth + 1, which, id, err)
+            return
+         end do
+      end select
+   end subroutine dyn_resolve_type
 
    subroutine dyn_select_field(schema, idx, p, f, err)
       use capnp_union, only: capnp_set_which

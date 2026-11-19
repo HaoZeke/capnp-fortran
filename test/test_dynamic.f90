@@ -6,7 +6,8 @@ module test_dynamic
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, TYPE_VOID, type_which, value_which, value_text
+   use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
+                                type_which, value_which, value_text
    use kitchen_capnp, only: sink_t, sink_new_root, NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
@@ -317,6 +318,24 @@ contains
                   size(brand%scopes(1)%bindings) > 0 .and. &
                   type_which(brand%scopes(1)%bindings(1)%type) == TYPE_TEXT, &
                   'dyn: arbitrary text brand binding')
+      call check_(error, brand%scopes(1)%bindings(1)%resolved_which == TYPE_TEXT .and. &
+                  brand%scopes(1)%bindings(1)%resolved_id == 0_int64, &
+                  'dyn: resolved text brand')
+      box_idx = capnp_dyn_find(bschema, 'QUse', err)
+      q = capnp_dyn_field_schema(bschema, box_idx, 'q', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      call check_(error, err == CAPNP_OK .and. size(brand%scopes) == 1 .and. &
+                  size(brand%scopes(1)%bindings) == 5, 'dyn: five brand bindings')
+      call check_(error, type_which(brand%scopes(1)%bindings(5)%type) == TYPE_DATA .and. &
+                  brand%scopes(1)%bindings(5)%resolved_which == TYPE_DATA, &
+                  'dyn: fifth binding resolves to data')
+      box_idx = capnp_dyn_find(bschema, 'BoxUse', err)
+      q = capnp_dyn_field_schema(bschema, box_idx, 'listBox', err)
+      call capnp_dyn_load_brand(q, brand, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  type_which(brand%scopes(1)%bindings(1)%type) == TYPE_LIST .and. &
+                  brand%scopes(1)%bindings(1)%resolved_which == TYPE_LIST, &
+                  'dyn: list brand resolves beside the raw type')
 
       call capnp_message_free(msg)
       call capnp_message_free(bmsg)
