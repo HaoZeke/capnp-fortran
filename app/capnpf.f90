@@ -89,11 +89,9 @@ contains
          call take_arg(i, arg)
          if (trim(arg) == '--help' .or. trim(arg) == '-h') then
             call print_usage(1, err)
-            if (err /= CAPNP_OK) rc = 1
             return
          else if (trim(arg) == '--version') then
             call write_fd_line(1, "Cap'n Proto (capnpf) version 0.3.1", err)
-            if (err /= CAPNP_OK) rc = 1
             return
          else if (trim(arg) == '--short') then
             short = .true.
@@ -148,7 +146,6 @@ contains
             cmd = trim(arg)
             if (cmd == 'help') then
                call print_usage(1, err)
-               if (err /= CAPNP_OK) rc = 1
                return
             end if
          else if (cmd == 'convert' .and. len(spec) == 0) then
@@ -736,7 +733,7 @@ contains
       if (count == 0) call fail('empty input', rc)
    end subroutine bytes_to_out
 
-   subroutine emit_one(sch, idx, env, msg, root, to, pretty, seg_words, rc)
+   subroutine emit_one(sch, idx, env, msg, root, to, pretty, seg_words, rc, strict_io)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       type(capnp_brand_env_t), intent(in) :: env
@@ -746,10 +743,14 @@ contains
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
+      logical, intent(in), optional :: strict_io
       character(len=:), allocatable :: text
       integer(int8), allocatable :: outb(:)
       integer :: err
+      logical :: strict
       rc = 0
+      strict = .true.
+      if (present(strict_io)) strict = strict_io
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
          if (err /= CAPNP_OK) then
@@ -758,7 +759,7 @@ contains
          end if
          call write_fd_line(1, text, err)
          if (err /= CAPNP_OK) then
-            call fail('cannot write stdout', rc)
+            if (strict) call fail('cannot write stdout', rc)
             return
          end if
       else if (to == 'json') then
@@ -769,7 +770,7 @@ contains
          end if
          call write_fd_line(1, text, err)
          if (err /= CAPNP_OK) then
-            call fail('cannot write stdout', rc)
+            if (strict) call fail('cannot write stdout', rc)
             return
          end if
       else
@@ -779,7 +780,7 @@ contains
             return
          end if
          call write_stdout(outb, err)
-         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
+         if (err /= CAPNP_OK .and. strict) call fail('cannot write stdout', rc)
       end if
    end subroutine emit_one
 
@@ -1141,10 +1142,7 @@ contains
                   return
                end if
                call write_fd_line(1, text, err)
-               if (err /= CAPNP_OK) then
-                  call fail('cannot write stdout', rc)
-                  return
-               end if
+               if (err /= CAPNP_OK) return
             end if
             return
          end if
@@ -1326,7 +1324,7 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
+         if (err /= CAPNP_OK) return
       end if
    end subroutine walk_struct_eval
 
@@ -1357,10 +1355,7 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) then
-            call fail('cannot write stdout', rc)
-            return
-         end if
+         if (err /= CAPNP_OK) return
          return
       end if
       call step_index(rest, pos, ix, err)
@@ -1417,7 +1412,7 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
+         if (err /= CAPNP_OK) return
       end if
    end subroutine walk_list_eval
 
@@ -1443,10 +1438,7 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) then
-            call fail('cannot write stdout', rc)
-            return
-         end if
+         if (err /= CAPNP_OK) return
          return
       end if
       if (fmt == 'json') then
@@ -1456,10 +1448,7 @@ contains
             return
          end if
          call write_fd_line(1, text, err)
-         if (err /= CAPNP_OK) then
-            call fail('cannot write stdout', rc)
-            return
-         end if
+         if (err /= CAPNP_OK) return
          return
       end if
       if (node_struct_is_group(sch%nodes(idx))) then
@@ -1502,7 +1491,7 @@ contains
             return
          end if
       end if
-      call emit_one(sch, idx, env, msg, root, fmt, pretty, seg_words, rc)
+      call emit_one(sch, idx, env, msg, root, fmt, pretty, seg_words, rc, strict_io=.false.)
       call capnp_message_free(msg)
    end subroutine emit_eval_struct
 
