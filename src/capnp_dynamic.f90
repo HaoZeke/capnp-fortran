@@ -249,6 +249,20 @@ contains
       integer(int64) :: i, j
       err = CAPNP_OK
       if (allocated(brand%scopes)) deallocate (brand%scopes)
+      if (t%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         allocate (brand%scopes(0))
+         return
+      end if
+      ! Brand is a pointer on struct, enum and interface only. Text, lists
+      ! and anyPointer use that pointer for something else.
+      select case (type_which(t))
+      case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
+      case default
+         err = CAPNP_ERR_KIND
+         allocate (brand%scopes(0))
+         return
+      end select
       raw = type_brand(t, err)
       if (err /= CAPNP_OK) return
       if (raw%kind == CAPNP_PK_NULL) then
@@ -340,10 +354,11 @@ contains
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         ew = type_which(et)
-         if (ew == TYPE_STRUCT .or. ew == TYPE_ENUM .or. ew == TYPE_INTERFACE) then
-            id = type_type_id(et)
-         end if
+         ! The element may itself be a parameter of this brand.
+         call dyn_resolve_type(brand, et, depth + 1, ew, id, err)
+         if (err /= CAPNP_OK) return
+         which = TYPE_LIST
+         if (ew /= TYPE_STRUCT .and. ew /= TYPE_ENUM .and. ew /= TYPE_INTERFACE) id = 0_int64
       case (TYPE_ANY_POINTER)
          if (type_anyptr_which(t) /= ANYPTR_PARAMETER) return
          if (.not. allocated(brand%scopes)) return
@@ -587,22 +602,37 @@ contains
    end subroutine capnp_dyn_method_annotations
 
    !> Wire type tag (TYPE_*) of a named field; TYPE_STRUCT for groups.
-   function capnp_dyn_field_type(schema, idx, fname, err) result(tw)
+   !> `brand`, when present, follows parameter bindings, including a
+   !> parameter used as a list element. `resolved_id` is the struct,
+   !> enum or interface id after that walk, or 0.
+   function capnp_dyn_field_type(schema, idx, fname, err, brand, resolved_id) result(tw)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
+      type(capnp_dyn_brand_t), intent(in), optional :: brand
+      integer(int64), intent(out), optional :: resolved_id
       integer :: tw
+      integer(int64) :: rid
       type(capnp_ptr_t) :: f, t
       tw = -1
+      rid = 0_int64
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
          tw = TYPE_STRUCT
+         if (present(resolved_id)) resolved_id = 0_int64
          return
       end if
       t = field_slot_type(f, err)
-      if (err == CAPNP_OK) tw = type_which(t)
+      if (err /= CAPNP_OK) return
+      if (present(brand)) then
+         call dyn_resolve_type(brand, t, 0, tw, rid, err)
+      else
+         tw = type_which(t)
+         if (tw == TYPE_STRUCT .or. tw == TYPE_ENUM .or. tw == TYPE_INTERFACE) rid = type_type_id(t)
+      end if
+      if (present(resolved_id)) resolved_id = rid
    end function capnp_dyn_field_type
 
    !> Integer-family read (ints, uints, enum), widened to int64, with
