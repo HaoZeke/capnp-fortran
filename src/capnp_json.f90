@@ -10,11 +10,12 @@
 !> $Json.flatten inlines sub-structs, groups, and discriminated union
 !> variants with an optional prefix. $Json.discriminator tags unions
 !> with an explicit variant field and optional valueName. An unknown
-!> discriminator string does not select an arm. Plain member keys in
-!> that object are still applied in document order. A repeated known
-!> tag is rejected, and a void arm accepts any payload. A non-string
-!> discriminator is rejected. NaN and infinities are the strings "NaN", "Infinity", and
-!> "-Infinity". A high surrogate followed by a low surrogate is one
+!> discriminator string does not select an arm. A known tag clears the
+!> arm it selects, so a member written earlier does not survive. Plain
+!> member keys in that object are still applied in document order. A
+!> repeated known tag is rejected, and a void arm accepts any payload.
+!> A non-string discriminator is rejected. NaN and infinities are the
+!> strings "NaN", "Infinity", and "-Infinity". A high surrogate followed by a low surrogate is one
 !> scalar, and an unquoted integer past 2^53 keeps its exact value.
 !> These two reads differ from capnp 1.4.0 only by adding precision or
 !> correctness, and both accept every input that version accepts.
@@ -1029,11 +1030,79 @@ contains
       call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err, unresolved)
    end subroutine fill_struct_pfx
 
-   !> Apply union keys in document order, the way kj JsonCodec walks an
-   !> object. A known tag selects an arm without clearing its storage.
-   !> A second known tag is an error. An unknown tag selects nothing, and
-   !> plain member keys still decode. valueName and flattened-union keys
-   !> that appear before the tag are retried after it.
+!> Zero the storage of one field. A known union tag does this after
+!> selecting the arm, which drops a member written earlier in the object.
+!> A void arm has no storage. A group clears each of its fields.
+   recursive subroutine clear_field(schema, f, p, env, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: t, fl, child
+      integer(int64) :: off
+      integer :: tw, gidx, i, nf
+      err = CAPNP_OK
+      if (field_which(f) == FIELD_GROUP) then
+         gidx = capnp_codec_find_id(schema, field_group_type_id(f))
+         if (gidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         fl = node_struct_fields(schema%nodes(gidx), err)
+         if (err /= CAPNP_OK) return
+         nf = int(capnp_list_len(fl))
+         do i = 0, nf - 1
+            child = capnp_list_get_struct(fl, i, err)
+            if (err /= CAPNP_OK) return
+            call clear_field(schema, child, p, env, err)
+            if (err /= CAPNP_OK) return
+         end do
+         return
+      end if
+      if (field_which(f) /= FIELD_SLOT) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, t)
+      tw = type_which(t)
+      off = field_slot_offset(f)
+      select case (tw)
+      case (TYPE_VOID)
+      case (TYPE_BOOL)
+         call capnp_set_bool(p, off, .false., err)
+      case (TYPE_INT8)
+         call capnp_set_i8(p, off, 0_int8, err)
+      case (TYPE_INT16)
+         call capnp_set_i16(p, off*2_int64, 0_int16, err)
+      case (TYPE_INT32)
+         call capnp_set_i32(p, off*4_int64, 0_int32, err)
+      case (TYPE_INT64)
+         call capnp_set_i64(p, off*8_int64, 0_int64, err)
+      case (TYPE_UINT8)
+         call capnp_set_u8(p, off, 0_int16, err)
+      case (TYPE_UINT16)
+         call capnp_set_u16(p, off*2_int64, 0_int32, err)
+      case (TYPE_UINT32)
+         call capnp_set_u32(p, off*4_int64, 0_int64, err)
+      case (TYPE_UINT64)
+         call capnp_set_u64(p, off*8_int64, 0_int64, err)
+      case (TYPE_FLOAT32)
+         call capnp_set_f32(p, off*4_int64, 0.0_real32, err)
+      case (TYPE_FLOAT64)
+         call capnp_set_f64(p, off*8_int64, 0.0_real64, err)
+      case (TYPE_ENUM)
+         call capnp_set_u16(p, off*2_int64, 0_int32, err)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+         call capnp_setp(p, int(off), capnp_ptr_t(), err)
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine clear_field
+
+!> Apply union keys in document order, the way kj JsonCodec walks an
+!> object. A known tag clears the arm it selects. A second known tag
+!> is an error. An unknown tag selects nothing, and plain member keys
+!> still decode. valueName and flattened-union keys that appear before
+!> the tag are retried after it.
    recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, &
                                           depth, err, unresolved)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -1120,6 +1189,9 @@ contains
             call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
+            call clear_field(schema, f, p, env, err)
+            if (err /= CAPNP_OK) return
+            have_child = .false.
             tag_set = .true.
             return
          end if

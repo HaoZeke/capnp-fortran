@@ -623,6 +623,9 @@ contains
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","message":"x","count":4}')
       call udiff(error, schema, n, 'TaggedEvent', '{"city":"A","kind":"moved","city":"B"}')
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"moved","city":"A","city":"B"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"count":7,"kind":"count"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"message":"hi","kind":"message"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"note":"x","kind":"note"}')
       call udiff(error, schema, n, 'ValueEvent', '{"type":"empty","payload":1}')
       call udiff(error, schema, n, 'ValueEvent', '{"payload":4,"type":"num","payload":5}')
       call udiff(error, schema, n, 'ValueEvent', '{"type":"num","payload":4,"payload":5}')
@@ -650,7 +653,10 @@ contains
       call udiff(error, schema, n, 'MultiUnionDoc', '{"mode":"custom","fast":3,"c_city":"x"}')
       call udiff(error, schema, n, 'MultiUnionDoc', '{"ext":{"tag":"off","body":"r"}}')
       call udiff(error, schema, n, 'MultiUnionDoc', '{"ext":{"body":"A","tag":"on","body":"B"}}')
-      call check_(error, n == 62, 'union-diff: case count')
+      call udiff(error, schema, n, 'MultiUnionDoc', '{"fast":3,"mode":"fast"}')
+      call udiff(error, schema, n, 'GroupArm', '{"box":{"x":4,"y":5},"kind":"box"}')
+      call udiff(error, schema, n, 'GroupArm', '{"kind":"box","box":{"x":4,"y":5}}')
+      call check_(error, n == 68, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
