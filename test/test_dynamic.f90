@@ -27,7 +27,8 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [new_unittest("dynamic", run_dynamic), &
                    new_unittest("dynamic-default-isolation", run_default_isolation), &
-                   new_unittest("dynamic-malformed-text", run_malformed_text)]
+                   new_unittest("dynamic-malformed-text", run_malformed_text), &
+                   new_unittest("dynamic-unloaded-schema", run_unloaded_schema)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -415,5 +416,31 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_malformed_text
+
+   !> An unloaded schema is rejected before any node is indexed.
+   subroutine run_unloaded_schema(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t) :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: p
+      type(capnp_dyn_annotation_t), allocatable :: ann(:)
+      integer :: err, tag
+
+      call capnp_message_init_builder(msg, err)
+      p = capnp_dyn_new_root(schema, 1, msg, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'unloaded: new_root')
+      p = capnp_dyn_new_root(schema, 0, msg, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'unloaded: new_root index 0')
+      call capnp_dyn_node_annotations(schema, 1, ann, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. size(ann) == 0, &
+                  'unloaded: node annotations')
+      call capnp_dyn_enumerant_annotations(schema, 1, 'mobile', ann, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'unloaded: enumerant annotations')
+      call capnp_dyn_method_annotations(schema, 1, 'ping', ann, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'unloaded: method annotations')
+      tag = capnp_dyn_which(schema, 1, p, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. tag == -1, 'unloaded: which')
+      call capnp_message_free(msg)
+   end subroutine run_unloaded_schema
 
 end module test_dynamic
