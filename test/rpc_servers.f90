@@ -68,12 +68,29 @@ contains
          allocate (ad)
          ad%base = capnp_get_i64(ctx%params, 0_int64)
          sp => ad
-         idx = rpc_ctx_export_cap(ctx, sp, err)
-         if (err /= CAPNP_OK) return
+         ! The export table owns this object and frees it with the last
+         ! reference. A failed return never reaches that table.
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK) then
+            deallocate (ad)
+            return
+         end if
          s = capnp_new_struct(ctx%rmsg, 0, 1, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            ctx%nexp = ctx%nexp - 1
+            ctx%staged(idx)%s => null()
+            ctx%staged(idx)%owned = .false.
+            deallocate (ad)
+            return
+         end if
          call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
          if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+         if (err /= CAPNP_OK) then
+            ctx%nexp = ctx%nexp - 1
+            ctx%staged(idx)%s => null()
+            ctx%staged(idx)%owned = .false.
+            deallocate (ad)
+         end if
       case default
          err = CAPNP_ERR_ARG
       end select

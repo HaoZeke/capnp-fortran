@@ -52,7 +52,15 @@ per-method procedure (:doc:`tutorial`, part 2.1). A capability object
 stays alive as long as it has a nonzero refcount in some vat's export
 table; ``rpc_ctx_export_cap`` stages a freshly minted capability
 (e.g. one method's result is itself a capability) into the current
-call's results.
+call's results. Pass ``owned=.true.`` when this vat allocated the
+server: the table frees it once the refcount reaches zero, and
+``rpc_conn_close`` drops every export because the peer will not
+Release it. A server whose ``dispatch`` is running is freed after
+that call returns, not during it. A results cap table that cannot
+be written is answered with an exception Return. The flush drops the
+exports it added and frees the owned servers those exports introduced,
+and it frees owned servers that stayed unexported. An export from
+before the flush keeps its refcount.
 
 To opt a capability into level 2 persistence, recognize
 ``ctx%interface_id == RPC_PERSISTENT_IFACE`` in ``dispatch`` and
@@ -98,7 +106,7 @@ loopbacks for tests, and poll-based readiness.
 | Procedure              | Signature                                                            | Notes                                              |
 |-------------------------+-----------------------------------------------------------------------+-----------------------------------------------------|
 | ~rpc_conn_init~         | ~(conn, fd, bootstrap)~                                              | ~bootstrap~ is a ~class(rpc_server_t), pointer~ (may be null) |
-| ~rpc_conn_close~        | ~(conn)~                                                             | half-closes and frees tables                       |
+| ~rpc_conn_close~        | ~(conn)~                                                             | half-closes and frees tables; an in-call owned server is freed when dispatch returns |
 | ~rpc_bootstrap_send~    | ~(conn, cap, err)~                                                   | returns a pipeline cap, usable immediately          |
 | ~rpc_call_begin~        | ~(conn, target, interface_id, method_id, m, params, qid, err)~        | fill ~params~ content, then send                    |
 | ~rpc_call_send~         | ~(conn, m, err)~                                                     |                                                      |
@@ -109,7 +117,7 @@ loopbacks for tests, and poll-based readiness.
 | ~rpc_finish_send~       | ~(conn, qid, retain_caps, err)~                                      |                                                      |
 | ~rpc_release_send~      | ~(conn, cap, err)~                                                   |                                                      |
 | ~rpc_pump_once~         | ~(conn, err)~                                                        | handle exactly one incoming message (servers loop on this) |
-| ~rpc_ctx_export_cap~    | ~(ctx, srv, err) result(idx)~                                        | stage a capability in a dispatch's results          |
+| ~rpc_ctx_export_cap~    | ~(ctx, srv, err [, owned]) result(idx)~                              | stage a capability; ~owned=.true.~ frees it at refcount zero |
 | ~rpc_make_cap_ptr~      | ~(m, idx) result(p)~                                                 | capability pointer for content slots                |
 
 #+begin_export rst

@@ -20,6 +20,7 @@ program tester
    use test_stream, only: collect_stream
    use test_idents, only: collect_idents
    use test_codegen, only: collect_codegen
+   use test_rpc_lifetime, only: collect_rpc_lifetime
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -29,7 +30,7 @@ program tester
    stat = 0
    ! Each name is allocated in the element that owns it. A constructor
    ! of new_testsuite() leaks those strings on this compiler.
-   allocate (testsuites(17))
+   allocate (testsuites(18))
    testsuites(1)%name = "wire"
    testsuites(1)%collect => collect_wire
    testsuites(2)%name = "addressbook"
@@ -64,6 +65,8 @@ program tester
    testsuites(16)%collect => collect_idents
    testsuites(17)%name = "codegen"
    testsuites(17)%collect => collect_codegen
+   testsuites(18)%name = "rpc_lifetime"
+   testsuites(18)%collect => collect_rpc_lifetime
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)

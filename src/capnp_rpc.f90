@@ -98,6 +98,8 @@ module capnp_rpc
    !> without a circular type dependency.
    type :: rpc_srv_ref_t
       class(*), pointer :: s => null()
+      !> True when this vat allocated the server and must free it.
+      logical :: owned = .false.
    end type rpc_srv_ref_t
 
    !> One incoming call, handed to a capability server's dispatch.
@@ -131,6 +133,11 @@ module capnp_rpc
       logical :: used = .false.
       integer :: refcount = 0
       class(*), pointer :: srv => null()
+      !> True when dropping the last reference must deallocate srv.
+      logical :: owned = .false.
+      !> Dispatches of this server that have been entered and not left.
+      !> drop_export will not deallocate while this is positive.
+      integer :: dispatching = 0
    end type rpc_export_slot_t
 
    type :: rpc_question_slot_t
@@ -274,6 +281,17 @@ contains
       call px_close(conn%fd)
       conn%fd = PX_BAD_FD
       conn%dead = .true.
+      ! The peer will not Release what it still imports. An export whose
+      ! dispatch is on the stack keeps that call's reference and is freed
+      ! when the call returns. Every other owned server is freed here.
+      do i = 0, MAXE - 1
+         if (.not. conn%exports(i)%used) cycle
+         if (conn%exports(i)%dispatching > 0) then
+            conn%exports(i)%refcount = conn%exports(i)%dispatching
+         else
+            call drop_export(conn, i, conn%exports(i)%refcount)
+         end if
+      end do
       do i = 0, MAXQ - 1
          if (conn%questions(i)%used) call capnp_message_free(conn%questions(i)%retmsg)
          if (conn%answers(i)%used) call capnp_message_free(conn%answers(i)%retmsg)
@@ -836,10 +854,11 @@ contains
    !> Stage a server for the call's results capTable; returns the cap
    !> index for the content pointer. Export ids are allocated when the
    !> table flushes at send time.
-   function rpc_ctx_export_cap(ctx, srv, err) result(idx)
+   function rpc_ctx_export_cap(ctx, srv, err, owned) result(idx)
       type(rpc_call_ctx_t), intent(inout) :: ctx
       class(rpc_server_t), pointer, intent(in) :: srv
       integer, intent(out) :: err
+      logical, intent(in), optional :: owned
       integer :: idx
       err = CAPNP_OK
       idx = -1
@@ -848,6 +867,8 @@ contains
          return
       end if
       ctx%staged(ctx%nexp)%s => srv
+      ctx%staged(ctx%nexp)%owned = .false.
+      if (present(owned)) ctx%staged(ctx%nexp)%owned = owned
       idx = ctx%nexp
       ctx%nexp = ctx%nexp + 1
    end function rpc_ctx_export_cap
@@ -863,15 +884,20 @@ contains
       p%msg => m
    end function rpc_make_cap_ptr
 
-   function export_server(conn, srv) result(eid)
+   function export_server(conn, srv, owned) result(eid)
       type(rpc_conn_t), intent(inout) :: conn
       class(*), pointer, intent(in) :: srv
+      logical, intent(in), optional :: owned
       integer :: eid, i
+      logical :: own
+      own = .false.
+      if (present(owned)) own = owned
       ! Reuse an existing export of the same server.
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) then
             if (associated(conn%exports(i)%srv, srv)) then
                conn%exports(i)%refcount = conn%exports(i)%refcount + 1
+               if (own) conn%exports(i)%owned = .true.
                eid = i
                return
             end if
@@ -882,6 +908,7 @@ contains
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
             conn%exports(i)%srv => srv
+            conn%exports(i)%owned = own
             eid = i
             return
          end if
@@ -1014,6 +1041,13 @@ contains
          if (err == CAPNP_OK) then
             call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, idx), err)
             call flush_cap_table(conn, ctx, err)
+            if (err /= CAPNP_OK) then
+               ! Exports added by the failed flush are already dropped.
+               call release_unflushed(conn, ctx)
+               call fill_exception(r, 'capability table full', err)
+            end if
+         else
+            call release_unflushed(conn, ctx)
          end if
       end if
       call finish_answer(conn, qid, rm, ctx, err)
@@ -1043,6 +1077,7 @@ contains
       if (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG) then
          ! Tail calls (yourself/thirdParty) redirect results; failing the
          ! call is legal, silently answering the caller instead is not.
+         call release_unflushed(conn, ctx)
          call fill_exception(r, 'sendResultsTo mode unsupported (caller only)', err)
          call finish_answer(conn, qid, rm, ctx, err)
          return
@@ -1055,6 +1090,7 @@ contains
 
       call resolve_target(conn, c, eid, err)
       if (err /= CAPNP_OK .or. eid < 0) then
+         call release_unflushed(conn, ctx)
          call fill_exception(r, 'no such capability', err)
          call finish_answer(conn, qid, rm, ctx, err)
          return
@@ -1064,6 +1100,10 @@ contains
       ctx%params = payload_content_get(params, err)
       ctx%rmsg => rm
       ctx%results = return_results_init(r, err)
+      ! The call keeps one reference so Release or close cannot destroy
+      ! the server between entering dispatch and leaving it.
+      conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+      conn%exports(eid)%dispatching = conn%exports(eid)%dispatching + 1
       dispatched = .false.
       derr = CAPNP_ERR_KIND
       select type (s => conn%exports(eid)%srv)
@@ -1072,11 +1112,21 @@ contains
          dispatched = .true.
       end select
       if (.not. dispatched .or. derr /= CAPNP_OK) then
-         ! Rebuild the union as an exception return.
+         ! An exception return does not publish the results cap table.
+         ! Owned servers staged for that table are freed here, once.
+         call release_unflushed(conn, ctx)
          call fill_exception(r, 'method raised error', err)
       else
          call flush_cap_table(conn, ctx, err)
+         if (err /= CAPNP_OK) then
+            ! Exports added by the failed flush are already dropped.
+            ! Owned servers with no export slot are freed here, once.
+            call release_unflushed(conn, ctx)
+            call fill_exception(r, 'capability table full', err)
+         end if
       end if
+      conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
+      call drop_export(conn, eid, 1)
       call finish_answer(conn, qid, rm, ctx, err)
    end subroutine handle_call
 
@@ -1728,30 +1778,131 @@ contains
       call send_join_result(conn, qid, jid, .false., .false., -1, err)
    end subroutine send_join_failure
 
+   !> Free owned servers staged for a return that will not publish them.
+   !>
+   !> Dispatch errors and exception returns leave these out of the export
+   !> table. A flush that fails rolls its new exports back before this
+   !> runs, so a server still in the table was exported earlier. The same
+   !> pointer staged twice is freed once. A pointer already exported keeps
+   !> that export and is freed when its refcount drops to zero.
+   subroutine release_unflushed(conn, ctx)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer :: i, j
+      class(*), pointer :: p
+      logical :: exported
+      do i = 0, ctx%nexp - 1
+         if (.not. associated(ctx%staged(i)%s)) cycle
+         do j = 0, i - 1
+            if (associated(ctx%staged(j)%s, ctx%staged(i)%s)) then
+               if (ctx%staged(i)%owned) ctx%staged(j)%owned = .true.
+               ctx%staged(i)%s => null()
+               ctx%staged(i)%owned = .false.
+               exit
+            end if
+         end do
+      end do
+      do i = 0, ctx%nexp - 1
+         if (.not. ctx%staged(i)%owned) cycle
+         if (.not. associated(ctx%staged(i)%s)) cycle
+         p => ctx%staged(i)%s
+         exported = .false.
+         do j = 0, MAXE - 1
+            if (conn%exports(j)%used .and. associated(conn%exports(j)%srv, p)) then
+               conn%exports(j)%owned = .true.
+               exported = .true.
+               exit
+            end if
+         end do
+         if (.not. exported) deallocate (ctx%staged(i)%s)
+         ctx%staged(i)%s => null()
+         ctx%staged(i)%owned = .false.
+      end do
+   end subroutine release_unflushed
+
+   !> Drop the exports `flush_cap_table` added and restore every export
+   !> that was already live.
+   !>
+   !> Cap'n Proto 1.4.0 answers a failure while building the results cap
+   !> table with an exception Return (`RpcCallContext::sendErrorReturn`,
+   !> and `fromException` on the bootstrap path) and does not publish
+   !> that table. The peer therefore has no export id to Release. An
+   !> owned server whose only export came from this flush is released
+   !> once. An export that already existed keeps the refcount and owned
+   !> flag it had on entry; its server stays.
+   subroutine rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      logical, intent(in) :: base_used(0:)
+      integer, intent(in) :: base_ref(0:)
+      logical, intent(in) :: base_owned(0:)
+      class(*), pointer :: p
+      integer :: i, j, delta
+      do j = 0, MAXE - 1
+         if (.not. base_used(j)) then
+            if (.not. conn%exports(j)%used) cycle
+            p => conn%exports(j)%srv
+            do i = 0, ctx%nexp - 1
+               if (associated(p)) then
+                  if (associated(ctx%staged(i)%s, p)) then
+                     ctx%staged(i)%s => null()
+                     ctx%staged(i)%owned = .false.
+                  end if
+               end if
+               if (ctx%staged_eids(i) == j) ctx%staged_eids(i) = -1
+            end do
+            call drop_export(conn, j, conn%exports(j)%refcount)
+         else if (conn%exports(j)%used) then
+            delta = conn%exports(j)%refcount - base_ref(j)
+            if (delta > 0) call drop_export(conn, j, delta)
+            if (conn%exports(j)%used) conn%exports(j)%owned = base_owned(j)
+            do i = 0, ctx%nexp - 1
+               if (ctx%staged_eids(i) == j) ctx%staged_eids(i) = -1
+            end do
+         end if
+      end do
+   end subroutine rollback_flushed_exports
+
    !> Allocate export ids for the staged servers and write the results
-   !> capTable.
+   !> capTable. On failure the exports this flush added are dropped and
+   !> every pre-existing export is restored to its earlier refcount.
    subroutine flush_cap_table(conn, ctx, err)
       type(rpc_conn_t), intent(inout) :: conn
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
-      integer :: i, eid
+      logical :: base_used(0:MAXE - 1)
+      integer :: base_ref(0:MAXE - 1)
+      logical :: base_owned(0:MAXE - 1)
+      integer :: i, eid, j
       err = CAPNP_OK
       if (ctx%nexp == 0) return
+      do j = 0, MAXE - 1
+         base_used(j) = conn%exports(j)%used
+         base_ref(j) = conn%exports(j)%refcount
+         base_owned(j) = conn%exports(j)%owned
+      end do
       ctab = payload_cap_table_init(ctx%results, int(ctx%nexp, int64), err)
       if (err /= CAPNP_OK) return
       do i = 0, ctx%nexp - 1
-         eid = export_server(conn, ctx%staged(i)%s)
+         eid = export_server(conn, ctx%staged(i)%s, ctx%staged(i)%owned)
          if (eid < 0) then
+            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
             err = CAPNP_ERR_ALLOC
             return
          end if
          ctx%staged_eids(i) = eid
          cd%p = capnp_list_get_struct(ctab, i, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
+            return
+         end if
          call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
+            return
+         end if
       end do
    end subroutine flush_cap_table
 
@@ -1857,12 +2008,20 @@ contains
    subroutine drop_export(conn, eid, count)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid, count
+      integer :: left
       if (.not. conn%exports(eid)%used) return
-      conn%exports(eid)%refcount = conn%exports(eid)%refcount - count
+      left = conn%exports(eid)%refcount - count
+      ! A dispatch still on the stack owns one reference per entry.
+      if (left < conn%exports(eid)%dispatching) left = conn%exports(eid)%dispatching
+      conn%exports(eid)%refcount = left
       if (conn%exports(eid)%refcount <= 0) then
+         if (conn%exports(eid)%owned .and. associated(conn%exports(eid)%srv)) &
+            deallocate (conn%exports(eid)%srv)
          conn%exports(eid)%used = .false.
+         conn%exports(eid)%owned = .false.
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
+         conn%exports(eid)%dispatching = 0
       end if
    end subroutine drop_export
 

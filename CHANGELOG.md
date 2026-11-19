@@ -10,6 +10,16 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `rpc_ctx_export_cap` accepts `owned=.true.` for a server this vat
+  allocated. The export table frees that server when its refcount
+  reaches zero, and `rpc_conn_close` drops every export the peer will
+  not Release. A server is not freed while its `dispatch` is running;
+  the free runs once after that call returns.
+- A call whose results cap table cannot be flushed is answered with an
+  exception Return. The flush drops the exports it added and frees the
+  owned servers those exports introduced, and it frees owned servers
+  that stayed unexported. An export from before the flush keeps its
+  refcount.
 - Reader pointer lookups store one cached copy of each defaulted field on the schema.
   `capnp_dyn_getp`, `capnp_dyn_get_any_struct`, and `capnp_dyn_get_any_list` take
   the schema as inout because of that cache. A routine that only holds the schema
