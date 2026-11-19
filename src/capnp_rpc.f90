@@ -152,6 +152,7 @@ module capnp_rpc
       class(rpc_server_t), pointer :: inner => null()
       class(rpc_membrane_policy_t), pointer :: policy => null()
       logical :: reverse = .false.
+      logical :: owned = .false.
    contains
       procedure :: dispatch => membrane_dispatch
    end type rpc_membrane_server_t
@@ -309,11 +310,17 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: fd
       class(rpc_server_t), pointer, intent(in) :: bootstrap
+      if (associated(conn%transport)) call rpc_conn_close(conn)
       conn%fd = fd
       call rpc_fd_stream_init(conn%own_transport, fd, .true.)
       conn%transport => conn%own_transport
       conn%dead = .false.
+      if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
+      conn%own_vat = rpc_vat_t()
+      conn%introductions = rpc_introduction_t()
+      conn%joins = rpc_join_slot_t()
+      conn%next_qid = 0_int64
       ! Its own vat until told otherwise, which is what a two-party
       ! deployment wants.
       conn%vat => conn%own_vat
@@ -325,6 +332,7 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       class(rpc_byte_stream_t), intent(inout), target :: stream
       class(rpc_server_t), pointer, intent(in) :: bootstrap
+      if (associated(conn%transport)) call rpc_conn_close(conn)
       conn%fd = PX_BAD_FD
       select type (stream)
       type is (rpc_fd_stream_t)
@@ -332,7 +340,12 @@ contains
       end select
       conn%transport => stream
       conn%dead = .false.
+      if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
+      conn%own_vat = rpc_vat_t()
+      conn%introductions = rpc_introduction_t()
+      conn%joins = rpc_join_slot_t()
+      conn%next_qid = 0_int64
       conn%vat => conn%own_vat
    end subroutine rpc_conn_init_stream
 
@@ -348,6 +361,9 @@ contains
          if (conn%answers(i)%used) call capnp_message_free(conn%answers(i)%retmsg)
          call question_slot_clear(conn%questions(i))
          call answer_slot_clear(conn%answers(i))
+      end do
+      do i = 0, MAXE - 1
+         if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
       end do
    end subroutine rpc_conn_close
 
@@ -404,6 +420,7 @@ contains
       wrapper%inner => inner
       wrapper%policy => policy
       wrapper%reverse = .false.
+      wrapper%owned = .false.
       if (present(reverse)) wrapper%reverse = reverse
    end subroutine rpc_membrane_server_init
 
@@ -484,6 +501,7 @@ contains
       end select
       allocate (wrapper)
       call rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      wrapper%owned = .true.
       srv => wrapper
    end subroutine membrane_wrap_server_ref
 
@@ -1018,6 +1036,17 @@ contains
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(finish_t) :: f
+      integer :: q
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call capnp_message_init_builder(m, err)
       if (err /= CAPNP_OK) return
       msg = message_new_root(m, err)
@@ -1027,9 +1056,9 @@ contains
       call finish_require_early_cancellation_workaround_set(f, .false., err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
-      if (conn%questions(int(qid))%used) then
-         call capnp_message_free(conn%questions(int(qid))%retmsg)
-         call question_slot_clear(conn%questions(int(qid)))
+      if (conn%questions(q)%used) then
+         call capnp_message_free(conn%questions(q)%retmsg)
+         call question_slot_clear(conn%questions(q))
       end if
    end subroutine rpc_finish_send
 
@@ -1045,6 +1074,16 @@ contains
       type(message_t) :: msg
       type(finish_t) :: f
       integer :: q
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call capnp_message_init_builder(m, err)
       if (err /= CAPNP_OK) return
       msg = message_new_root(m, err)
@@ -1054,12 +1093,9 @@ contains
       call finish_require_early_cancellation_workaround_set(f, .false., err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
-      q = int(qid)
-      if (q >= 0 .and. q < MAXQ) then
-         if (conn%questions(q)%used) then
-            if (conn%questions(q)%returned) call capnp_message_free(conn%questions(q)%retmsg)
-            call question_slot_clear(conn%questions(q))
-         end if
+      if (conn%questions(q)%used) then
+         if (conn%questions(q)%returned) call capnp_message_free(conn%questions(q)%retmsg)
+         call question_slot_clear(conn%questions(q))
       end if
    end subroutine rpc_request_cancellation
 
@@ -1756,8 +1792,8 @@ contains
             conn%vat%provisions(i)%eid = eid
             conn%vat%provisions(i)%qid = qid
             conn%vat%provisions(i)%embargoed = .false.
-            ! The recipient holds a reference once it accepts.
-            conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+            ! The provision owns the server reference until it is accepted;
+            ! the recipient connection acquires its own export reference.
             call send_empty_answer(conn, qid, err)
             return
          end if
@@ -2253,12 +2289,23 @@ contains
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
       type(finish_t) :: f
+      integer(int64) :: qid
       integer :: q, i, eid
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
-      q = int(finish_question_id_get(f))
-      if (q < 0 .or. q >= MAXQ) return
-      if (.not. conn%answers(q)%used) return
+      qid = finish_question_id_get(f)
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      q = int(qid)
+      if (.not. conn%answers(q)%used) then
+         do i = 0, MAXJOINS - 1
+            if (.not. conn%joins(i)%used) cycle
+            if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
+               conn%joins(i) = rpc_join_slot_t()
+               return
+            end if
+         end do
+         return
+      end if
       if (finish_release_result_caps_get(f)) then
          do i = 0, conn%answers(q)%nexp - 1
             eid = conn%answers(q)%exports(i)
@@ -2288,6 +2335,10 @@ contains
       if (.not. conn%exports(eid)%used) return
       conn%exports(eid)%refcount = conn%exports(eid)%refcount - count
       if (conn%exports(eid)%refcount <= 0) then
+         select type (wrapper => conn%exports(eid)%srv)
+         type is (rpc_membrane_server_t)
+            if (wrapper%owned) deallocate (conn%exports(eid)%srv)
+         end select
          conn%exports(eid)%used = .false.
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
