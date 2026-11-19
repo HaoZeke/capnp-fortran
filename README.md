@@ -40,7 +40,8 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
 - RPC level 1: two-party vat over a POSIX socket transport
   (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
   promise pipelining, embargo echo (same-process fpm suite), and level 2
-  persistence hooks; bootstrap and pipelined/settled calls are also
+  `Persistent<SturdyRef, Owner>.save` calls; bootstrap and
+  pipelined/settled calls are also
   protocol-tested against a live capnp-C++ peer when that interop tier is built.
 - RPC level 4: `Join`, answering whether a set of capabilities names one
   object, per the two-party rules in `rpc-twoparty.capnp`.
@@ -66,7 +67,7 @@ and capnp-C++:
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
-| RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
+| RPC level 2 (`Persistent.save`) | no | partial | yes (`rpc_persistent_save_begin` / `_wait`, app-defined SturdyRef and Owner) |
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves, three-vat tested) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
@@ -77,6 +78,14 @@ and capnp-C++:
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
 over TCP and calls it, pipelined and settled.
+
+Level 2 follows `capnp/persistent.capnp`: `rpc_persistent_save_begin`
+sends `Persistent<AnyPointer, AnyPointer>.save`, including the optional
+`SaveParams.sealFor` owner, and `rpc_persistent_save_wait` returns
+`SaveResults.sturdyRef`. Both values are realm-defined. Capnp-C++ does
+not define a universal restoration protocol or token format, so
+restoring a SturdyRef remains an application service rather than an RPC
+runtime operation in both implementations.
 
 Level 3 is three-party introduction. `rpc.capnp` leaves `ProvisionId`,
 `RecipientId` and `ThirdPartyCapId` as `AnyPointer` for the network layer
