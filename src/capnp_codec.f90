@@ -27,6 +27,7 @@ module capnp_codec
    public :: capnp_codec_new_struct, capnp_codec_alloc_list, capnp_codec_elem_esize
    public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
    public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
+   public :: capnp_put_signed, capnp_put_unsigned
 
    interface
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
@@ -551,6 +552,104 @@ contains
       d = 0.0_real64
       if (dv%kind /= CAPNP_PK_NULL) d = value_f64(dv)
    end function capnp_def_f64
+
+   subroutine capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, iv, ix
+      integer, intent(in) :: tw
+      logical, intent(in) :: in_list
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      select case (tw)
+      case (TYPE_INT8)
+         if (iv < -128_int64 .or. iv > 127_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i8(p, ix, int(iv, int8), err)
+         else
+            call capnp_set_i8(p, off, int(iv, int8), err, default=capnp_def_i8(dv))
+         end if
+      case (TYPE_INT16)
+         if (iv < -32768_int64 .or. iv > 32767_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i16(p, ix, int(iv, int16), err)
+         else
+            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=capnp_def_i16(dv))
+         end if
+      case (TYPE_INT32)
+         if (iv < -2147483648_int64 .or. iv > 2147483647_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i32(p, ix, int(iv, int32), err)
+         else
+            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=capnp_def_i32(dv))
+         end if
+      case (TYPE_INT64)
+         if (in_list) then
+            call capnp_list_set_i64(p, ix, iv, err)
+         else
+            call capnp_set_i64(p, off*8_int64, iv, err, default=capnp_def_i64(dv))
+         end if
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine capnp_put_signed
+
+   subroutine capnp_put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, uv, ix
+      integer, intent(in) :: tw
+      logical, intent(in) :: in_list
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      select case (tw)
+      case (TYPE_UINT8)
+         if (uv < 0_int64 .or. uv > 255_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i8(p, ix, capnp_as_i8(int(uv)), err)
+         else
+            call capnp_set_u8(p, off, int(uv, int16), err, default=capnp_def_u8(dv))
+         end if
+      case (TYPE_UINT16)
+         if (uv < 0_int64 .or. uv > 65535_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i16(p, ix, capnp_as_i16(int(uv)), err)
+         else
+            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=capnp_def_u16(dv))
+         end if
+      case (TYPE_UINT32)
+         if (uv < 0_int64 .or. uv > 4294967295_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (in_list) then
+            call capnp_list_set_i32(p, ix, capnp_as_i32u(uv), err)
+         else
+            call capnp_set_u32(p, off*4_int64, uv, err, default=capnp_def_u32(dv))
+         end if
+      case (TYPE_UINT64)
+         if (in_list) then
+            call capnp_list_set_i64(p, ix, uv, err)
+         else
+            call capnp_set_i64(p, off*8_int64, uv, err, default=capnp_def_i64(dv))
+         end if
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine capnp_put_unsigned
 
    pure function capnp_as_i8(u) result(v)
       integer, intent(in) :: u
