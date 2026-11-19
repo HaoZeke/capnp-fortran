@@ -12,13 +12,15 @@ module capnp_dynamic
    private
 
    public :: capnp_dyn_schema_t
-   public :: capnp_dyn_load, capnp_dyn_free, capnp_dyn_find
+   public :: capnp_dyn_load, capnp_dyn_free, capnp_dyn_find, capnp_dyn_new_root
    public :: capnp_dyn_get_int, capnp_dyn_get_f64, capnp_dyn_get_bool
    public :: capnp_dyn_get_text, capnp_dyn_get_data, capnp_dyn_getp
    public :: capnp_dyn_set_int, capnp_dyn_set_bool, capnp_dyn_set_f64
    public :: capnp_dyn_set_text, capnp_dyn_set_data
    public :: capnp_dyn_setp, capnp_dyn_init_struct, capnp_dyn_init_list
-   public :: capnp_dyn_which, capnp_dyn_field_type
+   public :: capnp_dyn_get_capability, capnp_dyn_set_capability
+   public :: capnp_dyn_get_any_struct, capnp_dyn_get_any_list
+   public :: capnp_dyn_select, capnp_dyn_which, capnp_dyn_field_type
    public :: capnp_dyn_annotation_t, capnp_dyn_node_annotations
    public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
    public :: capnp_dyn_method_annotations
@@ -122,6 +124,23 @@ contains
       end do
    end function dyn_node_by_id
 
+   function capnp_dyn_new_root(schema, idx, msg, err) result(p)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: p
+      p = capnp_ptr_t()
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes) .or. &
+          node_which(schema%nodes(idx)) /= NODE_STRUCT) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      p = capnp_new_struct(msg, node_struct_data_words(schema%nodes(idx)), &
+                           node_struct_pointer_count(schema%nodes(idx)), err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, p, err)
+   end function capnp_dyn_new_root
+
    !> The named field's schema entry within struct node idx; searches
    !> group members through their group nodes is NOT done here -- name
    !> lookup is per-node, matching the C++ DynamicStruct behaviour of
@@ -151,6 +170,24 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end subroutine dyn_field
+
+   subroutine dyn_select_field(schema, idx, p, f, err)
+      use capnp_union, only: capnp_set_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f
+      integer, intent(out) :: err
+      integer :: disc
+      err = CAPNP_OK
+      if (field_which(f) == FIELD_GROUP) return
+      disc = field_discriminant(f)
+      if (disc == NO_DISCRIMINANT) return
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, err)
+   end subroutine dyn_select_field
 
    subroutine dyn_annotations(list, annotations, err)
       type(capnp_ptr_t), intent(in) :: list
@@ -320,6 +357,8 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
@@ -526,6 +565,21 @@ contains
       tag = capnp_which(p, int(disc_off))
    end function capnp_dyn_which
 
+   !> Select a union member by its field name before initializing or assigning
+   !> its value. The supplied node must be the struct or named-union group
+   !> that owns the discriminant.
+   subroutine capnp_dyn_select(schema, idx, p, fname, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_select_field(schema, idx, p, f, err)
+   end subroutine capnp_dyn_select
+
    subroutine capnp_dyn_set_int(schema, idx, p, fname, v, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -580,6 +634,8 @@ contains
       end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_bool(p, field_slot_offset(f), v, err, default=value_bool(dv))
    end subroutine capnp_dyn_set_bool
 
@@ -597,6 +653,8 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
@@ -625,6 +683,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(p, int(field_slot_offset(f)), s, err)
    end subroutine capnp_dyn_set_text
 
@@ -644,6 +704,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_data(p, int(field_slot_offset(f)), bytes, err)
    end subroutine capnp_dyn_set_data
 
@@ -659,12 +721,97 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
+            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+         if ((type_which(t) == TYPE_STRUCT .or. type_which(t) == TYPE_ANY_STRUCT) .and. &
+             value%kind /= CAPNP_PK_STRUCT .and. value%kind /= CAPNP_PK_NULL) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         if ((type_which(t) == TYPE_LIST .or. type_which(t) == TYPE_ANY_LIST) .and. &
+             value%kind /= CAPNP_PK_LIST .and. value%kind /= CAPNP_PK_NULL) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         if ((type_which(t) == TYPE_INTERFACE .or. type_which(t) == TYPE_CAPABILITY) .and. &
+             value%kind /= CAPNP_PK_CAP .and. value%kind /= CAPNP_PK_NULL) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         call dyn_select_field(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
          call capnp_setp(p, int(field_slot_offset(f)), value, err)
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine capnp_dyn_setp
+
+   function capnp_dyn_get_capability(schema, idx, p, fname, err) result(capidx)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer, intent(out) :: err
+      integer(int64) :: capidx
+      type(capnp_ptr_t) :: value, f, t
+      capidx = 0_int64
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      if (type_which(t) /= TYPE_INTERFACE .and. type_which(t) /= TYPE_CAPABILITY .and. &
+          type_which(t) /= TYPE_ANY_POINTER) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      value = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
+      if (value%kind == CAPNP_PK_NULL) return
+      if (value%kind /= CAPNP_PK_CAP) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      capidx = value%capidx
+   end function capnp_dyn_get_capability
+
+   subroutine capnp_dyn_set_capability(schema, idx, p, fname, capidx, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer(int64), intent(in) :: capidx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: value
+      value = capnp_ptr_t()
+      if (associated(p%msg)) value%msg => p%msg
+      value%kind = CAPNP_PK_CAP
+      value%capidx = capidx
+      call capnp_dyn_setp(schema, idx, p, fname, value, err)
+   end subroutine capnp_dyn_set_capability
+
+   function capnp_dyn_get_any_struct(schema, idx, p, fname, err) result(value)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: value
+      value = capnp_dyn_getp(schema, idx, p, fname, err)
+      if (err /= CAPNP_OK .or. value%kind == CAPNP_PK_NULL) return
+      if (value%kind /= CAPNP_PK_STRUCT) err = CAPNP_ERR_KIND
+   end function capnp_dyn_get_any_struct
+
+   function capnp_dyn_get_any_list(schema, idx, p, fname, err) result(value)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: value
+      value = capnp_dyn_getp(schema, idx, p, fname, err)
+      if (err /= CAPNP_OK .or. value%kind == CAPNP_PK_NULL) return
+      if (value%kind /= CAPNP_PK_LIST) err = CAPNP_ERR_KIND
+   end function capnp_dyn_get_any_list
 
    function capnp_dyn_init_struct(schema, idx, p, fname, err) result(value)
       type(capnp_dyn_schema_t), intent(in) :: schema

@@ -38,8 +38,8 @@ contains
 
    subroutine run_dynamic(error)
       type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema, kschema, dschema
-      type(capnp_message_t), target :: msg, bmsg, kmsg, dmsg
+      type(capnp_dyn_schema_t), target :: schema, kschema, dschema, aschema
+      type(capnp_message_t), target :: msg, bmsg, kmsg, dmsg, amsg
       type(capnp_ptr_t) :: root, people, person, phones, phone, q
       type(capnp_dyn_annotation_t), allocatable :: annotations(:)
       type(sink_t) :: sink
@@ -47,7 +47,7 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
@@ -218,13 +218,47 @@ contains
       tag = capnp_dyn_which(dschema, dual_idx, dual%p, err, group='secondary')
       call check_(error, err == CAPNP_OK .and. tag == 0, 'dyn: secondary group which is 0 (voidB)')
 
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      call check_(error, err == CAPNP_OK, 'dyn: dynamic cgr reads')
+      call capnp_dyn_load(aschema, bytes, err)
+      dynamic_idx = capnp_dyn_find(aschema, 'Dynamic', err)
+      choice_idx = capnp_dyn_find(aschema, 'Dynamic.choice', err)
+      call check_(error, err == CAPNP_OK .and. dynamic_idx > 0 .and. choice_idx > 0, &
+                  'dyn: Dynamic and Choice nodes found')
+      call capnp_message_init_builder(amsg, err)
+      q = capnp_dyn_new_root(aschema, dynamic_idx, amsg, err)
+      call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 41_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_capability(aschema, dynamic_idx, q, 'capability', err) == 41_int64, &
+                  'dyn: capability index round trip')
+      people = capnp_new_struct(amsg, 0, 0, err)
+      call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyStruct', people, err)
+      people = capnp_dyn_get_any_struct(aschema, dynamic_idx, q, 'anyStruct', err)
+      call check_(error, err == CAPNP_OK .and. people%kind == CAPNP_PK_STRUCT, 'dyn: AnyStruct')
+      people = capnp_new_list(amsg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyList', people, err)
+      people = capnp_dyn_get_any_list(aschema, dynamic_idx, q, 'anyList', err)
+      call check_(error, err == CAPNP_OK .and. people%kind == CAPNP_PK_LIST, 'dyn: AnyList')
+      people = capnp_dyn_getp(aschema, dynamic_idx, q, 'choice', err)
+      call capnp_dyn_set_int(aschema, choice_idx, people, 'number', 73_int64, err)
+      call check_(error, err == CAPNP_OK, 'dyn: integer union setter runs')
+      tag = capnp_dyn_which(aschema, choice_idx, people, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0, 'dyn: integer setter selects union')
+      call capnp_dyn_select(aschema, choice_idx, people, 'label', err)
+      call capnp_dyn_set_text(aschema, choice_idx, people, 'label', 'selected', err)
+      call capnp_dyn_get_text(aschema, choice_idx, people, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'selected' .and. &
+                  capnp_dyn_which(aschema, choice_idx, people, err) == 1, 'dyn: select and text union')
+
       call capnp_message_free(msg)
       call capnp_message_free(bmsg)
       call capnp_message_free(kmsg)
       call capnp_message_free(dmsg)
+      call capnp_message_free(amsg)
       call capnp_dyn_free(schema)
       call capnp_dyn_free(kschema)
       call capnp_dyn_free(dschema)
+      call capnp_dyn_free(aschema)
    end subroutine run_dynamic
 
 end module test_dynamic
