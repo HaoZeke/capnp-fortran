@@ -608,7 +608,32 @@ contains
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
+      if (err /= CAPNP_OK) return
+      ! The default object lives in the schema message. Handing that
+      ! pointer back would let a write change every later default.
+      call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
    end function capnp_dyn_getp
+
+   !> Copy a schema default into the caller's builder and, when the slot
+   !> exists, store that copy in the field.
+   subroutine dyn_copy_default(host, slot, q, err)
+      type(capnp_ptr_t), intent(in) :: host
+      integer, intent(in) :: slot
+      type(capnp_ptr_t), intent(inout) :: q
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: copied
+      err = CAPNP_OK
+      if (q%kind == CAPNP_PK_NULL) return
+      if (.not. associated(host%msg) .or. .not. associated(q%msg)) return
+      if (associated(q%msg, host%msg)) return
+      if (.not. host%msg%is_builder) return
+      copied = capnp_copy(host%msg, q, err)
+      if (err /= CAPNP_OK) return
+      q = copied
+      if (host%kind == CAPNP_PK_STRUCT .and. slot >= 0 .and. slot < host%pwords) then
+         call capnp_setp(host, slot, q, err)
+      end if
+   end subroutine dyn_copy_default
 
    !> Union discriminant of struct node idx read from p.
    !>
