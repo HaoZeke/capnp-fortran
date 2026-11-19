@@ -60,13 +60,14 @@ module capnp_json
 
 contains
 
-   subroutine capnp_json_encode(schema, idx, p, text, err, pretty)
+   subroutine capnp_json_encode(schema, idx, p, text, err, pretty, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      type(capnp_brand_env_t), intent(in), optional :: brand_env
       type(capnp_brand_env_t) :: env
       type(disc_opts_t) :: no_disc
       type(jval) :: root
@@ -83,6 +84,7 @@ contains
       end if
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
+      if (present(brand_env)) env = brand_env
       call build_struct(schema, idx, p, env, no_disc, 0, root, err)
       if (err /= CAPNP_OK) return
       call emit_jval(root, 0, .false., do_pretty, text, multi)
