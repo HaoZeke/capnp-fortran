@@ -111,6 +111,7 @@ contains
       if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
       if (.not. allocated(error)) call t_request_cancellation(error)
+      if (.not. allocated(error)) call t_cancel_reserves_qid(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
 
@@ -838,8 +839,9 @@ contains
                   'cancel: result caps released')
       call check_(error, .not. finish_require_early_cancellation_workaround_get(finish), &
                   'cancel: modern cancellation semantics')
-      call check_(error, .not. cli%questions(int(qid))%used, &
-                  'cancel: local question released')
+      call check_(error, cli%questions(int(qid))%used .and. &
+                  cli%questions(int(qid))%canceled, &
+                  'cancel: question reserved until its return')
       call capnp_message_free(wire)
 
       call rpc_finish_send(cli, -1_int64, .false., err)
@@ -847,6 +849,74 @@ contains
       call rpc_request_cancellation(cli, -1_int64, err)
       call check_(error, err == CAPNP_ERR_BOUNDS, 'cancel: invalid cancellation id rejected')
    end subroutine t_request_cancellation
+
+   !> A canceled question keeps its id until the late Return arrives, so
+   !> that Return cannot become the result of the next call.
+   subroutine t_cancel_reserves_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qboot, q1, q2
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'cancel id: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'cancel id: bootstrap')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q1, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'a', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_request_cancellation(cconn, q1, e)
+      call check_(error, e == CAPNP_OK .and. cconn%questions(int(q1))%canceled, &
+                  'cancel id: first call reserved')
+      call rpc_wait(cconn, q1, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, 'cancel id: wait does not block')
+      call rpc_wait(cconn, -1_int64, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'cancel id: wait rejects a negative id')
+      call rpc_wait(cconn, 64_int64, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'cancel id: wait rejects an out of range id')
+
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q2, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 7_int64, e)
+      call capnp_set_text(s, 0, 'b', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call check_(error, q2 /= q1, 'cancel id: new call does not reuse the id')
+      if (allocated(error)) return
+
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q2, e)
+      call rpc_result_content(cconn, q2, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 14_int64, &
+                  'cancel id: late return is not the new result')
+      call check_(error, .not. cconn%questions(int(q1))%used, &
+                  'cancel id: return releases the reserved id')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_cancel_reserves_qid
 
    !> A membrane checks calls, recursively wraps result capabilities,
    !> blocks client-side calls through an explicit wrapper, and revokes

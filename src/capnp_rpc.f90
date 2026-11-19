@@ -185,6 +185,9 @@ module capnp_rpc
    type :: rpc_question_slot_t
       logical :: used = .false.
       logical :: returned = .false.
+      !> Finish arrived before Return. The id stays reserved so a later
+      !> call cannot observe this question's Return.
+      logical :: canceled = .false.
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -578,6 +581,7 @@ contains
          if (.not. conn%questions(k)%used) then
             conn%questions(k)%used = .true.
             conn%questions(k)%returned = .false.
+            conn%questions(k)%canceled = .false.
             conn%questions(k)%membrane => null()
             conn%questions(k)%membrane_reverse = .false.
             conn%next_qid = int(k + 1, int64)
@@ -965,13 +969,30 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
+      integer :: q
       err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      ! Cancellation already told the caller there will be no result.
+      ! Waiting here would block until a Return the caller discarded.
+      if (conn%questions(q)%canceled) then
+         conn%abort_reason = 'call canceled'
+         err = RPC_ERR_EXCEPTION
+         return
+      end if
       do
          if (conn%dead) then
             err = RPC_ERR_DEAD
             return
          end if
-         if (conn%questions(int(qid))%returned) exit
+         if (conn%questions(q)%returned) exit
          call rpc_pump_once(conn, err)
          if (err /= CAPNP_OK) return
       end do
@@ -1152,9 +1173,15 @@ contains
       call finish_require_early_cancellation_workaround_set(f, .false., err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
-      if (conn%questions(q)%used) then
-         if (conn%questions(q)%returned) call capnp_message_free(conn%questions(q)%retmsg)
+      if (err /= CAPNP_OK) return
+      if (.not. conn%questions(q)%used) return
+      if (conn%questions(q)%returned) then
+         call capnp_message_free(conn%questions(q)%retmsg)
          call question_slot_clear(conn%questions(q))
+      else
+         ! Reserve the id until the matching Return arrives. Reusing it
+         ! earlier delivers that Return to whatever call takes the id.
+         conn%questions(q)%canceled = .true.
       end if
    end subroutine rpc_request_cancellation
 
@@ -1170,6 +1197,7 @@ contains
       type(rpc_question_slot_t), intent(inout) :: slot
       slot%used = .false.
       slot%returned = .false.
+      slot%canceled = .false.
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -2336,10 +2364,14 @@ contains
          return
       end if
       ! A Return racing with a Finish for a canceled question is legal.
-      ! The Finish ended our interest in the answer, so absorb it.
-      if (.not. conn%questions(q)%used) then
+      ! The id was kept reserved so it could not be reused; the Return
+      ! ends that reservation and is not delivered to a later call.
+      if (.not. conn%questions(q)%used .or. conn%questions(q)%canceled) then
          err = CAPNP_OK
          call capnp_message_free(m)
+         if (q >= 0 .and. q < MAXQ) then
+            if (conn%questions(q)%used) call question_slot_clear(conn%questions(q))
+         end if
          return
       end if
       ! Own the Return bytes in the question slot.
