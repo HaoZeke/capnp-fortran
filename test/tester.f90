@@ -83,7 +83,10 @@ program tester
          if (allocated(test_name)) then
             write (error_unit, fmt) "Suite:", testsuites(is)%name
             call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
-            if (stat < 0) error stop 1
+            if (stat < 0) then
+               call release_runner()
+               error stop 1
+            end if
          else
             write (error_unit, fmt) "Testing:", testsuites(is)%name
             call run_testsuite(testsuites(is)%collect, error_unit, stat)
@@ -93,7 +96,7 @@ program tester
          do is = 1, size(testsuites)
             write (error_unit, fmt) "-", testsuites(is)%name
          end do
-         if (allocated(testsuites)) deallocate (testsuites)
+         call release_runner()
          error stop 1
       end if
    else
@@ -105,8 +108,14 @@ program tester
 
    if (stat > 0) then
       write (error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
-      if (allocated(testsuites)) deallocate (testsuites)
+      call release_runner()
       error stop 1
    end if
-   if (allocated(testsuites)) deallocate (testsuites)
+   call release_runner()
+contains
+   subroutine release_runner()
+      if (allocated(testsuites)) deallocate (testsuites)
+      if (allocated(suite_name)) deallocate (suite_name)
+      if (allocated(test_name)) deallocate (test_name)
+   end subroutine release_runner
 end program tester

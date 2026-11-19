@@ -1,6 +1,0 @@
-# Unittest-owned objects. Match the allocating frame, not the program
-# name: every stack passes through the tester program.
-leak:__testdrive_MOD
-leak:collect_
-leak:echo_dispatch
-leak:tester.f90
