@@ -43,7 +43,8 @@ contains
                    new_unittest("dynamic-reader-default", run_reader_default), &
                    new_unittest("dynamic-unset-which", run_unset_which), &
                    new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer), &
-                   new_unittest("dynamic-default-arena", run_default_arena)]
+                   new_unittest("dynamic-default-arena", run_default_arena), &
+                   new_unittest("dynamic-schema-inout", run_schema_inout)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1035,5 +1036,37 @@ contains
       call capnp_message_free(reader)
       call capnp_dyn_free(schema)
    end subroutine run_default_arena
+
+   !> The inout schema on reader lookups is stated where callers look.
+   subroutine run_schema_inout(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sentence = &
+         'Reader pointer lookups store one cached copy of each defaulted field on the schema'
+      call check_(error, file_has('src/capnp_dynamic.f90', sentence), &
+                  'inout: source states the cache')
+      call check_(error, file_has('CHANGELOG.md', sentence), &
+                  'inout: changelog states the cache')
+      call check_(error, file_has('docs/reference.md', sentence), &
+                  'inout: reference states the cache')
+   end subroutine run_schema_inout
+
+   function file_has(path, needle) result(found)
+      character(len=*), intent(in) :: path, needle
+      logical :: found
+      integer :: u, ios
+      character(len=512) :: line
+      found = .false.
+      open (newunit=u, file=path, status='old', action='read', iostat=ios)
+      if (ios /= 0) return
+      do
+         read (u, '(A)', iostat=ios) line
+         if (ios /= 0) exit
+         if (index(line, needle) > 0) then
+            found = .true.
+            exit
+         end if
+      end do
+      close (u)
+   end function file_has
 
 end module test_dynamic

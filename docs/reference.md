@@ -215,6 +215,17 @@ whole set at once. The obsolete save/delete messages get
 surface (socketpair, TCP listen/accept/connect, poll) as pure
 `iso_c_binding` interfaces into libc.
 
+## Dynamic schema (`capnp_dynamic`)
+
+Load a compiled schema (`capnp compile -o-`) with `capnp_dyn_load` and
+read or write fields by name.
+Reader pointer lookups store one cached copy of each defaulted field on the schema.
+`capnp_dyn_getp`,
+`capnp_dyn_get_any_struct`, and `capnp_dyn_get_any_list` therefore take the
+schema as `intent(inout)`. A routine that only holds the schema as
+`intent(in)` cannot call them. Builders still copy a default into the
+caller's own message. Writes through a reader handle are refused.
+
 ## Code generator (`capnpc-fortran`)
 
 Run as a `capnp` plugin: `capnp compile -o <path-to-capnpc-fortran>
