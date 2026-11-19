@@ -92,6 +92,10 @@ module capnp_rpc
    integer, parameter :: RPC_ERR_DEAD = 101
 
    integer, parameter :: MAXQ = 64   ! outstanding questions/answers
+   !> Question ids with this bit set are pipeline-only hints. A Return
+   !> for one is ignored, matching ExportTable::isHigh in rpc.c++.
+   integer(int64), parameter :: QID_HIGH_BIT = 2147483648_int64
+   integer, parameter :: HIBUCKETS = 64 ! overflow-answer hash buckets
    integer, parameter :: MAXE = 64   ! live exports
    integer, parameter :: MAXOPS = 8  ! pipeline ops per capability
    integer, parameter :: MAXCAPS = 16 ! caps per payload
@@ -101,6 +105,13 @@ module capnp_rpc
    integer, parameter :: MAXHOST = 64
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
    integer, parameter :: MAXJOINPARTS = 16  ! capabilities per join
+   integer, parameter :: IMP_ABSENT = 0
+   integer, parameter :: IMP_HOSTED = 1
+   integer, parameter :: IMP_PROMISE = 2
+   integer, parameter :: IMP_REMOTE = 3
+   integer, parameter :: IMP_LOCAL = 4
+   integer, parameter :: IMP_EMBARGO = 5
+   integer, parameter :: IMP_BROKEN = 6
 
    !> Policy shared by every wrapper belonging to one membrane. Reusing
    !> the same object gives all wrapped capabilities one revocation
@@ -210,6 +221,10 @@ module capnp_rpc
       !> Finish arrived before Return. The id stays reserved so a later
       !> call cannot observe this question's Return.
       logical :: canceled = .false.
+      !> The Call asked for sendResultsTo.yourself.
+      logical :: tail_call = .false.
+      !> The call was delivered to a local capability, not sent on the wire.
+      logical :: local_call = .false.
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -218,10 +233,65 @@ module capnp_rpc
    type :: rpc_answer_slot_t
       logical :: used = .false.
       logical :: has_results = .false.
+      !> Set only for a sendResultsTo.yourself call whose results are
+      !> held for a later takeFromOtherQuestion.
+      logical :: redirected = .false.
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
       integer :: exports(0:MAXCAPS - 1) = -1
    end type rpc_answer_slot_t
+
+   !> One inbound answer whose question id does not fit in `answers`.
+   !> The node stays until Finish so a capability in the results can
+   !> still be called. Nodes hang off a hash bucket, the same shape as
+   !> the high-id map in C++ ImportTable, so a lookup does not walk
+   !> every overflow answer.
+   type :: rpc_hi_node_t
+      integer(int64) :: qid = -1_int64
+      type(rpc_answer_slot_t) :: slot
+      type(rpc_hi_node_t), pointer :: next => null()
+   end type rpc_hi_node_t
+
+   !> One hash bucket. A pointer component cannot be an explicit-shape
+   !> array, so the head lives in a scalar wrapper.
+   type :: rpc_hi_head_t
+      type(rpc_hi_node_t), pointer :: head => null()
+   end type rpc_hi_head_t
+
+   !> One import id this connection has been shown.
+   !>
+   !> A senderPromise stays unresolved until Resolve. A later call on
+   !> that id follows a remote resolution. A resolution back to a
+   !> capability this vat hosts, after a call on the promise, issues an
+   !> embargo id and waits for receiverLoopback.
+   type :: rpc_import_node_t
+      integer(int64) :: id = -1_int64
+      integer :: state = IMP_ABSENT
+      logical :: received_call = .false.
+      integer(int64) :: resolved_id = -1_int64
+      integer(int64) :: embargo_id = -1_int64
+      !> Remote references this vat still owes a Release for.
+      integer :: refs = 0
+      logical :: released = .false.
+      character(len=:), allocatable :: reason
+      type(rpc_import_node_t), pointer :: next => null()
+   end type rpc_import_node_t
+
+   !> A call held until an embargo lifts, then delivered locally.
+   type :: rpc_queued_call_t
+      type(capnp_message_t) :: msg
+      integer(int64) :: qid = -1_int64
+      type(rpc_queued_call_t), pointer :: next => null()
+   end type rpc_queued_call_t
+
+   !> An embargo id this vat has sent in Disembargo.senderLoopback.
+   type :: rpc_embargo_node_t
+      integer(int64) :: id = -1_int64
+      integer(int64) :: promise_id = -1_int64
+      logical :: open = .false.
+      type(rpc_queued_call_t), pointer :: queued => null()
+      type(rpc_embargo_node_t), pointer :: next => null()
+   end type rpc_embargo_node_t
 
    !> A capability promised to a third vat (level 3), awaiting its Accept.
    !>
@@ -327,6 +397,16 @@ module capnp_rpc
       type(rpc_export_slot_t) :: exports(0:MAXE - 1)
       type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
+      !> Inbound answers with question ids at or above MAXQ, hashed.
+      !> The bucket count is fixed. The node count is not: C++ 1.4.0
+      !> stores the same answers in an unbounded hash map.
+      type(rpc_hi_head_t) :: hi_buckets(0:HIBUCKETS - 1)
+      !> Imports named by cap descriptors in Returns we have accepted.
+      type(rpc_import_node_t), pointer :: imports => null()
+      !> Embargo ids issued by a reflected Resolve. receiverLoopback is
+      !> accepted only for an id on this list.
+      type(rpc_embargo_node_t), pointer :: embargoes => null()
+      integer(int64) :: next_embargo = 0_int64
       !> Shared with this vat's other connections when one is attached;
       !> otherwise `own_vat` below.
       type(rpc_vat_t), pointer :: vat => null()
@@ -361,6 +441,7 @@ contains
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
+      conn%next_embargo = 0_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
       ! Its own vat until told otherwise, which is what a two-party
@@ -388,6 +469,7 @@ contains
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
+      conn%next_embargo = 0_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
       conn%vat => conn%own_vat
