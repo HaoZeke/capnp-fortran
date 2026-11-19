@@ -2631,6 +2631,14 @@ contains
 
    !> A dial hook can refuse an introduction, and a timeout returns
    !> instead of blocking. The default hook still reaches a local listener.
+   subroutine allow_any_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = .true.
+      if (port < 0 .and. len(host) < 0) allow = .false.
+   end subroutine allow_any_dial
+
    subroutine t_dial_guard(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: holder, introduced
@@ -2664,9 +2672,18 @@ contains
       call px_close(acc)
       call rpc_conn_close(introduced)
 
+      holder%introductions(0)%host = '127.0.0.1'
+      holder%introductions(0)%port = port
+      holder%dial_allow => null()
+      call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
+      call check_(error, e == CAPNP_ERR_ARG, 'dial: no hook is a refusal')
+      call px_poll_in(lfd, 100, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'dial: no hook does not connect')
+
       holder%introductions(0)%host = '192.0.2.1'
       holder%introductions(0)%port = 81
-      holder%dial_allow => null()
+      holder%dial_allow => allow_any_dial
       holder%dial_timeout_ms = 300
       call rpc_introduction_dial(holder, 55_int64, introduced, boot, e)
       call check_(error, e /= CAPNP_OK, 'dial: timeout or refusal returns')

@@ -201,6 +201,7 @@ contains
       ! address in ThirdPartyCapId, then Bob accepts it as another
       ! connection belonging to the same vat.
       boot => null()
+      carol_to_alice%dial_allow => allow_local_dial
       call rpc_introduction_dial(carol_to_alice, NONCE, carol_to_bob, boot, err)
       call check_(error, err == CAPNP_OK, 'handoff: introduction dialed')
       call px_tcp_accept(listen_fd, bc, err)
@@ -396,5 +397,12 @@ contains
       call rpc_conn_close(carol)
       call rpc_conn_close(bob_carol)
    end subroutine run_membrane_handoff
+
+   subroutine allow_local_dial(host, port, allow)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      logical, intent(out) :: allow
+      allow = host == '127.0.0.1' .and. port > 0
+   end subroutine allow_local_dial
 
 end module test_rpc_handoff

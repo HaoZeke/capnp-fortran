@@ -196,7 +196,7 @@ module capnp_rpc
       end subroutine rpc_membrane_check_ifc
 
       !> Return allow=.false. to refuse a third-party dial. A null hook
-      !> allows every recorded introduction.
+      !> denies every recorded introduction.
       subroutine rpc_dial_allow_ifc(host, port, allow)
          character(len=*), intent(in) :: host
          integer, intent(in) :: port
@@ -414,7 +414,7 @@ module capnp_rpc
       type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
-      !> Null allows every dial. Otherwise the hook is asked before connect.
+      !> Null denies every dial. A hook must allow the host before connect.
       procedure(rpc_dial_allow_ifc), pointer, nopass :: dial_allow => null()
       !> Connect timeout for an introduction dial, in milliseconds.
       integer :: dial_timeout_ms = 10000
@@ -2201,7 +2201,7 @@ contains
       do i = 0, MAXINTRO - 1
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
-         allow = .true.
+         allow = .false.
          if (associated(conn%dial_allow)) then
             call conn%dial_allow( &
                conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
