@@ -124,6 +124,15 @@ capability. The receiver groups incoming parts by joinId and compares
 local export identity only after the set is complete. Capnp-C++ 1.4.0
 does not handle Join and replies ``Message.unimplemented``, so this
 feature has same-language wire tests but no live C++ peer test.
+
+``rpc_request_cancellation`` abandons an outstanding question by sending
+Finish with ``requireEarlyCancellationWorkaround = false``. This is the
+behavior of Cap'n Proto 1.0 and newer. ``rpc_stream_cancel`` sends the
+same request for every call still in a stream window. Cancellation is
+cooperative after application delivery: methods that do not opt in may
+continue to completion, matching capnp-C++ ``allowCancellation``. The
+live C++ interop test cancels an opted-in never-ending method and then
+checks that the C++ promise was dropped.
 #+end_export
 
 * Procedure reference
@@ -140,6 +149,8 @@ feature has same-language wire tests but no live C++ peer test.
 | ~rpc_introduction_dial~ | ~(conn, nonce, introduced, bootstrap, err)~                           | dial a pending three-party VatId                      |
 | ~rpc_join_send~         | ~(conn, caps, join_id, qids, err)~                                    | send a complete two-party Join set                    |
 | ~rpc_join_wait~         | ~(conn, qids, joined, succeeded, err)~                                | collect and settle the Join result                    |
+| ~rpc_request_cancellation~ | ~(conn, qid, err)~                                                | abandon a question with modern Finish semantics       |
+| ~rpc_stream_cancel~     | ~(conn, stream, err)~                                                | cancel all outstanding calls in a stream window       |
 | ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |

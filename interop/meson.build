@@ -38,6 +38,7 @@ else
   bash = find_program('bash', required: rpc_required)
 
   if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+    capnp_include = capnp_rpc_dep.get_variable(pkgconfig: 'includedir')
     adder_gen = custom_target(
       'adder-capnp-cpp',
       input: '../schema/adder.capnp',
@@ -45,6 +46,7 @@ else
       command: [
         capnp_tool, 'compile',
         '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-I' + capnp_include,
         '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
         '@INPUT@',
       ],
