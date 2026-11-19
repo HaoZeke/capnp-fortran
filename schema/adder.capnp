@@ -3,6 +3,10 @@
 # called by the Fortran vat (interop/rpc_client.f90). The explicit interface id
 # is mirrored as ADDER_IFACE in the Fortran client.
 
+using Cxx = import "/capnp/c++.capnp";
+
 interface Adder @0xea01e10cbc414411 {
   add @0 (a :Int64, b :Int64) -> (sum :Int64);
+  waitForever @1 () -> () $Cxx.allowCancellation;
+  cancellationCount @2 () -> (count :UInt32);
 }
