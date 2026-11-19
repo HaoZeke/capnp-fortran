@@ -26,6 +26,7 @@ contains
          new_unittest("canonical-release", run_canonical_release), &
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
+         new_unittest("json-surrogate", run_json_surrogate), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
@@ -386,6 +387,63 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_json_void_missing
 
+   subroutine run_json_surrogate(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: text
+      integer :: err, idx
+      integer, allocatable :: got(:)
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, idx > 0, 'surrogate: Sample')
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD83D\uDE00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: pair decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: title')
+      got = codes(text)
+      call check_(error, size(got) == 4 .and. all(got == [240, 159, 152, 128]), &
+                  'surrogate: grinning face is one scalar')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD83D"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: lone high decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 160, 189]), &
+                  'surrogate: lone high is WTF-8')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uDE00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: lone low decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 184, 128]), &
+                  'surrogate: lone low is WTF-8')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD800\uD800\uDC00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: high high low decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 7 .and. &
+                  all(got == [237, 160, 128, 240, 144, 128, 128]), &
+                  'surrogate: only the adjacent pair is combined')
+      call capnp_message_free(decoded)
+      call match_capnp_json(error, schema, idx, '{"display_name":"\uD83D"}', &
+                            'surrogate: lone high matches capnp')
+      call match_capnp_json(error, schema, idx, '{"display_name":"\u00e9"}', &
+                            'surrogate: bmp escape matches capnp')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_surrogate
+
    subroutine run_text_leniency(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -596,6 +654,61 @@ contains
          v = int(x, int8)
       end if
    end function i8_of
+
+   function codes(s) result(b)
+      character(len=*), intent(in) :: s
+      integer, allocatable :: b(:)
+      integer :: i
+      allocate (b(len(s)))
+      do i = 1, len(s)
+         b(i) = iachar(s(i:i))
+      end do
+   end function codes
+
+   subroutine load_codec(error, schema)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(out) :: schema
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (allocated(error)) return
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
+         call test_failed(error, 'capnp compile codec schema')
+         return
+      end if
+      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      if (err /= CAPNP_OK) call test_failed(error, 'load codec schema')
+   end subroutine load_codec
+
+   subroutine match_capnp_json(error, schema, idx, js, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, label
+      type(capnp_message_t), target :: decoded
+      integer(int8), allocatable :: ours(:), ref(:)
+      integer :: err
+      if (allocated(error)) return
+      call spit(tmp//'/one.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
+         //tmp//'/one.json > '//tmp//'/one.can')) then
+         call test_failed(error, label//': capnp')
+         return
+      end if
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_OK, label//': decode')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/one.can', ref, err)
+      call check_(error, err == CAPNP_OK .and. allocated(ours) .and. allocated(ref) .and. &
+                  size(ours) == size(ref) .and. all(ours == ref), label)
+      call capnp_message_free(decoded)
+   end subroutine match_capnp_json
 
    function clash_schema() result(s)
       character(len=:), allocatable :: s
