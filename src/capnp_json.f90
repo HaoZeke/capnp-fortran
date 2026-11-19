@@ -17,10 +17,10 @@
 !> any payload. A non-string
 !> discriminator is rejected. NaN and infinities are the strings
 !> "NaN", "Infinity", and "-Infinity". A high surrogate followed by
-!> a low surrogate is one scalar, and an unquoted integer past 2^53
-!> keeps its exact value. These two reads differ from capnp 1.4.0
-!> only by adding precision or correctness, and both accept every
-!> input that version accepts.
+!> a low surrogate is one scalar. capnp 1.4.0 stores the two surrogate
+!> bytes. An unquoted integer past 2^53 keeps every digit. capnp 1.4.0
+!> rounds through a double and rejects an integer that does not fit in
+!> one, including 9223372036854775807, which this decoder accepts.
 module capnp_json
    use capnp
    use capnp_schema
@@ -241,7 +241,7 @@ contains
       integer :: i, nf, active, fd, gidx, sidx
       logical :: show, is_flat
       err = CAPNP_OK
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -584,7 +584,7 @@ contains
       integer :: n
       err = CAPNP_OK
       jv%k = JK_ARR
-      if (depth > MAX_DEPTH) then
+      if (depth > depth_cap(lst)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -1609,23 +1609,18 @@ contains
       integer(int8), allocatable :: raw(:)
       integer :: stat
       err = CAPNP_OK
-      if (mode == 1) then
-         if (jv%k == JK_NULL) then
-            allocate (raw(0), stat=stat)
-            if (stat /= 0) err = CAPNP_ERR_ALLOC
-         else if (jv%k /= JK_STR) then
+      if (mode == 1 .or. mode == 2) then
+         ! A null, boolean, or number has no string arm. capnp 1.4.0
+         ! then decodes an empty byte string. An array or object is an
+         ! error.
+         if (jv%k == JK_ARR .or. jv%k == JK_OBJ) then
             err = CAPNP_ERR_ARG
             return
-         else
+         else if (jv%k /= JK_STR) then
+            allocate (raw(0), stat=stat)
+            if (stat /= 0) err = CAPNP_ERR_ALLOC
+         else if (mode == 1) then
             call b64_decode(jv%str, raw, err)
-         end if
-      else if (mode == 2) then
-         if (jv%k == JK_NULL) then
-            allocate (raw(0), stat=stat)
-            if (stat /= 0) err = CAPNP_ERR_ALLOC
-         else if (jv%k /= JK_STR) then
-            err = CAPNP_ERR_ARG
-            return
          else
             call hex_decode(jv%str, raw, err)
          end if
@@ -1887,6 +1882,29 @@ contains
       end if
    end subroutine j_float
 
+   !> Low 16 bits of a toward-zero truncation to a signed 32-bit integer.
+   !> A NaN, or a magnitude that does not fit in that integer, becomes
+   !> zero. That is the conversion g++ applies for capnp 1.4.0's
+   !> static_cast of an enum number.
+   pure function u16_from_f64(x) result(ord)
+      real(real64), intent(in) :: x
+      integer :: ord
+      integer(int32) :: bits
+      ord = 0
+      if (ieee_is_nan(x)) return
+      if (abs(x) >= 2147483648.0_real64) return
+      bits = int(x, int32)
+      ord = int(iand(int(bits, int64), 65535_int64))
+   end function u16_from_f64
+
+   !> Encode follows the message limit. JSON decode stays at 64.
+   pure function depth_cap(p) result(lim)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: lim
+      lim = MAX_DEPTH
+      if (associated(p%msg)) lim = p%msg%depth_limit
+   end function depth_cap
+
    subroutine j_enum(schema, t, jv, ord, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t
@@ -1900,11 +1918,7 @@ contains
       err = CAPNP_OK
       ord = 0
       if (jv%k == JK_NUM) then
-         if (jv%num < 0.0_real64 .or. jv%num > 65535.0_real64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         ord = int(jv%num)
+         ord = u16_from_f64(jv%num)
          return
       end if
       if (jv%k /= JK_STR) then
@@ -2254,10 +2268,6 @@ contains
       end if
       if (jpeek(sc) == '.') then
          sc%i = sc%i + 1
-         if (capnp_dec_digit(jpeek(sc)) < 0) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
          do while (capnp_dec_digit(jpeek(sc)) >= 0)
             sc%i = sc%i + 1
          end do
@@ -2305,8 +2315,8 @@ contains
       end if
       do i = 1, n
          if (jv%kids(i)%k /= JK_NUM) then
-            err = CAPNP_ERR_ARG
-            return
+            raw(i - 1) = 0_int8
+            cycle
          end if
          if (jv%kids(i)%num < 0.0_real64 .or. jv%kids(i)%num > 255.0_real64) then
             err = CAPNP_ERR_ARG
@@ -2427,69 +2437,131 @@ contains
       end if
    end subroutine b64_encode
 
+   !> kj::decodeBase64. Whitespace is skipped. Padding and invalid
+   !> characters do not stop the decode; the bytes already formed are kept.
    subroutine b64_decode(s, raw, err)
       character(len=*), intent(in) :: s
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
-      integer :: i, n, v, nd, a, b, c, d, outn, stat
-      integer, allocatable :: vals(:)
-      character(len=1) :: ch
+      integer :: i, n, step, frag, outn, partial, stat
+      integer(int64) :: cap
+      integer(int8), allocatable :: buf(:)
       err = CAPNP_OK
       n = len(s)
-      allocate (vals(n), stat=stat)
+      cap = (int(n, int64)*6_int64 + 7_int64)/8_int64
+      if (cap < 1_int64) cap = 1_int64
+      if (cap > int(huge(n), int64)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (buf(0:int(cap) - 1), stat=stat)
       if (stat /= 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
-      nd = 0
-      do i = 1, n
-         ch = s(i:i)
-         if (ch == '=' .or. ch == ' ' .or. ch == achar(9) .or. ch == achar(10) .or. ch == achar(13)) cycle
-         v = index(B64, ch) - 1
-         if (v < 0) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         nd = nd + 1
-         vals(nd) = v
-      end do
-      if (mod(nd, 4) == 1) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      outn = nd/4*3
-      if (mod(nd, 4) == 2) outn = outn + 1
-      if (mod(nd, 4) == 3) outn = outn + 2
-      if (outn == 0) then
-         allocate (raw(0), stat=stat)
-         if (stat /= 0) err = CAPNP_ERR_ALLOC
-         return
-      end if
-      allocate (raw(0:outn - 1), stat=stat)
-      if (stat /= 0) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
+      step = 0
       outn = 0
+      partial = 0
       i = 1
-      do while (i + 3 <= nd)
-         a = vals(i); b = vals(i + 1); c = vals(i + 2); d = vals(i + 3)
-         v = ior(ishft(a, 18), ior(ishft(b, 12), ior(ishft(c, 6), d)))
-         raw(outn) = capnp_as_i8(iand(ishft(v, -16), 255))
-         raw(outn + 1) = capnp_as_i8(iand(ishft(v, -8), 255))
-         raw(outn + 2) = capnp_as_i8(iand(v, 255))
-         outn = outn + 3
-         i = i + 4
+      do
+         select case (step)
+         case (0)
+            do
+               if (i > n) then
+                  call b64_take(buf, outn, raw, err)
+                  return
+               end if
+               frag = b64_value(s(i:i))
+               i = i + 1
+               if (frag >= 0) exit
+            end do
+            partial = ishft(iand(frag, 63), 2)
+            step = 1
+         case (1)
+            do
+               if (i > n) then
+                  call b64_take(buf, outn, raw, err)
+                  return
+               end if
+               frag = b64_value(s(i:i))
+               i = i + 1
+               if (frag >= 0) exit
+            end do
+            partial = ior(partial, ishft(iand(frag, 48), -4))
+            buf(outn) = capnp_as_i8(iand(partial, 255))
+            outn = outn + 1
+            partial = ishft(iand(frag, 15), 4)
+            step = 2
+         case (2)
+            do
+               if (i > n) then
+                  call b64_take(buf, outn, raw, err)
+                  return
+               end if
+               frag = b64_value(s(i:i))
+               i = i + 1
+               if (frag >= 0) exit
+            end do
+            partial = ior(partial, ishft(iand(frag, 60), -2))
+            buf(outn) = capnp_as_i8(iand(partial, 255))
+            outn = outn + 1
+            partial = ishft(iand(frag, 3), 6)
+            step = 3
+         case default
+            do
+               if (i > n) then
+                  call b64_take(buf, outn, raw, err)
+                  return
+               end if
+               frag = b64_value(s(i:i))
+               i = i + 1
+               if (frag >= 0) exit
+            end do
+            partial = ior(partial, iand(frag, 63))
+            buf(outn) = capnp_as_i8(iand(partial, 255))
+            outn = outn + 1
+            step = 0
+         end select
       end do
-      if (i + 1 == nd) then
-         v = ior(ishft(vals(i), 18), ishft(vals(i + 1), 12))
-         raw(outn) = capnp_as_i8(iand(ishft(v, -16), 255))
-      else if (i + 2 == nd) then
-         v = ior(ishft(vals(i), 18), ior(ishft(vals(i + 1), 12), ishft(vals(i + 2), 6)))
-         raw(outn) = capnp_as_i8(iand(ishft(v, -16), 255))
-         raw(outn + 1) = capnp_as_i8(iand(ishft(v, -8), 255))
-      end if
    end subroutine b64_decode
+
+   pure function b64_value(ch) result(v)
+      character(len=1), intent(in) :: ch
+      integer :: v
+      integer :: c, p
+      c = iachar(ch)
+      if (c == 9 .or. c == 10 .or. c == 12 .or. c == 13 .or. c == 32) then
+         v = -1
+      else if (ch == '=') then
+         v = -2
+      else
+         p = index(B64, ch)
+         if (p == 0) then
+            v = -3
+         else
+            v = p - 1
+         end if
+      end if
+   end function b64_value
+
+   subroutine b64_take(buf, outn, raw, err)
+      integer(int8), intent(in) :: buf(0:)
+      integer, intent(in) :: outn
+      integer(int8), allocatable, intent(out) :: raw(:)
+      integer, intent(out) :: err
+      integer :: stat
+      err = CAPNP_OK
+      if (outn <= 0) then
+         allocate (raw(0), stat=stat)
+      else
+         allocate (raw(0:outn - 1), stat=stat)
+      end if
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (outn > 0) raw(0:outn - 1) = buf(0:outn - 1)
+   end subroutine b64_take
 
    subroutine hex_encode(raw, s, err)
       integer(int8), intent(in) :: raw(:)
@@ -2522,35 +2594,32 @@ contains
       end do
    end subroutine hex_encode
 
+   !> kj::decodeHex. An odd trailing character is dropped. A bad nibble
+   !> contributes a zero to that half of the byte.
    subroutine hex_decode(s, raw, err)
       character(len=*), intent(in) :: s
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
-      integer :: i, n, hi, lo, stat
+      integer :: i, n, hi, lo, b, stat
       err = CAPNP_OK
-      n = len(s)
-      if (mod(n, 2) /= 0) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
+      n = len(s)/2
       if (n == 0) then
          allocate (raw(0), stat=stat)
          if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      allocate (raw(0:n/2 - 1), stat=stat)
+      allocate (raw(0:n - 1), stat=stat)
       if (stat /= 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
-      do i = 1, n/2
+      do i = 1, n
          hi = capnp_hex_digit(s(2*i - 1:2*i - 1))
          lo = capnp_hex_digit(s(2*i:2*i))
-         if (hi < 0 .or. lo < 0) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         raw(i - 1) = capnp_as_i8(hi*16 + lo)
+         b = 0
+         if (hi >= 0) b = hi*16
+         if (lo >= 0) b = b + lo
+         raw(i - 1) = capnp_as_i8(b)
       end do
    end subroutine hex_decode
 
