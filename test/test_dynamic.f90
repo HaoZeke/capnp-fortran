@@ -29,7 +29,8 @@ contains
                    new_unittest("dynamic-default-isolation", run_default_isolation), &
                    new_unittest("dynamic-malformed-text", run_malformed_text), &
                    new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
-                   new_unittest("dynamic-init-null", run_init_null)]
+                   new_unittest("dynamic-init-null", run_init_null), &
+                   new_unittest("dynamic-assign-types", run_assign_types)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -472,5 +473,64 @@ contains
                   'init-null: primitive list')
       call capnp_dyn_free(schema)
    end subroutine run_init_null
+
+   !> setp rejects a struct of the wrong schema and a list of the wrong
+   !> element type, and accepts a matching struct and list.
+   subroutine run_assign_types(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: sink, other, wrong, right, forged, wide, narrow
+      type(capnp_ptr_t) :: spots, bad_spots
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      call capnp_message_init_builder(msg, err)
+      sink = capnp_dyn_new_root(schema, sink_idx, msg, err)
+      call check_(error, err == CAPNP_OK, 'assign: sink root')
+
+      wrong = capnp_new_struct(msg, 1, 0, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'origin', wrong, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'assign: struct shape')
+
+      right = capnp_new_struct(msg, 3, 0, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'origin', right, err)
+      call check_(error, err == CAPNP_OK, 'assign: matching struct shape')
+
+      forged = capnp_new_struct(msg, 3, 0, err)
+      forged%schema_id = 99_int64
+      call capnp_dyn_setp(schema, sink_idx, sink, 'origin', forged, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'assign: struct schema id')
+
+      other = capnp_dyn_new_root(schema, sink_idx, msg, err)
+      right = capnp_dyn_init_struct(schema, sink_idx, other, 'origin', err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'origin', right, err)
+      call check_(error, err == CAPNP_OK .and. right%schema_id /= 0_int64, &
+                  'assign: stamped struct schema id')
+
+      wide = capnp_new_list(msg, CAPNP_SZ_EIGHT, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', wide, err)
+      call check_(error, err == CAPNP_OK, 'assign: int64 list')
+      narrow = capnp_new_list(msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', narrow, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'assign: list element width')
+
+      spots = capnp_new_composite_list(msg, 1_int64, 3, 0, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'spots', spots, err)
+      call check_(error, err == CAPNP_OK, 'assign: composite element layout')
+      bad_spots = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'spots', bad_spots, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'assign: composite element mismatch')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_assign_types
 
 end module test_dynamic
