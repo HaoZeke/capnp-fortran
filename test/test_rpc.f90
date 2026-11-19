@@ -26,6 +26,15 @@ module test_rpc
       procedure :: outbound_call => counting_outbound_call
    end type counting_membrane_policy_t
 
+   type, extends(rpc_byte_stream_t) :: fail_stream_t
+      integer :: accept_sends = 0
+   contains
+      procedure :: send_all => fail_stream_send
+      procedure :: recv_all => fail_stream_recv
+      procedure :: poll_in => fail_stream_poll
+      procedure :: close => fail_stream_close
+   end type fail_stream_t
+
    type(rpc_conn_t), target :: cli, srv
    type(echo_srv_t), target :: echo
    class(rpc_server_t), pointer :: boot
@@ -112,6 +121,7 @@ contains
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
       if (.not. allocated(error)) call t_request_cancellation(error)
       if (.not. allocated(error)) call t_cancel_reserves_qid(error)
+      if (.not. allocated(error)) call t_send_failure_releases_qid(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
 
@@ -917,6 +927,73 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_cancel_reserves_qid
+
+   subroutine fail_stream_send(self, bytes, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      if (self%accept_sends > 0) then
+         self%accept_sends = self%accept_sends - 1
+         err = CAPNP_OK
+         if (size(bytes) < 0) err = CAPNP_ERR_IO
+      else
+         err = CAPNP_ERR_IO
+      end if
+   end subroutine fail_stream_send
+
+   subroutine fail_stream_recv(self, bytes, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      err = CAPNP_ERR_IO
+      if (size(bytes) < 0) self%accept_sends = 0
+   end subroutine fail_stream_recv
+
+   subroutine fail_stream_poll(self, timeout_ms, readable, err)
+      class(fail_stream_t), intent(inout) :: self
+      integer, intent(in) :: timeout_ms
+      logical, intent(out) :: readable
+      integer, intent(out) :: err
+      readable = .false.
+      err = CAPNP_OK
+      if (timeout_ms < 0) self%accept_sends = 0
+   end subroutine fail_stream_poll
+
+   subroutine fail_stream_close(self)
+      class(fail_stream_t), intent(inout) :: self
+      self%accept_sends = 0
+   end subroutine fail_stream_close
+
+   !> A question allocated for a call or bootstrap that never leaves the
+   !> vat must not stay reserved, or the table fills after repeated errors.
+   subroutine t_send_failure_releases_qid(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(fail_stream_t), target :: broken
+      type(rpc_conn_t), target :: cconn
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qid
+      integer :: i, e
+      local_boot => null()
+      broken%accept_sends = 0
+      call rpc_conn_init_stream(cconn, broken, local_boot)
+      qid = 0_int64
+      do i = 1, 65
+         call rpc_bootstrap_send(cconn, cap, e)
+      end do
+      call check_(error, e == CAPNP_ERR_IO, 'send fail: bootstrap reports the stream')
+      call check_(error, .not. cconn%questions(0)%used, &
+                  'send fail: bootstrap does not keep the question')
+      cap = rpc_cap_t()
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, qid, e)
+      call check_(error, e == CAPNP_ERR_ARG .and. qid < 0_int64, &
+                  'send fail: bad target releases its question')
+      call check_(error, .not. cconn%questions(0)%used, &
+                  'send fail: question table still empty')
+      call rpc_conn_close(cconn)
+   end subroutine t_send_failure_releases_qid
 
    !> A membrane checks calls, recursively wraps result capabilities,
    !> blocks client-side calls through an explicit wrapper, and revokes
