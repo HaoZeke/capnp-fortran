@@ -10,9 +10,11 @@
 !> $Json.flatten inlines sub-structs, groups, and discriminated union
 !> variants with an optional prefix. $Json.discriminator tags unions
 !> with an explicit variant field and optional valueName. An unknown
-!> discriminator string does not select an arm. Plain member keys in
-!> that object are still applied in document order. A repeated known
-!> tag is rejected, and a void arm accepts any payload. A non-string
+!> discriminator string does not select an arm. A known tag clears
+!> the arm it selects, so a member written earlier does not survive.
+!> Plain member keys in that object are still applied in document
+!> order. A repeated known tag is rejected, and a void arm accepts
+!> any payload. A non-string
 !> discriminator is rejected. NaN and infinities are the strings
 !> "NaN", "Infinity", and "-Infinity". A high surrogate followed by
 !> a low surrogate is one scalar, and an unquoted integer past 2^53
@@ -1030,8 +1032,10 @@ contains
       call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err, unresolved)
    end subroutine fill_struct_pfx
 
-   !> Zero the storage of one field. A void arm has no storage. A group
-   !> clears each of its fields.
+   !> Zero the storage of one field. A known union tag does this after
+   !> selecting the arm, which drops a member written earlier in the
+   !> object. A void arm has no storage. A group clears its first union
+   !> member and then its other fields.
    recursive subroutine clear_field(schema, f, p, env, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
@@ -1050,9 +1054,25 @@ contains
          fl = node_struct_fields(schema%nodes(gidx), err)
          if (err /= CAPNP_OK) return
          nf = int(capnp_list_len(fl))
+         ! A group union ends on its first member, the same as capnp's
+         ! clear of the field whose discriminant is zero.
+         if (node_struct_discriminant_count(schema%nodes(gidx)) > 0) then
+            do i = 0, nf - 1
+               child = capnp_list_get_struct(fl, i, err)
+               if (err /= CAPNP_OK) return
+               if (field_discriminant(child) /= 0) cycle
+               call capnp_set_which(p, &
+                  int(node_struct_discriminant_offset(schema%nodes(gidx))), 0, err)
+               if (err /= CAPNP_OK) return
+               call clear_field(schema, child, p, env, err)
+               if (err /= CAPNP_OK) return
+               exit
+            end do
+         end if
          do i = 0, nf - 1
             child = capnp_list_get_struct(fl, i, err)
             if (err /= CAPNP_OK) return
+            if (field_discriminant(child) /= NO_DISCRIMINANT) cycle
             call clear_field(schema, child, p, env, err)
             if (err /= CAPNP_OK) return
          end do
@@ -1098,10 +1118,10 @@ contains
    end subroutine clear_field
 
    !> Apply union keys in document order, the way kj JsonCodec walks an
-   !> object. A second known tag is an error. An unknown tag selects
-   !> nothing, and plain member keys still decode. valueName and
-   !> flattened-union keys that appear before the tag are retried after
-   !> it.
+   !> object. A known tag clears the arm it selects. A second known tag
+   !> is an error. An unknown tag selects nothing, and plain member keys
+   !> still decode. valueName and flattened-union keys that appear before
+   !> the tag are retried after it.
    recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, &
                                           depth, err, unresolved)
       type(capnp_dyn_schema_t), intent(in) :: schema

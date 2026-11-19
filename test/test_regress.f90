@@ -709,7 +709,8 @@ contains
       call udiff(error, schema, n, 'GroupArm', '{"box":{"x":4,"y":5},"kind":"box"}')
       call udiff(error, schema, n, 'GroupArm', '{"kind":"box","box":{"x":4,"y":5}}')
       call udiff(error, schema, n, 'GroupArm', '{"n":5,"box":{}}')
-      call check_(error, n == 69, 'union-diff: case count')
+      call udiff(error, schema, n, 'GroupUnion', '{"gu":{"q":5},"kind":"gu"}')
+      call check_(error, n == 70, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
