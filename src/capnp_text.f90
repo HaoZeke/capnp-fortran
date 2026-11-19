@@ -977,7 +977,7 @@ contains
             call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
             if (err /= CAPNP_OK) return
             if (iv == 0_int64) then
-               fv = transfer(int(z'80000000', int32), 0.0_real32)
+               fv = 0.0_real32
             else
                call capnp_fmt_i64(iv, dec)
                call capnp_parse_f32(dec, fv, err)

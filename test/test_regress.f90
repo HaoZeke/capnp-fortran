@@ -941,6 +941,9 @@ contains
       do i = 1, 7
          call one_f32(error, schema, idx, f32_bits(i), f32_expect(i))
       end do
+      call f32_match_encode(error, schema, idx, '(x = -0)')
+      call f32_match_encode(error, schema, idx, '(x = -0x0)')
+      call f32_match_encode(error, schema, idx, '(x = -00)')
       call capnp_dyn_free(schema)
    end subroutine run_f32_text
 
@@ -1018,11 +1021,41 @@ contains
       gotb = transfer(x32, 0_int32)
       if (expect == 'nan') then
          call check_(error, err == CAPNP_OK .and. gotb /= 0_int32, 'f32: nan decodes')
+      else if (expect == '-0') then
+         call capnp_message_free(msg)
+         call f32_match_encode(error, schema, idx, ref)
+         return
       else
          call check_(error, err == CAPNP_OK .and. gotb == bits, 'f32 bits '//expect)
       end if
       call capnp_message_free(msg)
    end subroutine one_f32
+
+   !> Text such as "(x = -0)" decodes to the same bytes as capnp encode.
+   subroutine f32_match_encode(error, schema, idx, text)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: text
+      type(capnp_message_t), target :: msg
+      integer(int8), allocatable :: ours(:), ref(:)
+      integer :: err
+      if (allocated(error)) return
+      call spit(tmp//'/f32.in', text//achar(10), err)
+      if (.not. sh('capnp encode '//tmp//'/f32.capnp F < '//tmp//'/f32.in > '//tmp//'/f32.enc' &
+         //' && capnp convert binary:canonical '//tmp//'/f32.capnp F < '//tmp//'/f32.enc > ' &
+         //tmp//'/f32.can')) then
+         call test_failed(error, 'f32: capnp encode '//text)
+         return
+      end if
+      call capnp_text_decode(schema, idx, text, msg, err)
+      call check_(error, err == CAPNP_OK, 'f32: decode '//text)
+      call capnp_canonicalize(msg, ours, err)
+      call capnp_read_file(tmp//'/f32.can', ref, err)
+      call check_(error, err == CAPNP_OK .and. allocated(ours) .and. allocated(ref) .and. &
+                  size(ours) == size(ref) .and. all(ours == ref), 'f32: encode bytes '//text)
+      call capnp_message_free(msg)
+   end subroutine f32_match_encode
 
    function chomp(s) result(t)
       character(len=*), intent(in) :: s
