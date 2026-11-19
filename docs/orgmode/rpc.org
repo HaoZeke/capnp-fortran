@@ -101,8 +101,10 @@ segment-table framing plain serialization uses
 pluggable exact-read, exact-write, readiness, and close interface.
 ``rpc_fd_stream_t`` adapts a descriptor and
 ``rpc_socketpair_streams`` creates an owned loopback pair.
-``capnp_posix`` remains a thin ``bind(c)`` surface over POSIX sockets
-with no C sources. TCP, Unix-domain sockets, and socketpairs are
+``capnp_posix`` remains a thin ``bind(c)`` surface over POSIX sockets.
+The three flags a non-blocking connect has to recognise come from a
+small C file, because their numeric values are not the same on every
+Unix. TCP, Unix-domain sockets, and socketpairs are
 adapters rather than requirements of the RPC core. A TLS implementation
 can provide ``rpc_byte_stream_t`` without coupling this library to a TLS
 stack or certificate policy.
@@ -110,7 +112,8 @@ stack or certificate policy.
 The three-party network layer records ``VatId{host, port}`` values from
 ``thirdPartyHosted`` descriptors. ``rpc_introduction_dial`` opens a
 numeric IPv4 address from one of those pending introductions and
-initializes a connection ready for ``rpc_accept_send``. After the
+initializes a connection ready for ``rpc_accept_send``. A null dial
+hook refuses every address. After the
 Accept succeeds, ``rpc_introduction_done`` releases the vine.
 Applications can perform DNS or directory lookup before using a custom
 connection adapter.
@@ -124,7 +127,9 @@ exercise this project's network parameterization, not C++ 1.4.0 level
 
 For level 4 equality, ``rpc_join_send`` emits every Join part before
 ``rpc_join_wait`` collects the result set and settles its single
-capability. The receiver groups incoming parts by joinId and compares
+capability. Eight joins fit at once. A part that never finishes holds
+its question id until Finish. The receiver groups incoming parts by
+joinId and compares
 local export identity only after the set is complete. Capnp-C++ 1.4.0
 does not handle Join and replies ``Message.unimplemented``, so this
 feature has same-language wire tests but no live C++ peer test.
