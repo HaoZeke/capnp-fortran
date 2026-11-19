@@ -55,7 +55,7 @@ PY
   ;;
 fresh)
   "$bin" "$root/test/fixtures/dynamic.cgr.bin"
-  diff -q "$out/dynamic_capnp.f90" "$root/test/generated/dynamic_capnp.f90"
+  diff -q "$out/schema/dynamic_capnp.f90" "$root/test/generated/dynamic_capnp.f90"
   ;;
 *)
   echo "usage: codegen_check.sh multifile|suffix|annot|fresh" >&2
