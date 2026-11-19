@@ -34,6 +34,14 @@ module test_rpc
       procedure :: dispatch => stage_srv_dispatch
    end type stage_srv_t
 
+   !> Records method ids in the order they are dispatched.
+   type, extends(rpc_server_t) :: order_srv_t
+      integer :: n = 0
+      integer :: seen(4) = 0
+   contains
+      procedure :: dispatch => order_dispatch
+   end type order_srv_t
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -102,7 +110,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(75))
+      allocate (testsuite(84))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -203,56 +211,74 @@ contains
       testsuite(49)%test => w_duplicate_return
       testsuite(50)%name = "rpc-take-from-normal-answer"
       testsuite(50)%test => w_take_from_normal_answer
-      testsuite(51)%name = "rpc-join-duplicate-qid"
-      testsuite(51)%test => w_join_duplicate_qid
-      testsuite(52)%name = "rpc-disembargo-provide-wrong-conn"
-      testsuite(52)%test => w_disembargo_provide_wrong_conn
-      testsuite(53)%name = "rpc-third-party-tail-aborts"
-      testsuite(53)%test => w_third_party_tail_aborts
-      testsuite(54)%name = "rpc-yourself-splice"
-      testsuite(54)%test => w_yourself_splice
-      testsuite(55)%name = "rpc-release-live-over"
-      testsuite(55)%test => w_release_live_over
-      testsuite(56)%name = "rpc-call-missing-export"
-      testsuite(56)%test => w_call_missing_export
-      testsuite(57)%name = "rpc-return-unknown-question"
-      testsuite(57)%test => w_return_unknown_question
-      testsuite(58)%name = "rpc-return-after-finish"
-      testsuite(58)%test => w_return_after_finish
-      testsuite(59)%name = "rpc-return-answer-id-64"
-      testsuite(59)%test => w_return_answer_id_64
-      testsuite(60)%name = "rpc-return-high-bit-ignored"
-      testsuite(60)%test => w_return_high_bit_ignored
-      testsuite(61)%name = "rpc-return-falsely-canceled"
-      testsuite(61)%test => w_return_falsely_canceled
-      testsuite(62)%name = "rpc-return-canceled-after-cancel"
-      testsuite(62)%test => w_return_canceled_after_cancel
-      testsuite(63)%name = "rpc-return-elsewhere-not-tail"
-      testsuite(63)%test => w_return_elsewhere_not_tail
-      testsuite(64)%name = "rpc-tail-return-with-results"
-      testsuite(64)%test => w_tail_return_with_results
-      testsuite(65)%name = "rpc-tail-return-with-exception"
-      testsuite(65)%test => w_tail_return_with_exception
-      testsuite(66)%name = "rpc-unimplemented-bootstrap"
-      testsuite(66)%test => w_unimplemented_bootstrap
-      testsuite(67)%name = "rpc-no-finish-needed"
-      testsuite(67)%test => w_no_finish_needed
-      testsuite(68)%name = "rpc-unknown-tags"
-      testsuite(68)%test => w_unknown_tags
-      testsuite(69)%name = "rpc-shutdown"
-      testsuite(69)%test => w_shutdown
-      testsuite(70)%name = "posix-recv-eintr-retried"
-      testsuite(70)%test => t_recv_all_retries_eintr
-      testsuite(71)%name = "rpc-framing-511-accepted"
-      testsuite(71)%test => t_framing_511_accepted
-      testsuite(72)%name = "rpc-framing-512-rejected"
-      testsuite(72)%test => t_framing_512_rejected
-      testsuite(73)%name = "rpc-framing-oversized-rejected"
-      testsuite(73)%test => t_framing_oversized_rejected
-      testsuite(74)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(74)%test => t_framing_negative_traversal_rejected
-      testsuite(75)%name = "rpc-framing-short-and-padded"
-      testsuite(75)%test => t_framing_short_and_padded
+      testsuite(51)%name = "rpc-resolve-to-hosted"
+      testsuite(51)%test => w_resolve_to_hosted
+      testsuite(52)%name = "rpc-resolve-none"
+      testsuite(52)%test => w_resolve_none
+      testsuite(53)%name = "rpc-resolve-non-promise"
+      testsuite(53)%test => w_resolve_non_promise
+      testsuite(54)%name = "rpc-resolve-exception"
+      testsuite(54)%test => w_resolve_exception
+      testsuite(55)%name = "rpc-resolve-embargo"
+      testsuite(55)%test => w_resolve_embargo
+      testsuite(56)%name = "rpc-join-duplicate-qid"
+      testsuite(56)%test => w_join_duplicate_qid
+      testsuite(57)%name = "rpc-disembargo-provide-wrong-conn"
+      testsuite(57)%test => w_disembargo_provide_wrong_conn
+      testsuite(58)%name = "rpc-third-party-tail-aborts"
+      testsuite(58)%test => w_third_party_tail_aborts
+      testsuite(59)%name = "rpc-yourself-splice"
+      testsuite(59)%test => w_yourself_splice
+      testsuite(60)%name = "rpc-release-live-over"
+      testsuite(60)%test => w_release_live_over
+      testsuite(61)%name = "rpc-call-order"
+      testsuite(61)%test => w_call_order
+      testsuite(62)%name = "rpc-call-missing-export"
+      testsuite(62)%test => w_call_missing_export
+      testsuite(63)%name = "rpc-return-unknown-question"
+      testsuite(63)%test => w_return_unknown_question
+      testsuite(64)%name = "rpc-return-after-finish"
+      testsuite(64)%test => w_return_after_finish
+      testsuite(65)%name = "rpc-return-answer-id-64"
+      testsuite(65)%test => w_return_answer_id_64
+      testsuite(66)%name = "rpc-return-high-bit-ignored"
+      testsuite(66)%test => w_return_high_bit_ignored
+      testsuite(67)%name = "rpc-return-falsely-canceled"
+      testsuite(67)%test => w_return_falsely_canceled
+      testsuite(68)%name = "rpc-return-canceled-after-cancel"
+      testsuite(68)%test => w_return_canceled_after_cancel
+      testsuite(69)%name = "rpc-return-elsewhere-not-tail"
+      testsuite(69)%test => w_return_elsewhere_not_tail
+      testsuite(70)%name = "rpc-tail-return-with-results"
+      testsuite(70)%test => w_tail_return_with_results
+      testsuite(71)%name = "rpc-tail-return-with-exception"
+      testsuite(71)%test => w_tail_return_with_exception
+      testsuite(72)%name = "rpc-resolve-second-ignored"
+      testsuite(72)%test => w_resolve_second_ignored
+      testsuite(73)%name = "rpc-unimplemented-bootstrap"
+      testsuite(73)%test => w_unimplemented_bootstrap
+      testsuite(74)%name = "rpc-embargo-queues-locally"
+      testsuite(74)%test => w_embargo_queues_locally
+      testsuite(75)%name = "rpc-no-finish-needed"
+      testsuite(75)%test => w_no_finish_needed
+      testsuite(76)%name = "rpc-resolve-accepted"
+      testsuite(76)%test => w_resolve_accepted
+      testsuite(77)%name = "rpc-unknown-tags"
+      testsuite(77)%test => w_unknown_tags
+      testsuite(78)%name = "rpc-shutdown"
+      testsuite(78)%test => w_shutdown
+      testsuite(79)%name = "posix-recv-eintr-retried"
+      testsuite(79)%test => t_recv_all_retries_eintr
+      testsuite(80)%name = "rpc-framing-511-accepted"
+      testsuite(80)%test => t_framing_511_accepted
+      testsuite(81)%name = "rpc-framing-512-rejected"
+      testsuite(81)%test => t_framing_512_rejected
+      testsuite(82)%name = "rpc-framing-oversized-rejected"
+      testsuite(82)%test => t_framing_oversized_rejected
+      testsuite(83)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(83)%test => t_framing_negative_traversal_rejected
+      testsuite(84)%name = "rpc-framing-short-and-padded"
+      testsuite(84)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -325,6 +351,18 @@ contains
       ctx%nexp = 1
    end subroutine stage_srv_dispatch
 
+   subroutine order_dispatch(self, ctx, err)
+      class(order_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: s
+      err = CAPNP_OK
+      self%n = self%n + 1
+      if (self%n <= size(self%seen)) self%seen(self%n) = ctx%method_id
+      s = capnp_new_struct(ctx%rmsg, 0, 0, err)
+      if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+   end subroutine order_dispatch
+
    subroutine counting_inbound_call(self, interface_id, method_id, err)
       class(counting_membrane_policy_t), intent(inout) :: self
       integer(int64), intent(in) :: interface_id
@@ -372,6 +410,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_no_finish_needed(error)
    end subroutine w_no_finish_needed
+
+   subroutine w_resolve_accepted(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_accepted(error)
+   end subroutine w_resolve_accepted
 
    subroutine w_unknown_tags(error)
       type(error_type), allocatable, intent(out) :: error
@@ -736,6 +779,41 @@ contains
       call t_take_from_normal_answer(error)
    end subroutine w_take_from_normal_answer
 
+   subroutine w_resolve_to_hosted(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_to_hosted(error)
+   end subroutine w_resolve_to_hosted
+
+   subroutine w_resolve_none(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_none(error)
+   end subroutine w_resolve_none
+
+   subroutine w_resolve_non_promise(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_non_promise(error)
+   end subroutine w_resolve_non_promise
+
+   subroutine w_resolve_exception(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_exception(error)
+   end subroutine w_resolve_exception
+
+   subroutine w_resolve_embargo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_embargo(error)
+   end subroutine w_resolve_embargo
+
    subroutine w_join_duplicate_qid(error)
       type(error_type), allocatable, intent(out) :: error
       call ensure_rpc(error)
@@ -770,6 +848,13 @@ contains
       if (allocated(error)) return
       call t_release_live_over(error)
    end subroutine w_release_live_over
+
+   subroutine w_call_order(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_call_order(error)
+   end subroutine w_call_order
 
    subroutine w_call_missing_export(error)
       type(error_type), allocatable, intent(out) :: error
@@ -841,12 +926,26 @@ contains
       call t_tail_return_with_exception(error)
    end subroutine w_tail_return_with_exception
 
+   subroutine w_resolve_second_ignored(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_resolve_second_ignored(error)
+   end subroutine w_resolve_second_ignored
+
    subroutine w_unimplemented_bootstrap(error)
       type(error_type), allocatable, intent(out) :: error
       call ensure_rpc(error)
       if (allocated(error)) return
       call t_unimplemented_bootstrap(error)
    end subroutine w_unimplemented_bootstrap
+
+   subroutine w_embargo_queues_locally(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_embargo_queues_locally(error)
+   end subroutine w_embargo_queues_locally
 
    !> Send one Join part: question `qid`, targeting export `eid`, carrying
    !> a two-party JoinKeyPart naming the set.
@@ -2653,13 +2752,14 @@ contains
       call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
-   !> Resolve messages come back as unimplemented; sendResultsTo.yourself
-   !> holds the results and returns resultsSentElsewhere on adoption.
+   !> An unknown Resolve is ignored. sendResultsTo.yourself holds the
+   !> results and returns resultsSentElsewhere.
    subroutine t_resolve_and_tail_calls(error)
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
       type(call_t) :: c
       type(message_target_t) :: tgt
       type(rpc_cap_t) :: bootcap
@@ -2668,17 +2768,22 @@ contains
       integer(int64) :: qb, qy
       logical :: readable
 
-      ! Resolve -> unimplemented reply, absorbed by the sender.
+      ! A Resolve for an import this vat has never seen is ignored.
+      ! Nothing is written back, so the client must not wait for one.
       call capnp_message_init_builder(m, err)
       msg = message_new_root(m, err)
       rv = message_resolve_init(msg, err)
       call resolve_promise_id_set(rv, 7_int64, err)
+      cd = resolve_cap_init(rv, err)
+      call cap_descriptor_sender_hosted_set(cd, 0_int64, err)
       call rpc_send_message(cli%fd, m, err)
       call capnp_message_free(m)
       call rpc_pump_once(srv, err)
-      call check_(error, err == CAPNP_OK, 'rpc: resolve answered')
-      call rpc_pump_once(cli, err)
-      call check_(error, err == CAPNP_OK, 'rpc: resolve unimplemented absorbed')
+      call check_(error, err == CAPNP_OK .and. rpc_conn_alive(srv), &
+                  'rpc: unknown resolve is ignored')
+      call px_poll_in(cli%fd, 0, readable, err)
+      call check_(error, err == CAPNP_OK .and. .not. readable, &
+                  'rpc: unknown resolve sends nothing')
 
       ! sendResultsTo.yourself runs the call and holds the results.
       ! Nothing is written until a takeFrom names that answer.
@@ -2689,10 +2794,9 @@ contains
       msg = message_read_root(m, err)
       c = message_call_get(msg, err)
       call call_send_results_to_yourself_set(c, err)
-      tgt = call_target_get(c, err)
       s = capnp_new_struct(m, 1, 1, err)
-      call capnp_set_i64(s, 0_int64, 9_int64, err)
-      call capnp_set_text(s, 0, 'y', err)
+      call capnp_set_i64(s, 0_int64, 1_int64, err)
+      call capnp_set_text(s, 0, 'x', err)
       call payload_content_set(params, s, err)
       call rpc_call_send(cli, m, err)
       call rpc_pump_once(srv, err)
@@ -3890,7 +3994,6 @@ contains
       call capnp_message_free(m)
    end subroutine recv_on
 
-
    subroutine send_finish_on(fd, qid, e)
       integer, intent(in) :: fd
       integer(int64), intent(in) :: qid
@@ -4150,6 +4253,379 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_take_from_normal_answer
 
+   !> Answer `q` with a senderPromise so the client records a promise import.
+   subroutine inject_promise(peer_fd, client, base, promise_id, q, e)
+      integer, intent(in) :: peer_fd
+      type(rpc_conn_t), intent(inout) :: client
+      type(rpc_cap_t), intent(in) :: base
+      integer(int64), intent(in) :: promise_id
+      integer(int64), intent(out) :: q
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params, pl
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      call rpc_call_begin(client, base, ECHO_IFACE, 0, m, params, q, e)
+      if (e /= CAPNP_OK) return
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q, e)
+      pl = return_results_init(r, e)
+      call payload_content_set(pl, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(pl, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, promise_id, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(peer_fd, m, e)
+      call capnp_message_free(m)
+   end subroutine inject_promise
+
+   subroutine send_resolve_hosted(peer_fd, promise_id, hosted, e)
+      integer, intent(in) :: peer_fd
+      integer(int64), intent(in) :: promise_id, hosted
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, promise_id, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_hosted_set(cd, hosted, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(peer_fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_resolve_hosted
+
+   !> A promise import resolved to a senderHosted cap is called as that cap.
+   subroutine t_resolve_to_hosted(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, pcap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qprom, qcall
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], pcap, e)
+      call check_(error, e == CAPNP_OK .and. pcap%id == 4_int64, &
+                  'resolve: promise import recorded')
+      if (allocated(error)) return
+      sconn%exports(4)%used = .true.
+      sconn%exports(4)%refcount = 1
+      sconn%exports(4)%srv => local_echo
+      call send_resolve_hosted(sconn%fd, 4_int64, 0_int64, e)
+      call rpc_pump_once(cconn, e)
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'resolve: hosted resolve accepted')
+      call px_poll_in(sconn%fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, &
+                  'resolve: promise release arrives')
+      if (allocated(error)) return
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. sconn%exports(4)%used, &
+                  'resolve: promise export is released')
+      call check_(error, rpc_conn_alive(sconn), 'resolve: promise release leaves the server up')
+      call rpc_call_begin(cconn, pcap, ECHO_IFACE, 0, m, params, qcall, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call wait_for(cconn, qcall, error, 'resolve: call after resolve returns')
+      if (allocated(error)) return
+      call rpc_result_content(cconn, qcall, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 8_int64, &
+                  'resolve: call uses the hosted cap')
+      call rpc_release_send(cconn, pcap, e)
+      call px_poll_in(sconn%fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, &
+                  'resolve: replacement release arrives')
+      if (allocated(error)) return
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. sconn%exports(0)%used, &
+                  'resolve: dropping the client releases the replacement')
+      call check_(error, rpc_conn_alive(sconn), &
+                  'resolve: replacement release leaves the server up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_to_hosted
+
+   !> CapDescriptor.none in a Resolve aborts.
+   subroutine t_resolve_none(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, pcap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qprom
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], pcap, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_none_set(cd, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call check_(error, .not. rpc_conn_alive(cconn), 'resolve: none aborts')
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'CapDescriptor.none') > 0, 'resolve: none reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_none
+
+   !> Resolve for a settled senderHosted import aborts.
+   subroutine t_resolve_non_promise(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap
+      type(capnp_message_t), target :: reply
+      type(message_t) :: rmsg
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call send_resolve_hosted(sconn%fd, 0_int64, 1_int64, e)
+      call rpc_pump_once(cconn, e)
+      call check_(error, .not. rpc_conn_alive(cconn), 'resolve: non-promise aborts')
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'non-promise import') > 0, &
+                  'resolve: non-promise reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_non_promise
+
+   !> A Resolve exception makes a later call on the promise fail.
+   subroutine t_resolve_exception(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, pcap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(exception_t) :: ex
+      type(payload_t) :: params
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qprom, qcall
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], pcap, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      ex = resolve_exception_init(rv, e)
+      call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+      call exception_reason_set(ex, 'broken promise', e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call check_(error, rpc_conn_alive(cconn), 'resolve: exception keeps the connection')
+      call rpc_call_begin(cconn, pcap, ECHO_IFACE, 0, m, params, qcall, e)
+      call check_(error, e == RPC_ERR_EXCEPTION, 'resolve: later call fails')
+      call check_(error, index(rpc_conn_reason(cconn), 'broken promise') > 0, &
+                  'resolve: exception reason kept')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_exception
+
+   !> A call on a promise that then resolves to a local cap issues an
+   !> embargo. The matching receiverLoopback is accepted. Any other id
+   !> aborts. A reflected resolve with no prior call releases the
+   !> promise and sends no disembargo.
+   subroutine t_resolve_embargo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, quiet, called
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(disembargo_t) :: d
+      type(release_t) :: rel
+      type(message_target_t) :: tgt
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qquiet, qprom, qcall, emb
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qquiet, e)
+      call rpc_wait(cconn, qquiet, e)
+      call rpc_result_cap(cconn, qquiet, [integer ::], quiet, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call px_poll_in(sconn%fd, 200, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable .and. rpc_conn_alive(cconn), &
+                  'resolve: quiet resolve releases the promise')
+      call recv_within(sconn%fd, reply, error, 'resolve: promise release arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 4_int64, 'resolve: quiet release id')
+      call capnp_message_free(reply)
+      call px_poll_in(sconn%fd, 0, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'resolve: no call means no embargo')
+      if (allocated(error)) return
+      call inject_promise(sconn%fd, cconn, echo_cap, 6_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], called, e)
+      call rpc_call_begin(cconn, called, ECHO_IFACE, 0, m, params, qcall, e)
+      call rpc_call_send(cconn, m, e)
+      sconn%exports(6)%used = .true.
+      sconn%exports(6)%refcount = 1
+      sconn%exports(6)%srv => local_echo
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qcall, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 6_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                  'resolve: reflected resolve sends Disembargo')
+      d = message_disembargo_get(rmsg, e)
+      emb = disembargo_context_sender_loopback_get(d)
+      tgt = disembargo_target_get(d, e)
+      call check_(error, message_target_imported_cap_get(tgt) == 6_int64, &
+                  'resolve: embargo targets the promise')
+      call capnp_message_free(reply)
+      call recv_within(sconn%fd, reply, error, &
+                       'resolve: promise release follows the embargo')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 6_int64, &
+                  'resolve: embargoed promise is released')
+      call capnp_message_free(reply)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_receiver_loopback_set(d, emb, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, 6_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'resolve: issued receiverLoopback accepted')
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_receiver_loopback_set(d, emb + 1_int64, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, 6_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call check_(error, .not. rpc_conn_alive(cconn), 'resolve: unknown embargo aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_embargo
+
    !> A Join part that reuses a live question id aborts. The export count
    !> stays where the first part left it.
    subroutine t_join_duplicate_qid(error)
@@ -4354,6 +4830,101 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_yourself_splice
+
+   !> Releasing more references than an export holds aborts and leaves
+   !> the count unchanged.
+   subroutine t_release_live_over(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(release_t) :: rel
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e, refs
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      refs = sconn%exports(0)%refcount
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
+                  'release: over-release leaves the count')
+      call check_(error, .not. rpc_conn_alive(sconn), 'release: over-release aborts')
+      call rpc_recv_message(cconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      ex = message_abort_get(rmsg, e)
+      call exception_reason_get(ex, reason, e)
+      call check_(error, index(reason, 'below zero') > 0, 'release: over-release reason')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_release_live_over
+
+   !> Two calls on one promise stay in receipt order across a Resolve
+   !> for an unknown import.
+   subroutine t_call_order(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(order_srv_t), target :: order
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: fa, fb, e
+      integer(int64) :: qa, qb
+      call px_socketpair(fa, fb, e)
+      boot => order
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 1, m, params, qa, e)
+      s = capnp_new_struct(m, 0, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 1_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 2, m, params, qb, e)
+      s = capnp_new_struct(m, 0, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, order%n == 2 .and. order%seen(1) == 1 .and. order%seen(2) == 2, &
+                  'order: calls stay in receipt order')
+      call check_(error, rpc_conn_alive(sconn), 'order: unknown resolve leaves it up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_call_order
 
    subroutine recv_within(fd, m, error, name)
       integer, intent(in) :: fd
@@ -4774,6 +5345,56 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_tail_return_with_exception
 
+   !> A second Resolve for a promise that already resolved is ignored.
+   subroutine t_resolve_second_ignored(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap, pcap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      logical :: readable
+      integer :: e
+      integer(int64) :: qboot, qprom, qcall
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call inject_promise(sconn%fd, cconn, cap, 4_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], pcap, e)
+      sconn%exports(4)%used = .true.
+      sconn%exports(4)%refcount = 1
+      sconn%exports(4)%srv => echo
+      call send_resolve_hosted(sconn%fd, 4_int64, 0_int64, e)
+      call rpc_pump_once(cconn, e)
+      call drain_one(sconn%fd, error, 'resolve: second drains the promise release')
+      call send_resolve_hosted(sconn%fd, 4_int64, 2_int64, e)
+      call rpc_pump_once(cconn, e)
+      call check_(error, rpc_conn_alive(cconn), 'resolve: second resolve is ignored')
+      call px_poll_in(sconn%fd, 0, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'resolve: second resolve sends nothing')
+      call rpc_call_begin(cconn, pcap, ECHO_IFACE, 0, m, params, qcall, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call wait_for(cconn, qcall, error, 'resolve: second still calls the first cap')
+      if (allocated(error)) return
+      call rpc_result_content(cconn, qcall, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 8_int64, &
+                  'resolve: second resolve does not retarget the call')
+      call check_(error, rpc_conn_alive(sconn), 'resolve: second resolve leaves the server up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_second_ignored
+
    !> Unimplemented(Bootstrap) aborts. The question would otherwise never return.
    subroutine t_unimplemented_bootstrap(error)
       type(error_type), allocatable, intent(inout) :: error
@@ -4797,51 +5418,115 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_unimplemented_bootstrap
 
-   !> Releasing more references than an export holds aborts and leaves
-   !> the count unchanged.
-   subroutine t_release_live_over(error)
+   !> Calls made while a reflected promise is embargoed stay off the wire
+   !> and run on the local export after the receiverLoopback.
+   subroutine t_embargo_queues_locally(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
-      type(echo_srv_t), target :: local_echo
+      type(echo_srv_t), target :: client_echo, server_echo
       class(rpc_server_t), pointer :: boot
-      type(rpc_cap_t) :: cap
+      type(rpc_cap_t) :: remote, promise, localboot
       type(capnp_message_t), target :: m, reply
       type(message_t) :: msg, rmsg
-      type(release_t) :: rel
-      type(exception_t) :: ex
-      character(len=:), allocatable :: reason
-      integer :: fa, fb, e, refs
-      integer(int64) :: qboot
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(capnp_ptr_t) :: s, content
+      logical :: readable
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qsrv, qprom, qprobe, qheld, qlater, emb
       call px_socketpair(fa, fb, e)
-      boot => local_echo
+      boot => server_echo
       call rpc_conn_init(sconn, fb, boot)
-      boot => null()
+      boot => client_echo
       call rpc_conn_init(cconn, fa, boot)
-      call rpc_bootstrap_send(cconn, cap, e)
-      qboot = cap%id
+      call rpc_bootstrap_send(cconn, remote, e)
+      qboot = remote%id
       call rpc_pump_once(sconn, e)
       call rpc_wait(cconn, qboot, e)
-      refs = sconn%exports(0)%refcount
+      call rpc_result_cap(cconn, qboot, [integer ::], remote, e)
+      call rpc_bootstrap_send(sconn, localboot, e)
+      qsrv = localboot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qsrv, e)
+      call check_(error, cconn%exports(0)%used, 'embargo: client exported its bootstrap')
+      call inject_promise(sconn%fd, cconn, remote, 4_int64, qprom, e)
+      call rpc_wait(cconn, qprom, e)
+      call rpc_result_cap(cconn, qprom, [integer ::], promise, e)
+      call rpc_call_begin(cconn, promise, ECHO_IFACE, 0, m, params, qprobe, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'embargo: probe call leaves the wire')
       call capnp_message_init_builder(m, e)
       msg = message_new_root(m, e)
-      rel = message_release_init(msg, e)
-      call release_id_set(rel, 0_int64, e)
-      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
-      call rpc_send_message(cconn%fd, m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
       call capnp_message_free(m)
-      call rpc_pump_once(sconn, e)
-      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
-                  'release: over-release leaves the count')
-      call check_(error, .not. rpc_conn_alive(sconn), 'release: over-release aborts')
-      call rpc_recv_message(cconn%fd, reply, e)
+      call rpc_pump_once(cconn, e)
+      call recv_within(sconn%fd, reply, error, 'embargo: disembargo arrives')
+      if (allocated(error)) return
       rmsg = message_read_root(reply, e)
-      ex = message_abort_get(rmsg, e)
-      call exception_reason_get(ex, reason, e)
-      call check_(error, index(reason, 'below zero') > 0, 'release: over-release reason')
+      call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                  'embargo: reflected resolve sends Disembargo')
+      d = message_disembargo_get(rmsg, e)
+      emb = disembargo_context_sender_loopback_get(d)
       call capnp_message_free(reply)
+      call recv_within(sconn%fd, reply, error, 'embargo: promise release arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG, &
+                  'embargo: promise id is released after the disembargo')
+      call capnp_message_free(reply)
+      call rpc_call_begin(cconn, promise, ECHO_IFACE, 0, m, params, qheld, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo: a call during the embargo is not sent')
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_receiver_loopback_set(d, emb, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, 4_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call wait_for(cconn, qheld, error, 'embargo: queued call returns locally')
+      if (allocated(error)) return
+      call rpc_result_content(cconn, qheld, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 8_int64, &
+                  'embargo: queued call ran on the local cap')
+      call rpc_call_begin(cconn, promise, ECHO_IFACE, 0, m, params, qlater, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 5_int64, e)
+      call capnp_set_text(s, 0, 'y', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo: a later call stays local')
+      call wait_for(cconn, qlater, error, 'embargo: later call returns locally')
+      if (allocated(error)) return
+      call rpc_result_content(cconn, qlater, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 10_int64, &
+                  'embargo: later call ran on the local cap')
+      call check_(error, rpc_conn_alive(cconn) .and. rpc_conn_alive(sconn), &
+                  'embargo: local delivery leaves both vats up')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
-   end subroutine t_release_live_over
+   end subroutine t_embargo_queues_locally
 
    !> A cap-less result carries noFinishNeeded. A result that exports a
    !> capability does not.
@@ -4890,6 +5575,84 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_no_finish_needed
+
+   !> Resolve to a third-party vine or to one of our own answers is
+   !> accepted. Neither form aborts the connection.
+   subroutine t_resolve_accepted(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, promise
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(third_party_cap_descriptor_t) :: tp
+      type(promised_answer_t) :: pa
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content, ops
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qprom, qcall
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(cconn, fa, boot)
+      boot => null()
+      call rpc_conn_init(sconn, fb, boot)
+      ! The client answers this bootstrap, so receiverAnswer can name it.
+      call rpc_bootstrap_send(sconn, cap, e)
+      qboot = cap%id
+      call pump_ready(cconn, error, 'bootstrap call arrives')
+      call wait_for(sconn, qboot, error, 'question returns')
+      cap = rpc_cap_t()
+      cap%kind = RPC_CAP_IMPORT
+      cap%id = 0_int64
+      call inject_promise(sconn%fd, cconn, cap, 6_int64, qprom, e)
+      call wait_for(cconn, qprom, error, 'question returns')
+      call rpc_result_cap(cconn, qprom, [integer ::], promise, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 6_int64, e)
+      cd = resolve_cap_init(rv, e)
+      tp = cap_descriptor_third_party_hosted_init(cd, e)
+      call third_party_cap_descriptor_vine_id_set(tp, 9_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call pump_ready(cconn, error, 'message arrives')
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'resolve: thirdPartyHosted is accepted')
+      if (allocated(error)) return
+      call inject_promise(sconn%fd, cconn, cap, 7_int64, qprom, e)
+      call wait_for(cconn, qprom, error, 'question returns')
+      call rpc_result_cap(cconn, qprom, [integer ::], promise, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 7_int64, e)
+      cd = resolve_cap_init(rv, e)
+      pa = cap_descriptor_receiver_answer_init(cd, e)
+      call promised_answer_question_id_set(pa, qboot, e)
+      ops = promised_answer_transform_init(pa, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call pump_ready(cconn, error, 'message arrives')
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'resolve: receiverAnswer is accepted')
+      if (allocated(error)) return
+      call rpc_call_begin(cconn, promise, ECHO_IFACE, 0, m, params, qcall, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call wait_for(cconn, qcall, error, 'question returns')
+      call rpc_result_content(cconn, qcall, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 8_int64, &
+                  'resolve: receiverAnswer calls the local export')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_accepted
 
    !> Unknown union tags abort with the same text Cap'n Proto 1.4.0 uses.
    subroutine t_unknown_tags(error)

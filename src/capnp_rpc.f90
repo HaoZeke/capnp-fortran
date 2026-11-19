@@ -279,6 +279,8 @@ module capnp_rpc
       !> Remote references this vat still owes a Release for.
       integer :: refs = 0
       logical :: released = .false.
+      !> receiverHosted resolution kept one extra ref on the export.
+      logical :: pinned = .false.
       character(len=:), allocatable :: reason
       type(rpc_import_node_t), pointer :: next => null()
    end type rpc_import_node_t
@@ -515,6 +517,7 @@ contains
          call answer_slot_clear(conn%answers(i))
       end do
       call free_hi_answers(conn)
+      call free_imports(conn)
       if (associated(conn%vat)) call release_hosted_provisions(conn)
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
@@ -977,7 +980,20 @@ contains
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
       integer :: i
+      integer(int64) :: target_id
+      logical :: broken
+      character(len=:), allocatable :: breason
       err = CAPNP_OK
+      target_id = target%id
+      if (target%kind == RPC_CAP_IMPORT) then
+         call import_follow(conn, target%id, target_id, broken, breason)
+         if (broken) then
+            if (allocated(breason)) conn%abort_reason = breason
+            err = RPC_ERR_EXCEPTION
+            qid = -1_int64
+            return
+         end if
+      end if
       if (associated(target%membrane)) then
          call membrane_check(target%membrane, target%membrane_reverse, &
                              interface_id, method_id, err)
@@ -1007,7 +1023,7 @@ contains
       if (err == CAPNP_OK) then
          select case (target%kind)
          case (RPC_CAP_IMPORT)
-            call message_target_imported_cap_set(tgt, target%id, err)
+            call message_target_imported_cap_set(tgt, target_id, err)
          case (RPC_CAP_LOCAL)
             ! The call never leaves this vat. The imported-cap slot is
             ! only here so the message is well formed until send.
@@ -1042,10 +1058,12 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: m
       integer, intent(out) :: err
-      integer(int64) :: qid
+      integer(int64) :: qid, target_id
       type(message_t) :: msg
       type(call_t) :: c
       type(message_target_t) :: tgt
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
       integer :: rerr
       qid = call_question_of(m)
       if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
@@ -1100,15 +1118,90 @@ contains
             end if
          end if
       end if
+      ! An embargoed or locally resolved promise is not called on the wire.
+      ! C++ queues those calls on the local capability until the embargo lifts.
+      msg = message_read_root(m, rerr)
+      if (rerr == CAPNP_OK .and. message_which(msg) == MESSAGE_CALL_TAG) then
+         c = message_call_get(msg, rerr)
+         if (rerr == CAPNP_OK) tgt = call_target_get(c, rerr)
+         if (rerr == CAPNP_OK) then
+            if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
+               target_id = message_target_imported_cap_get(tgt)
+               call import_find(conn, target_id, node, found)
+               if (found) then
+                  if (node%state == IMP_EMBARGO .or. node%state == IMP_LOCAL) then
+                     call deliver_local_promise(conn, node, m, qid, err)
+                     call capnp_message_free(m)
+                     return
+                  end if
+               end if
+            end if
+         end if
+      end if
+      call note_sent_promise(conn, m)
       call rpc_send_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
          call release_unsent_call_caps(conn, m)
-         if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
-            call question_slot_clear(conn%questions(int(qid)))
-         end if
+         if (qid >= 0_int64) call release_question(conn, qid)
       end if
       call capnp_message_free(m)
    end subroutine rpc_call_send
+
+   !> Hold a call made on an embargoed promise, or run it on the local
+   !> capability once the embargo has lifted.
+   subroutine deliver_local_promise(conn, node, m, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(in) :: node
+      type(capnp_message_t), intent(inout), target :: m
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      if (node%state == IMP_EMBARGO) then
+         call enqueue_embargo_call(conn, node, m, qid, err)
+      else
+         call fulfill_local_call(conn, int(node%resolved_id), m, qid, err)
+      end if
+   end subroutine deliver_local_promise
+
+   subroutine enqueue_embargo_call(conn, node, m, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(in) :: node
+      type(capnp_message_t), intent(inout) :: m
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(rpc_embargo_node_t), pointer :: emb
+      type(rpc_queued_call_t), pointer :: q, tail
+      integer(int8), allocatable :: bytes(:)
+      emb => conn%embargoes
+      do while (associated(emb))
+         if (emb%open .and. emb%promise_id == node%id) exit
+         emb => emb%next
+      end do
+      if (.not. associated(emb)) then
+         call fulfill_local_call(conn, int(node%resolved_id), m, qid, err)
+         return
+      end if
+      allocate (q)
+      q%qid = qid
+      q%next => null()
+      call capnp_serialize_bytes(m, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, q%msg, err)
+      if (err /= CAPNP_OK) then
+         deallocate (q)
+         return
+      end if
+      if (.not. associated(emb%queued)) then
+         emb%queued => q
+      else
+         tail => emb%queued
+         do while (associated(tail%next))
+            tail => tail%next
+         end do
+         tail%next => q
+      end if
+      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) &
+         conn%questions(int(qid))%local_call = .true.
+      err = CAPNP_OK
+   end subroutine enqueue_embargo_call
 
    !> Run a saved Call against a local export and store the Return on
    !> the question. Nothing is written to the peer. A local answer can
@@ -1398,6 +1491,59 @@ contains
       end do
       conn%pipe_wait => null()
    end subroutine free_pipe_waits
+
+   subroutine drain_embargo_queue(conn, emb, export_id, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_embargo_node_t), intent(inout) :: emb
+      integer, intent(in) :: export_id
+      integer, intent(out) :: err
+      type(rpc_queued_call_t), pointer :: q, nxt
+      err = CAPNP_OK
+      q => emb%queued
+      emb%queued => null()
+      do while (associated(q))
+         nxt => q%next
+         call fulfill_local_call(conn, export_id, q%msg, q%qid, err)
+         call capnp_message_free(q%msg)
+         deallocate (q)
+         q => nxt
+         if (err /= CAPNP_OK) exit
+      end do
+      do while (associated(q))
+         nxt => q%next
+         call capnp_message_free(q%msg)
+         deallocate (q)
+         q => nxt
+      end do
+   end subroutine drain_embargo_queue
+
+   subroutine drop_queued_call(conn, qid)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_embargo_node_t), pointer :: emb
+      type(rpc_queued_call_t), pointer :: q, prev, nxt
+      emb => conn%embargoes
+      do while (associated(emb))
+         prev => null()
+         q => emb%queued
+         do while (associated(q))
+            if (q%qid == qid) then
+               nxt => q%next
+               if (associated(prev)) then
+                  prev%next => nxt
+               else
+                  emb%queued => nxt
+               end if
+               call capnp_message_free(q%msg)
+               deallocate (q)
+               return
+            end if
+            prev => q
+            q => q%next
+         end do
+         emb => emb%next
+      end do
+   end subroutine drop_queued_call
 
    !> Question id carried by a Call, or -1 when the message is not one.
    function call_question_of(m) result(qid)
@@ -1956,9 +2102,23 @@ contains
          if (local) then
             if (id >= 0_int64 .and. id < int(MAXE, int64)) &
                call drop_export(conn, int(id), 1)
+         else
+            call forget_import_ref(conn, id)
          end if
       end do
    end subroutine drop_finished_caps
+
+   subroutine forget_import_ref(conn, id)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: id
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      call import_find(conn, id, node, found)
+      if (.not. found) return
+      if (node%released .or. node%refs <= 0) return
+      node%refs = node%refs - 1
+      if (node%refs == 0) node%released = .true.
+   end subroutine forget_import_ref
 
    !> Request cancellation by sending Finish before a Return. Modern
    !> peers receive requireEarlyCancellationWorkaround=false, matching
@@ -1982,7 +2142,9 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (.not. conn%questions(q)%local_call) then
+      if (conn%questions(q)%local_call) then
+         call drop_queued_call(conn, qid)
+      else
          call capnp_message_init_builder(m, err)
          if (err /= CAPNP_OK) return
          msg = message_new_root(m, err)
@@ -2054,10 +2216,118 @@ contains
       end do
    end subroutine free_hi_answers
 
-   !> Validate CapDescriptor rows of a payload cap table.
-   subroutine note_payload_imports(conn, pl, err)
+   subroutine free_imports(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_import_node_t), pointer :: node, nxt
+      type(rpc_embargo_node_t), pointer :: emb, emb_next
+      type(rpc_queued_call_t), pointer :: q, qn
+      node => conn%imports
+      do while (associated(node))
+         nxt => node%next
+         deallocate (node)
+         node => nxt
+      end do
+      conn%imports => null()
+      emb => conn%embargoes
+      do while (associated(emb))
+         emb_next => emb%next
+         q => emb%queued
+         do while (associated(q))
+            qn => q%next
+            call capnp_message_free(q%msg)
+            deallocate (q)
+            q => qn
+         end do
+         deallocate (emb)
+         emb => emb_next
+      end do
+      conn%embargoes => null()
+      conn%next_embargo = 0_int64
+   end subroutine free_imports
+
+   subroutine import_find(conn, id, node, found)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: id
+      type(rpc_import_node_t), pointer, intent(out) :: node
+      logical, intent(out) :: found
+      node => conn%imports
+      found = .false.
+      do while (associated(node))
+         if (node%id == id) then
+            found = .true.
+            return
+         end if
+         node => node%next
+      end do
+      node => null()
+   end subroutine import_find
+
+   !> Remember an import id the first time a cap descriptor names it.
+   !> A later descriptor for the same id does not change a promise into
+   !> a settled import or the reverse.
+   subroutine import_note(conn, id, promise)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: id
+      logical, intent(in) :: promise
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      if (id < 0_int64) return
+      call import_find(conn, id, node, found)
+      if (found) return
+      allocate (node)
+      node%id = id
+      node%refs = 1
+      node%released = .false.
+      if (promise) then
+         node%state = IMP_PROMISE
+      else
+         node%state = IMP_HOSTED
+      end if
+      node%next => conn%imports
+      conn%imports => node
+   end subroutine import_note
+
+   !> A new delivery of an id we already know is another remote reference.
+   subroutine import_receive(conn, id, promise)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: id
+      logical, intent(in) :: promise
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      call import_find(conn, id, node, found)
+      if (.not. found) then
+         call import_note(conn, id, promise)
+         return
+      end if
+      ! A released id can be handed out again. The old node would ignore
+      ! the new Resolve and the new refs.
+      if (node%released .or. node%refs <= 0) then
+         node%refs = 1
+         node%released = .false.
+         node%received_call = .false.
+         node%resolved_id = -1_int64
+         node%embargo_id = -1_int64
+         node%pinned = .false.
+         if (allocated(node%reason)) deallocate (node%reason)
+         if (promise) then
+            node%state = IMP_PROMISE
+         else
+            node%state = IMP_HOSTED
+         end if
+         return
+      end if
+      node%refs = node%refs + 1
+      node%released = .false.
+   end subroutine import_receive
+
+   !> Record senderHosted and senderPromise rows of a payload cap table.
+   !> `record` is false for a call's params: those caps are the sender's
+   !> exports, and counting them here would invent imports. An unknown
+   !> descriptor aborts either way.
+   subroutine note_payload_imports(conn, pl, record, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
+      logical, intent(in) :: record
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
@@ -2073,7 +2343,11 @@ contains
          select case (cap_descriptor_which(cd))
          case (CAP_DESCRIPTOR_NONE_TAG)
          case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            if (record) call import_receive(conn, &
+                                            cap_descriptor_sender_hosted_get(cd), .false.)
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            if (record) call import_receive(conn, &
+                                            cap_descriptor_sender_promise_get(cd), .true.)
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
          case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
          case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
@@ -2083,6 +2357,305 @@ contains
          end select
       end do
    end subroutine note_payload_imports
+
+   !> Follow remote resolutions. A broken promise sets broken and does
+   !> not produce an id to call.
+   subroutine import_follow(conn, id, out_id, broken, reason)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: id
+      integer(int64), intent(out) :: out_id
+      logical, intent(out) :: broken
+      character(len=:), allocatable, intent(out) :: reason
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      integer :: step
+      broken = .false.
+      out_id = id
+      do step = 1, 8
+         call import_find(conn, out_id, node, found)
+         if (.not. found) return
+         select case (node%state)
+         case (IMP_REMOTE)
+            out_id = node%resolved_id
+         case (IMP_BROKEN)
+            broken = .true.
+            if (allocated(node%reason)) reason = node%reason
+            return
+         case default
+            return
+         end select
+      end do
+   end subroutine import_follow
+
+   subroutine note_sent_promise(conn, m)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(capnp_message_t), intent(inout), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      integer :: rerr
+      integer(int64) :: id
+      msg = message_read_root(m, rerr)
+      if (rerr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_CALL_TAG) return
+      c = message_call_get(msg, rerr)
+      if (rerr /= CAPNP_OK) return
+      tgt = call_target_get(c, rerr)
+      if (rerr /= CAPNP_OK) return
+      if (message_target_which(tgt) /= MESSAGE_TARGET_IMPORTED_CAP_TAG) return
+      id = message_target_imported_cap_get(tgt)
+      call import_find(conn, id, node, found)
+      if (.not. found) return
+      if (node%state == IMP_PROMISE) node%received_call = .true.
+   end subroutine note_sent_promise
+
+   subroutine send_sender_loopback(conn, promise_id, embargo_id, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: promise_id, embargo_id
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      d = message_disembargo_init(msg, err)
+      if (err == CAPNP_OK) call disembargo_context_sender_loopback_set(d, embargo_id, err)
+      if (err == CAPNP_OK) tgt = disembargo_target_init(d, err)
+      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, promise_id, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_sender_loopback
+
+   subroutine resolve_remote(conn, node, new_id, as_promise, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout) :: node
+      integer(int64), intent(in) :: new_id
+      logical, intent(in) :: as_promise
+      integer, intent(out) :: err
+      type(rpc_import_node_t), pointer :: other
+      logical :: found, held
+      err = CAPNP_OK
+      ! The application still holds this promise when refs remain. The
+      ! promise import itself is dropped now; the replacement is what a
+      ! later rpc_release_send releases.
+      held = node%refs > 0 .and. .not. node%released
+      call release_all_import(conn, node, err)
+      if (err /= CAPNP_OK) return
+      node%state = IMP_REMOTE
+      node%resolved_id = new_id
+      call import_receive(conn, new_id, as_promise)
+      if (.not. held) then
+         call import_find(conn, new_id, other, found)
+         if (found) call release_one_import(conn, other, err)
+         return
+      end if
+      if (.not. node%received_call) return
+      call import_find(conn, new_id, other, found)
+      if (found) then
+         if (other%state == IMP_PROMISE) other%received_call = .true.
+      end if
+   end subroutine resolve_remote
+
+   subroutine resolve_reflected(conn, node, local_id, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      integer(int64), intent(in) :: local_id
+      integer, intent(out) :: err
+      type(rpc_embargo_node_t), pointer :: emb
+      integer(int64) :: eid
+      err = CAPNP_OK
+      node%resolved_id = local_id
+      ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
+      ! Without that ref a Release from the peer frees the object before
+      ! the local call runs.
+      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
+         if (conn%exports(int(local_id))%used) then
+            conn%exports(int(local_id))%refcount = &
+               conn%exports(int(local_id))%refcount + 1
+            node%pinned = .true.
+         end if
+      end if
+      if (.not. node%received_call) then
+         node%state = IMP_LOCAL
+         call release_all_import(conn, node, err)
+         return
+      end if
+      eid = conn%next_embargo
+      conn%next_embargo = eid + 1_int64
+      allocate (emb)
+      emb%id = eid
+      emb%promise_id = node%id
+      emb%open = .true.
+      emb%next => conn%embargoes
+      conn%embargoes => emb
+      node%state = IMP_EMBARGO
+      node%embargo_id = eid
+      call send_sender_loopback(conn, node%id, eid, err)
+      ! C++ drops the promise ImportClient after the Disembargo is sent.
+      if (err == CAPNP_OK) call release_all_import(conn, node, err)
+   end subroutine resolve_reflected
+
+   !> Fulfill a promise import. An unknown id is ignored. CapDescriptor
+   !> none and a Resolve for a settled import abort the connection.
+   subroutine handle_resolve(conn, msg, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_t), intent(in) :: msg
+      integer, intent(out) :: err
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(exception_t) :: ex
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      integer(int64) :: pid
+      character(len=:), allocatable :: reason
+      err = CAPNP_OK
+      rv = message_resolve_get(msg, err)
+      if (err /= CAPNP_OK) return
+      pid = resolve_promise_id_get(rv)
+      if (resolve_which(rv) == RESOLVE_EXCEPTION_TAG) then
+         call import_find(conn, pid, node, found)
+         if (.not. found) return
+         if (node%state /= IMP_PROMISE) then
+            if (node%state == IMP_HOSTED) then
+               call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
+            end if
+            return
+         end if
+         ex = resolve_exception_get(rv, err)
+         if (err /= CAPNP_OK) return
+         call exception_reason_get(ex, reason, err)
+         call release_all_import(conn, node, err)
+         if (err /= CAPNP_OK) return
+         node%state = IMP_BROKEN
+         if (allocated(reason)) node%reason = reason
+         if (.not. allocated(node%reason)) node%reason = 'promise rejected'
+         return
+      end if
+      if (resolve_which(rv) /= RESOLVE_CAP_TAG) then
+         call abort_conn(conn, "Unknown 'Resolve' type.", err)
+         return
+      end if
+      cd = resolve_cap_get(rv, err)
+      if (err /= CAPNP_OK) return
+      if (cap_descriptor_which(cd) == CAP_DESCRIPTOR_NONE_TAG) then
+         call abort_conn(conn, "'Resolve' contained 'CapDescriptor.none'.", err)
+         return
+      end if
+      call import_find(conn, pid, node, found)
+      if (.not. found) return
+      ! A second Resolve arrives after the promise import has been
+      ! superseded. C++ has already erased that import and ignores it.
+      ! A hosted import that was never a promise is still an error.
+      if (node%state /= IMP_PROMISE) then
+         if (node%state == IMP_HOSTED) then
+            call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
+         end if
+         return
+      end if
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         call resolve_remote(conn, node, cap_descriptor_sender_hosted_get(cd), .false., err)
+      case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         call resolve_remote(conn, node, cap_descriptor_sender_promise_get(cd), .true., err)
+      case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         call resolve_reflected(conn, node, cap_descriptor_receiver_hosted_get(cd), err)
+      case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+         block
+            type(third_party_cap_descriptor_t) :: tp
+            tp = cap_descriptor_third_party_hosted_get(cd, err)
+            if (err /= CAPNP_OK) return
+            ! Level 1 uses the vine. C++ imports it and does not abort.
+            call resolve_remote(conn, node, &
+                                third_party_cap_descriptor_vine_id_get(tp), .false., err)
+         end block
+      case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+         call resolve_receiver_answer(conn, node, cd, err)
+      case default
+         call abort_conn(conn, "Unknown 'Resolve' type.", err)
+      end select
+   end subroutine handle_resolve
+
+   !> Resolve a promise to a capability inside one of our answers.
+   !> A missing answer breaks the promise. It does not abort.
+   subroutine resolve_receiver_answer(conn, node, cd, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      type(cap_descriptor_t), intent(in) :: cd
+      integer, intent(out) :: err
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops, p, ctab
+      type(message_t) :: amsg
+      type(return_t) :: ar
+      type(payload_t) :: apl
+      type(cap_descriptor_t) :: acd
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      integer(int64) :: aqid, eid
+      integer :: i
+      err = CAPNP_OK
+      pa = cap_descriptor_receiver_answer_get(cd, err)
+      if (err /= CAPNP_OK) return
+      aqid = promised_answer_question_id_get(pa)
+      call answer_find(conn, aqid, slot, found)
+      if (found) then
+         if (associated(slot)) then
+            if (slot%used .and. slot%has_results) then
+               amsg = message_read_root(slot%retmsg, err)
+               if (err /= CAPNP_OK) return
+               ar = message_return_get(amsg, err)
+               if (err == CAPNP_OK .and. return_which(ar) == RETURN_RESULTS_TAG) then
+                  apl = return_results_get(ar, err)
+                  p = payload_content_get(apl, err)
+                  ops = promised_answer_transform_get(pa, err)
+                  if (err /= CAPNP_OK) return
+                  do i = 0, int(capnp_list_len(ops)) - 1
+                     op%p = capnp_list_get_struct(ops, i, err)
+                     if (err /= CAPNP_OK) return
+                     select case (promised_answer_op_which(op))
+                     case (PROMISED_ANSWER_OP_NOOP_TAG)
+                     case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+                        p = capnp_getp(p, &
+                                       int(promised_answer_op_get_pointer_field_get(op)), err)
+                        if (err /= CAPNP_OK) return
+                     case default
+                        call abort_conn(conn, 'Unsupported pipeline op.', err)
+                        return
+                     end select
+                  end do
+                  if (p%kind == CAPNP_PK_CAP) then
+                     ctab = payload_cap_table_get(apl, err)
+                     if (err == CAPNP_OK) then
+                        if (p%capidx >= 0_int64 .and. p%capidx < capnp_list_len(ctab)) then
+                           acd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
+                           if (err == CAPNP_OK) then
+                              if (cap_descriptor_which(acd) == &
+                                  CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
+                                 eid = cap_descriptor_sender_hosted_get(acd)
+                                 call resolve_reflected(conn, node, eid, err)
+                                 return
+                              end if
+                           end if
+                        end if
+                     end if
+                  end if
+               end if
+            end if
+         end if
+      end if
+      call release_all_import(conn, node, err)
+      if (err /= CAPNP_OK) return
+      node%state = IMP_BROKEN
+      node%reason = "invalid 'receiverAnswer'"
+   end subroutine resolve_receiver_answer
 
    pure function hi_bucket(qid) result(b)
       integer(int64), intent(in) :: qid
@@ -2159,15 +2732,67 @@ contains
       end do
    end subroutine answer_drop_hi
 
-
-   !> Drop refcount on an imported capability.
-   subroutine rpc_release_send(conn, cap, err)
+   !> Send Release. count is the referenceCount field.
+   subroutine send_release(conn, id, count, err)
       type(rpc_conn_t), intent(inout), target :: conn
-      type(rpc_cap_t), intent(in) :: cap
+      integer(int64), intent(in) :: id, count
       integer, intent(out) :: err
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(release_t) :: rel
+      err = CAPNP_OK
+      if (count <= 0_int64) return
+      if (.not. associated(conn%transport) .or. conn%dead) return
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      rel = message_release_init(msg, err)
+      if (err == CAPNP_OK) call release_id_set(rel, id, err)
+      if (err == CAPNP_OK) call release_reference_count_set(rel, count, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_release
+
+   !> Drop every remote reference this import still owes. Used when a
+   !> promise import is superseded and its ImportClient is destroyed.
+   subroutine release_all_import(conn, node, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout) :: node
+      integer, intent(out) :: err
+      integer :: n
+      err = CAPNP_OK
+      if (node%released .or. node%refs <= 0) return
+      n = node%refs
+      node%refs = 0
+      node%released = .true.
+      call send_release(conn, node%id, int(n, int64), err)
+   end subroutine release_all_import
+
+   !> Drop one remote reference, matching one rpc_release_send.
+   subroutine release_one_import(conn, node, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout) :: node
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      if (node%released .or. node%refs <= 0) return
+      node%refs = node%refs - 1
+      if (node%refs == 0) node%released = .true.
+      call send_release(conn, node%id, 1_int64, err)
+   end subroutine release_one_import
+
+   !> Drop refcount on an imported capability. A resolved promise
+   !> releases the replacement, which is the cap the peer still exports.
+   subroutine rpc_release_send(conn, cap, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: cap
+      integer, intent(out) :: err
+      type(rpc_import_node_t), pointer :: node, nxt
+      logical :: found
+      integer :: step
       err = CAPNP_OK
       if (cap%kind == RPC_CAP_LOCAL) then
          if (cap%id >= 0_int64 .and. cap%id < int(MAXE, int64)) &
@@ -2175,14 +2800,27 @@ contains
          return
       end if
       if (cap%kind /= RPC_CAP_IMPORT) return
-      call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      rel = message_release_init(msg, err)
-      call release_id_set(rel, cap%id, err)
-      call release_reference_count_set(rel, 1_int64, err)
-      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
-      call capnp_message_free(m)
+      call import_find(conn, cap%id, node, found)
+      if (.not. found) then
+         call send_release(conn, cap%id, 1_int64, err)
+         return
+      end if
+      do step = 1, 8
+         if (node%state /= IMP_REMOTE) exit
+         call import_find(conn, node%resolved_id, nxt, found)
+         if (.not. found) return
+         node => nxt
+      end do
+      if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
+         if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
+             node%resolved_id < int(MAXE, int64)) then
+            call drop_export(conn, int(node%resolved_id), 1)
+            node%pinned = .false.
+         end if
+         return
+      end if
+      if (node%state == IMP_BROKEN) return
+      call release_one_import(conn, node, err)
    end subroutine rpc_release_send
 
    ! ------------------------------------------------------------------
@@ -2462,11 +3100,7 @@ contains
       case (MESSAGE_JOIN_TAG)
          call handle_join(conn, msg, err)
       case (MESSAGE_RESOLVE_TAG)
-         ! Promise resolution. Replying unimplemented is the
-         ! spec-defined signal that this vat does not adopt
-         ! resolutions: the sender must keep forwarding calls
-         ! addressed to the promise, which it does until Release.
-         call send_unimplemented(conn, msg, err)
+         call handle_resolve(conn, msg, err)
       case default
          ! The obsolete save/delete messages. Reply unimplemented,
          ! echoing the message, per the spec.
@@ -2658,7 +3292,7 @@ contains
       ! capability lives.
       params = call_params_get(c, err)
       if (err == CAPNP_OK) call note_introductions(conn, params, err)
-      if (err == CAPNP_OK) call note_payload_imports(conn, params, err)
+      if (err == CAPNP_OK) call note_payload_imports(conn, params, .false., err)
       if (conn%dead .or. err /= CAPNP_OK) then
          call capnp_message_free(rm)
          return
@@ -3856,7 +4490,7 @@ contains
             integer :: ierr
             rpl = return_results_get(r, ierr)
             if (ierr == CAPNP_OK) call note_introductions(conn, rpl, ierr)
-            if (ierr == CAPNP_OK) call note_payload_imports(conn, rpl, ierr)
+            if (ierr == CAPNP_OK) call note_payload_imports(conn, rpl, .true., ierr)
             if (ierr /= CAPNP_OK) then
                call capnp_message_free(m)
                err = ierr
@@ -4021,6 +4655,8 @@ contains
       integer :: which
       integer(int64) :: embargo_id
       type(rpc_embargo_node_t), pointer :: emb
+      type(rpc_import_node_t), pointer :: inode
+      logical :: efound
       d = message_disembargo_get(msg, err)
       if (err /= CAPNP_OK) return
       which = disembargo_context_which(d)
@@ -4042,6 +4678,14 @@ contains
             return
          end if
          emb%open = .false.
+         call import_find(conn, emb%promise_id, inode, efound)
+         if (efound) then
+            if (inode%state == IMP_EMBARGO .and. inode%embargo_id == embargo_id) then
+               inode%state = IMP_LOCAL
+               call drain_embargo_queue(conn, emb, int(inode%resolved_id), err)
+               if (err /= CAPNP_OK) return
+            end if
+         end if
          err = CAPNP_OK
          return
       end if
