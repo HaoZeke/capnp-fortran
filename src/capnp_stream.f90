@@ -12,6 +12,7 @@ module capnp_stream
    public :: capnp_write_message, capnp_read_message
    public :: capnp_write_message_packed, capnp_read_message_packed
    public :: capnp_read_message_unit, capnp_read_message_packed_unit
+   public :: capnp_add_segment_words, capnp_packed_room
 
    !> Run-length state carried between packed words pulled off a stream.
    type :: pk_source_t
@@ -219,17 +220,29 @@ contains
       do i = 1_int64, nsegs64
          ! Size entries start at byte 4 of the header; table lacks the head word.
          n = iand(int(cp_get_i32(table, (i - 1_int64)*4_int64), int64), 4294967295_int64)
-         total = total + n*CAPNP_WORD_BYTES
+         call capnp_add_segment_words(total, n, err)
+         if (err /= CAPNP_OK) return
       end do
-      if (total/CAPNP_WORD_BYTES > limit) then
+      if (total > limit) then
          err = CAPNP_ERR_TRAVERSAL
          return
       end if
-      allocate (whole(0:header_bytes + total - 1))
+      total = total*CAPNP_WORD_BYTES
+      call stream_body_fits(unit, total, err)
+      if (err /= CAPNP_OK) return
+      allocate (whole(0:header_bytes + total - 1), stat=ios)
+      if (ios /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       whole(0:3) = head
       whole(4:header_bytes - 1) = table
       if (total > 0_int64) then
-         allocate (body(0:total - 1))
+         allocate (body(0:total - 1), stat=ios)
+         if (ios /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          read (unit, iostat=ios) body
          if (ios /= 0) then
             err = CAPNP_ERR_FRAMING
@@ -256,6 +269,7 @@ contains
       integer(int8) :: hdr(0:2055) ! 257 words; 511 segments need 256
       integer(int8), allocatable :: flat(:)
       integer(int64) :: nsegs64, header_words, total_words, nwords, limit, i, n
+      integer :: ios
       err = CAPNP_OK
       limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       if (present(traversal_words)) limit = traversal_words
@@ -284,14 +298,21 @@ contains
       total_words = 0_int64
       do i = 1_int64, nsegs64
          n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
-         total_words = total_words + n
+         call capnp_add_segment_words(total_words, n, err)
+         if (err /= CAPNP_OK) return
       end do
       if (total_words > limit) then
          err = CAPNP_ERR_TRAVERSAL
          return
       end if
+      call packed_stream_fits(unit, st, total_words, err)
+      if (err /= CAPNP_OK) return
       nwords = header_words + total_words
-      allocate (flat(0:nwords*CAPNP_WORD_BYTES - 1))
+      allocate (flat(0:nwords*CAPNP_WORD_BYTES - 1), stat=ios)
+      if (ios /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       flat = 0_int8
       flat(0:header_words*CAPNP_WORD_BYTES - 1) = hdr(0:header_words*CAPNP_WORD_BYTES - 1)
       do i = header_words + 1_int64, nwords
@@ -437,5 +458,88 @@ contains
          end do
       end if
    end subroutine unpack_word_from_unit
+
+   !> Add one segment's word count, rejecting a total above the default
+   !> reader traversal limit before any body allocation.
+   pure subroutine capnp_add_segment_words(total, n, err)
+      integer(int64), intent(inout) :: total
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      if (n < 0_int64) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
+      if (n > CAPNP_DEFAULT_TRAVERSAL_WORDS .or. &
+          total > CAPNP_DEFAULT_TRAVERSAL_WORDS - n) then
+         err = CAPNP_ERR_TRAVERSAL
+         return
+      end if
+      total = total + n
+   end subroutine capnp_add_segment_words
+
+   !> Most words still available from a packed tail. zero_left words are
+   !> already tagged. raw_left words still cost 8 bytes each. Every
+   !> remaining pair of bytes expands to at most 256 zero words.
+   pure subroutine capnp_packed_room(rem_bytes, zero_left, raw_left, room, err)
+      integer(int64), intent(in) :: rem_bytes
+      integer, intent(in) :: zero_left, raw_left
+      integer(int64), intent(out) :: room
+      integer, intent(out) :: err
+      integer(int64) :: rem
+      err = CAPNP_OK
+      room = 0_int64
+      if (rem_bytes < 0_int64 .or. zero_left < 0 .or. raw_left < 0) then
+         err = CAPNP_ERR_PACKED
+         return
+      end if
+      rem = rem_bytes
+      room = int(zero_left, int64)
+      if (raw_left > 0) then
+         if (rem < int(raw_left, int64)*8_int64) then
+            err = CAPNP_ERR_PACKED
+            return
+         end if
+         room = room + int(raw_left, int64)
+         rem = rem - int(raw_left, int64)*8_int64
+      end if
+      room = room + (rem/2_int64)*256_int64
+   end subroutine capnp_packed_room
+
+   !> Reject a body longer than the bytes still in a sized file. Pipes
+   !> report no size; the traversal cap is the bound in that case.
+   subroutine stream_body_fits(unit, need, err)
+      integer, intent(in) :: unit
+      integer(int64), intent(in) :: need
+      integer, intent(out) :: err
+      integer(int64) :: fsz, fpos
+      integer :: ios
+      err = CAPNP_OK
+      if (need < 0_int64) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
+      inquire (unit=unit, size=fsz, pos=fpos, iostat=ios)
+      if (ios /= 0) return
+      if (fsz < 1_int64 .or. fpos < 1_int64) return
+      if (need > fsz - fpos + 1_int64) err = CAPNP_ERR_FRAMING
+   end subroutine stream_body_fits
+
+   subroutine packed_stream_fits(unit, st, total_words, err)
+      integer, intent(in) :: unit
+      type(pk_source_t), intent(in) :: st
+      integer(int64), intent(in) :: total_words
+      integer, intent(out) :: err
+      integer(int64) :: fsz, fpos, rem, room
+      integer :: ios
+      err = CAPNP_OK
+      inquire (unit=unit, size=fsz, pos=fpos, iostat=ios)
+      if (ios /= 0) return
+      if (fsz < 1_int64 .or. fpos < 1_int64) return
+      rem = fsz - fpos + 1_int64
+      call capnp_packed_room(rem, st%zero_left, st%raw_left, room, err)
+      if (err /= CAPNP_OK) return
+      if (total_words > room) err = CAPNP_ERR_FRAMING
+   end subroutine packed_stream_fits
 
 end module capnp_stream

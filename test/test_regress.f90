@@ -19,6 +19,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
+         new_unittest("segment-bomb", run_segment_bomb), &
          new_unittest("list-linear", run_list_linear), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded) &
@@ -76,6 +77,49 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_comment_eof
+
+   subroutine run_segment_bomb(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8) :: packed(0:4), plain(0:7)
+      integer :: u, err
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      ! One segment of 0x7FFFFF words: under the traversal budget, and
+      ! more words than the four packed bytes can expand to.
+      packed = 0_int8
+      packed(0) = 112_int8
+      packed(1) = -1_int8
+      packed(2) = -1_int8
+      packed(3) = 127_int8
+      open (newunit=u, file=tmp//'/bomb.packed', access='stream', form='unformatted', &
+            status='replace')
+      write (u) packed(0:3)
+      close (u)
+      open (newunit=u, file=tmp//'/bomb.packed', access='stream', form='unformatted', &
+            status='old', action='read')
+      call capnp_read_message_packed_unit(u, msg, err)
+      close (u)
+      call check_(error, err == CAPNP_ERR_FRAMING, 'bomb: packed stream is framing')
+      plain = 0_int8
+      plain(4:7) = -1_int8
+      open (newunit=u, file=tmp//'/bomb.plain', access='stream', form='unformatted', &
+            status='replace')
+      write (u) plain
+      close (u)
+      open (newunit=u, file=tmp//'/bomb.plain', access='stream', form='unformatted', &
+            status='old', action='read')
+      call capnp_read_message_unit(u, msg, err)
+      close (u)
+      call check_(error, err == CAPNP_ERR_TRAVERSAL .or. err == CAPNP_ERR_FRAMING, &
+                  'bomb: plain stream rejects')
+      if (.not. have_capnp()) return
+      call check_(error, sh(cap_setup()//' && printf "\360\377\377\377\377" | "$CAP" decode' &
+         //' schema/common.capnp Vec3 >/dev/null 2>'//tmp//'/bomb.err; test $? -ne 0'), &
+         'bomb: cli packed header exits')
+   end subroutine run_segment_bomb
 
    subroutine run_list_linear(error)
       type(error_type), allocatable, intent(out) :: error
