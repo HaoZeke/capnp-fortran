@@ -15,7 +15,7 @@ module capnp_json
    implicit none
    private
 
-   public :: capnp_json_encode, capnp_json_decode
+   public :: capnp_json_encode, capnp_json_decode, capnp_json_span
 
    integer(int64), parameter :: ANN_NAME = int(z'FA5B1FD61C2E7C3D', int64)
    integer(int64), parameter :: ANN_B64 = int(z'D7D879450A253E4B', int64)
@@ -55,12 +55,24 @@ contains
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      type(capnp_brand_env_t) :: env
+      type(jval) :: root
       logical :: do_pretty, multi
       err = CAPNP_OK
       text = ''
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
-      call enc_struct(schema, idx, p, 0, .false., do_pretty, 0, text, multi, err)
+      call build_struct(schema, idx, p, env, 0, root, err)
+      if (err /= CAPNP_OK) return
+      call emit_jval(root, 0, .false., do_pretty, text, multi)
    end subroutine capnp_json_encode
 
    subroutine capnp_json_decode(schema, idx, text, msg, err)
@@ -69,12 +81,17 @@ contains
       character(len=*), intent(in) :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
+      type(capnp_brand_env_t) :: env
       type(jval) :: root
       type(capnp_ptr_t) :: obj
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      if (idx < 1 .or. .not. schema%loaded .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -97,25 +114,44 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
-      call fill_struct(schema, idx, obj, root, 0, err)
+      call fill_struct(schema, idx, obj, env, root, 0, err)
    end subroutine capnp_json_decode
 
-   recursive subroutine enc_struct(schema, idx, p, indent, has_prefix, pretty, depth, out, multi, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx, indent, depth
-      type(capnp_ptr_t), intent(in) :: p
-      logical, intent(in) :: has_prefix, pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
+   !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
+   subroutine capnp_json_span(text, from, beg, to, err)
+      character(len=*), intent(in) :: text
+      integer, intent(in) :: from
+      integer, intent(out) :: beg, to
       integer, intent(out) :: err
-      type(piece_t), allocatable :: items(:)
-      type(capnp_ptr_t) :: fl, f
-      character(len=:), allocatable :: nm, val, body, colon
-      integer :: i, n, nf, active, fd, sub
-      logical :: show, child_multi
+      type(scan_t) :: sc
+      type(jval) :: dummy
       err = CAPNP_OK
-      out = ''
-      multi = .false.
+      beg = 0
+      to = 0
+      sc%s = text
+      sc%n = len(text)
+      sc%i = max(from, 1)
+      call jskip(sc)
+      if (sc%i > sc%n) return
+      beg = sc%i
+      call parse_value(sc, dummy, 0, err)
+      if (err == CAPNP_OK) to = sc%i - 1
+   end subroutine capnp_json_span
+
+   recursive subroutine build_struct(schema, idx, p, env, depth, jv, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      type(jval), intent(out) :: jv
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f
+      type(jval) :: one
+      character(len=:), allocatable :: nm
+      integer :: i, n, nf, active, fd
+      logical :: show
+      err = CAPNP_OK
+      jv%k = JK_OBJ
       if (depth > MAX_DEPTH) then
          err = CAPNP_ERR_DEPTH
          return
@@ -124,9 +160,6 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      active = -1
-      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) &
-         active = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
       fl = node_struct_fields(schema%nodes(idx), err)
       if (err /= CAPNP_OK) return
       nf = int(capnp_list_len(fl))
@@ -134,127 +167,65 @@ contains
       do i = 0, nf - 1
          f = capnp_list_get_struct(fl, i, err)
          if (err /= CAPNP_OK) return
-         fd = field_discriminant(f)
+         if (field_discriminant(f) /= NO_DISCRIMINANT) cycle
          show = capnp_codec_field_present(f, p, err)
          if (err /= CAPNP_OK) return
-         if (fd /= NO_DISCRIMINANT) then
-            if (fd /= active) cycle
-            if (fd == 0 .and. .not. show) cycle
-         else if (.not. show) then
-            cycle
-         end if
+         if (.not. show) cycle
          call json_field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         if (fd /= NO_DISCRIMINANT .and. .not. show) then
-            val = 'null'
-            child_multi = .false.
-         else
-            sub = indent
-            if (nf > 1) sub = indent + 1
-            call enc_field_value(schema, f, p, sub, .true., pretty, depth + 1, val, child_multi, err)
-            if (err /= CAPNP_OK) return
-         end if
-         if (pretty) then
-            colon = ': '
-         else
-            colon = ':'
-         end if
-         call push(items, n, json_quote(nm)//colon//val, child_multi)
+         call build_field_value(schema, f, p, env, depth + 1, one, err)
+         if (err /= CAPNP_OK) return
+         one%key = nm
+         call append_kid(jv%kids, n, one)
       end do
-      ! sub-indent for children used nf, but the object may have fewer
-      ! printed fields. Re-join with the printed count. Children were
-      ! encoded with a sub-indent based on the schema field count, which
-      ! matches C++ only when every field is printed. Recompute when the
-      ! printed set is shorter by encoding with the printed size.
-      if (n /= nf .and. n > 0) then
-         call reencode_fields(schema, idx, p, indent, pretty, depth, items, n, err)
-         if (err /= CAPNP_OK) return
-      end if
-      call jjoin(items, n, indent, has_prefix, pretty, multi, body)
-      out = '{'//body//'}'
-   end subroutine enc_struct
-
-   !> C++ bumps indent when the encoded object has more than one field.
-   !> The first pass used the schema field count; redo when that differs
-   !> from the number of fields actually written.
-   subroutine reencode_fields(schema, idx, p, indent, pretty, depth, items, n, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx, indent, depth, n
-      type(capnp_ptr_t), intent(in) :: p
-      logical, intent(in) :: pretty
-      type(piece_t), allocatable, intent(inout) :: items(:)
-      integer, intent(out) :: err
-      type(piece_t), allocatable :: fresh(:)
-      type(capnp_ptr_t) :: fl, f
-      character(len=:), allocatable :: nm, val, colon
-      integer :: i, nf, active, fd, sub, m
-      logical :: show, child_multi
-      err = CAPNP_OK
-      sub = indent
-      if (n > 1) sub = indent + 1
-      fl = node_struct_fields(schema%nodes(idx), err)
-      if (err /= CAPNP_OK) return
-      active = -1
-      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) &
-         active = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
-      nf = int(capnp_list_len(fl))
-      m = 0
-      if (pretty) then
-         colon = ': '
-      else
-         colon = ':'
-      end if
-      do i = 0, nf - 1
-         f = capnp_list_get_struct(fl, i, err)
-         if (err /= CAPNP_OK) return
-         fd = field_discriminant(f)
-         show = capnp_codec_field_present(f, p, err)
-         if (err /= CAPNP_OK) return
-         if (fd /= NO_DISCRIMINANT) then
+      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) then
+         if (p%kind == CAPNP_PK_NULL) then
+            active = 0
+         else
+            active = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+         end if
+         do i = 0, nf - 1
+            f = capnp_list_get_struct(fl, i, err)
+            if (err /= CAPNP_OK) return
+            fd = field_discriminant(f)
             if (fd /= active) cycle
-            if (fd == 0 .and. .not. show) cycle
-         else if (.not. show) then
-            cycle
-         end if
-         call json_field_name(f, nm, err)
-         if (err /= CAPNP_OK) return
-         if (fd /= NO_DISCRIMINANT .and. .not. show) then
-            val = 'null'
-            child_multi = .false.
-         else
-            call enc_field_value(schema, f, p, sub, .true., pretty, depth + 1, val, child_multi, err)
+            call json_field_name(f, nm, err)
             if (err /= CAPNP_OK) return
-         end if
-         call push(fresh, m, json_quote(nm)//colon//val, child_multi)
-      end do
-      call move_alloc(fresh, items)
-   end subroutine reencode_fields
+            call build_field_value(schema, f, p, env, depth + 1, one, err)
+            if (err /= CAPNP_OK) return
+            one%key = nm
+            call append_kid(jv%kids, n, one)
+            exit
+         end do
+      end if
+      call trim_kids(jv%kids, n)
+   end subroutine build_struct
 
-   recursive subroutine enc_field_value(schema, f, p, indent, has_prefix, pretty, depth, out, multi, err)
+   recursive subroutine build_field_value(schema, f, p, env, depth, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
-      integer, intent(in) :: indent, depth
-      logical, intent(in) :: has_prefix, pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
+      type(capnp_brand_env_t), intent(in) :: env
+      integer, intent(in) :: depth
+      type(jval), intent(out) :: jv
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, q, et, dv
+      type(capnp_ptr_t) :: raw_t, t, q, et, dv
+      type(capnp_brand_env_t) :: cenv
+      integer(int8), allocatable :: raw(:)
       integer :: tw, idx, mode
       integer(int64) :: off
       err = CAPNP_OK
-      out = ''
-      multi = .false.
       if (field_which(f) == FIELD_GROUP) then
          idx = capnp_codec_find_id(schema, field_group_type_id(f))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, p, indent, has_prefix, pretty, depth, out, multi, err)
+         call build_struct(schema, idx, p, env, depth, jv, err)
          return
       end if
-      t = field_slot_type(f, err)
+      raw_t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       tw = type_which(t)
@@ -263,161 +234,204 @@ contains
       if (err /= CAPNP_OK) return
       select case (tw)
       case (TYPE_VOID)
-         out = 'null'
+         jv%k = JK_NULL
       case (TYPE_BOOL)
-         if (capnp_get_bool(p, off, default=capnp_def_bool(dv))) then
-            out = 'true'
-         else
-            out = 'false'
-         end if
+         jv%k = JK_BOOL
+         jv%b = capnp_get_bool(p, off, default=capnp_def_bool(dv))
       case (TYPE_INT8)
-         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=capnp_def_i8(dv)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=capnp_def_i8(dv)), int64), jv%str)
       case (TYPE_INT16)
-         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=capnp_def_i16(dv)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=capnp_def_i16(dv)), int64), jv%str)
       case (TYPE_INT32)
-         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=capnp_def_i32(dv)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=capnp_def_i32(dv)), int64), jv%str)
       case (TYPE_INT64)
-         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), out)
-         out = json_quote(out)
+         jv%k = JK_STR
+         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), jv%str)
       case (TYPE_UINT8)
-         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=capnp_def_u8(dv)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=capnp_def_u8(dv)), int64), jv%str)
       case (TYPE_UINT16)
-         call capnp_fmt_u64(int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv)), int64), jv%str)
       case (TYPE_UINT32)
-         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=capnp_def_u32(dv)), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=capnp_def_u32(dv)), jv%str)
       case (TYPE_UINT64)
-         call capnp_fmt_u64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), out)
-         out = json_quote(out)
+         jv%k = JK_STR
+         call capnp_fmt_u64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), jv%str)
       case (TYPE_FLOAT32)
-         out = json_float(real(capnp_get_f32(p, off*4_int64, default=capnp_def_f32(dv)), real64))
+         call put_float_jval(real(capnp_get_f32(p, off*4_int64, default=capnp_def_f32(dv)), real64), jv)
       case (TYPE_FLOAT64)
-         out = json_float(capnp_get_f64(p, off*8_int64, default=capnp_def_f64(dv)))
+         call put_float_jval(capnp_get_f64(p, off*8_int64, default=capnp_def_f64(dv)), jv)
       case (TYPE_TEXT)
-         call capnp_get_text(p, int(off), out, err)
-         if (err /= CAPNP_OK) return
-         out = json_quote(out)
+         jv%k = JK_STR
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL) then
+            if (dv%kind /= CAPNP_PK_NULL) then
+               call value_text(dv, jv%str, err)
+            else
+               jv%str = ''
+            end if
+         else
+            call capnp_get_text(p, int(off), jv%str, err)
+         end if
       case (TYPE_DATA)
-         call enc_data_field(p, int(off), mode, pretty, out, err)
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL) then
+            if (dv%kind /= CAPNP_PK_NULL) then
+               call value_data(dv, raw, err)
+               if (err /= CAPNP_OK) return
+            else
+               allocate (raw(0))
+            end if
+         else
+            call capnp_get_data(p, int(off), raw, err)
+            if (err /= CAPNP_OK) return
+         end if
+         call build_data_jval(raw, mode, jv)
       case (TYPE_ENUM)
-         call enc_enum(schema, t, int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv))), out, err)
+         call build_enum_jval(schema, t, int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv))), jv, err)
       case (TYPE_LIST)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(dv, err)
+            if (err /= CAPNP_OK) return
+         end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, indent, has_prefix, pretty, depth, out, multi, err)
+         call build_list(schema, et, q, env, depth, jv, err)
       case (TYPE_STRUCT)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(dv, err)
+            if (err /= CAPNP_OK) return
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, q, indent, has_prefix, pretty, depth, out, multi, err)
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
+         call build_struct(schema, idx, q, cenv, depth, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select
-   end subroutine enc_field_value
+   end subroutine build_field_value
 
-   recursive subroutine enc_list(schema, et, lst, indent, has_prefix, pretty, depth, out, multi, err)
+   recursive subroutine build_list(schema, raw_et, lst, env, depth, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, lst
-      integer, intent(in) :: indent, depth
-      logical, intent(in) :: has_prefix, pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
+      type(capnp_ptr_t), intent(in) :: raw_et, lst
+      type(capnp_brand_env_t), intent(in) :: env
+      integer, intent(in) :: depth
+      type(jval), intent(out) :: jv
       integer, intent(out) :: err
-      type(piece_t), allocatable :: items(:)
-      character(len=:), allocatable :: el, body
+      type(capnp_ptr_t) :: et
+      type(jval) :: one
       integer(int64) :: i, nlen
-      integer :: n, sub
-      logical :: child_multi
+      integer :: n
       err = CAPNP_OK
-      out = ''
-      multi = .false.
-      if (lst%kind /= CAPNP_PK_LIST) then
-         out = '[]'
+      jv%k = JK_ARR
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
          return
       end if
+      if (lst%kind /= CAPNP_PK_LIST) return
+      et = capnp_brand_resolve(env, raw_et)
       nlen = capnp_list_len(lst)
-      sub = indent
-      if (nlen > 1_int64) sub = indent + 1
       n = 0
       do i = 0_int64, nlen - 1_int64
-         call enc_element(schema, et, lst, i, sub, .false., pretty, depth + 1, el, child_multi, err)
+         call build_element(schema, et, lst, i, env, depth + 1, one, err)
          if (err /= CAPNP_OK) return
-         call push(items, n, el, child_multi)
+         call append_kid(jv%kids, n, one)
       end do
-      call jjoin(items, n, indent, has_prefix, pretty, multi, body)
-      out = '['//body//']'
-   end subroutine enc_list
+      call trim_kids(jv%kids, n)
+   end subroutine build_list
 
-   recursive subroutine enc_element(schema, et, lst, i, indent, has_prefix, pretty, depth, out, multi, err)
+   recursive subroutine build_element(schema, et, lst, i, env, depth, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       integer(int64), intent(in) :: i
-      integer, intent(in) :: indent, depth
-      logical, intent(in) :: has_prefix, pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
+      type(capnp_brand_env_t), intent(in) :: env
+      integer, intent(in) :: depth
+      type(jval), intent(out) :: jv
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q, inner, el
+      type(capnp_brand_env_t) :: cenv
       integer(int8), allocatable :: raw(:)
       integer :: tw, idx, ord
       err = CAPNP_OK
-      out = ''
-      multi = .false.
       tw = type_which(et)
       select case (tw)
       case (TYPE_VOID)
-         out = 'null'
+         jv%k = JK_NULL
       case (TYPE_BOOL)
-         if (capnp_list_get_bool(lst, i, err)) then
-            out = 'true'
-         else
-            out = 'false'
-         end if
+         jv%k = JK_BOOL
+         jv%b = capnp_list_get_bool(lst, i, err)
       case (TYPE_INT8)
-         call capnp_fmt_i64(int(capnp_list_get_i8(lst, i, err), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_list_get_i8(lst, i, err), int64), jv%str)
       case (TYPE_INT16)
-         call capnp_fmt_i64(int(capnp_list_get_i16(lst, i, err), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_list_get_i16(lst, i, err), int64), jv%str)
       case (TYPE_INT32)
-         call capnp_fmt_i64(int(capnp_list_get_i32(lst, i, err), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_i64(int(capnp_list_get_i32(lst, i, err), int64), jv%str)
       case (TYPE_INT64)
-         call capnp_fmt_i64(capnp_list_get_i64(lst, i, err), out)
-         out = json_quote(out)
+         jv%k = JK_STR
+         call capnp_fmt_i64(capnp_list_get_i64(lst, i, err), jv%str)
       case (TYPE_UINT8)
-         call capnp_fmt_u64(int(capnp_u_of_i8(capnp_list_get_i8(lst, i, err)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(int(capnp_u_of_i8(capnp_list_get_i8(lst, i, err)), int64), jv%str)
       case (TYPE_UINT16)
-         call capnp_fmt_u64(int(capnp_u_of_i16(capnp_list_get_i16(lst, i, err)), int64), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(int(capnp_u_of_i16(capnp_list_get_i16(lst, i, err)), int64), jv%str)
       case (TYPE_UINT32)
-         call capnp_fmt_u64(capnp_u_of_i32(capnp_list_get_i32(lst, i, err)), out)
+         jv%k = JK_NUM
+         call capnp_fmt_u64(capnp_u_of_i32(capnp_list_get_i32(lst, i, err)), jv%str)
       case (TYPE_UINT64)
-         call capnp_fmt_u64(capnp_list_get_i64(lst, i, err), out)
-         out = json_quote(out)
+         jv%k = JK_STR
+         call capnp_fmt_u64(capnp_list_get_i64(lst, i, err), jv%str)
       case (TYPE_FLOAT32)
-         out = json_float(real(capnp_list_get_f32(lst, i, err), real64))
+         call put_float_jval(real(capnp_list_get_f32(lst, i, err), real64), jv)
       case (TYPE_FLOAT64)
-         out = json_float(capnp_list_get_f64(lst, i, err))
+         call put_float_jval(capnp_list_get_f64(lst, i, err), jv)
       case (TYPE_ENUM)
          ord = capnp_u_of_i16(capnp_list_get_i16(lst, i, err))
          if (err /= CAPNP_OK) return
-         call enc_enum(schema, et, ord, out, err)
+         call build_enum_jval(schema, et, ord, jv, err)
       case (TYPE_TEXT)
-         call capnp_list_get_text(lst, int(i), out, err)
-         if (err /= CAPNP_OK) return
-         out = json_quote(out)
+         jv%k = JK_STR
+         call capnp_list_get_text(lst, int(i), jv%str, err)
       case (TYPE_DATA)
          call capnp_get_data(lst, int(i), raw, err)
          if (err /= CAPNP_OK) return
-         call enc_data_bytes(raw, 0, pretty, out, err)
+         call build_data_jval(raw, 0, jv)
       case (TYPE_LIST)
          q = capnp_list_getp(lst, int(i), err)
          if (err /= CAPNP_OK) return
          inner = type_list_element(et, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, inner, q, indent, has_prefix, pretty, depth, out, multi, err)
+         call build_list(schema, inner, q, env, depth, jv, err)
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -426,56 +440,66 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, el, indent, has_prefix, pretty, depth, out, multi, err)
+         call capnp_brand_enter(env, et, cenv, err)
+         if (err /= CAPNP_OK) return
+         call build_struct(schema, idx, el, cenv, depth, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select
-   end subroutine enc_element
+   end subroutine build_element
 
-   subroutine enc_data_field(p, slot, mode, pretty, out, err)
-      type(capnp_ptr_t), intent(in) :: p
-      integer, intent(in) :: slot, mode
-      logical, intent(in) :: pretty
-      character(len=:), allocatable, intent(out) :: out
-      integer, intent(out) :: err
-      integer(int8), allocatable :: raw(:)
-      call capnp_get_data(p, slot, raw, err)
-      if (err /= CAPNP_OK) return
-      call enc_data_bytes(raw, mode, pretty, out, err)
-   end subroutine enc_data_field
+   subroutine put_float_jval(x, jv)
+      real(real64), intent(in) :: x
+      type(jval), intent(out) :: jv
+      integer(int64) :: bits
+      if (ieee_nan(x)) then
+         jv%k = JK_STR
+         jv%str = 'NaN'
+      else if (.not. ieee_finite(x)) then
+         jv%k = JK_STR
+         bits = transfer(x, 0_int64)
+         if (iand(bits, int(z'8000000000000000', int64)) /= 0_int64) then
+            jv%str = '-Infinity'
+         else
+            jv%str = 'Infinity'
+         end if
+      else
+         jv%k = JK_NUM
+         call capnp_fmt_f64(x, jv%str)
+      end if
+   end subroutine put_float_jval
 
-   subroutine enc_data_bytes(raw, mode, pretty, out, err)
+   subroutine build_data_jval(raw, mode, jv)
       integer(int8), intent(in) :: raw(:)
       integer, intent(in) :: mode
-      logical, intent(in) :: pretty
-      character(len=:), allocatable, intent(out) :: out
-      integer, intent(out) :: err
-      type(piece_t), allocatable :: items(:)
-      character(len=:), allocatable :: body, one
+      type(jval), intent(out) :: jv
+      type(jval) :: one
       integer :: i, n
-      logical :: multi
-      err = CAPNP_OK
       if (mode == 1) then
-         out = json_quote(b64_encode(raw))
+         jv%k = JK_STR
+         jv%str = b64_encode(raw)
          return
       else if (mode == 2) then
-         out = json_quote(hex_encode(raw))
+         jv%k = JK_STR
+         jv%str = hex_encode(raw)
          return
       end if
-      n = 0
-      do i = 1, size(raw)
-         call capnp_fmt_u64(int(capnp_u_of_i8(raw(i)), int64), one)
-         call push(items, n, one, .false.)
+      jv%k = JK_ARR
+      n = size(raw)
+      if (n <= 0) return
+      allocate (jv%kids(n))
+      do i = 1, n
+         one%k = JK_NUM
+         call capnp_fmt_u64(int(capnp_u_of_i8(raw(i)), int64), one%str)
+         call take_jval(jv%kids(i), one)
       end do
-      call jjoin(items, n, 0, .false., pretty, multi, body)
-      out = '['//body//']'
-   end subroutine enc_data_bytes
+   end subroutine build_data_jval
 
-   subroutine enc_enum(schema, t, ord, out, err)
+   subroutine build_enum_jval(schema, t, ord, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t
       integer, intent(in) :: ord
-      character(len=:), allocatable, intent(out) :: out
+      type(jval), intent(out) :: jv
       integer, intent(out) :: err
       type(capnp_ptr_t) :: el, e, al
       character(len=:), allocatable :: nm
@@ -494,17 +518,78 @@ contains
             al = enumerant_annotations(e, err)
             if (err == CAPNP_OK) call name_override(al, nm, err)
             if (err /= CAPNP_OK) return
-            out = json_quote(nm)
+            jv%k = JK_STR
+            jv%str = nm
             return
          end if
       end if
-      call capnp_fmt_i64(int(ord, int64), out)
-   end subroutine enc_enum
+      jv%k = JK_NUM
+      call capnp_fmt_i64(int(ord, int64), jv%str)
+   end subroutine build_enum_jval
 
-   recursive subroutine fill_struct(schema, idx, p, jv, depth, err)
+   recursive subroutine emit_jval(jv, indent, has_prefix, pretty, out, multi)
+      type(jval), intent(in) :: jv
+      integer, intent(in) :: indent
+      logical, intent(in) :: has_prefix, pretty
+      character(len=:), allocatable, intent(out) :: out
+      logical, intent(out) :: multi
+      type(piece_t), allocatable :: items(:)
+      character(len=:), allocatable :: val, body, colon
+      integer :: i, m, n, sub
+      logical :: child_multi
+      multi = .false.
+      select case (jv%k)
+      case (JK_NULL)
+         out = 'null'
+      case (JK_BOOL)
+         if (jv%b) then
+            out = 'true'
+         else
+            out = 'false'
+         end if
+      case (JK_NUM)
+         out = jv%str
+      case (JK_STR)
+         out = json_quote(jv%str)
+      case (JK_ARR)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         m = 0
+         do i = 1, n
+            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi)
+            call push(items, m, val, child_multi)
+         end do
+         call jjoin(items, m, indent, has_prefix, pretty, multi, body)
+         out = '['//body//']'
+      case (JK_OBJ)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         if (pretty) then
+            colon = ': '
+         else
+            colon = ':'
+         end if
+         m = 0
+         do i = 1, n
+            call emit_jval(jv%kids(i), sub, .true., pretty, val, child_multi)
+            call push(items, m, json_quote(jv%kids(i)%key)//colon//val, child_multi)
+         end do
+         call jjoin(items, m, indent, has_prefix, pretty, multi, body)
+         out = '{'//body//'}'
+      case default
+         out = 'null'
+      end select
+   end subroutine emit_jval
+
+   recursive subroutine fill_struct(schema, idx, p, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(out) :: err
       integer :: i
@@ -526,18 +611,20 @@ contains
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
          end if
-         call fill_field(schema, f, p, jv%kids(i), depth + 1, err)
+         call fill_field(schema, f, p, env, jv%kids(i), depth + 1, err)
          if (err /= CAPNP_OK) return
       end do
    end subroutine fill_struct
 
-   recursive subroutine fill_field(schema, f, p, jv, depth, err)
+   recursive subroutine fill_field(schema, f, p, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(in) :: depth
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, q, et, dv
+      type(capnp_ptr_t) :: raw_t, t, q, et, dv
+      type(capnp_brand_env_t) :: cenv
       integer :: tw, idx, dw, pw, mode
       integer(int64) :: off
       err = CAPNP_OK
@@ -547,11 +634,12 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call fill_struct(schema, idx, p, jv, depth, err)
+         call fill_struct(schema, idx, p, env, jv, depth, err)
          return
       end if
-      t = field_slot_type(f, err)
+      raw_t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       tw = type_which(t)
@@ -562,21 +650,26 @@ contains
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call fill_list(schema, et, p, int(off), jv, depth, err)
+         call fill_list(schema, et, p, int(off), env, jv, depth, err)
       case (TYPE_STRUCT)
-         if (jv%k == JK_NULL) return
+         if (jv%k /= JK_OBJ) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
          dw = node_struct_data_words(schema%nodes(idx))
          pw = node_struct_pointer_count(schema%nodes(idx))
          q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, q, jv, depth, err)
+         call fill_struct(schema, idx, q, cenv, jv, depth, err)
       case (TYPE_DATA)
          call fill_data(p, int(off), jv, mode, .false., 0_int64, err)
       case default
@@ -584,15 +677,21 @@ contains
       end select
    end subroutine fill_field
 
-   recursive subroutine fill_list(schema, et, parent, slot, jv, depth, err)
+   recursive subroutine fill_list(schema, raw_et, parent, slot, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, parent
+      type(capnp_ptr_t), intent(in) :: raw_et, parent
       integer, intent(in) :: slot, depth
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: lst, inner, el
+      type(capnp_ptr_t) :: lst, et, inner, el
+      type(capnp_brand_env_t) :: cenv
       integer :: n, i, tw, idx
       err = CAPNP_OK
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (jv%k /= JK_ARR) then
          err = CAPNP_ERR_ARG
          return
@@ -602,7 +701,8 @@ contains
       else
          n = 0
       end if
-      lst = capnp_codec_alloc_list(parent, et, n, schema, err)
+      et = capnp_brand_resolve(env, raw_et)
+      lst = capnp_codec_alloc_list(parent, et, n, schema, err, env=env)
       if (err /= CAPNP_OK) return
       call capnp_setp(parent, slot, lst, err)
       if (err /= CAPNP_OK) return
@@ -612,7 +712,7 @@ contains
          case (TYPE_LIST)
             inner = type_list_element(et, err)
             if (err /= CAPNP_OK) return
-            call fill_list(schema, inner, lst, i - 1, jv%kids(i), depth + 1, err)
+            call fill_list(schema, inner, lst, i - 1, env, jv%kids(i), depth + 1, err)
          case (TYPE_STRUCT)
             el = capnp_list_get_struct(lst, i - 1, err)
             if (err /= CAPNP_OK) return
@@ -621,7 +721,9 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            call fill_struct(schema, idx, el, jv%kids(i), depth + 1, err)
+            call capnp_brand_enter(env, et, cenv, err)
+            if (err /= CAPNP_OK) return
+            call fill_struct(schema, idx, el, cenv, jv%kids(i), depth + 1, err)
          case (TYPE_DATA)
             call fill_data(lst, i - 1, jv%kids(i), 0, .true., int(i - 1, int64), err)
          case default
@@ -716,12 +818,14 @@ contains
       integer(int8), allocatable :: raw(:)
       err = CAPNP_OK
       if (mode == 1) then
+         if (jv%k == JK_NULL) return
          if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
          end if
          call b64_decode(jv%str, raw, err)
       else if (mode == 2) then
+         if (jv%k == JK_NULL) return
          if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
@@ -746,11 +850,7 @@ contains
       if (jv%k == JK_STR) then
          call capnp_parse_i64(jv%str, iv, err)
       else if (jv%k == JK_NUM) then
-         if (jv%num < -9223372036854775808.0_real64 .or. jv%num > 9223372036854774784.0_real64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         iv = int(jv%num, int64)
+         call capnp_f64_to_i64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
@@ -764,11 +864,7 @@ contains
       if (jv%k == JK_STR) then
          call capnp_parse_u64(jv%str, iv, err)
       else if (jv%k == JK_NUM) then
-         if (jv%num < 0.0_real64 .or. jv%num > 18446744073709549568.0_real64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         iv = int(jv%num, int64)
+         call capnp_f64_to_u64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
@@ -829,10 +925,6 @@ contains
          if (err /= CAPNP_OK) return
          call enumerant_name(e, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == jv%str) then
-            ord = i
-            return
-         end if
          al = enumerant_annotations(e, err)
          if (err /= CAPNP_OK) return
          call name_override(al, nm, err)
@@ -1136,50 +1228,39 @@ contains
    function json_quote(s) result(out)
       character(len=*), intent(in) :: s
       character(len=:), allocatable :: out
-      integer :: i, ub
+      character(len=:), allocatable :: buf
+      integer :: i, m, ub
       character(len=2) :: hh
       character(len=*), parameter :: hexd = '0123456789abcdef'
-      out = '"'
+      allocate (character(len=len(s)*6 + 2) :: buf)
+      buf(1:1) = '"'
+      m = 1
       do i = 1, len(s)
          ub = iachar(s(i:i))
          select case (ub)
-         case (34); out = out//'\"'
-         case (92); out = out//'\\'
-         case (8); out = out//'\b'
-         case (12); out = out//'\f'
-         case (10); out = out//'\n'
-         case (13); out = out//'\r'
-         case (9); out = out//'\t'
+         case (34); buf(m + 1:m + 2) = '\"'; m = m + 2
+         case (92); buf(m + 1:m + 2) = '\\'; m = m + 2
+         case (8); buf(m + 1:m + 2) = '\b'; m = m + 2
+         case (12); buf(m + 1:m + 2) = '\f'; m = m + 2
+         case (10); buf(m + 1:m + 2) = '\n'; m = m + 2
+         case (13); buf(m + 1:m + 2) = '\r'; m = m + 2
+         case (9); buf(m + 1:m + 2) = '\t'; m = m + 2
          case default
             if (ub < 32) then
                hh(1:1) = hexd(ub/16 + 1:ub/16 + 1)
                hh(2:2) = hexd(mod(ub, 16) + 1:mod(ub, 16) + 1)
-               out = out//'\u00'//hh
+               buf(m + 1:m + 6) = '\u00'//hh
+               m = m + 6
             else
-               out = out//s(i:i)
+               m = m + 1
+               buf(m:m) = s(i:i)
             end if
          end select
       end do
-      out = out//'"'
+      m = m + 1
+      buf(m:m) = '"'
+      out = buf(1:m)
    end function json_quote
-
-   function json_float(x) result(s)
-      real(real64), intent(in) :: x
-      character(len=:), allocatable :: s
-      integer(int64) :: bits
-      if (ieee_nan(x)) then
-         s = '"NaN"'
-      else if (.not. ieee_finite(x)) then
-         bits = transfer(x, 0_int64)
-         if (iand(bits, int(z'8000000000000000', int64)) /= 0_int64) then
-            s = '"-Infinity"'
-         else
-            s = '"Infinity"'
-         end if
-      else
-         call capnp_fmt_f64(x, s)
-      end if
-   end function json_float
 
    function b64_encode(raw) result(s)
       integer(int8), intent(in) :: raw(:)
@@ -1220,13 +1301,15 @@ contains
       integer, intent(out) :: err
       integer :: i, n, v, nd, a, b, c, d, outn
       integer, allocatable :: vals(:)
+      character(len=1) :: ch
       err = CAPNP_OK
       n = len(s)
       allocate (vals(n))
       nd = 0
       do i = 1, n
-         if (s(i:i) == '=') cycle
-         v = index(B64, s(i:i)) - 1
+         ch = s(i:i)
+         if (ch == '=' .or. ch == ' ' .or. ch == achar(9) .or. ch == achar(10) .or. ch == achar(13)) cycle
+         v = index(B64, ch) - 1
          if (v < 0) then
             err = CAPNP_ERR_ARG
             return
@@ -1355,7 +1438,7 @@ contains
             if (err /= CAPNP_OK) return
             call value_text(v, alt, err)
             if (err /= CAPNP_OK) return
-            if (len(alt) > 0) name = alt
+            name = alt
             return
          end if
       end do
