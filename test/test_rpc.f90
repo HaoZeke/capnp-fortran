@@ -102,7 +102,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(68))
+      allocate (testsuite(69))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -223,22 +223,24 @@ contains
       testsuite(59)%test => w_return_canceled_after_cancel
       testsuite(60)%name = "rpc-unimplemented-bootstrap"
       testsuite(60)%test => w_unimplemented_bootstrap
-      testsuite(61)%name = "rpc-unknown-tags"
-      testsuite(61)%test => w_unknown_tags
-      testsuite(62)%name = "rpc-shutdown"
-      testsuite(62)%test => w_shutdown
-      testsuite(63)%name = "posix-recv-eintr-retried"
-      testsuite(63)%test => t_recv_all_retries_eintr
-      testsuite(64)%name = "rpc-framing-511-accepted"
-      testsuite(64)%test => t_framing_511_accepted
-      testsuite(65)%name = "rpc-framing-512-rejected"
-      testsuite(65)%test => t_framing_512_rejected
-      testsuite(66)%name = "rpc-framing-oversized-rejected"
-      testsuite(66)%test => t_framing_oversized_rejected
-      testsuite(67)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(67)%test => t_framing_negative_traversal_rejected
-      testsuite(68)%name = "rpc-framing-short-and-padded"
-      testsuite(68)%test => t_framing_short_and_padded
+      testsuite(61)%name = "rpc-no-finish-needed"
+      testsuite(61)%test => w_no_finish_needed
+      testsuite(62)%name = "rpc-unknown-tags"
+      testsuite(62)%test => w_unknown_tags
+      testsuite(63)%name = "rpc-shutdown"
+      testsuite(63)%test => w_shutdown
+      testsuite(64)%name = "posix-recv-eintr-retried"
+      testsuite(64)%test => t_recv_all_retries_eintr
+      testsuite(65)%name = "rpc-framing-511-accepted"
+      testsuite(65)%test => t_framing_511_accepted
+      testsuite(66)%name = "rpc-framing-512-rejected"
+      testsuite(66)%test => t_framing_512_rejected
+      testsuite(67)%name = "rpc-framing-oversized-rejected"
+      testsuite(67)%test => t_framing_oversized_rejected
+      testsuite(68)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(68)%test => t_framing_negative_traversal_rejected
+      testsuite(69)%name = "rpc-framing-short-and-padded"
+      testsuite(69)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -353,6 +355,11 @@ contains
       call rpc_conn_init(cli, fda, boot)
       rpc_up = .true.
    end subroutine ensure_rpc
+
+   subroutine w_no_finish_needed(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_no_finish_needed(error)
+   end subroutine w_no_finish_needed
 
    subroutine w_unknown_tags(error)
       type(error_type), allocatable, intent(out) :: error
@@ -4519,6 +4526,54 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_unimplemented_bootstrap
+
+   !> A cap-less result carries noFinishNeeded. A result that exports a
+   !> capability does not.
+   subroutine t_no_finish_needed(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(payload_t) :: params
+      type(return_t) :: r
+      type(capnp_ptr_t) :: s
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      msg = message_read_root(cconn%questions(int(qboot))%retmsg, e)
+      r = message_return_get(msg, e)
+      call check_(error, .not. return_no_finish_needed_get(r), &
+                  'noFinish: a capability result still needs Finish')
+      if (allocated(error)) return
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 4_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q, e)
+      msg = message_read_root(cconn%questions(int(q))%retmsg, e)
+      r = message_return_get(msg, e)
+      call check_(error, return_which(r) == RETURN_RESULTS_TAG, &
+                  'noFinish: echo returned results')
+      call check_(error, return_no_finish_needed_get(r), &
+                  'noFinish: a cap-less result sets the flag')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_no_finish_needed
 
    !> Unknown union tags abort with the same text Cap'n Proto 1.4.0 uses.
    subroutine t_unknown_tags(error)

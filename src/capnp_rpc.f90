@@ -3116,6 +3116,11 @@ contains
       integer :: i
       logical :: found
       type(rpc_answer_slot_t), pointer :: slot
+      type(message_t) :: heldmsg
+      type(return_t) :: heldr
+      integer :: herr
+      logical :: capless
+      capless = .false.
       err = CAPNP_OK
       if (qid < 0_int64) then
          do i = 0, ctx%nexp - 1
@@ -3137,12 +3142,28 @@ contains
          call abort_conn(conn, 'questionId is already in use', err)
          return
       end if
+      heldmsg = message_read_root(rm, herr)
+      if (herr == CAPNP_OK) then
+         if (message_which(heldmsg) == MESSAGE_RETURN_TAG) then
+            heldr = message_return_get(heldmsg, herr)
+            ! Cap-less results need no Finish (rpc.c++ sendReturn,
+            ! noFinishNeeded when the response has no capabilities).
+            if (herr == CAPNP_OK) then
+               if (return_which(heldr) == RETURN_RESULTS_TAG .and. ctx%nexp == 0) then
+                  call return_no_finish_needed_set(heldr, .true., err)
+                  if (err == CAPNP_OK) capless = .true.
+               end if
+            end if
+         end if
+      end if
       ! Close from inside dispatch drops the transport. The server
       ! is freed when this call returns, and there is no peer left.
-      if (.not. associated(conn%transport)) then
-         err = CAPNP_ERR_IO
-      else
-         call rpc_send_message(conn%transport, rm, err)
+      if (err == CAPNP_OK) then
+         if (.not. associated(conn%transport)) then
+            err = CAPNP_ERR_IO
+         else
+            call rpc_send_message(conn%transport, rm, err)
+         end if
       end if
       if (err /= CAPNP_OK) then
          ! The peer never saw the exports this answer published.
@@ -3150,6 +3171,12 @@ contains
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
          end do
          call capnp_message_free(rm)
+         return
+      end if
+      if (capless) then
+         call capnp_message_free(rm)
+         call answer_slot_clear(slot)
+         if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
          return
       end if
       call capnp_serialize_bytes(rm, bytes, err)
