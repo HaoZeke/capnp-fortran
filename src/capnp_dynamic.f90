@@ -372,8 +372,11 @@ contains
       end select
    end subroutine dyn_resolve_type
 
-   !> anyPointer is only resolved when one of its arms is active.
-   !> Anything else, including a parameter that does not bind, is unset.
+   !> An anyPointer parameter with no binding, an unknown scope, or an
+   !> index past the binding list stays AnyPointer. That is what the C++
+   !> schema loader returns, so a type parameter added later does not
+   !> break an older brand. Only an anyPointer arm that is not one of the
+   !> three legal arms, or an unconstrained tag outside its range, is unset.
    subroutine dyn_resolve_anyptr(brand, t, depth, which, id, err)
       type(capnp_dyn_brand_t), intent(in) :: brand
       type(capnp_ptr_t), intent(in) :: t
@@ -391,7 +394,8 @@ contains
       case (ANYPTR_IMPLICIT)
       case (ANYPTR_PARAMETER)
          if (.not. allocated(brand%scopes)) then
-            which = -1
+            which = TYPE_ANY_POINTER
+            id = 0_int64
             return
          end if
          idx = type_param_index(t) + 1
@@ -399,22 +403,26 @@ contains
             if (brand%scopes(i)%inherited) cycle
             if (brand%scopes(i)%id /= type_param_scope_id(t)) cycle
             if (.not. allocated(brand%scopes(i)%bindings)) then
-               which = -1
+               which = TYPE_ANY_POINTER
+               id = 0_int64
                return
             end if
             if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) then
-               which = -1
+               which = TYPE_ANY_POINTER
+               id = 0_int64
                return
             end if
             if (brand%scopes(i)%bindings(idx)%unbound) then
-               which = -1
+               which = TYPE_ANY_POINTER
+               id = 0_int64
                return
             end if
             call dyn_resolve_type(brand, brand%scopes(i)%bindings(idx)%type, &
                                   depth + 1, which, id, err)
             return
          end do
-         which = -1
+         which = TYPE_ANY_POINTER
+         id = 0_int64
       case default
          which = -1
       end select
