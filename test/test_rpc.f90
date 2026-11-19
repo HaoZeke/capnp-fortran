@@ -232,6 +232,7 @@ contains
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
       if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
+      if (.not. allocated(error)) call t_join_finish_one_part(error)
       if (.not. allocated(error)) call t_join_send_unwinds(error)
       if (.not. allocated(error)) call t_join_finish_releases_cap(error)
       if (.not. allocated(error)) call t_abandoned_join_cleared(error)
@@ -2646,5 +2647,31 @@ contains
       call px_close(fb)
       call px_close(lfd)
    end subroutine t_dial_guard
+
+   !> Finish of one Join part exceptions every other part already in the
+   !> set, including one that arrived after the finished part.
+   subroutine t_join_finish_one_part(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: a, b, n, i, kind
+      integer(int64) :: ansid
+      logical :: is_exc, held
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'join finish: server has a live export')
+      if (allocated(error)) return
+      call send_join_part(910_int64, a, 44_int64, 3, 0, err)
+      call rpc_pump_once(srv, err)
+      call send_join_part(911_int64, a, 44_int64, 3, 1, err)
+      call rpc_pump_once(srv, err)
+      call send_finish(910_int64, err)
+      call rpc_pump_once(srv, err)
+      call recv_answer(ansid, is_exc, kind, err)
+      call check_(error, err == CAPNP_OK .and. ansid == 911_int64 .and. is_exc, &
+                  'join finish: later part is exceptioned')
+      held = .false.
+      do i = 0, 7
+         if (srv%joins(i)%used .and. srv%joins(i)%join_id == 44_int64) held = .true.
+      end do
+      call check_(error, .not. held, 'join finish: the set is torn down')
+   end subroutine t_join_finish_one_part
 
 end module test_rpc

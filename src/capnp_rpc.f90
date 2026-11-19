@@ -2755,7 +2755,7 @@ contains
       integer, intent(out) :: err
       type(finish_t) :: f
       integer(int64) :: qid
-      integer :: q, i, eid
+      integer :: q, i, k, eid, jerr
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
@@ -2763,6 +2763,16 @@ contains
       do i = 0, MAXJOINS - 1
          if (.not. conn%joins(i)%used) cycle
          if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
+            ! One Finish cancels the whole set. Every other part that
+            ! has already arrived, including a later one, is answered
+            ! with an exception. The finished part itself is not.
+            do k = 0, conn%joins(i)%part_count - 1
+               if (.not. conn%joins(i)%seen(k)) cycle
+               if (conn%joins(i)%qids(k) == qid) cycle
+               call send_answer_exception(conn, conn%joins(i)%qids(k), &
+                                          'join finished', jerr)
+               if (jerr /= CAPNP_OK) err = jerr
+            end do
             conn%joins(i) = rpc_join_slot_t()
             return
          end if
