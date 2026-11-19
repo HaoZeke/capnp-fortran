@@ -23,6 +23,7 @@ program tester
    use test_codegen, only: collect_codegen
    use test_rpc_lifetime, only: collect_rpc_lifetime
    use test_net, only: collect_net
+   use rpc_servers, only: free_minted_adders
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -112,6 +113,7 @@ program tester
       error stop 1
    end if
    call release_runner()
+   call free_minted_adders()
 contains
    subroutine release_runner()
       if (allocated(testsuites)) deallocate (testsuites)

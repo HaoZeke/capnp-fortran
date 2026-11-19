@@ -7,9 +7,16 @@ module rpc_servers
    implicit none
    private
 
-   public :: echo_srv_t, adder_srv_t, ECHO_IFACE
+   public :: echo_srv_t, adder_srv_t, ECHO_IFACE, free_minted_adders
+
+   type :: adder_ref_t
+      type(adder_srv_t), pointer :: p => null()
+   end type adder_ref_t
+
+   type(adder_ref_t), allocatable :: minted(:)
 
    integer(int64), parameter :: ECHO_IFACE = 81985529216486895_int64 ! 0x0123456789abcdef
+   integer :: next_adder_token = 0
 
    !> method 0: results = { i64 = params.i64 * 2, text = 'echo: '//params.text }
    !> method 1: results = { cap ptr0 = new adder with base = params.i64 }
@@ -21,8 +28,10 @@ module rpc_servers
    !> method 0: results.i64 = base + params.i64
    type, extends(rpc_server_t) :: adder_srv_t
       integer(int64) :: base = 0_int64
+      integer :: token = 0
    contains
       procedure :: dispatch => adder_dispatch
+      final :: adder_final
    end type adder_srv_t
 
 contains
@@ -75,6 +84,9 @@ contains
          if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
       case (1)
          allocate (ad)
+         next_adder_token = next_adder_token + 1
+         ad%token = next_adder_token
+         call remember_adder(ad)
          ad%base = capnp_get_i64(ctx%params, 0_int64)
          sp => ad
          ! The export table owns this object and frees it with the last
@@ -104,6 +116,45 @@ contains
          err = CAPNP_ERR_ARG
       end select
    end subroutine echo_dispatch
+
+   subroutine remember_adder(ad)
+      type(adder_srv_t), pointer, intent(in) :: ad
+      type(adder_ref_t), allocatable :: grown(:)
+      integer :: n
+      if (.not. allocated(minted)) allocate (minted(0))
+      n = size(minted)
+      allocate (grown(n + 1))
+      if (n > 0) grown(1:n) = minted
+      grown(n + 1)%p => ad
+      call move_alloc(grown, minted)
+   end subroutine remember_adder
+
+   !> Free adders minted by the echo server. Call this after every
+   !> connection that exported them has been closed.
+   subroutine free_minted_adders()
+      type(adder_srv_t), pointer :: p
+      integer :: i
+      if (.not. allocated(minted)) return
+      do i = 1, size(minted)
+         if (.not. associated(minted(i)%p)) cycle
+         p => minted(i)%p
+         minted(i)%p => null()
+         deallocate (p)
+      end do
+      deallocate (minted)
+   end subroutine free_minted_adders
+
+   !> The export table frees an owned adder. Drop the runner's pointer
+   !> so that later cleanup does not free the same object.
+   subroutine adder_final(self)
+      type(adder_srv_t), intent(inout) :: self
+      integer :: i
+      if (.not. allocated(minted)) return
+      do i = 1, size(minted)
+         if (.not. associated(minted(i)%p)) cycle
+         if (minted(i)%p%token == self%token) minted(i)%p => null()
+      end do
+   end subroutine adder_final
 
    subroutine adder_dispatch(self, ctx, err)
       class(adder_srv_t), intent(inout) :: self
