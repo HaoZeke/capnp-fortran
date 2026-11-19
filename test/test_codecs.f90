@@ -162,7 +162,7 @@ contains
             '  ubig = 0777,'//achar(10)// &
             '  tiny = 1.5038984e-36,'//achar(10)// &
             '  wide = 18446744073709551615,'//achar(10)// &
-            '  title = "\x41B\?'\''café",'//achar(10)// &
+            '  title = "\x41B\?''caf'//achar(195)//achar(169)//'",'//achar(10)// &
             '  blob = "\x00\xffA" )'//achar(10)
       call spit(tmp//'/te.txt', src, err)
       if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
@@ -465,8 +465,10 @@ contains
          call capnp_serialize_bytes(msg, bytes, err)
          call capnp_write_file(tmp//'/jud.bin', bytes, err)
          if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
-            //' && capnp convert -I"$INC" binary:json schema/codec.capnp UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.json' &
-            //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.s.json')) then
+            //' && capnp convert -I"$INC" binary:json schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.json' &
+            //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.s.json')) then
             call test_failed(error, 'capnp convert UnionDefaults json')
             call capnp_message_free(msg)
             call capnp_dyn_free(schema)
@@ -524,7 +526,9 @@ contains
 
       ! 1. Nested $Json.flatten (populated and null sub-structs).
       call verify_json_case(error, schema, 'FlatEnvelope', &
-         '(id = 7, direct = (city = "Bern", code = 3000), nested = (midId = 9, place = (city = "Graz", code = 8010)), grp = (flag = true), renamedGrp = (val = 42))', &
+         '(id = 7, direct = (city = "Bern", code = 3000), '// &
+         'nested = (midId = 9, place = (city = "Graz", code = 8010)), '// &
+         'grp = (flag = true), renamedGrp = (val = 42))', &
          'flatten: populated')
       call verify_json_case(error, schema, 'FlatEnvelope', &
          '(id = 7)', 'flatten: null substructs')
@@ -584,7 +588,8 @@ contains
       if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
          //' && capnp encode -I"$INC" schema/codec.capnp '//tname//' < '//tmp//'/vc.txt > '//tmp//'/vc.bin' &
          //' && capnp convert -I"$INC" binary:json schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.json' &
-         //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.s.json' &
+         //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp ' &
+         //tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.s.json' &
          //' && capnp convert -I"$INC" binary:canonical schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.can')) then
          call test_failed(error, label//': capnp reference failed')
          return
@@ -660,12 +665,14 @@ contains
       if (.not. sh('mkdir -p '//tmp// &
          ' && CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
          //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
-         //' && "$CAP" encode --flat -p schema/common.capnp Vec3 <<< "(x = 1.5, y = -2.5, z = 4)" > '//tmp//'/fp.ours' &
-         //' && capnp encode --flat -p schema/common.capnp Vec3 <<< "(x = 1.5, y = -2.5, z = 4)" > '//tmp//'/fp.ref' &
+         //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
+         //' | "$CAP" encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ours' &
+         //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
+         //' | capnp encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ref' &
          //' && "$CAP" decode --flat -p --short schema/common.capnp Vec3 < '//tmp//'/fp.ref > '//tmp//'/fp.dec.ours' &
          //' && capnp decode --flat -p --short schema/common.capnp Vec3 < '//tmp//'/fp.ref > '//tmp//'/fp.dec.ref' &
-         //' && capnp encode --segment-size=2 schema/addressbook.capnp AddressBook' &
-         //' <<< "(people = [(id = 1, name = \"Alice\", email = \"a@b.c\")])" > '//tmp//'/mseg.bin' &
+         //' && printf "(people = [(id = 1, name = \"Alice\", email = \"a@b.c\")])\n"' &
+         //' | capnp encode --segment-size=2 schema/addressbook.capnp AddressBook > '//tmp//'/mseg.bin' &
          //' && "$CAP" convert binary:flat-packed < '//tmp//'/mseg.bin > '//tmp//'/mseg.fp' &
          //' && "$CAP" convert flat-packed:canonical < '//tmp//'/mseg.fp > '//tmp//'/mseg.can.ours' &
          //' && capnp convert binary:canonical < '//tmp//'/mseg.bin > '//tmp//'/mseg.can.ref')) then
@@ -715,8 +722,10 @@ contains
          //' && "$CAP" eval -I"$INC" -b schema/codec.capnp "evalConst.home" | capnp convert binary:canonical > '//tmp//'/evb.ours' &
          //' && capnp eval -I"$INC" -b schema/codec.capnp "evalConst.home" | capnp convert binary:canonical > '//tmp//'/evb.ref' &
          //' && "$CAP" eval -I"$INC" -p schema/codec.capnp "evalConst.home" | capnp convert packed:canonical > '//tmp//'/evp.ours' &
-         //' && "$CAP" eval -I"$INC" --flat schema/codec.capnp "evalConst.home" | capnp convert flat:canonical > '//tmp//'/evf.ours' &
-         //' && "$CAP" eval -I"$INC" -oflat-packed schema/codec.capnp "evalConst.home" | capnp convert flat-packed:canonical > '//tmp//'/evfp.ours' &
+         //' && "$CAP" eval -I"$INC" --flat schema/codec.capnp "evalConst.home"' &
+         //' | capnp convert flat:canonical > '//tmp//'/evf.ours' &
+         //' && "$CAP" eval -I"$INC" -oflat-packed schema/codec.capnp "evalConst.home"' &
+         //' | capnp convert flat-packed:canonical > '//tmp//'/evfp.ours' &
          //' && "$CAP" eval -I"$INC" -ocanonical schema/codec.capnp "evalConst.home" > '//tmp//'/evc.ours')) then
          call test_failed(error, 'cli-ext: deep/binary eval failed')
          return
@@ -753,13 +762,13 @@ contains
          //' && "$CAP" --help >/dev/null && "$CAP" --version >/dev/null'), 'cli-ext: --help/--version exit 0')
       call check_(error, sh('CAP=$(find build -type f -name capnpf -perm -111 | head -1)' &
          //' && ! "$CAP" encode schema/common.capnp Vec3 < /dev/null 2>/dev/null' &
-         //' && ! "$CAP" encode schema/common.capnp Vec3 <<< "   " 2>/dev/null' &
+         //' && ! (printf "   \n" | "$CAP" encode schema/common.capnp Vec3 2>/dev/null)' &
          //' && ! "$CAP" eval -b schema/kitchen.capnp answer 2>/dev/null' &
          //' && ! "$CAP" eval -ojson schema/kitchen.capnp answer 2>/dev/null' &
          //' && ! "$CAP" eval schema/kitchen.capnp "primes[9]" 2>/dev/null' &
          //' && ! "$CAP" convert bogus:text schema/common.capnp Vec3 < /dev/null 2>/dev/null'), &
          'cli-ext: error exit codes')
-      call check_(error, sh('! compgen -G "/tmp/capnpf-*.cgr" >/dev/null'), &
+      call check_(error, sh('! ls /tmp/capnpf-*.cgr >/dev/null 2>&1'), &
          'cli-ext: no leaked /tmp/capnpf-*.cgr files')
    end subroutine run_cli_extended
 
