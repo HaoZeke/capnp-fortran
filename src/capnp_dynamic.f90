@@ -32,10 +32,18 @@ module capnp_dynamic
       type(capnp_message_t) :: cgr
       type(capnp_ptr_t), allocatable :: nodes(:)
       logical :: loaded = .false.
-      !> Copies of pointer defaults handed to readers. The schema message
-      !> itself stays untouched. Freed with the schema.
+      !> One frozen copy of each defaulted pointer handed to readers, keyed
+      !> by node and slot. The schema message itself stays untouched.
+      !> Freed with the schema. Further reads reuse the copy, so a reader
+      !> loop does not grow the arena.
       type(capnp_message_t) :: ro_arena
       logical :: ro_ready = .false.
+      !> Parallel cache of reader copies. ro_node(i), ro_slot(i) and
+      !> ro_view(i) describe one field. n_ro is the live prefix.
+      integer, allocatable :: ro_node(:)
+      integer(int64), allocatable :: ro_slot(:)
+      type(capnp_ptr_t), allocatable :: ro_view(:)
+      integer :: n_ro = 0
    end type capnp_dyn_schema_t
 
    !> An annotation use as exposed by the C++ schema API. `value` and
@@ -102,6 +110,10 @@ contains
       call capnp_message_free(schema%cgr)
       if (schema%ro_ready) call capnp_message_free(schema%ro_arena)
       schema%ro_ready = .false.
+      schema%n_ro = 0
+      if (allocated(schema%ro_node)) deallocate (schema%ro_node)
+      if (allocated(schema%ro_slot)) deallocate (schema%ro_slot)
+      if (allocated(schema%ro_view)) deallocate (schema%ro_view)
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
    end subroutine capnp_dyn_free
@@ -988,10 +1000,13 @@ contains
       q = value_pointer(dv, err)
       if (err /= CAPNP_OK) return
       ! The default object lives in the schema message. A reader gets a
-      ! frozen view of a copy. A builder copies into its own message, as
-      ! the C++ runtime does, so a write cannot change later defaults.
-      if (.not. associated(p%msg) .or. .not. p%msg%is_builder) then
-         call dyn_reader_view(schema, q, err)
+      ! frozen view of one cached copy of this field. A builder copies
+      ! into its own message, as the C++ runtime does, so a write cannot
+      ! change later defaults.
+      if (.not. associated(p%msg)) then
+         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
+      else if (.not. p%msg%is_builder) then
+         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
       else
          call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
       end if
@@ -999,19 +1014,39 @@ contains
           q%kind == CAPNP_PK_STRUCT) then
          q%schema_id = type_type_id(t)
       end if
-      if (err == CAPNP_OK .and. (.not. associated(p%msg) .or. .not. p%msg%is_builder)) &
-         q%frozen = .true.
+      if (err == CAPNP_OK) then
+         if (.not. associated(p%msg)) then
+            q%frozen = .true.
+         else if (.not. p%msg%is_builder) then
+            q%frozen = .true.
+         end if
+      end if
    end function capnp_dyn_getp
 
-   !> Copy a schema default into a reader-owned arena and freeze the handle.
-   subroutine dyn_reader_view(schema, q, err)
+   !> Copy a schema default into a reader-owned arena once per field and
+   !> freeze the handle. Later reads of the same field reuse that copy.
+   subroutine dyn_reader_view(schema, node, slot, q, err)
       type(capnp_dyn_schema_t), intent(inout), target :: schema
+      integer, intent(in) :: node
+      integer(int64), intent(in) :: slot
       type(capnp_ptr_t), intent(inout) :: q
       integer, intent(out) :: err
       type(capnp_ptr_t) :: copied
+      integer, allocatable :: grown_node(:)
+      integer(int64), allocatable :: grown_slot(:)
+      type(capnp_ptr_t), allocatable :: grown_view(:)
       integer(int64) :: sid
+      integer :: i, n
       err = CAPNP_OK
       if (q%kind == CAPNP_PK_NULL) return
+      if (allocated(schema%ro_node)) then
+         do i = 1, schema%n_ro
+            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot) then
+               q = schema%ro_view(i)
+               return
+            end if
+         end do
+      end if
       sid = q%schema_id
       if (.not. schema%ro_ready) then
          call capnp_message_init_builder(schema%ro_arena, err)
@@ -1022,6 +1057,22 @@ contains
       if (err /= CAPNP_OK) return
       copied%schema_id = sid
       copied%frozen = .true.
+      n = schema%n_ro
+      if (.not. allocated(schema%ro_node)) then
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
+      else if (n >= size(schema%ro_node)) then
+         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
+         grown_node(1:n) = schema%ro_node(1:n)
+         grown_slot(1:n) = schema%ro_slot(1:n)
+         grown_view(1:n) = schema%ro_view(1:n)
+         call move_alloc(grown_node, schema%ro_node)
+         call move_alloc(grown_slot, schema%ro_slot)
+         call move_alloc(grown_view, schema%ro_view)
+      end if
+      schema%n_ro = n + 1
+      schema%ro_node(schema%n_ro) = node
+      schema%ro_slot(schema%n_ro) = slot
+      schema%ro_view(schema%n_ro) = copied
       q = copied
    end subroutine dyn_reader_view
 
