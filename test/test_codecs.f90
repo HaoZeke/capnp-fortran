@@ -253,11 +253,11 @@ contains
          call test_failed(error, 'mkdir')
          return
       end if
-      call spit(tmp//'/bu.txt', src, err)
-      if (.not. sh('capnp encode schema/box.capnp BoxUse < '//tmp//'/bu.txt > '//tmp//'/bu.bin' &
-         //' && capnp decode schema/box.capnp BoxUse < '//tmp//'/bu.bin > '//tmp//'/bu.out' &
-         //' && capnp convert binary:json schema/box.capnp BoxUse < '//tmp//'/bu.bin > '//tmp//'/bu.json' &
-         //' && capnp convert binary:canonical schema/box.capnp BoxUse < '//tmp//'/bu.bin > '//tmp//'/bu.can')) then
+      call spit(tmp//'/box_use.txt', src, err)
+      if (.not. sh('capnp encode schema/box.capnp BoxUse < '//tmp//'/box_use.txt > '//tmp//'/box_use.bin' &
+         //' && capnp decode schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.out' &
+         //' && capnp convert binary:json schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.json' &
+         //' && capnp convert binary:canonical schema/box.capnp BoxUse < '//tmp//'/box_use.bin > '//tmp//'/box_use.can')) then
          call test_failed(error, 'capnp generic BoxUse')
          return
       end if
@@ -265,22 +265,22 @@ contains
       call capnp_dyn_load(schema, bytes, err)
       idx = capnp_dyn_find(schema, 'BoxUse', err)
       call check_(error, idx > 0, 'generics: BoxUse node')
-      call capnp_read_file(tmp//'/bu.bin', bytes, err)
+      call capnp_read_file(tmp//'/box_use.bin', bytes, err)
       call capnp_deserialize_bytes(bytes, msg, err)
       root = capnp_root(msg, err)
       call capnp_text_encode(schema, idx, root, text, err, pretty=.true.)
       call check_(error, err == CAPNP_OK, 'generics: text encode')
-      call check_file(error, text, tmp//'/bu.out', 'generics: text pretty')
+      call check_file(error, text, tmp//'/box_use.out', 'generics: text pretty')
       call capnp_text_decode(schema, idx, src, decoded, err)
       call check_(error, err == CAPNP_OK, 'generics: text decode')
       call capnp_canonicalize(decoded, ours, err)
-      call capnp_read_file(tmp//'/bu.can', ref, err)
+      call capnp_read_file(tmp//'/box_use.can', ref, err)
       call check_bytes(error, ours, ref, 'generics: text canonical')
 
       call capnp_json_encode(schema, idx, root, jtxt, err, pretty=.true.)
       call check_(error, err == CAPNP_OK, 'generics: json encode')
-      call check_file(error, jtxt, tmp//'/bu.json', 'generics: json pretty')
-      call slurp(tmp//'/bu.json', jtxt, err)
+      call check_file(error, jtxt, tmp//'/box_use.json', 'generics: json pretty')
+      call slurp(tmp//'/box_use.json', jtxt, err)
       call capnp_json_decode(schema, idx, jtxt, decoded, err)
       call check_(error, err == CAPNP_OK, 'generics: json decode')
       call capnp_canonicalize(decoded, ours, err)
