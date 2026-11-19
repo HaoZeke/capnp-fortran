@@ -24,6 +24,7 @@ module capnp_codec
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
    public :: capnp_quiet_nan
    public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
+   public :: capnp_codec_new_struct, capnp_codec_alloc_list, capnp_codec_elem_esize
    public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
    public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
 
@@ -423,6 +424,63 @@ contains
          y = .true.
       end select
    end function capnp_codec_field_present
+
+   function capnp_codec_new_struct(p, dw, pw, err) result(q)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: dw, pw
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      type(capnp_message_t), pointer :: m
+      m => p%msg
+      q = capnp_new_struct(m, dw, pw, err)
+   end function capnp_codec_new_struct
+
+   function capnp_codec_alloc_list(parent, et, n, schema, err) result(lst)
+      type(capnp_ptr_t), intent(in) :: parent, et
+      integer, intent(in) :: n
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: lst, rt
+      type(capnp_message_t), pointer :: m
+      integer :: tw, idx, dw, pw, es
+      m => parent%msg
+      err = CAPNP_OK
+      rt = et
+      tw = type_which(rt)
+      if (tw == TYPE_STRUCT) then
+         idx = capnp_codec_find_id(schema, type_type_id(rt))
+         if (idx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         dw = node_struct_data_words(schema%nodes(idx))
+         pw = node_struct_pointer_count(schema%nodes(idx))
+         lst = capnp_new_composite_list(m, int(n, int64), dw, pw, err)
+      else
+         es = capnp_codec_elem_esize(tw)
+         if (es < 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         lst = capnp_new_list(m, es, int(n, int64), err)
+      end if
+   end function capnp_codec_alloc_list
+
+   pure function capnp_codec_elem_esize(tw) result(es)
+      integer, intent(in) :: tw
+      integer :: es
+      select case (tw)
+      case (TYPE_VOID); es = CAPNP_SZ_VOID
+      case (TYPE_BOOL); es = CAPNP_SZ_BIT
+      case (TYPE_INT8, TYPE_UINT8); es = CAPNP_SZ_BYTE
+      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         es = CAPNP_SZ_PTR
+      case default; es = -1
+      end select
+   end function capnp_codec_elem_esize
 
    function capnp_def_bool(dv) result(d)
       type(capnp_ptr_t), intent(in) :: dv

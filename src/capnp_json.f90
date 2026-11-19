@@ -572,7 +572,7 @@ contains
          end if
          dw = node_struct_data_words(schema%nodes(idx))
          pw = node_struct_pointer_count(schema%nodes(idx))
-         q = new_struct(p, dw, pw, err)
+         q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
@@ -602,7 +602,7 @@ contains
       else
          n = 0
       end if
-      lst = alloc_list(parent, et, n, schema, err)
+      lst = capnp_codec_alloc_list(parent, et, n, schema, err)
       if (err /= CAPNP_OK) return
       call capnp_setp(parent, slot, lst, err)
       if (err /= CAPNP_OK) return
@@ -1405,61 +1405,6 @@ contains
          end if
       end do
    end function find_json_field
-
-   function new_struct(p, dw, pw, err) result(q)
-      type(capnp_ptr_t), intent(in) :: p
-      integer, intent(in) :: dw, pw
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: q
-      type(capnp_message_t), pointer :: m
-      m => p%msg
-      q = capnp_new_struct(m, dw, pw, err)
-   end function new_struct
-
-   function alloc_list(parent, et, n, schema, err) result(lst)
-      type(capnp_ptr_t), intent(in) :: parent, et
-      integer, intent(in) :: n
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: lst
-      type(capnp_message_t), pointer :: m
-      integer :: tw, idx, dw, pw, es
-      m => parent%msg
-      err = CAPNP_OK
-      tw = type_which(et)
-      if (tw == TYPE_STRUCT) then
-         idx = capnp_codec_find_id(schema, type_type_id(et))
-         if (idx == 0) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         dw = node_struct_data_words(schema%nodes(idx))
-         pw = node_struct_pointer_count(schema%nodes(idx))
-         lst = capnp_new_composite_list(m, int(n, int64), dw, pw, err)
-      else
-         es = elem_esize(tw)
-         if (es < 0) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
-         lst = capnp_new_list(m, es, int(n, int64), err)
-      end if
-   end function alloc_list
-
-   pure function elem_esize(tw) result(es)
-      integer, intent(in) :: tw
-      integer :: es
-      select case (tw)
-      case (TYPE_VOID); es = CAPNP_SZ_VOID
-      case (TYPE_BOOL); es = CAPNP_SZ_BIT
-      case (TYPE_INT8, TYPE_UINT8); es = CAPNP_SZ_BYTE
-      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
-      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
-      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
-      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE); es = CAPNP_SZ_PTR
-      case default; es = -1
-      end select
-   end function elem_esize
 
    subroutine put_signed(p, off, tw, iv, in_list, ix, dv, err)
       type(capnp_ptr_t), intent(in) :: p, dv
