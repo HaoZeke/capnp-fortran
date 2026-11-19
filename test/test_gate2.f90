@@ -23,6 +23,7 @@ program test_gate2
    call case_19()
    call case_20()
    call case_21()
+   call case_22()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -666,4 +667,36 @@ contains
          achar(10) // &
          'rm -rf "$d"; exit $r')
    end subroutine case_21
+
+   subroutine case_22()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'python3 -c ' // &
+         achar(39) // &
+         'import sys; sys.stdout.write("{\"scores\": [" + ", ".join(st' // &
+         'r(i * 7919) for i in range(200000)) + "], \"title\": \"" + "' // &
+         'ab" * 300000 + "\"}\n")' // &
+         achar(39) // &
+         ' > /tmp/g2-grow.in' // &
+         achar(10) // &
+         'for t in text json; do' // &
+         achar(10) // &
+         '  "$CAP" convert json:$t schema/codec.capnp Sample < /tmp/g2' // &
+         '-grow.in > /tmp/g2-grow.o; echo $? >> /tmp/g2-grow.o' // &
+         achar(10) // &
+         '  capnp convert json:$t schema/codec.capnp Sample < /tmp/g2-' // &
+         'grow.in > /tmp/g2-grow.r; echo $? >> /tmp/g2-grow.r' // &
+         achar(10) // &
+         '  cmp -s /tmp/g2-grow.o /tmp/g2-grow.r || exit 1' // &
+         achar(10) // &
+         'done')
+   end subroutine case_22
+
 end program test_gate2
