@@ -19,6 +19,11 @@ name = "capnpc-fortran"
 source-dir = "app"
 main = "main.f90"
 
+[[executable]]
+name = "capnpf"
+source-dir = "app"
+main = "capnpf.f90"
+
 [fortran]
 implicit-typing = false
 implicit-external = false
