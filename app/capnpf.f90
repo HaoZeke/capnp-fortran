@@ -55,6 +55,13 @@ program capnpf
 
 contains
 
+   !> The capnp tool reads with both limits at the maximum.
+   function tool_limits() result(opt)
+      type(capnp_reader_options_t) :: opt
+      opt%traversal_words = huge(0_int64)
+      opt%nesting_limit = huge(0)
+   end function tool_limits
+
    subroutine main_run(rc)
       integer, intent(out) :: rc
       character(len=:), allocatable :: arg, next_arg
@@ -456,8 +463,7 @@ contains
          call fail('empty input', rc)
          return
       end if
-      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., &
-                       to_fmt == 'flat' .or. to_fmt == 'flat-packed', seg_words, rc)
+      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
    end subroutine cmd_encode
 
    subroutine cmd_decode(sch, idx, from_fmt, short, rc)
@@ -485,7 +491,6 @@ contains
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
-      logical :: single_out
       integer :: err
       rc = 0
       call read_stdin(raw, err)
@@ -493,21 +498,20 @@ contains
          call fail('empty input', rc)
          return
       end if
-      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'text') then
-         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words, rc)
+         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else if (from == 'json') then
-         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words, rc)
+         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else
          call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
 
-   subroutine text_to_out(sch, idx, text, to, pretty, single_only, seg_words, rc)
+   subroutine text_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
-      logical, intent(in) :: pretty, single_only
+      logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
@@ -524,10 +528,6 @@ contains
             return
          end if
          if (beg == 0) exit
-         if (single_only .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -549,11 +549,11 @@ contains
       if (count == 0) call fail('empty input', rc)
    end subroutine text_to_out
 
-   subroutine json_to_out(sch, idx, text, to, pretty, single_only, seg_words, rc)
+   subroutine json_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
-      logical, intent(in) :: pretty, single_only
+      logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
@@ -570,10 +570,6 @@ contains
             return
          end if
          if (beg == 0) exit
-         if (single_only .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -609,9 +605,7 @@ contains
       integer(int64) :: off, n, total
       integer :: err, count
       type(capnp_ptr_t) :: root
-      logical :: single_out
       rc = 0
-      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'flat-packed') then
          call capnp_unpack(raw, unpacked, err)
          if (err /= CAPNP_OK) then
@@ -624,7 +618,7 @@ contains
             return
          end if
          wrapped = wrap_flat(unpacked)
-         call capnp_deserialize_bytes(wrapped, msg, err)
+         call capnp_deserialize_bytes(wrapped, msg, err, options=tool_limits())
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
             call fail('bad flat-packed message', rc)
@@ -646,7 +640,7 @@ contains
             return
          end if
          wrapped = wrap_flat(raw)
-         call capnp_deserialize_bytes(wrapped, msg, err)
+         call capnp_deserialize_bytes(wrapped, msg, err, options=tool_limits())
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
             call fail('bad flat input', rc)
@@ -667,16 +661,12 @@ contains
          total = size(raw, kind=int64)
          count = 0
          do while (off < total)
-            if (single_out .and. count >= 1) then
-               call fail('flat output supports only one message', rc)
-               return
-            end if
             call unpack_next_message(raw, off, one, err)
             if (err /= CAPNP_OK) then
                call fail('bad packed input', rc)
                return
             end if
-            call capnp_deserialize_bytes(one, msg, err)
+            call capnp_deserialize_bytes(one, msg, err, options=tool_limits())
             deallocate (one)
             if (err /= CAPNP_OK) then
                call capnp_message_free(msg)
@@ -701,10 +691,6 @@ contains
       total = size(raw, kind=int64)
       count = 0
       do while (off < total)
-         if (single_out .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) then
             call fail('bad framing', rc)
@@ -712,7 +698,7 @@ contains
          end if
          allocate (one(0:n - 1))
          one = raw(off:off + n - 1)
-         call capnp_deserialize_bytes(one, msg, err)
+         call capnp_deserialize_bytes(one, msg, err, options=tool_limits())
          deallocate (one)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -749,7 +735,8 @@ contains
       integer :: err
       rc = 0
       if (to == 'text') then
-         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
+         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('text encode failed', rc)
             return
@@ -760,7 +747,8 @@ contains
             return
          end if
       else if (to == 'json') then
-         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
+         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
@@ -854,6 +842,7 @@ contains
       integer, intent(out) :: err
       type(capnp_message_t), target :: reseg
       type(capnp_ptr_t) :: root, croot
+      type(capnp_builder_options_t) :: bopt
       integer(int8), allocatable :: flatb(:)
       err = CAPNP_OK
       if (to == 'canonical') then
@@ -867,7 +856,33 @@ contains
       else if (seg_words > 0_int64 .and. (to == 'binary' .or. to == 'packed')) then
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) return
-         call capnp_message_init_builder(reseg, err, first_words=seg_words)
+         bopt%first_segment_words = seg_words
+         bopt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
+         call capnp_message_init_builder(reseg, err, options=bopt)
+         if (err /= CAPNP_OK) return
+         croot = capnp_copy(reseg, root, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         call capnp_set_root(reseg, croot, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         if (to == 'packed') then
+            call capnp_serialize_packed_bytes(reseg, outb, err)
+         else
+            call capnp_serialize_bytes(reseg, outb, err)
+         end if
+         call capnp_message_free(reseg)
+      else if (.not. msg%is_builder .and. (to == 'binary' .or. to == 'packed')) then
+         ! A reader segment keeps every word from the table, including a
+         ! zero tail the object does not use. The capnp tool copies the
+         ! root into a fresh builder, so that tail is not written back.
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) return
+         call capnp_message_init_builder(reseg, err)
          if (err /= CAPNP_OK) return
          croot = capnp_copy(reseg, root, err)
          if (err /= CAPNP_OK) then
@@ -1434,7 +1449,8 @@ contains
       integer :: err
       rc = 0
       if (fmt == 'text') then
-         call capnp_text_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env)
+         call capnp_text_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('text encode failed', rc)
             return
@@ -1444,7 +1460,8 @@ contains
          return
       end if
       if (fmt == 'json') then
-         call capnp_json_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env)
+         call capnp_json_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
