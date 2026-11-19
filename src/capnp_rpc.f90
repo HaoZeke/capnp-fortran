@@ -153,6 +153,8 @@ module capnp_rpc
       class(rpc_membrane_policy_t), pointer :: policy => null()
       logical :: reverse = .false.
       logical :: owned = .false.
+      !> Live export slots and provisions holding this owned wrapper.
+      integer :: refs = 0
    contains
       procedure :: dispatch => membrane_dispatch
    end type rpc_membrane_server_t
@@ -210,6 +212,11 @@ module capnp_rpc
       !> means nothing.
       class(*), pointer :: srv => null()
       integer :: eid = -1
+      !> Export on `host` that the provision pins. Accept must not drop
+      !> the capability while this pin is held, and must not free the
+      !> wrapper when the recipient's own export is released.
+      integer :: source_eid = -1
+      type(rpc_conn_t), pointer :: host => null()
       !> The introducer's Provide question, which is how a later
       !> Disembargo names this arrangement (rpc.capnp,
       !> Disembargo.context.provide).
@@ -350,7 +357,7 @@ contains
    end subroutine rpc_conn_init_stream
 
    subroutine rpc_conn_close(conn)
-      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_conn_t), intent(inout), target :: conn
       integer :: i
       if (associated(conn%transport)) call conn%transport%close()
       conn%transport => null()
@@ -362,8 +369,12 @@ contains
          call question_slot_clear(conn%questions(i))
          call answer_slot_clear(conn%answers(i))
       end do
+      if (associated(conn%vat)) call release_hosted_provisions(conn)
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
+      end do
+      do i = 0, MAXJOINS - 1
+         conn%joins(i) = rpc_join_slot_t()
       end do
    end subroutine rpc_conn_close
 
@@ -502,8 +513,56 @@ contains
       allocate (wrapper)
       call rpc_membrane_server_init(wrapper, inner, policy, reverse)
       wrapper%owned = .true.
+      wrapper%refs = 0
       srv => wrapper
    end subroutine membrane_wrap_server_ref
+
+   !> One holder of an owned membrane. Unowned servers are the caller's.
+   subroutine retain_server(srv)
+      class(*), pointer, intent(in) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned) srv%refs = srv%refs + 1
+      end select
+   end subroutine retain_server
+
+   !> Drop one holder. The last holder frees the wrapper.
+   subroutine release_server(srv)
+      class(*), pointer, intent(inout) :: srv
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_membrane_server_t)
+         if (srv%owned) then
+            srv%refs = srv%refs - 1
+            if (srv%refs <= 0) deallocate (srv)
+         end if
+      end select
+      srv => null()
+   end subroutine release_server
+
+   !> Drop the source-export pin a provision took in handle_provide.
+   subroutine release_provision_pin(slot)
+      type(rpc_provision_slot_t), intent(inout) :: slot
+      if (associated(slot%host) .and. slot%source_eid >= 0 .and. &
+          slot%source_eid < MAXE) then
+         call drop_export(slot%host, slot%source_eid, 1)
+      end if
+      slot%host => null()
+      slot%source_eid = -1
+   end subroutine release_provision_pin
+
+   !> Provisions whose source export lives on this connection.
+   subroutine release_hosted_provisions(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer :: i
+      do i = 0, MAXPROV - 1
+         if (.not. conn%vat%provisions(i)%used) cycle
+         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
+         call release_provision_pin(conn%vat%provisions(i))
+         conn%vat%provisions(i) = rpc_provision_slot_t()
+      end do
+   end subroutine release_hosted_provisions
 
    ! ------------------------------------------------------------------
    ! Client side
@@ -1314,6 +1373,7 @@ contains
          if (.not. conn%exports(i)%used) then
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
+            call retain_server(srv)
             conn%exports(i)%srv => srv
             eid = i
             return
@@ -1790,10 +1850,14 @@ contains
             conn%vat%provisions(i)%nonce = nonce
             conn%vat%provisions(i)%srv => conn%exports(eid)%srv
             conn%vat%provisions(i)%eid = eid
+            conn%vat%provisions(i)%source_eid = eid
+            conn%vat%provisions(i)%host => conn
             conn%vat%provisions(i)%qid = qid
             conn%vat%provisions(i)%embargoed = .false.
-            ! The provision owns the server reference until it is accepted;
-            ! the recipient connection acquires its own export reference.
+            ! Pin the source export for the life of the arrangement. The
+            ! recipient takes its own export, and its own object reference
+            ! when the server is an owned membrane.
+            conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
             call send_empty_answer(conn, qid, err)
             return
          end if
@@ -1813,7 +1877,7 @@ contains
       type(provision_id_t) :: pid
       type(capnp_ptr_t) :: pp
       integer(int64) :: qid, nonce
-      integer :: i, eid
+      integer :: i, eid, new_eid
 
       ac = message_accept_get(msg, err)
       if (err /= CAPNP_OK) return
@@ -1833,21 +1897,25 @@ contains
          if (conn%vat%provisions(i)%used .and. .not. conn%vat%provisions(i)%embargoed &
              .and. conn%vat%provisions(i)%nonce == nonce) then
             ! Export it here: the id the introducer used belongs to its
-            ! own connection and means nothing on this one.
-            eid = export_server(conn, conn%vat%provisions(i)%srv)
-            if (eid < 0) then
+            ! own connection and means nothing on this one. A new slot
+            ! takes its own reference on an owned membrane.
+            new_eid = export_server(conn, conn%vat%provisions(i)%srv)
+            if (new_eid < 0) then
                call send_answer_exception(conn, qid, 'accept: export table full', err)
                return
             end if
-            conn%vat%provisions(i)%eid = eid
+            eid = new_eid
+            conn%vat%provisions(i)%eid = new_eid
             if (accept_embargo_get(ac)) then
                ! Claimed, but the Return waits: the recipient has calls
                ! in flight through the introducer, and answering now
                ! would let one sent straight to us overtake them. The
-               ! introducer lifts it with Disembargo.provide.
+               ! introducer lifts it with Disembargo.provide. The pin
+               ! stays until that Return is sent.
                conn%vat%provisions(i)%embargoed = .true.
                conn%vat%provisions(i)%accept_qid = qid
             else
+               call release_provision_pin(conn%vat%provisions(i))
                conn%vat%provisions(i) = rpc_provision_slot_t()
             end if
             exit
@@ -1912,6 +1980,7 @@ contains
          if (conn%vat%provisions(i)%qid /= provide_qid) cycle
          qid = conn%vat%provisions(i)%accept_qid
          eid = conn%vat%provisions(i)%eid
+         call release_provision_pin(conn%vat%provisions(i))
          conn%vat%provisions(i) = rpc_provision_slot_t()
          call send_accepted_cap(conn, qid, eid, err)
          return
@@ -2332,16 +2401,16 @@ contains
    subroutine drop_export(conn, eid, count)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid, count
+      class(*), pointer :: held
+      if (eid < 0 .or. eid >= MAXE) return
       if (.not. conn%exports(eid)%used) return
       conn%exports(eid)%refcount = conn%exports(eid)%refcount - count
       if (conn%exports(eid)%refcount <= 0) then
-         select type (wrapper => conn%exports(eid)%srv)
-         type is (rpc_membrane_server_t)
-            if (wrapper%owned) deallocate (conn%exports(eid)%srv)
-         end select
+         held => conn%exports(eid)%srv
          conn%exports(eid)%used = .false.
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
+         call release_server(held)
       end if
    end subroutine drop_export
 
