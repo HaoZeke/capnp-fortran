@@ -33,6 +33,7 @@ contains
                    new_unittest("dynamic-init-null", run_init_null), &
                    new_unittest("dynamic-assign-types", run_assign_types), &
                    new_unittest("dynamic-group-union", run_group_union), &
+                   new_unittest("dynamic-union-clear", run_union_clear), &
                    new_unittest("dynamic-scalars", run_scalars)]
    end subroutine collect_dynamic
 
@@ -695,5 +696,54 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_scalars
+
+   !> Switching a union clears the previous arm, and select rejects a field
+   !> that is not a union member.
+   subroutine run_union_clear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: choice, shape
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, choice_idx, scalar_idx, shape_idx, circle_idx, tag
+      real(real64) :: radius
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      choice_idx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      scalar_idx = capnp_dyn_find(schema, 'Scalars', err)
+      shape_idx = capnp_dyn_find(schema, 'Shape', err)
+      circle_idx = capnp_dyn_find(schema, 'Shape.circle', err)
+      call check_(error, choice_idx > 0 .and. scalar_idx > 0 .and. shape_idx > 0 .and. &
+                  circle_idx > 0, 'union: nodes found')
+
+      call capnp_message_init_builder(msg, err)
+      choice = capnp_dyn_new_root(schema, choice_idx, msg, err)
+      call capnp_dyn_set_text(schema, choice_idx, choice, 'label', 'hello', err)
+      call capnp_dyn_set_int(schema, choice_idx, choice, 'number', 4_int64, err)
+      call capnp_dyn_select(schema, choice_idx, choice, 'label', err)
+      call capnp_dyn_get_text(schema, choice_idx, choice, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == '', 'union: old text arm is cleared')
+
+      choice = capnp_dyn_new_root(schema, scalar_idx, msg, err)
+      call capnp_dyn_select(schema, scalar_idx, choice, 'note', err)
+      call check_(error, err == CAPNP_ERR_KIND, 'union: select rejects a non-union field')
+
+      shape = capnp_dyn_new_root(schema, shape_idx, msg, err)
+      call capnp_dyn_set_f64(schema, circle_idx, shape, 'radius', 3.5_real64, err)
+      call capnp_dyn_select(schema, shape_idx, shape, 'square', err)
+      tag = capnp_dyn_which(schema, shape_idx, shape, err)
+      radius = capnp_dyn_get_f64(schema, circle_idx, shape, 'radius', err)
+      call check_(error, err == CAPNP_OK .and. tag == 1 .and. radius == 0.0_real64, &
+                  'union: group arm is cleared')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_clear
 
 end module test_dynamic
