@@ -33,15 +33,17 @@ module capnp_dynamic
       type(capnp_ptr_t), allocatable :: nodes(:)
       logical :: loaded = .false.
       !> One frozen copy of each defaulted pointer handed to readers, keyed
-      !> by node and slot. The schema message itself stays untouched.
+      !> by node, slot and field: union arms share a slot but not a default.
+      !> The schema message itself stays untouched.
       !> Freed with the schema. Further reads reuse the copy, so a reader
       !> loop does not grow the arena.
       type(capnp_message_t) :: ro_arena
       logical :: ro_ready = .false.
-      !> Parallel cache of reader copies. ro_node(i), ro_slot(i) and
-      !> ro_view(i) describe one field. n_ro is the live prefix.
-      integer, allocatable :: ro_node(:)
-      integer(int64), allocatable :: ro_slot(:)
+      !> Parallel cache of reader copies. ro_node(i), ro_slot(i), the field
+      !> location ro_fseg(i) and ro_foff(i), and ro_view(i) describe one
+      !> field. n_ro is the live prefix.
+      integer, allocatable :: ro_node(:), ro_fseg(:)
+      integer(int64), allocatable :: ro_slot(:), ro_foff(:)
       type(capnp_ptr_t), allocatable :: ro_view(:)
       integer :: n_ro = 0
    end type capnp_dyn_schema_t
@@ -113,6 +115,8 @@ contains
       schema%n_ro = 0
       if (allocated(schema%ro_node)) deallocate (schema%ro_node)
       if (allocated(schema%ro_slot)) deallocate (schema%ro_slot)
+      if (allocated(schema%ro_fseg)) deallocate (schema%ro_fseg)
+      if (allocated(schema%ro_foff)) deallocate (schema%ro_foff)
       if (allocated(schema%ro_view)) deallocate (schema%ro_view)
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
@@ -1007,11 +1011,14 @@ contains
       ! The default object lives in the schema message. A reader gets a
       ! frozen view of one cached copy of this field. A builder copies
       ! into its own message, as the C++ runtime does, so a write cannot
-      ! change later defaults.
+      ! change later defaults. A frozen view is read-only, so it reads as
+      ! a reader even though its arena is a builder. Association is tested
+      ! before the builder flag: Fortran does not promise to skip the
+      ! second operand of or.
       if (.not. associated(p%msg)) then
-         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
-      else if (.not. p%msg%is_builder) then
-         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
+         call dyn_reader_view(schema, idx, f, q, err)
+      else if (p%frozen .or. .not. p%msg%is_builder) then
+         call dyn_reader_view(schema, idx, f, q, err)
       else
          call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
       end if
@@ -1022,7 +1029,7 @@ contains
       if (err == CAPNP_OK) then
          if (.not. associated(p%msg)) then
             q%frozen = .true.
-         else if (.not. p%msg%is_builder) then
+         else if (p%frozen .or. .not. p%msg%is_builder) then
             q%frozen = .true.
          end if
       end if
@@ -1030,23 +1037,25 @@ contains
 
    !> Copy a schema default into a reader-owned arena once per field and
    !> freeze the handle. Later reads of the same field reuse that copy.
-   subroutine dyn_reader_view(schema, node, slot, q, err)
+   subroutine dyn_reader_view(schema, node, f, q, err)
       type(capnp_dyn_schema_t), intent(inout), target :: schema
       integer, intent(in) :: node
-      integer(int64), intent(in) :: slot
+      type(capnp_ptr_t), intent(in) :: f
       type(capnp_ptr_t), intent(inout) :: q
       integer, intent(out) :: err
       type(capnp_ptr_t) :: copied
-      integer, allocatable :: grown_node(:)
-      integer(int64), allocatable :: grown_slot(:)
+      integer, allocatable :: grown_node(:), grown_fseg(:)
+      integer(int64), allocatable :: grown_slot(:), grown_foff(:)
       type(capnp_ptr_t), allocatable :: grown_view(:)
-      integer(int64) :: sid
+      integer(int64) :: sid, slot
       integer :: i, n
       err = CAPNP_OK
       if (q%kind == CAPNP_PK_NULL) return
+      slot = field_slot_offset(f)
       if (allocated(schema%ro_node)) then
          do i = 1, schema%n_ro
-            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot) then
+            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot .and. &
+                schema%ro_fseg(i) == f%seg .and. schema%ro_foff(i) == f%off) then
                q = schema%ro_view(i)
                return
             end if
@@ -1065,18 +1074,26 @@ contains
       n = schema%n_ro
       if (.not. allocated(schema%ro_node)) then
          allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
+         allocate (schema%ro_fseg(8), schema%ro_foff(8))
       else if (n >= size(schema%ro_node)) then
          allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
+         allocate (grown_fseg(n*2), grown_foff(n*2))
          grown_node(1:n) = schema%ro_node(1:n)
          grown_slot(1:n) = schema%ro_slot(1:n)
          grown_view(1:n) = schema%ro_view(1:n)
+         grown_fseg(1:n) = schema%ro_fseg(1:n)
+         grown_foff(1:n) = schema%ro_foff(1:n)
          call move_alloc(grown_node, schema%ro_node)
          call move_alloc(grown_slot, schema%ro_slot)
          call move_alloc(grown_view, schema%ro_view)
+         call move_alloc(grown_fseg, schema%ro_fseg)
+         call move_alloc(grown_foff, schema%ro_foff)
       end if
       schema%n_ro = n + 1
       schema%ro_node(schema%n_ro) = node
       schema%ro_slot(schema%n_ro) = slot
+      schema%ro_fseg(schema%n_ro) = f%seg
+      schema%ro_foff(schema%n_ro) = f%off
       schema%ro_view(schema%n_ro) = copied
       q = copied
    end subroutine dyn_reader_view
@@ -1473,6 +1490,18 @@ contains
                if (value%kind /= CAPNP_PK_LIST .or. value%esize /= CAPNP_SZ_BYTE) then
                   err = CAPNP_ERR_KIND
                   return
+               end if
+               if (type_which(t) == TYPE_TEXT) then
+                  ! capnp_get_text rejects Text without its trailing NUL.
+                  if (value%nelem < 1_int64) then
+                     err = CAPNP_ERR_KIND
+                     return
+                  end if
+                  if (capnp_list_get_i8(value, value%nelem - 1_int64, err) /= 0_int8) then
+                     err = CAPNP_ERR_KIND
+                     return
+                  end if
+                  if (err /= CAPNP_OK) return
                end if
             case (TYPE_INTERFACE)
                if (value%kind /= CAPNP_PK_CAP) then
