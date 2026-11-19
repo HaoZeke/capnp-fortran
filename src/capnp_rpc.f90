@@ -52,6 +52,7 @@ module capnp_rpc
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
    public :: rpc_membrane_policy_t, rpc_membrane_server_t
    public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
+   public :: rpc_membrane_owned_live
    public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
@@ -160,7 +161,12 @@ module capnp_rpc
       integer :: refs = 0
    contains
       procedure :: dispatch => membrane_dispatch
+      final :: membrane_owned_final
    end type rpc_membrane_server_t
+
+   !> Owned wrappers allocated by a membrane. Tests use this to see that
+   !> unwrapping frees the wrapper instead of leaving it behind.
+   integer :: g_membrane_owned_live = 0
 
    abstract interface
       subroutine rpc_dispatch_ifc(self, ctx, err)
@@ -540,7 +546,12 @@ contains
       type is (rpc_membrane_server_t)
          if (associated(existing%policy, policy) .and. &
              existing%reverse .neqv. reverse) then
-            srv => existing%inner
+            inner => existing%inner
+            ! This pointer is the only holder of an owned wrapper that
+            ! was never exported. Dropping it on the floor leaks the
+            ! wrapper, and a later use of that memory is not the inner.
+            if (existing%owned .and. existing%refs <= 0) deallocate (existing)
+            srv => inner
             return
          end if
       end select
@@ -555,8 +566,19 @@ contains
       call rpc_membrane_server_init(wrapper, inner, policy, reverse)
       wrapper%owned = .true.
       wrapper%refs = 0
+      g_membrane_owned_live = g_membrane_owned_live + 1
       srv => wrapper
    end subroutine membrane_wrap_server_ref
+
+   subroutine membrane_owned_final(self)
+      type(rpc_membrane_server_t), intent(inout) :: self
+      if (self%owned) g_membrane_owned_live = g_membrane_owned_live - 1
+   end subroutine membrane_owned_final
+
+   function rpc_membrane_owned_live() result(n)
+      integer :: n
+      n = g_membrane_owned_live
+   end function rpc_membrane_owned_live
 
    !> One holder of an owned membrane. Unowned servers are the caller's.
    subroutine retain_server(srv)

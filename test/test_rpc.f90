@@ -28,6 +28,12 @@ module test_rpc
       procedure :: outbound_call => counting_outbound_call
    end type counting_membrane_policy_t
 
+   type, extends(rpc_server_t) :: stage_srv_t
+      class(*), pointer :: staged => null()
+   contains
+      procedure :: dispatch => stage_srv_dispatch
+   end type stage_srv_t
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -168,6 +174,19 @@ contains
       call px_close(fb)
    end subroutine t_recv_all_retries_eintr
 
+   subroutine stage_srv_dispatch(self, ctx, err)
+      class(stage_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      if (.not. associated(self%staged)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      ctx%staged(0)%s => self%staged
+      ctx%nexp = 1
+   end subroutine stage_srv_dispatch
+
    subroutine counting_inbound_call(self, interface_id, method_id, err)
       class(counting_membrane_policy_t), intent(inout) :: self
       integer(int64), intent(in) :: interface_id
@@ -242,6 +261,7 @@ contains
       if (.not. allocated(error)) call t_send_failure_releases_qid(error)
       if (.not. allocated(error)) call t_call_send_failure_releases(error)
       if (.not. allocated(error)) call t_malformed_root_is_freed(error)
+      if (.not. allocated(error)) call t_membrane_unwrap_frees(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -2756,5 +2776,44 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_malformed_root_is_freed
+
+   !> Unwrapping an owned membrane frees that wrapper.
+   subroutine t_membrane_unwrap_frees(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(echo_srv_t), target :: plain
+      type(stage_srv_t), target :: inner_fwd, inner_rev
+      type(rpc_membrane_server_t) :: fwd, rev
+      type(counting_membrane_policy_t), target :: policy
+      class(rpc_membrane_policy_t), pointer :: pol
+      class(rpc_server_t), pointer :: pplain, pfwd, prev
+      type(rpc_call_ctx_t) :: ctx
+      integer :: live, e
+      logical :: inner
+      pol => policy
+      pplain => plain
+      inner_fwd%staged => pplain
+      pfwd => inner_fwd
+      call rpc_membrane_server_init(fwd, pfwd, pol, reverse=.false.)
+      live = rpc_membrane_owned_live()
+      ctx%interface_id = 1_int64
+      ctx%method_id = 0
+      call fwd%dispatch(ctx, e)
+      call check_(error, e == CAPNP_OK .and. rpc_membrane_owned_live() == live + 1, &
+                  'membrane unwrap: crossing allocates one wrapper')
+      if (allocated(error)) return
+      inner_rev%staged => ctx%staged(0)%s
+      prev => inner_rev
+      call rpc_membrane_server_init(rev, prev, pol, reverse=.true.)
+      call rev%dispatch(ctx, e)
+      inner = .false.
+      select type (s => ctx%staged(0)%s)
+      class is (echo_srv_t)
+         inner = associated(s, plain)
+      end select
+      call check_(error, e == CAPNP_OK .and. inner, &
+                  'membrane unwrap: reverse crossing returns the inner server')
+      call check_(error, rpc_membrane_owned_live() == live, &
+                  'membrane unwrap: the owned wrapper is freed')
+   end subroutine t_membrane_unwrap_frees
 
 end module test_rpc
