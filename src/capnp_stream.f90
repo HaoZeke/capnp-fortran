@@ -32,16 +32,32 @@ contains
       call capnp_pack(flat, bytes, err)
    end subroutine capnp_serialize_packed_bytes
 
-   subroutine capnp_deserialize_packed_bytes(bytes, msg, err, traversal_words, depth_limit)
+   subroutine capnp_deserialize_packed_bytes(bytes, msg, err, traversal_words, &
+                                            depth_limit, options)
       integer(int8), intent(in) :: bytes(0:)
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
       integer, intent(in), optional :: depth_limit
+      type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8), allocatable :: flat(:)
-      call capnp_unpack(bytes, flat, err)
+      integer(int64) :: limit, word_cap
+      limit = reader_word_limit(traversal_words, options)
+      if (limit < 0_int64) then
+         err = CAPNP_ERR_TRAVERSAL
+         return
+      end if
+      ! The largest legal segment table is 257 words (512 segments). The
+      ! body is what the traversal budget counts, so the unpacked buffer
+      ! may be that much larger and still be a legal message.
+      if (limit > huge(0_int64) - 257_int64) then
+         call capnp_unpack(bytes, flat, err)
+      else
+         word_cap = limit + 257_int64
+         call capnp_unpack(bytes, flat, err, max_words=word_cap)
+      end if
       if (err /= CAPNP_OK) return
-      call capnp_deserialize_bytes(flat, msg, err, traversal_words, depth_limit)
+      call capnp_deserialize_bytes(flat, msg, err, traversal_words, depth_limit, options)
    end subroutine capnp_deserialize_packed_bytes
 
    subroutine capnp_write_message(path, msg, err)
@@ -54,14 +70,15 @@ contains
       call capnp_write_file(path, bytes, err)
    end subroutine capnp_write_message
 
-   subroutine capnp_read_message(path, msg, err)
+   subroutine capnp_read_message(path, msg, err, options)
       character(len=*), intent(in) :: path
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
+      type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8), allocatable :: bytes(:)
       call capnp_read_file(path, bytes, err)
       if (err /= CAPNP_OK) return
-      call capnp_deserialize_bytes(bytes, msg, err)
+      call capnp_deserialize_bytes(bytes, msg, err, options=options)
    end subroutine capnp_read_message
 
    subroutine capnp_write_message_packed(path, msg, err)
@@ -74,29 +91,32 @@ contains
       call capnp_write_file(path, bytes, err)
    end subroutine capnp_write_message_packed
 
-   subroutine capnp_read_message_packed(path, msg, err)
+   subroutine capnp_read_message_packed(path, msg, err, options)
       character(len=*), intent(in) :: path
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
+      type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8), allocatable :: bytes(:)
       call capnp_read_file(path, bytes, err)
       if (err /= CAPNP_OK) return
-      call capnp_deserialize_packed_bytes(bytes, msg, err)
+      call capnp_deserialize_packed_bytes(bytes, msg, err, options=options)
    end subroutine capnp_read_message_packed
 
    !> Read exactly one framed message from an open stream-access unit,
    !> consuming only that message's bytes (capn_init_fp parity). Several
    !> messages written back-to-back on one stream read in sequence.
-   subroutine capnp_read_message_unit(unit, msg, err)
+   subroutine capnp_read_message_unit(unit, msg, err, options)
       use capnp_endian, only: cp_get_i32
       integer, intent(in) :: unit
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
+      type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8) :: head(0:3)
       integer(int8), allocatable :: table(:), body(:), whole(:)
-      integer(int64) :: nsegs64, header_bytes, total, i, n
+      integer(int64) :: nsegs64, header_bytes, total, i, n, limit
       integer :: ios
       err = CAPNP_OK
+      limit = reader_traversal(options)
       read (unit, iostat=ios) head
       if (ios /= 0) then
          err = CAPNP_ERR_IO
@@ -118,7 +138,7 @@ contains
       do i = 1_int64, nsegs64
          ! Size entries start at byte 4 of the header; table lacks the head word.
          n = iand(int(cp_get_i32(table, (i - 1_int64)*4_int64), int64), 4294967295_int64)
-         call capnp_add_segment_words(total, n, err)
+         call capnp_add_segment_words(total, n, err, limit)
          if (err /= CAPNP_OK) return
       end do
       total = total*CAPNP_WORD_BYTES
@@ -144,25 +164,27 @@ contains
          end if
          whole(header_bytes:) = body
       end if
-      call capnp_deserialize_bytes(whole, msg, err)
+      call capnp_deserialize_bytes(whole, msg, err, options=options)
    end subroutine capnp_read_message_unit
 
    !> Read exactly one packed framed message from an open stream-access
    !> unit (C++ PackedMessageReader parity). The packed encoding is
    !> self-delimiting per word, so consumption stops at this message's
    !> last byte and packed messages written back-to-back read in sequence.
-   subroutine capnp_read_message_packed_unit(unit, msg, err)
+   subroutine capnp_read_message_packed_unit(unit, msg, err, options)
       use capnp_endian, only: cp_get_i32
       integer, intent(in) :: unit
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
+      type(capnp_reader_options_t), intent(in), optional :: options
       type(pk_source_t) :: st
       integer(int8) :: w8(0:7)
       integer(int8) :: hdr(0:2055) ! 257 words: table for the 512-segment cap
       integer(int8), allocatable :: flat(:)
-      integer(int64) :: nsegs64, header_words, total_words, nwords, i, n
+      integer(int64) :: nsegs64, header_words, total_words, nwords, i, n, limit
       integer :: ios
       err = CAPNP_OK
+      limit = reader_traversal(options)
       call unpack_word_from_unit(unit, st, w8, err)
       if (err /= CAPNP_OK) return
       nsegs64 = iand(int(cp_get_i32(w8, 0_int64), int64), 4294967295_int64) + 1_int64
@@ -180,7 +202,7 @@ contains
       total_words = 0_int64
       do i = 1_int64, nsegs64
          n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
-         call capnp_add_segment_words(total_words, n, err)
+         call capnp_add_segment_words(total_words, n, err, limit)
          if (err /= CAPNP_OK) return
       end do
       call packed_stream_fits(unit, st, total_words, err)
@@ -198,7 +220,7 @@ contains
          if (err /= CAPNP_OK) return
          flat((i - 1_int64)*8_int64:(i - 1_int64)*8_int64 + 7_int64) = w8
       end do
-      call capnp_deserialize_bytes(flat, msg, err)
+      call capnp_deserialize_bytes(flat, msg, err, options=options)
    end subroutine capnp_read_message_packed_unit
 
    !> Pull one unpacked word off a stream of packed bytes, honouring
@@ -260,24 +282,47 @@ contains
       end if
    end subroutine unpack_word_from_unit
 
-   !> Add one segment's word count, rejecting a total above the default
-   !> reader traversal limit before any body allocation.
-   pure subroutine capnp_add_segment_words(total, n, err)
+   !> Add one segment's word count, rejecting a total above the reader
+   !> traversal limit before any body allocation. limit overrides the
+   !> default eight mebiword budget; omitting it keeps that default.
+   pure subroutine capnp_add_segment_words(total, n, err, limit)
       integer(int64), intent(inout) :: total
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: limit
+      integer(int64) :: cap
       err = CAPNP_OK
+      cap = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(limit)) cap = limit
       if (n < 0_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
-      if (n > CAPNP_DEFAULT_TRAVERSAL_WORDS .or. &
-          total > CAPNP_DEFAULT_TRAVERSAL_WORDS - n) then
+      if (cap < 0_int64 .or. n > cap .or. total > cap - n) then
          err = CAPNP_ERR_TRAVERSAL
          return
       end if
       total = total + n
    end subroutine capnp_add_segment_words
+
+   !> Traversal budget from an explicit word count, else reader options,
+   !> else the eight mebiword default. Explicit wins, matching deserialize.
+   pure function reader_word_limit(traversal_words, options) result(limit)
+      integer(int64), intent(in), optional :: traversal_words
+      type(capnp_reader_options_t), intent(in), optional :: options
+      integer(int64) :: limit
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(options)) limit = options%traversal_words
+      if (present(traversal_words)) limit = traversal_words
+   end function reader_word_limit
+
+   !> Traversal budget from reader options, or the eight mebiword default.
+   pure function reader_traversal(options) result(limit)
+      type(capnp_reader_options_t), intent(in), optional :: options
+      integer(int64) :: limit
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(options)) limit = options%traversal_words
+   end function reader_traversal
 
    !> Most words still available from a packed tail. zero_left words are
    !> already tagged. raw_left words still cost 8 bytes each. Every

@@ -47,6 +47,30 @@ module capnp_kinds
    integer(int64), parameter, public :: CAPNP_DEFAULT_TRAVERSAL_WORDS = 8388608_int64
    integer, parameter, public :: CAPNP_DEFAULT_DEPTH_LIMIT = 64
 
+   !> Builder allocation, matching C++ 1.4.0 MallocMessageBuilder.
+   !> Fixed size repeats the first segment unless one object is larger.
+   !> Heuristic growth is the historical default: each new segment is at
+   !> least twice the previous capacity, and at least the request.
+   integer, parameter, public :: CAPNP_ALLOC_FIXED_SIZE = 1
+   integer, parameter, public :: CAPNP_ALLOC_GROW_HEURISTICALLY = 2
+   integer(int64), parameter, public :: CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS = 1024_int64
+
+   !> Readers. traversal_words is the pointer-walk budget. Stream readers
+   !> also refuse a segment table past that budget before they allocate
+   !> the body; a flat reader does not, and charges the walk instead.
+   !> nesting_limit is the pointer depth.
+   type, public :: capnp_reader_options_t
+      integer(int64) :: traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      integer :: nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+   end type capnp_reader_options_t
+
+   !> first_segment_words is the first segment capacity. Zero is legal and,
+   !> with fixed size, places every later object in its own segment.
+   type, public :: capnp_builder_options_t
+      integer(int64) :: first_segment_words = CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS
+      integer :: allocation_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
+   end type capnp_builder_options_t
+
    public :: capnp_list_step_bits
 
 contains
