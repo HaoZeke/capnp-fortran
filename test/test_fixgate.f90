@@ -6,6 +6,7 @@ program test_fixgate
    integer :: nfail
    nfail = 0
    call case_fmt()
+   call case_f32()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -18,5 +19,14 @@ contains
       if (.not. allocated(s)) call bad()
       if (index(s, "1.25") /= 1) call bad()
    end subroutine case_fmt
+
+
+   subroutine case_f32()
+      real(real32) :: y
+      integer :: err
+      call capnp_parse_f32("1.5", y, err)
+      if (err /= 0) call bad()
+      if (abs(y - 1.5_real32) > 1.0e-6_real32) call bad()
+   end subroutine case_f32
 
 end program

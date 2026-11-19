@@ -14,7 +14,7 @@ module capnp_codec
 
    public :: capnp_fmt_f64, capnp_fmt_f32
    public :: capnp_fmt_i64, capnp_fmt_u64
-   public :: capnp_parse_f64, capnp_parse_i64, capnp_parse_u64
+   public :: capnp_parse_f64, capnp_parse_f32, capnp_parse_i64, capnp_parse_u64
    public :: capnp_cescape_text, capnp_cescape_data, capnp_cunescape
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
@@ -68,7 +68,7 @@ contains
    subroutine capnp_fmt_f32(x, s)
       real(real32), intent(in) :: x
       character(len=:), allocatable, intent(out) :: s
-      real(c_float) :: y
+      real(real32) :: y
       integer :: err
       if (ieee_is_nan(x)) then
          s = 'nan'
@@ -83,8 +83,8 @@ contains
          return
       end if
       call fmt_g(real(x, real64), 6, s)
-      call parse_f32(s, y, err)
-      if (err /= 0 .or. .not. f32_same(real(y, real32), x)) &
+      call capnp_parse_f32(s, y, err)
+      if (err /= CAPNP_OK .or. .not. f32_same(y, x)) &
          call fmt_g(real(x, real64), 8, s)
    end subroutine capnp_fmt_f32
 
@@ -154,6 +154,31 @@ contains
       x = real(y, real64)
       if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
    end subroutine capnp_parse_f64
+
+   subroutine capnp_parse_f32(tok, x, err)
+      character(len=*), intent(in) :: tok
+      real(real32), intent(out) :: x
+      integer, intent(out) :: err
+      character(kind=c_char), allocatable, target :: cs(:)
+      type(c_ptr) :: endp
+      real(c_float) :: y
+      integer :: i, n
+      err = CAPNP_OK
+      x = 0.0_real32
+      n = len(tok)
+      if (n == 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      allocate (cs(n + 1))
+      do i = 1, n
+         cs(i) = tok(i:i)
+      end do
+      cs(n + 1) = c_null_char
+      y = c_strtof(cs, endp)
+      x = real(y, real32)
+      if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
+   end subroutine capnp_parse_f32
 
    subroutine capnp_parse_i64(tok, v, err)
       character(len=*), intent(in) :: tok
@@ -430,23 +455,6 @@ contains
       end if
    end subroutine fmt_g
 
-   subroutine parse_f32(tok, x, err)
-      character(len=*), intent(in) :: tok
-      real(c_float), intent(out) :: x
-      integer, intent(out) :: err
-      character(kind=c_char), allocatable, target :: cs(:)
-      type(c_ptr) :: endp
-      integer :: i, n
-      err = CAPNP_OK
-      n = len(tok)
-      allocate (cs(n + 1))
-      do i = 1, n
-         cs(i) = tok(i:i)
-      end do
-      cs(n + 1) = c_null_char
-      x = c_strtof(cs, endp)
-      if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
-   end subroutine parse_f32
 
    pure function neg_bit64(x) result(y)
       real(real64), intent(in) :: x
