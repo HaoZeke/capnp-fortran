@@ -39,7 +39,8 @@ contains
                    new_unittest("dynamic-scalars", run_scalars), &
                    new_unittest("dynamic-reader-default", run_reader_default), &
                    new_unittest("dynamic-unset-which", run_unset_which), &
-                   new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer)]
+                   new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer), &
+                   new_unittest("dynamic-default-arena", run_default_arena)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -902,5 +903,51 @@ contains
 
       call capnp_dyn_free(schema)
    end subroutine run_unbound_anypointer
+
+   !> A second read of a defaulted pointer must not grow the reader arena.
+   subroutine run_default_arena(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(sink_t) :: sink
+      type(capnp_ptr_t) :: root, origin
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: len1
+      integer :: err, sink_idx, vec_idx, n1, i
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call capnp_message_init_builder(built, err)
+      sink = sink_new_root(built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. schema%ro_ready .and. schema%ro_arena%nsegs >= 1, &
+                  'arena: first read copies once')
+      n1 = schema%ro_arena%nsegs
+      len1 = schema%ro_arena%segs(1)%len
+      do i = 1, 32
+         origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check_(error, err == CAPNP_OK .and. schema%ro_arena%nsegs == n1 .and. &
+                  schema%ro_arena%segs(1)%len == len1 .and. len1 > 8_int64, &
+                  'arena: later reads do not allocate')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'arena: cached default still reads 1.5')
+
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_default_arena
 
 end module test_dynamic
