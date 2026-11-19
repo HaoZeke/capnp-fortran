@@ -34,7 +34,8 @@ contains
          new_unittest("long-argument", run_long_arg), &
          new_unittest("schema-pipe", run_schema_pipe), &
          new_unittest("plugin-release", run_plugin_release), &
-         new_unittest("cli-locate", run_cli_locate) &
+         new_unittest("cli-locate", run_cli_locate), &
+         new_unittest("string-linear", run_string_linear) &
          ]
    end subroutine collect_regress
 
@@ -825,6 +826,104 @@ contains
       call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
                   'schema: pipe matches capnp and leaves the symlink target')
    end subroutine run_schema_pipe
+
+   subroutine run_string_linear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: js, tx, got
+      integer(int8), allocatable :: raw(:)
+      integer :: err, idx, i, np, nt
+      character(len=*), parameter :: jpfx = '{"display_name":"'
+      character(len=*), parameter :: tpfx = '(title = '
+      integer(int64) :: c1, c2, rate
+      real :: elapsed
+      integer, parameter :: nch = 160000
+      integer, parameter :: nbytes = 100000
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, idx > 0, 'linear: Sample')
+      call capnp_json_decode(schema, idx, '{"display_name":"a\nb"}', msg, err)
+      call check_(error, err == CAPNP_OK, 'linear: short escape decodes')
+      root = capnp_root(msg, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
+      call check_(error, err == CAPNP_OK .and. got == 'a'//achar(10)//'b', 'linear: newline kept')
+      call capnp_message_free(msg)
+      np = len(jpfx)
+      allocate (character(len=np + nch + 2) :: js)
+      js(1:np) = jpfx
+      js(np + 1:np + nch) = repeat('a', nch)
+      js(np + nch + 1:np + nch + 1) = '"'
+      js(np + nch + 2:np + nch + 2) = '}'
+      call system_clock(c1, rate)
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call system_clock(c2)
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      call check_(error, err == CAPNP_OK, 'linear: json string decodes')
+      root = capnp_root(msg, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
+      call check_(error, err == CAPNP_OK .and. len(got) == nch .and. got == repeat('a', nch), &
+                  'linear: json string bytes')
+      call check_(error, elapsed < 1.0, clock_msg('json string', elapsed))
+      call capnp_message_free(msg)
+      nt = len(tpfx)
+      allocate (character(len=nt + 4*nch + 1) :: tx)
+      tx(1:nt) = tpfx
+      do i = 1, nch
+         tx(nt + 4*(i - 1) + 1:nt + 4*i) = '"a" '
+      end do
+      tx(nt + 4*nch + 1:nt + 4*nch + 1) = ')'
+      call system_clock(c1, rate)
+      call capnp_text_decode(schema, idx, tx(1:nt + 4*nch + 1), msg, err)
+      call system_clock(c2)
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      call check_(error, err == CAPNP_OK, 'linear: adjacent text decodes')
+      root = capnp_root(msg, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
+      call check_(error, err == CAPNP_OK .and. got == repeat('a', nch), 'linear: adjacent text bytes')
+      call check_(error, elapsed < 1.0, clock_msg('adjacent text', elapsed))
+      call capnp_message_free(msg)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      allocate (raw(0:nbytes - 1))
+      raw = 65_int8
+      raw(0) = 0_int8
+      raw(1) = 1_int8
+      raw(2) = -1_int8
+      call capnp_dyn_set_data(schema, idx, root, 'hexed', raw, err)
+      call check_(error, err == CAPNP_OK, 'linear: set hex data')
+      call system_clock(c1, rate)
+      call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
+      call system_clock(c2)
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      call check_(error, err == CAPNP_OK .and. allocated(js) .and. index(js, '"hexed":"0001ff') > 0 .and. &
+                  index(js, repeat('41', 8)) > 0, 'linear: hex prefix')
+      call check_(error, elapsed < 1.0, clock_msg('hex encode', elapsed))
+      call capnp_dyn_set_data(schema, idx, root, 'b64', raw, err)
+      call system_clock(c1, rate)
+      call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
+      call system_clock(c2)
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      call check_(error, err == CAPNP_OK .and. index(js, '"b64":"AAH/') > 0, 'linear: base64 prefix')
+      call check_(error, elapsed < 1.0, clock_msg('base64 encode', elapsed))
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_string_linear
+
+   function clock_msg(label, elapsed) result(s)
+      character(len=*), intent(in) :: label
+      real, intent(in) :: elapsed
+      character(len=:), allocatable :: s
+      character(len=64) :: buf
+      write (buf, '(a,f8.3,a)') label//' took', elapsed, 's'
+      s = trim(buf)
+   end function clock_msg
 
    subroutine slurp(path, s, err)
       character(len=*), intent(in) :: path

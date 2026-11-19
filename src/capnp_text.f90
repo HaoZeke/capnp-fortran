@@ -216,7 +216,8 @@ contains
             call value_text(val, body, err)
             if (err /= CAPNP_OK) return
          end if
-         call capnp_cescape_text(body, esc)
+         call capnp_cescape_text(body, esc, err)
+         if (err /= CAPNP_OK) return
          text = '"'//esc//'"'
       case (TYPE_DATA)
          if (val%kind == CAPNP_PK_NULL) then
@@ -224,7 +225,8 @@ contains
          else
             call value_data(val, raw, err)
             if (err /= CAPNP_OK) return
-            call capnp_cescape_data(raw, esc)
+            call capnp_cescape_data(raw, esc, err)
+            if (err /= CAPNP_OK) return
          end if
          text = '"'//esc//'"'
       case (TYPE_ENUM)
@@ -434,7 +436,8 @@ contains
             call capnp_get_text(p, int(off), s, err)
             if (err /= CAPNP_OK) return
          end if
-         call capnp_cescape_text(s, esc)
+         call capnp_cescape_text(s, esc, err)
+         if (err /= CAPNP_OK) return
          out = '"'//esc//'"'
       case (TYPE_DATA)
          q = capnp_ptr_t()
@@ -446,14 +449,16 @@ contains
             if (dv%kind /= CAPNP_PK_NULL) then
                call value_data(dv, raw, err)
                if (err /= CAPNP_OK) return
-               call capnp_cescape_data(raw, esc)
+               call capnp_cescape_data(raw, esc, err)
+               if (err /= CAPNP_OK) return
             else
                esc = ''
             end if
          else
             call capnp_get_data(p, int(off), raw, err)
             if (err /= CAPNP_OK) return
-            call capnp_cescape_data(raw, esc)
+            call capnp_cescape_data(raw, esc, err)
+            if (err /= CAPNP_OK) return
          end if
          out = '"'//esc//'"'
       case (TYPE_LIST)
@@ -586,12 +591,14 @@ contains
       case (TYPE_TEXT)
          call capnp_list_get_text(lst, int(i), s, err)
          if (err /= CAPNP_OK) return
-         call capnp_cescape_text(s, esc)
+         call capnp_cescape_text(s, esc, err)
+         if (err /= CAPNP_OK) return
          out = '"'//esc//'"'
       case (TYPE_DATA)
          call capnp_get_data(lst, int(i), raw, err)
          if (err /= CAPNP_OK) return
-         call capnp_cescape_data(raw, esc)
+         call capnp_cescape_data(raw, esc, err)
+         if (err /= CAPNP_OK) return
          out = '"'//esc//'"'
       case (TYPE_LIST)
          q = capnp_list_getp(lst, int(i), err)
@@ -1384,6 +1391,7 @@ contains
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       character(len=:), allocatable :: piece, raw
+      type(buf_t) :: acc
       integer :: a
       err = CAPNP_OK
       out = ''
@@ -1427,9 +1435,13 @@ contains
          sc%i = sc%i + 1
          call capnp_cunescape(raw, piece, err)
          if (err /= CAPNP_OK) return
-         out = out//piece
+         call buf_add(acc, piece, err)
+         if (err /= CAPNP_OK) return
          call skip_ws(sc)
-         if (peek(sc) /= '"') return
+         if (peek(sc) /= '"') then
+            call buf_take(acc, out)
+            return
+         end if
       end do
    end subroutine read_string
 
@@ -1438,7 +1450,7 @@ contains
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
       character(len=:), allocatable :: s
-      integer :: i, n, d1, d2, cap
+      integer :: i, n, d1, d2, cap, stat
       integer(int8), allocatable :: tmp(:)
       err = CAPNP_OK
       call skip_ws(sc)
@@ -1446,7 +1458,11 @@ contains
          if ((sc%s(sc%i:sc%i + 2) == '0x"' .or. sc%s(sc%i:sc%i + 2) == '0X"')) then
             sc%i = sc%i + 3
             cap = 8
-            allocate (tmp(0:cap - 1))
+            allocate (tmp(0:cap - 1), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
             n = 0
             do
                do while (peek(sc) == ' ' .or. peek(sc) == achar(9))
@@ -1465,7 +1481,15 @@ contains
                end if
                sc%i = sc%i + 1
                if (n >= cap) then
-                  allocate (raw(0:cap*2 - 1))
+                  if (cap > ishft(huge(cap), -1)) then
+                     err = CAPNP_ERR_ALLOC
+                     return
+                  end if
+                  allocate (raw(0:cap*2 - 1), stat=stat)
+                  if (stat /= 0) then
+                     err = CAPNP_ERR_ALLOC
+                     return
+                  end if
                   if (n > 0) raw(0:n - 1) = tmp(0:n - 1)
                   call move_alloc(raw, tmp)
                   cap = cap*2
@@ -1474,11 +1498,15 @@ contains
                n = n + 1
             end do
             if (n == 0) then
-               allocate (raw(0))
+               allocate (raw(0), stat=stat)
             else
-               allocate (raw(0:n - 1))
-               raw(0:n - 1) = tmp(0:n - 1)
+               allocate (raw(0:n - 1), stat=stat)
             end if
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+            if (n > 0) raw(0:n - 1) = tmp(0:n - 1)
             return
          end if
       end if
@@ -1486,10 +1514,15 @@ contains
       if (err /= CAPNP_OK) return
       n = len(s)
       if (n == 0) then
-         allocate (raw(0))
+         allocate (raw(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      allocate (raw(0:n - 1))
+      allocate (raw(0:n - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1, n
          raw(i - 1) = capnp_as_i8(iachar(s(i:i)))
       end do

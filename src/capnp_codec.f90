@@ -255,38 +255,76 @@ contains
       call parse_u64_body(body, v, oct, err)
    end subroutine capnp_parse_u64
 
-   subroutine capnp_cescape_text(str, out)
+   subroutine capnp_cescape_text(str, out, err)
       character(len=*), intent(in) :: str
       character(len=:), allocatable, intent(out) :: out
+      integer, intent(out), optional :: err
       character(len=:), allocatable :: buf
-      integer :: i, m
+      integer :: i, m, stat, local
+      local = CAPNP_OK
+      out = ''
       if (len(str) == 0) then
-         out = ''
+         if (present(err)) err = local
          return
       end if
-      allocate (character(len=len(str)*4) :: buf)
+      if (int(len(str), int64)*4_int64 > int(huge(m), int64)) then
+         local = CAPNP_ERR_ALLOC
+         if (present(err)) err = local
+         return
+      end if
+      allocate (character(len=len(str)*4) :: buf, stat=stat)
+      if (stat /= 0) then
+         local = CAPNP_ERR_ALLOC
+         if (present(err)) err = local
+         return
+      end if
       m = 0
       do i = 1, len(str)
          call escape_byte(iachar(str(i:i)), .false., buf, m)
       end do
-      out = buf(1:m)
+      if (m == 0) then
+         out = ''
+      else
+         out = buf(1:m)
+      end if
+      if (present(err)) err = local
    end subroutine capnp_cescape_text
 
-   subroutine capnp_cescape_data(bytes, out)
+   subroutine capnp_cescape_data(bytes, out, err)
       integer(int8), intent(in) :: bytes(:)
       character(len=:), allocatable, intent(out) :: out
+      integer, intent(out), optional :: err
       character(len=:), allocatable :: buf
-      integer :: i, m
-      if (size(bytes) == 0) then
-         out = ''
+      integer :: i, n, m, lb, stat, local
+      local = CAPNP_OK
+      out = ''
+      n = size(bytes)
+      if (n == 0) then
+         if (present(err)) err = local
          return
       end if
-      allocate (character(len=size(bytes)*4) :: buf)
+      if (int(n, int64)*4_int64 > int(huge(m), int64)) then
+         local = CAPNP_ERR_ALLOC
+         if (present(err)) err = local
+         return
+      end if
+      allocate (character(len=n*4) :: buf, stat=stat)
+      if (stat /= 0) then
+         local = CAPNP_ERR_ALLOC
+         if (present(err)) err = local
+         return
+      end if
       m = 0
-      do i = 1, size(bytes)
-         call escape_byte(capnp_u_of_i8(bytes(i)), .true., buf, m)
+      lb = lbound(bytes, 1)
+      do i = 0, n - 1
+         call escape_byte(capnp_u_of_i8(bytes(lb + i)), .true., buf, m)
       end do
-      out = buf(1:m)
+      if (m == 0) then
+         out = ''
+      else
+         out = buf(1:m)
+      end if
+      if (present(err)) err = local
    end subroutine capnp_cescape_data
 
    !> Decode C-style escapes (1-3 octal digits and \xHH) into a byte string.
@@ -295,14 +333,19 @@ contains
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       character(len=:), allocatable :: buf
-      integer :: i, n, m, d, d2, noct, v
+      integer :: i, n, m, d, d2, noct, v, stat
       err = CAPNP_OK
       n = len(src)
       if (n == 0) then
          out = ''
          return
       end if
-      allocate (character(len=n) :: buf)
+      allocate (character(len=n) :: buf, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         out = ''
+         return
+      end if
       m = 0
       i = 1
       do while (i <= n)

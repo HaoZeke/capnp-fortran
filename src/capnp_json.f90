@@ -208,7 +208,8 @@ contains
       n = 0
       call append_struct_fields(schema, idx, p, env, '', parent_disc, '', depth, jv%kids, n, err)
       if (err /= CAPNP_OK) return
-      call trim_kids(jv%kids, n)
+      call trim_kids(jv%kids, n, err)
+      if (err /= CAPNP_OK) return
    end subroutine build_struct
 
    recursive subroutine append_struct_fields(schema, idx, p, env, pfx, parent_disc, union_decl, &
@@ -424,7 +425,7 @@ contains
       type(capnp_brand_env_t) :: cenv
       type(disc_opts_t) :: gdisc, no_disc
       integer(int8), allocatable :: raw(:)
-      integer :: tw, idx, mode
+      integer :: tw, idx, mode, stat
       integer(int64) :: off
       err = CAPNP_OK
       if (field_which(f) == FIELD_GROUP) then
@@ -510,13 +511,18 @@ contains
                call value_data(dv, raw, err)
                if (err /= CAPNP_OK) return
             else
-               allocate (raw(0))
+               allocate (raw(0), stat=stat)
+               if (stat /= 0) then
+                  err = CAPNP_ERR_ALLOC
+                  return
+               end if
             end if
          else
             call capnp_get_data(p, int(off), raw, err)
             if (err /= CAPNP_OK) return
          end if
-         call build_data_jval(raw, mode, jv)
+         call build_data_jval(raw, mode, jv, err)
+         if (err /= CAPNP_OK) return
       case (TYPE_ENUM)
          call build_enum_jval(schema, t, int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv))), jv, err)
       case (TYPE_LIST)
@@ -582,7 +588,8 @@ contains
          call append_kid(jv%kids, n, one, err)
          if (err /= CAPNP_OK) return
       end do
-      call trim_kids(jv%kids, n)
+      call trim_kids(jv%kids, n, err)
+      if (err /= CAPNP_OK) return
    end subroutine build_list
 
    recursive subroutine build_element(schema, et, lst, i, env, depth, jv, err)
@@ -644,7 +651,8 @@ contains
       case (TYPE_DATA)
          call capnp_get_data(lst, int(i), raw, err)
          if (err /= CAPNP_OK) return
-         call build_data_jval(raw, 0, jv)
+         call build_data_jval(raw, 0, jv, err)
+         if (err /= CAPNP_OK) return
       case (TYPE_LIST)
          q = capnp_list_getp(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -688,29 +696,36 @@ contains
       end if
    end subroutine put_float_jval
 
-   subroutine build_data_jval(raw, mode, jv)
+   subroutine build_data_jval(raw, mode, jv, err)
       integer(int8), intent(in) :: raw(:)
       integer, intent(in) :: mode
       type(jval), intent(out) :: jv
+      integer, intent(out) :: err
       type(jval) :: one
-      integer :: i, n
+      integer :: i, n, stat, lb
+      err = CAPNP_OK
       if (mode == 1) then
          jv%k = JK_STR
-         jv%str = b64_encode(raw)
+         call b64_encode(raw, jv%str, err)
          return
       else if (mode == 2) then
          jv%k = JK_STR
-         jv%str = hex_encode(raw)
+         call hex_encode(raw, jv%str, err)
          return
       end if
       jv%k = JK_ARR
       n = size(raw)
       if (n <= 0) return
-      allocate (jv%kids(n))
-      do i = 1, n
+      allocate (jv%kids(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      lb = lbound(raw, 1)
+      do i = 0, n - 1
          one%k = JK_NUM
-         call capnp_fmt_u64(int(capnp_u_of_i8(raw(i)), int64), one%str)
-         call take_jval(jv%kids(i), one)
+         call capnp_fmt_u64(int(capnp_u_of_i8(raw(lb + i)), int64), one%str)
+         call take_jval(jv%kids(i + 1), one)
       end do
    end subroutine build_data_jval
 
@@ -771,7 +786,8 @@ contains
       case (JK_NUM)
          out = jv%str
       case (JK_STR)
-         out = json_quote(jv%str)
+         call json_quote(jv%str, out, err)
+         if (err /= CAPNP_OK) return
       case (JK_ARR)
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
@@ -801,7 +817,9 @@ contains
          do i = 1, n
             call emit_jval(jv%kids(i), sub, .true., pretty, val, child_multi, err)
             if (err /= CAPNP_OK) return
-            call push(items, m, json_quote(jv%kids(i)%key)//colon//val, child_multi, err)
+            call json_quote(jv%kids(i)%key, body, err)
+            if (err /= CAPNP_OK) return
+            call push(items, m, body//colon//val, child_multi, err)
             if (err /= CAPNP_OK) return
          end do
          call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
@@ -1333,10 +1351,12 @@ contains
       integer(int64), intent(in) :: ix
       integer, intent(out) :: err
       integer(int8), allocatable :: raw(:)
+      integer :: stat
       err = CAPNP_OK
       if (mode == 1) then
          if (jv%k == JK_NULL) then
-            allocate (raw(0))
+            allocate (raw(0), stat=stat)
+            if (stat /= 0) err = CAPNP_ERR_ALLOC
          else if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
@@ -1345,7 +1365,8 @@ contains
          end if
       else if (mode == 2) then
          if (jv%k == JK_NULL) then
-            allocate (raw(0))
+            allocate (raw(0), stat=stat)
+            if (stat /= 0) err = CAPNP_ERR_ALLOC
          else if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
@@ -1736,7 +1757,8 @@ contains
             return
          end if
       end do
-      call trim_kids(jv%kids, n)
+      call trim_kids(jv%kids, n, err)
+      if (err /= CAPNP_OK) return
    end subroutine parse_object
 
    recursive subroutine parse_array(sc, jv, depth, err)
@@ -1773,14 +1795,46 @@ contains
             return
          end if
       end do
-      call trim_kids(jv%kids, n)
+      call trim_kids(jv%kids, n, err)
+      if (err /= CAPNP_OK) return
    end subroutine parse_array
+
+   subroutine quoted_span(sc, cap, err)
+      type(scan_t), intent(in) :: sc
+      integer, intent(out) :: cap
+      integer, intent(out) :: err
+      integer :: i
+      character(len=1) :: c
+      err = CAPNP_OK
+      cap = 1
+      if (jpeek(sc) /= '"') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      i = sc%i + 1
+      do
+         if (i > sc%n) then
+            cap = max(1, sc%n - sc%i)
+            return
+         end if
+         c = sc%s(i:i)
+         if (c == '"') then
+            cap = max(1, i - (sc%i + 1))
+            return
+         else if (c == '\') then
+            i = i + 2
+         else
+            i = i + 1
+         end if
+      end do
+   end subroutine quoted_span
 
    subroutine parse_string(sc, s, err)
       type(scan_t), intent(inout) :: sc
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      integer :: cp, low
+      character(len=:), allocatable :: buf
+      integer :: cp, low, n, cap, stat
       character(len=1) :: c
       err = CAPNP_OK
       s = ''
@@ -1788,7 +1842,16 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      call quoted_span(sc, cap, err)
+      if (err /= CAPNP_OK) return
+      if (cap < 1) cap = 1
+      allocate (character(len=cap) :: buf, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       sc%i = sc%i + 1
+      n = 0
       do
          if (sc%i > sc%n) then
             err = CAPNP_ERR_ARG
@@ -1796,9 +1859,17 @@ contains
          end if
          c = sc%s(sc%i:sc%i)
          sc%i = sc%i + 1
-         if (c == '"') return
+         if (c == '"') then
+            if (n == 0) then
+               s = ''
+            else
+               s = buf(1:n)
+            end if
+            return
+         end if
          if (c /= '\') then
-            s = s//c
+            call buf_putc(buf, n, c, err)
+            if (err /= CAPNP_OK) return
             cycle
          end if
          if (sc%i > sc%n) then
@@ -1808,14 +1879,14 @@ contains
          c = sc%s(sc%i:sc%i)
          sc%i = sc%i + 1
          select case (c)
-         case ('"'); s = s//'"'
-         case ('\'); s = s//'\'
-         case ('/'); s = s//'/'
-         case ('b'); s = s//achar(8)
-         case ('f'); s = s//achar(12)
-         case ('n'); s = s//achar(10)
-         case ('r'); s = s//achar(13)
-         case ('t'); s = s//achar(9)
+         case ('"'); call buf_putc(buf, n, '"', err)
+         case ('\'); call buf_putc(buf, n, '\', err)
+         case ('/'); call buf_putc(buf, n, '/', err)
+         case ('b'); call buf_putc(buf, n, achar(8), err)
+         case ('f'); call buf_putc(buf, n, achar(12), err)
+         case ('n'); call buf_putc(buf, n, achar(10), err)
+         case ('r'); call buf_putc(buf, n, achar(13), err)
+         case ('t'); call buf_putc(buf, n, achar(9), err)
          case ('u')
             call read_u4(sc, cp, err)
             if (err /= CAPNP_OK) return
@@ -1827,12 +1898,12 @@ contains
                   end if
                end if
             end if
-            call append_utf8(s, cp, err)
-            if (err /= CAPNP_OK) return
+            call append_utf8(buf, n, cp, err)
          case default
             err = CAPNP_ERR_ARG
             return
          end select
+         if (err /= CAPNP_OK) return
       end do
    end subroutine parse_string
 
@@ -1951,22 +2022,28 @@ contains
       type(jval), intent(in) :: jv
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
-      integer :: i, n, u
+      integer :: i, n, u, stat
       err = CAPNP_OK
       if (jv%k /= JK_ARR) then
          err = CAPNP_ERR_ARG
          return
       end if
       if (.not. allocated(jv%kids)) then
-         allocate (raw(0))
+         allocate (raw(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       n = size(jv%kids)
       if (n == 0) then
-         allocate (raw(0))
+         allocate (raw(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      allocate (raw(0:n - 1))
+      allocate (raw(0:n - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1, n
          if (jv%kids(i)%k /= JK_NUM) then
             err = CAPNP_ERR_ARG
@@ -1985,14 +2062,26 @@ contains
       end do
    end subroutine bytes_from_array
 
-   function json_quote(s) result(out)
+   subroutine json_quote(s, out, err)
       character(len=*), intent(in) :: s
-      character(len=:), allocatable :: out
+      character(len=:), allocatable, intent(out) :: out
+      integer, intent(out) :: err
       character(len=:), allocatable :: buf
-      integer :: i, m, ub
+      integer :: i, m, ub, cap, stat
       character(len=2) :: hh
       character(len=*), parameter :: hexd = '0123456789abcdef'
-      allocate (character(len=len(s)*6 + 2) :: buf)
+      err = CAPNP_OK
+      out = ''
+      if (int(len(s), int64)*6_int64 + 2_int64 > int(huge(cap), int64)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      cap = len(s)*6 + 2
+      allocate (character(len=cap) :: buf, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       buf(1:1) = '"'
       m = 1
       do i = 1, len(s)
@@ -2020,51 +2109,79 @@ contains
       m = m + 1
       buf(m:m) = '"'
       out = buf(1:m)
-   end function json_quote
+   end subroutine json_quote
 
-   function b64_encode(raw) result(s)
+   subroutine b64_encode(raw, s, err)
       integer(int8), intent(in) :: raw(:)
-      character(len=:), allocatable :: s
-      integer :: i, n, a, b, c, v
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      integer :: i, n, a, b, c, v, p, m, lb, stat
+      err = CAPNP_OK
       n = size(raw)
-      s = ''
-      i = 1
-      do while (i + 2 <= n)
-         a = capnp_u_of_i8(raw(i))
-         b = capnp_u_of_i8(raw(i + 1))
-         c = capnp_u_of_i8(raw(i + 2))
+      if (n <= 0) then
+         s = ''
+         return
+      end if
+      if (int(n, int64)*2_int64 > int(huge(n), int64)) then
+         err = CAPNP_ERR_ALLOC
+         s = ''
+         return
+      end if
+      m = (n/3)*4
+      if (mod(n, 3) /= 0) m = m + 4
+      allocate (character(len=m) :: s, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         s = ''
+         return
+      end if
+      lb = lbound(raw, 1)
+      p = 1
+      i = 0
+      do while (i + 2 < n)
+         a = capnp_u_of_i8(raw(lb + i))
+         b = capnp_u_of_i8(raw(lb + i + 1))
+         c = capnp_u_of_i8(raw(lb + i + 2))
          v = ior(ishft(a, 16), ior(ishft(b, 8), c))
-         s = s//B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
-         s = s//B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)
-         s = s//B64(iand(ishft(v, -6), 63) + 1:iand(ishft(v, -6), 63) + 1)
-         s = s//B64(iand(v, 63) + 1:iand(v, 63) + 1)
+         s(p:p) = B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
+         s(p + 1:p + 1) = B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)
+         s(p + 2:p + 2) = B64(iand(ishft(v, -6), 63) + 1:iand(ishft(v, -6), 63) + 1)
+         s(p + 3:p + 3) = B64(iand(v, 63) + 1:iand(v, 63) + 1)
+         p = p + 4
          i = i + 3
       end do
-      if (i == n) then
-         a = capnp_u_of_i8(raw(i))
-         v = ishft(a, 16)
-         s = s//B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
-         s = s//B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)//'=='
-      else if (i + 1 == n) then
-         a = capnp_u_of_i8(raw(i))
-         b = capnp_u_of_i8(raw(i + 1))
-         v = ior(ishft(a, 16), ishft(b, 8))
-         s = s//B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
-         s = s//B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)
-         s = s//B64(iand(ishft(v, -6), 63) + 1:iand(ishft(v, -6), 63) + 1)//'='
+      if (i < n) then
+         a = capnp_u_of_i8(raw(lb + i))
+         if (i + 1 == n) then
+            v = ishft(a, 16)
+            s(p:p) = B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
+            s(p + 1:p + 1) = B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)
+            s(p + 2:p + 3) = '=='
+         else
+            b = capnp_u_of_i8(raw(lb + i + 1))
+            v = ior(ishft(a, 16), ishft(b, 8))
+            s(p:p) = B64(ishft(v, -18) + 1:ishft(v, -18) + 1)
+            s(p + 1:p + 1) = B64(iand(ishft(v, -12), 63) + 1:iand(ishft(v, -12), 63) + 1)
+            s(p + 2:p + 2) = B64(iand(ishft(v, -6), 63) + 1:iand(ishft(v, -6), 63) + 1)
+            s(p + 3:p + 3) = '='
+         end if
       end if
-   end function b64_encode
+   end subroutine b64_encode
 
    subroutine b64_decode(s, raw, err)
       character(len=*), intent(in) :: s
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
-      integer :: i, n, v, nd, a, b, c, d, outn
+      integer :: i, n, v, nd, a, b, c, d, outn, stat
       integer, allocatable :: vals(:)
       character(len=1) :: ch
       err = CAPNP_OK
       n = len(s)
-      allocate (vals(n))
+      allocate (vals(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       nd = 0
       do i = 1, n
          ch = s(i:i)
@@ -2085,10 +2202,15 @@ contains
       if (mod(nd, 4) == 2) outn = outn + 1
       if (mod(nd, 4) == 3) outn = outn + 2
       if (outn == 0) then
-         allocate (raw(0))
+         allocate (raw(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      allocate (raw(0:outn - 1))
+      allocate (raw(0:outn - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       outn = 0
       i = 1
       do while (i + 3 <= nd)
@@ -2110,23 +2232,42 @@ contains
       end if
    end subroutine b64_decode
 
-   function hex_encode(raw) result(s)
+   subroutine hex_encode(raw, s, err)
       integer(int8), intent(in) :: raw(:)
-      character(len=:), allocatable :: s
-      integer :: i, u
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      integer :: i, n, u, lb, stat
       character(len=*), parameter :: hexd = '0123456789abcdef'
-      s = ''
-      do i = 1, size(raw)
-         u = capnp_u_of_i8(raw(i))
-         s = s//hexd(u/16 + 1:u/16 + 1)//hexd(mod(u, 16) + 1:mod(u, 16) + 1)
+      err = CAPNP_OK
+      n = size(raw)
+      if (n <= 0) then
+         s = ''
+         return
+      end if
+      if (int(n, int64)*2_int64 > int(huge(n), int64)) then
+         err = CAPNP_ERR_ALLOC
+         s = ''
+         return
+      end if
+      allocate (character(len=n*2) :: s, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         s = ''
+         return
+      end if
+      lb = lbound(raw, 1)
+      do i = 0, n - 1
+         u = capnp_u_of_i8(raw(lb + i))
+         s(2*i + 1:2*i + 1) = hexd(u/16 + 1:u/16 + 1)
+         s(2*i + 2:2*i + 2) = hexd(mod(u, 16) + 1:mod(u, 16) + 1)
       end do
-   end function hex_encode
+   end subroutine hex_encode
 
    subroutine hex_decode(s, raw, err)
       character(len=*), intent(in) :: s
       integer(int8), allocatable, intent(out) :: raw(:)
       integer, intent(out) :: err
-      integer :: i, n, hi, lo
+      integer :: i, n, hi, lo, stat
       err = CAPNP_OK
       n = len(s)
       if (mod(n, 2) /= 0) then
@@ -2134,10 +2275,15 @@ contains
          return
       end if
       if (n == 0) then
-         allocate (raw(0))
+         allocate (raw(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      allocate (raw(0:n/2 - 1))
+      allocate (raw(0:n/2 - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1, n/2
          hi = capnp_hex_digit(s(2*i - 1:2*i - 1))
          lo = capnp_hex_digit(s(2*i:2*i))
@@ -2149,23 +2295,59 @@ contains
       end do
    end subroutine hex_decode
 
-   subroutine append_utf8(s, cp, err)
-      character(len=:), allocatable, intent(inout) :: s
+   subroutine buf_putc(buf, n, c, err)
+      character(len=*), intent(inout) :: buf
+      integer, intent(inout) :: n
+      character(len=1), intent(in) :: c
+      integer, intent(inout) :: err
+      if (n >= len(buf)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      n = n + 1
+      buf(n:n) = c
+   end subroutine buf_putc
+
+   subroutine append_utf8(buf, n, cp, err)
+      character(len=*), intent(inout) :: buf
+      integer, intent(inout) :: n
       integer, intent(in) :: cp
       integer, intent(inout) :: err
+      integer :: need
       if (cp < 0 .or. cp > 1114111) then
          err = CAPNP_ERR_ARG
          return
       else if (cp <= 127) then
-         s = s//achar(cp)
+         need = 1
       else if (cp <= 2047) then
-         s = s//achar(ior(192, ishft(cp, -6)))//achar(ior(128, iand(cp, 63)))
+         need = 2
       else if (cp <= 65535) then
-         s = s//achar(ior(224, ishft(cp, -12)))//achar(ior(128, iand(ishft(cp, -6), 63)))// &
-             achar(ior(128, iand(cp, 63)))
+         need = 3
       else
-         s = s//achar(ior(240, ishft(cp, -18)))//achar(ior(128, iand(ishft(cp, -12), 63)))// &
-             achar(ior(128, iand(ishft(cp, -6), 63)))//achar(ior(128, iand(cp, 63)))
+         need = 4
+      end if
+      if (n > len(buf) - need) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (cp <= 127) then
+         n = n + 1
+         buf(n:n) = achar(cp)
+      else if (cp <= 2047) then
+         buf(n + 1:n + 1) = achar(ior(192, ishft(cp, -6)))
+         buf(n + 2:n + 2) = achar(ior(128, iand(cp, 63)))
+         n = n + 2
+      else if (cp <= 65535) then
+         buf(n + 1:n + 1) = achar(ior(224, ishft(cp, -12)))
+         buf(n + 2:n + 2) = achar(ior(128, iand(ishft(cp, -6), 63)))
+         buf(n + 3:n + 3) = achar(ior(128, iand(cp, 63)))
+         n = n + 3
+      else
+         buf(n + 1:n + 1) = achar(ior(240, ishft(cp, -18)))
+         buf(n + 2:n + 2) = achar(ior(128, iand(ishft(cp, -12), 63)))
+         buf(n + 3:n + 3) = achar(ior(128, iand(ishft(cp, -6), 63)))
+         buf(n + 4:n + 4) = achar(ior(128, iand(cp, 63)))
+         n = n + 4
       end if
    end subroutine append_utf8
 
@@ -2413,16 +2595,22 @@ contains
       call take_jval(kids(n), src)
    end subroutine append_kid
 
-   subroutine trim_kids(kids, n)
+   subroutine trim_kids(kids, n, err)
       type(jval), allocatable, intent(inout) :: kids(:)
       integer, intent(in) :: n
+      integer, intent(out) :: err
       type(jval), allocatable :: tmp(:)
-      integer :: i
+      integer :: i, stat
+      err = CAPNP_OK
       if (n <= 0) then
          if (allocated(kids)) deallocate (kids)
          return
       end if
-      allocate (tmp(n))
+      allocate (tmp(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1, n
          call take_jval(tmp(i), kids(i))
       end do
