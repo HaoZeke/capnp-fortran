@@ -172,7 +172,7 @@ on the wire.
 | ~rpc_membrane_cap~      | ~(cap, policy, reverse) result(wrapped)~                              | wrap an imported client capability                    |
 | ~rpc_membrane_server_init~ | ~(wrapper, inner, policy, reverse)~                              | wrap a local server capability                        |
 | ~rpc_membrane_revoke~   | ~(policy, reason)~                                                   | revoke every wrapper sharing the policy               |
-| ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
+| ~rpc_pipeline_cap~      | ~(conn, qid, field_indices) result(cap)~                             | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |
 | ~rpc_result_cap~        | ~(conn, qid, field_indices, cap, err)~                               | settles a result capability into an import          |
