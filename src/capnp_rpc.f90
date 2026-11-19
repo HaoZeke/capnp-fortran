@@ -661,14 +661,21 @@ contains
       slot%source_eid = -1
    end subroutine release_provision_pin
 
-   !> Provisions whose source export lives on this connection.
+   !> Provisions this connection introduced, and embargoed Accepts whose
+   !> answer was going to be sent here. Either side closing ends the
+   !> arrangement. A closed recipient is not answered: its transport is
+   !> already gone, and a later Finish must not send through it.
    subroutine release_hosted_provisions(conn)
       type(rpc_conn_t), intent(inout), target :: conn
       integer :: i, ferr
       do i = 0, MAXPROV - 1
          if (.not. conn%vat%provisions(i)%used) cycle
-         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
-         call abandon_provision(conn%vat%provisions(i), ferr)
+         if (associated(conn%vat%provisions(i)%host, conn)) then
+            call abandon_provision(conn%vat%provisions(i), ferr)
+         else if (associated(conn%vat%provisions(i)%recipient, conn)) then
+            call release_provision_pin(conn%vat%provisions(i))
+            conn%vat%provisions(i) = rpc_provision_slot_t()
+         end if
       end do
    end subroutine release_hosted_provisions
 
@@ -692,6 +699,9 @@ contains
       call release_provision_pin(slot)
       slot = rpc_provision_slot_t()
       if (.not. associated(recip)) return
+      ! The recipient already closed. Its exports go with that close,
+      ! and there is no transport left to answer.
+      if (.not. rpc_conn_alive(recip)) return
       if (ae >= 0) call drop_export(recip, ae, 1)
       call send_answer_exception(recip, aq, 'provide finished', err)
    end subroutine abandon_provision

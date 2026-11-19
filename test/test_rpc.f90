@@ -266,6 +266,7 @@ contains
       if (.not. allocated(error)) call t_embargo_finish_answers_recipient(error)
       if (.not. allocated(error)) call t_accept_finish_releases_cap(error)
       if (.not. allocated(error)) call t_accept_finish_after_embargo(error)
+      if (.not. allocated(error)) call t_embargo_recipient_close(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -3102,6 +3103,66 @@ contains
       call rpc_conn_close(prov_a)
       call rpc_conn_close(prov_b)
    end subroutine t_accept_finish_after_embargo
+
+   !> Closing the recipient of an embargoed Accept drops the provision.
+   !> A later Finish of the Provide must not send on that dead connection.
+   subroutine t_embargo_recipient_close(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat_store
+      type(rpc_vat_t), pointer :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, pq, aq
+      integer :: ia, pa, ra, pb, e, refs
+      logical :: readable
+      vat => vat_store
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK .and. prov_a%exports(0)%used, &
+                  'recipient close: bootstrap')
+      if (allocated(error)) return
+      refs = prov_a%exports(0)%refcount
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 93_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 93_int64, .true., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call px_poll_in(recip%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'recipient close: Accept waits')
+      if (allocated(error)) return
+      call rpc_conn_close(prov_b)
+      call check_(error, rpc_pending_provisions(prov_a) == 0, &
+                  'recipient close: the provision is dropped')
+      call check_(error, prov_a%exports(0)%used .and. &
+                  prov_a%exports(0)%refcount == refs, &
+                  'recipient close: the pin is released')
+      if (allocated(error)) return
+      call rpc_finish_send(intro, pq, .false., e)
+      call rpc_pump_once(prov_a, e)
+      call check_(error, e == CAPNP_OK, &
+                  'recipient close: Finish does not send to the dead peer')
+      call check_(error, prov_a%exports(0)%refcount == refs, &
+                  'recipient close: Finish leaves the introducer export')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+   end subroutine t_embargo_recipient_close
 
    !> Read one Return from an arbitrary connection.
    subroutine recv_on(fd, ansid, is_exc, kind, e)
