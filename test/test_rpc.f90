@@ -264,6 +264,8 @@ contains
       if (.not. allocated(error)) call t_membrane_unwrap_frees(error)
       if (.not. allocated(error)) call t_provide_overrelease_keeps_server(error)
       if (.not. allocated(error)) call t_embargo_finish_answers_recipient(error)
+      if (.not. allocated(error)) call t_accept_finish_releases_cap(error)
+      if (.not. allocated(error)) call t_accept_finish_after_embargo(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -2995,6 +2997,111 @@ contains
       call rpc_conn_close(recip)
       call rpc_conn_close(prov_b)
    end subroutine t_embargo_finish_answers_recipient
+
+   !> Finish(releaseResultCaps) drops the export an Accept result published.
+   subroutine t_accept_finish_releases_cap(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat_store
+      type(rpc_vat_t), pointer :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, pq, aq
+      integer :: ia, pa, ra, pb, e
+      vat => vat_store
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'accept finish: bootstrap')
+      if (allocated(error)) return
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 91_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 91_int64, .false., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call rpc_wait(recip, aq, e)
+      call check_(error, e == CAPNP_OK .and. prov_b%exports(0)%used, &
+                  'accept finish: the claimed cap is exported')
+      if (allocated(error)) return
+      call rpc_finish_send(recip, aq, .false., e)
+      call rpc_pump_once(prov_b, e)
+      call check_(error, e == CAPNP_OK .and. .not. prov_b%exports(0)%used, &
+                  'accept finish: Finish releases the result export')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+   end subroutine t_accept_finish_releases_cap
+
+   !> The same release happens when the Accept was held for an embargo
+   !> and the result is sent only after that embargo lifts.
+   subroutine t_accept_finish_after_embargo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat_store
+      type(rpc_vat_t), pointer :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, pq, aq
+      integer :: ia, pa, ra, pb, e
+      logical :: readable
+      vat => vat_store
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'embargo accept finish: bootstrap')
+      if (allocated(error)) return
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 92_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 92_int64, .true., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call px_poll_in(recip%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo accept finish: Accept waits')
+      call check_(error, prov_b%exports(0)%used, &
+                  'embargo accept finish: export is held during the embargo')
+      if (allocated(error)) return
+      call rpc_disembargo_provide_send(intro, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(recip, aq, e)
+      call check_(error, e == CAPNP_OK, 'embargo accept finish: result arrives')
+      if (allocated(error)) return
+      call rpc_finish_send(recip, aq, .false., e)
+      call rpc_pump_once(prov_b, e)
+      call check_(error, e == CAPNP_OK .and. .not. prov_b%exports(0)%used, &
+                  'embargo accept finish: Finish releases the result export')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+   end subroutine t_accept_finish_after_embargo
 
    !> Read one Return from an arbitrary connection.
    subroutine recv_on(fd, ansid, is_exc, kind, e)

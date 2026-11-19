@@ -2338,6 +2338,12 @@ contains
       if (err /= CAPNP_OK) return
       call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, 0), err)
       if (err /= CAPNP_OK) return
+      ! export_server already counted this result. Finish with
+      ! releaseResultCaps drops that reference, and so does a failed
+      ! send. The id was not staged, so record it the way a Join result
+      ! records an export it did not flush.
+      ctx%nexp = 1
+      ctx%staged_eids(0) = eid
       call finish_answer(conn, qid, rm, ctx, err)
    end subroutine send_accepted_cap
 
