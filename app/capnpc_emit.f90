@@ -182,6 +182,8 @@ module capnpc_emit
    integer, parameter :: F_IDENT_MAX = 63
    ! Longest accessor suffix we append: `_set_elem` (9 chars).
    integer, parameter :: F_IDENT_SUFFIX = 9
+   ! `_DEFAULT` is the longest suffix glued onto an annotation stem.
+   integer, parameter :: F_ANNOT_TAIL = 8
 
 contains
 
@@ -2074,14 +2076,14 @@ contains
    !> A symbol that another annotation of the file already has (the same
    !> annotation name from two files, or a field and a nested type that
    !> spell alike) takes the annotation id as a suffix, then a counter.
-   !> The stem leaves room for the _KIND and _DEFAULT tails.
+   !> One clamp of the full symbol: _KIND and _DEFAULT are literal tails
+   !> of this stem, so a second hash cannot split them.
    subroutine annotation_symbol(a, target, o, err)
       type(capnp_ptr_t), intent(in) :: a
       character(len=*), intent(in) :: target
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
       character(len=:), allocatable :: an, cand
-      integer, parameter :: tail = 8
       integer :: idx, k
       err = CAPNP_OK
       do k = 1, g_nannsym
@@ -2098,15 +2100,15 @@ contains
          if (err /= CAPNP_OK) return
          cand = upcase(target)//'_ANNOTATION_'//upcase(an)
       end if
-      o = ident_fit(cand, F_IDENT_MAX - tail)
+      o = ident_fit(cand, F_IDENT_MAX - F_ANNOT_TAIL)
       k = 1
       do while (annsym_taken(o))
          k = k + 1
          if (k == 2) then
-            o = ident_fit(cand//'_'//hex_of_id(annotation_id(a), 8), F_IDENT_MAX - tail)
+            o = ident_fit(cand//'_'//hex_of_id(annotation_id(a), 8), F_IDENT_MAX - F_ANNOT_TAIL)
          else
             o = ident_fit(cand//'_'//hex_of_id(annotation_id(a), 8)//'_'//itoa(int(k, int64)), &
-                          F_IDENT_MAX - tail)
+                          F_IDENT_MAX - F_ANNOT_TAIL)
          end if
       end do
       call ns_add(g_annsym_used, o)
@@ -2160,8 +2162,9 @@ contains
       integer :: k
       err = CAPNP_OK
       k = value_which(v)
-      call w('   integer, parameter :: '//ident_const(name//'_KIND')//' = '// &
-             itoa(int(k, int64)))
+      ! `name` already reserves F_ANNOT_TAIL, so _KIND is not hashed again.
+      call w('   integer, parameter :: '//name//'_KIND'// &
+             ' = '//itoa(int(k, int64)))
       select case (k)
       case (TYPE_VOID)
       case (TYPE_BOOL)
@@ -2195,7 +2198,7 @@ contains
             call note_blob(name, db)
          end if
       case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
-         has = register_default_blob(name, v)
+         has = register_default_blob(name, v, blob=name//'_DEFAULT')
       case default
          err = CAPNP_ERR_KIND
          return
@@ -2226,7 +2229,7 @@ contains
          call w('      logical, save :: loaded = .false.')
          call w('      err = CAPNP_OK')
          call w('      if (.not. loaded) then')
-         call w('         call capnp_deserialize_bytes('//blob_name(name)//', cmsg, err)')
+         call w('         call capnp_deserialize_bytes('//name//'_DEFAULT, cmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         loaded = .true.')
          call w('      end if')
@@ -2580,9 +2583,10 @@ contains
 
    !> Serialize a Value's default object into a standalone message blob and
    !> register it (pass 1). Returns whether a non-null default exists.
-   function register_default_blob(an, dv) result(has)
+   function register_default_blob(an, dv, blob) result(has)
       character(len=*), intent(in) :: an
       type(capnp_ptr_t), intent(in) :: dv
+      character(len=*), intent(in), optional :: blob
       logical :: has
       type(capnp_message_t), target :: tmp
       type(capnp_ptr_t) :: dobj, c
@@ -2606,7 +2610,11 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_serialize_bytes(tmp, bytes, err)
       if (err /= CAPNP_OK) return
-      call note_blob(blob_name(an), bytes)
+      if (present(blob)) then
+         call note_blob(blob, bytes)
+      else
+         call note_blob(blob_name(an), bytes)
+      end if
       call capnp_message_free(tmp)
    end function register_default_blob
 

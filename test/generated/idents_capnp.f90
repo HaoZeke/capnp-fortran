@@ -69,7 +69,7 @@ module idents_capnp
       0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,  &
       1, 0, 0, 0, 90, 0, 0, 0, 102, 114, 111, 109, 45, 98, 114, 97,  &
       110, 100, 0, 0, 0, 0, 0, 0]
-   integer(int8), parameter :: ABCDEFGHIJ_ABCD_9D_C2087F90249E234F_CD_E2A9DC02B84A8E5D_DEFAULT(0:31) = [integer(int8) :: &
+   integer(int8), parameter :: ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D_DEFAULT(0:31) = [integer(int8) :: &
       0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,  &
       1, 0, 0, 0, 34, 0, 0, 0, 97, 110, 110, 0, 0, 0, 0, 0]
    integer(int8), parameter :: HOLD_DATA_BODY_DEFAULT(0:39) = [integer(int8) :: &
@@ -433,7 +433,7 @@ contains
       logical, save :: loaded = .false.
       err = CAPNP_OK
       if (.not. loaded) then
-         call capnp_deserialize_bytes(ABCDEFGHIJ_ABCD_9D_C2087F90249E234F_CD_E2A9DC02B84A8E5D_DEFAULT, cmsg, err)
+         call capnp_deserialize_bytes(ABCDEFGHIJ_ABCD_9D_c2087f90249e234f_CD_E2A9DC02B84A8E5D_DEFAULT, cmsg, err)
          if (err /= CAPNP_OK) return
          loaded = .true.
       end if
