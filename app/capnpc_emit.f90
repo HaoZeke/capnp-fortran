@@ -1907,6 +1907,18 @@ contains
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '//upcase(tn)//'_INTERFACE_ID = '// &
              itoa(node_id(np))//'_int64')
+      ! Annotation values are module data, not type-bound procedure bindings.
+      do i = 0_int64, capnp_list_len(ml) - 1_int64
+         mp = capnp_list_get_struct(ml, int(i), err)
+         if (err /= CAPNP_OK) return
+         call method_name(mp, mn, err)
+         if (err /= CAPNP_OK) return
+         mn = snake(mn)
+         al = method_annotations(mp, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
+         if (err /= CAPNP_OK) return
+      end do
       call w('   type :: '//tn//'_client_t')
       call w('      type(rpc_cap_t) :: cap')
       call w('   end type '//tn//'_client_t')
@@ -1918,10 +1930,6 @@ contains
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
          mn = snake(mn)
-         al = method_annotations(mp, err)
-         if (err /= CAPNP_OK) return
-         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
-         if (err /= CAPNP_OK) return
          call w('      procedure('//tn//'_'//mn//'_ifc), deferred :: '//mn)
       end do
       call w('      procedure :: dispatch => '//tn//'_dispatch')
@@ -2023,8 +2031,8 @@ contains
          call w('            type('//pn//'_t) :: params')
          call w('            type('//rn//'_t) :: results')
          call w('            params%p = ctx%params')
-         call w('            results%p = capnp_new_struct(ctx%rmsg, '//upcase(rn)// &
-                '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
+         call w('            results%p = capnp_new_struct(ctx%rmsg, &')
+         call w('               '//upcase(rn)//'_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
          call w('            call self%'//mn//'(params, results, err)')
          call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')
