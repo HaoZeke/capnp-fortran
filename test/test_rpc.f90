@@ -112,6 +112,7 @@ contains
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
       if (.not. allocated(error)) call t_request_cancellation(error)
       if (.not. allocated(error)) call t_membrane(error)
+      if (.not. allocated(error)) call t_pluggable_transport(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -891,6 +892,33 @@ contains
       call rpc_conn_close(mcli)
       call rpc_conn_close(msrv)
    end subroutine t_membrane
+
+   !> Connections can own an abstract byte stream rather than depending
+   !> on the integer descriptor adapter in the RPC core.
+   subroutine t_pluggable_transport(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_fd_stream_t), target :: astream, bstream
+      type(rpc_conn_t), target :: aconn, bconn
+      type(echo_srv_t), target :: stream_server
+      class(rpc_server_t), pointer :: stream_boot
+      type(rpc_cap_t) :: cap
+      integer :: e
+      call rpc_socketpair_streams(astream, bstream, e)
+      call check_(error, e == CAPNP_OK, 'transport: stream socketpair')
+      if (allocated(error)) return
+      stream_boot => null()
+      call rpc_conn_init_stream(aconn, astream, stream_boot)
+      stream_boot => stream_server
+      call rpc_conn_init_stream(bconn, bstream, stream_boot)
+      call rpc_bootstrap_send(aconn, cap, e)
+      call rpc_pump_once(bconn, e)
+      call rpc_wait(aconn, cap%id, e)
+      call check_(error, e == CAPNP_OK, 'transport: bootstrap over byte stream')
+      call rpc_conn_close(aconn)
+      call rpc_conn_close(bconn)
+      call check_(error, astream%fd == PX_BAD_FD .and. bstream%fd == PX_BAD_FD, &
+                  'transport: adapter close owns descriptors')
+   end subroutine t_pluggable_transport
 
    !> Bootstrap, then a call on the still-promised bootstrap cap
    !> (pipelining), then settle the cap and call again.

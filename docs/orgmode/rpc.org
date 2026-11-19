@@ -89,11 +89,15 @@ whenever a schema is available (:doc:`tutorial`, part 2.2).
 #+begin_export rst
 ``capnp_rpc_transport`` frames each RPC message with the same
 segment-table framing plain serialization uses
-(:doc:`reference`, "Serialization"), over a file descriptor from
-``capnp_posix``. ``capnp_posix`` is a thin ``bind(c)`` surface over
-POSIX sockets -- no C sources, only ``iso_c_binding`` interfaces into
-libc -- covering stream sockets (TCP and Unix-domain), socketpair
-loopbacks for tests, and poll-based readiness.
+(:doc:`reference`, "Serialization"). ``rpc_byte_stream_t`` is its
+pluggable exact-read, exact-write, readiness, and close interface.
+``rpc_fd_stream_t`` adapts a descriptor and
+``rpc_socketpair_streams`` creates an owned loopback pair.
+``capnp_posix`` remains a thin ``bind(c)`` surface over POSIX sockets
+with no C sources. TCP, Unix-domain sockets, and socketpairs are
+adapters rather than requirements of the RPC core. A TLS implementation
+can provide ``rpc_byte_stream_t`` without coupling this library to a TLS
+stack or certificate policy.
 
 The three-party network layer records ``VatId{host, port}`` values from
 ``thirdPartyHosted`` descriptors. ``rpc_introduction_dial`` opens a
@@ -145,6 +149,7 @@ on the wire.
 | Procedure              | Signature                                                            | Notes                                              |
 |-------------------------+-----------------------------------------------------------------------+-----------------------------------------------------|
 | ~rpc_conn_init~         | ~(conn, fd, bootstrap)~                                              | ~bootstrap~ is a ~class(rpc_server_t), pointer~ (may be null) |
+| ~rpc_conn_init_stream~  | ~(conn, stream, bootstrap)~                                          | use an application-defined ~rpc_byte_stream_t~         |
 | ~rpc_conn_close~        | ~(conn)~                                                             | half-closes and frees tables                       |
 | ~rpc_bootstrap_send~    | ~(conn, cap, err)~                                                   | returns a pipeline cap, usable immediately          |
 | ~rpc_call_begin~        | ~(conn, target, interface_id, method_id, m, params, qid, err)~        | fill ~params~ content, then send                    |
