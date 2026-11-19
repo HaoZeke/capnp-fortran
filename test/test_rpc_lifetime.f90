@@ -38,7 +38,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(6))
+      allocate (testsuite(8))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -51,6 +51,10 @@ contains
       testsuite(5)%test => run_release_during_dispatch
       testsuite(6)%name = "full export table returns an exception"
       testsuite(6)%test => run_export_table_full
+      testsuite(7)%name = "partial flush releases both staged servers"
+      testsuite(7)%test => run_partial_flush
+      testsuite(8)%name = "failed flush keeps a reused export"
+      testsuite(8)%test => run_partial_reused
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -84,10 +88,10 @@ contains
       class(life_srv_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
-      type(counted_srv_t), pointer :: obj
+      type(counted_srv_t), pointer :: obj, obj2
       class(rpc_server_t), pointer :: sp
       type(capnp_ptr_t) :: s
-      integer :: idx
+      integer :: idx, idx1
       err = CAPNP_OK
       associate (server => self)
       end associate
@@ -150,6 +154,71 @@ contains
          s = capnp_new_struct(ctx%rmsg, 0, 1, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err /= CAPNP_OK) return
+         call payload_content_set(ctx%results, s, err)
+      case (8)
+         ! Two distinct owned servers, returned on the success path so
+         ! the cap table is flushed.
+         allocate (obj)
+         next_token = next_token + 1
+         obj%token = next_token
+         sp => obj
+         idx1 = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx1 < 0) then
+            deallocate (obj)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         allocate (obj2)
+         next_token = next_token + 1
+         obj2%token = next_token
+         sp => obj2
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) then
+            deallocate (obj2)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         s = capnp_new_struct(ctx%rmsg, 0, 2, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx1), err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(s, 1, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err /= CAPNP_OK) return
+         call payload_content_set(ctx%results, s, err)
+      case (9)
+         ! A new owned server, then the server already exported in
+         ! `held`, then another new owned server.
+         if (.not. associated(held)) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         allocate (obj)
+         next_token = next_token + 1
+         obj%token = next_token
+         sp => obj
+         idx1 = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx1 < 0) then
+            deallocate (obj)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         sp => held
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) return
+         allocate (obj2)
+         next_token = next_token + 1
+         obj2%token = next_token
+         sp => obj2
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) then
+            deallocate (obj2)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx1), err)
          if (err /= CAPNP_OK) return
          call payload_content_set(ctx%results, s, err)
       case default
@@ -437,5 +506,146 @@ contains
          call check_(error, final_count == next_token - base, &
                      'export table full: close frees each server once')
    end subroutine run_export_table_full
+
+   !> Fill the export table, then Release one counted server so one slot
+   !> is free. nlive is the number of counted servers still exported.
+   !> with_held exports `held` first and leaves that export in place.
+   subroutine fill_one_free_slot(cli, srv, settled, with_held, victim, &
+                                 held_cap, nlive, error)
+      type(rpc_conn_t), intent(inout), target :: cli, srv
+      type(rpc_cap_t), intent(in) :: settled
+      logical, intent(in) :: with_held
+      type(rpc_cap_t), intent(out) :: victim, held_cap
+      integer, intent(out) :: nlive
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: err, i, n7, nok, e2, base
+      integer(int64) :: qid
+      nlive = 0
+      victim = rpc_cap_t()
+      held_cap = rpc_cap_t()
+      final_count = 0
+      base = next_token
+      nok = 0
+      e2 = 0
+      n7 = 63
+      if (with_held) n7 = 62
+      if (with_held) then
+         call call_method(cli, srv, settled, 3, err, qid)
+         call check_(error, err == CAPNP_OK, 'fill: held export')
+         if (allocated(error)) return
+         call rpc_result_cap(cli, qid, [0], held_cap, err)
+         call check_(error, err == CAPNP_OK .and. associated(held), &
+                     'fill: held cap')
+         if (allocated(error)) return
+         call rpc_finish_send(cli, qid, .true., e2)
+         call rpc_pump_once(srv, e2)
+         nok = 1
+      end if
+      do i = 1, n7
+         call call_method(cli, srv, settled, 7, err, qid)
+         if (err /= CAPNP_OK) exit
+         if (i == 1) then
+            call rpc_result_cap(cli, qid, [0], victim, err)
+            if (err /= CAPNP_OK) exit
+         end if
+         call rpc_finish_send(cli, qid, .true., e2)
+         call rpc_pump_once(srv, e2)
+         nok = nok + 1
+      end do
+      call check_(error, nok == 63, 'fill: 63 exports before the free slot')
+      if (allocated(error)) return
+      call check_(error, victim%kind == RPC_CAP_IMPORT, 'fill: victim import')
+      if (allocated(error)) return
+      call rpc_release_send(cli, victim, err)
+      call check_(error, err == CAPNP_OK, 'fill: release sent')
+      if (allocated(error)) return
+      call rpc_pump_once(srv, err)
+      call check_(error, err == CAPNP_OK, 'fill: release pumped')
+      if (allocated(error)) return
+      call check_(error, final_count == 1, 'fill: one server released')
+      nlive = next_token - base - final_count
+      call check_(error, nlive == 62, 'fill: 62 counted servers still live')
+   end subroutine fill_one_free_slot
+
+   !> One free export slot, two staged owned servers. Both are released
+   !> while the connection stays open, and close releases nothing again.
+   subroutine run_partial_flush(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, victim, held_cap
+      logical :: opened
+      integer :: err, nlive
+      nlive = 0
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) &
+         call fill_one_free_slot(cli, srv, settled, .false., victim, &
+                                 held_cap, nlive, error)
+      if (.not. allocated(error)) then
+         final_count = 0
+         call call_method(cli, srv, settled, 8, err)
+         write (*, '(a,i0)') 'partial-flush deaths=', final_count
+         call check_(error, err == RPC_ERR_EXCEPTION, &
+                     'partial flush releases both staged servers: exception')
+         call check_(error, final_count == 2, &
+                     'partial flush releases both staged servers')
+      end if
+      call close_pair(cli, srv, opened)
+      if (opened .and. .not. allocated(error)) then
+         write (*, '(a,i0)') 'partial-flush after close deaths=', final_count
+         call check_(error, final_count == nlive + 2, &
+                     'partial flush releases both staged servers: close')
+      end if
+   end subroutine run_partial_flush
+
+   !> One free slot. The flush reuses an export from an earlier call and
+   !> then runs out of slots. The earlier server stays until its own
+   !> Release, and the two new servers are released with the exception.
+   subroutine run_partial_reused(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, victim, held_cap
+      logical :: opened
+      integer :: err, nlive, tok
+      nlive = 0
+      tok = 0
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) &
+         call fill_one_free_slot(cli, srv, settled, .true., victim, &
+                                 held_cap, nlive, error)
+      if (.not. allocated(error)) then
+         tok = held%token
+         final_count = 0
+         call call_method(cli, srv, settled, 9, err)
+         write (*, '(a,i0)') 'reused-flush deaths=', final_count
+         call check_(error, err == RPC_ERR_EXCEPTION, &
+                     'failed flush keeps a reused export: exception')
+         call check_(error, final_count == 2, &
+                     'failed flush keeps a reused export: two new servers')
+         call check_(error, associated(held), &
+                     'failed flush keeps a reused export: still live')
+         if (.not. allocated(error)) &
+            call check_(error, held%token == tok, &
+                        'failed flush keeps a reused export: readable')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_release_send(cli, held_cap, err)
+         call check_(error, err == CAPNP_OK, &
+                     'failed flush keeps a reused export: release sent')
+         if (.not. allocated(error)) call rpc_pump_once(srv, err)
+         write (*, '(a,i0)') 'reused-flush after release deaths=', final_count
+         call check_(error, final_count == 3, &
+                     'failed flush keeps a reused export: original release')
+         call check_(error, .not. associated(held), &
+                     'failed flush keeps a reused export: released once')
+      end if
+      call close_pair(cli, srv, opened)
+      if (opened .and. .not. allocated(error)) then
+         write (*, '(a,i0)') 'reused-flush after close deaths=', final_count
+         call check_(error, final_count == nlive + 2, &
+                     'failed flush keeps a reused export: close')
+      end if
+   end subroutine run_partial_reused
 
 end module test_rpc_lifetime
