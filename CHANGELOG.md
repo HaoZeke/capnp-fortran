@@ -30,8 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.
-- `capnpc-fortran` frees its request buffer and file name before exit, so
-  LeakSanitizer builds of the plugin run clean.
+- `capnpc-fortran` frees the command argument, request buffer, file
+  name, and message on success and on every error exit, so a leak
+  checker sees a clean run.
 - Zero-copy Text and Data views associate through the segment byte pointer,
   preserving the Fortran pointer-target invariant across compilers.
 - RPC capability-table lengths convert explicitly to the loop-index kind, and
