@@ -22,6 +22,7 @@ program tester
    use test_codegen_parity, only: collect_codegen_parity
    use test_idents, only: collect_idents
    use test_regress, only: collect_regress, release_regress_tmp
+   use test_edges, only: collect_edges
    use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
@@ -50,7 +51,8 @@ program tester
         new_testsuite("stream", collect_stream), &
         new_testsuite("codegen_parity", collect_codegen_parity), &
         new_testsuite("idents", collect_idents), &
-        new_testsuite("regress", collect_regress) &
+        new_testsuite("regress", collect_regress), &
+        new_testsuite("edges", collect_edges) &
         ]
 
    call get_argument(1, suite_name)
