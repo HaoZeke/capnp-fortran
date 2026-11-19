@@ -210,7 +210,7 @@ contains
       integer(int64), intent(in) :: w
       type(capnp_ptr_t), intent(out) :: p
       integer, intent(out) :: err
-      integer(int64) :: cnt, content_bytes, tag
+      integer(int64) :: cnt, content_bytes, tag, stride
       integer :: es, sb
 
       err = CAPNP_OK
@@ -240,14 +240,16 @@ contains
          p%nelem = ibits(tag, 2, 29)
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
+         stride = int(p%dwords, int64) + int(p%pwords, int64)
          ! Element count must fit the declared content words.
-         if (p%nelem*int(p%dwords + p%pwords, int64) > cnt) then
-            err = CAPNP_ERR_BOUNDS
-            p%kind = CAPNP_PK_NULL
-            return
-         end if
-         ! layout.c++:2323: a zero-word element still costs one word.
-         if (p%dwords + p%pwords == 0 .and. p%nelem > 0_int64) then
+         if (stride > 0_int64) then
+            if (p%nelem > cnt/stride) then
+               err = CAPNP_ERR_BOUNDS
+               p%kind = CAPNP_PK_NULL
+               return
+            end if
+         else if (p%nelem > 0_int64) then
+            ! layout.c++:2323: a zero-word element still costs one word.
             if (.not. charge(msg, p%nelem*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       else
