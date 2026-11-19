@@ -58,6 +58,7 @@ module capnp_rpc
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
+   public :: rpc_persistent_save_begin, rpc_persistent_save_wait
 
    integer, parameter :: RPC_CAP_NONE = 0
    integer, parameter :: RPC_CAP_IMPORT = 1
@@ -526,6 +527,46 @@ contains
       call rpc_send_message(conn%fd, m, err)
       call capnp_message_free(m)
    end subroutine rpc_call_send
+
+   !> Begin Persistent.save using the generic
+   !> Persistent<AnyPointer, AnyPointer> wire layout. `owner` is copied to
+   !> SaveParams.sealFor when present; a null owner requests an unsealed
+   !> reference, whose acceptance is realm policy.
+   subroutine rpc_persistent_save_begin(conn, target, m, owner, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: target
+      type(capnp_message_t), intent(inout), target :: m
+      type(capnp_ptr_t), intent(in), optional :: owner
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: save_params
+      call rpc_call_begin(conn, target, RPC_PERSISTENT_IFACE, &
+                          RPC_PERSISTENT_SAVE, m, params, qid, err)
+      if (err /= CAPNP_OK) return
+      save_params = capnp_new_struct(m, 0, 1, err)
+      if (err /= CAPNP_OK) return
+      if (present(owner)) then
+         call capnp_setp(save_params, 0, owner, err)
+         if (err /= CAPNP_OK) return
+      end if
+      call payload_content_set(params, save_params, err)
+   end subroutine rpc_persistent_save_begin
+
+   !> Wait for Persistent.save and return SaveResults.sturdyRef. The
+   !> pointer remains owned by the question until rpc_finish_send.
+   subroutine rpc_persistent_save_wait(conn, qid, sturdy_ref, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(capnp_ptr_t), intent(out) :: sturdy_ref
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: results
+      call rpc_wait(conn, qid, err)
+      if (err /= CAPNP_OK) return
+      call rpc_result_content(conn, qid, results, err)
+      if (err /= CAPNP_OK) return
+      sturdy_ref = capnp_getp(results, 0, err)
+   end subroutine rpc_persistent_save_wait
 
    !> A capability reached by pointer-field hops into a question's
    !> not-yet-returned results: promise pipelining.
