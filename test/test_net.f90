@@ -51,6 +51,7 @@ contains
    subroutine run_connect_unreach(error)
       type(error_type), allocatable, intent(out) :: error
       character(len=8) :: flag
+      character(len=4096) :: bin
       integer :: stat, cs, fd, err
       call get_environment_variable('CAPNP_IN_NETNS', flag)
       if (flag == '1') then
@@ -60,11 +61,15 @@ contains
          if (err == CAPNP_OK) call px_close(fd)
          return
       end if
+      call check_(error, .not. source_has_find(), &
+                  'connect: the check does not search the build tree')
+      if (allocated(error)) return
+      call get_command_argument(0, bin)
       stat = 0
       cs = 0
       call execute_command_line( &
-         'bin=$(find build -path "*test/tester" -type f | head -1); ' // &
-         'unshare -n -r env CAPNP_IN_NETNS=1 "$bin" net connect-unreach', &
+         'unshare -n -r env CAPNP_IN_NETNS=1 "' // trim(bin) // &
+         '" net connect-unreach >/dev/null 2>/dev/null', &
          exitstat=stat, cmdstat=cs)
       if (cs /= 0) then
          call skip_test(error, 'unshare is not available')
@@ -72,5 +77,20 @@ contains
       end if
       call check_(error, stat == 0, 'connect: unreachable network is an error')
    end subroutine run_connect_unreach
+
+   function source_has_find() result(found)
+      logical :: found
+      integer :: u, ios
+      character(len=240) :: line
+      found = .false.
+      open (newunit=u, file='test/test_net.f90', status='old', action='read', iostat=ios)
+      if (ios /= 0) return
+      do
+         read (u, '(a)', iostat=ios) line
+         if (ios /= 0) exit
+         if (index(line, 'find' // ' build') > 0) found = .true.
+      end do
+      close (u)
+   end function source_has_find
 
 end module test_net
