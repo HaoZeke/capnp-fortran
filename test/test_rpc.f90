@@ -263,6 +263,7 @@ contains
       if (.not. allocated(error)) call t_malformed_root_is_freed(error)
       if (.not. allocated(error)) call t_membrane_unwrap_frees(error)
       if (.not. allocated(error)) call t_provide_overrelease_keeps_server(error)
+      if (.not. allocated(error)) call t_embargo_finish_answers_recipient(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -2899,5 +2900,134 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_provide_overrelease_keeps_server
+
+   !> Finish of an embargoed Provide answers the recipient connection and
+   !> leaves the introducer's export alone. Closing the introducer's
+   !> connection does the same.
+   subroutine t_embargo_finish_answers_recipient(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat_store
+      type(rpc_vat_t), pointer :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, pq, aq
+      integer :: ia, pa, ra, pb, e, refs
+      integer(int64) :: ansid
+      logical :: is_exc, readable
+      integer :: kind
+      vat => vat_store
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      call check_(error, e == CAPNP_OK, 'embargo finish: socketpairs')
+      if (allocated(error)) return
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK .and. prov_a%exports(0)%used, &
+                  'embargo finish: introducer bootstrapped')
+      if (allocated(error)) return
+      refs = prov_a%exports(0)%refcount
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 88_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 88_int64, .true., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call px_poll_in(recip%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo finish: Accept waits')
+      call rpc_finish_send(intro, pq, .false., e)
+      call rpc_pump_once(prov_a, e)
+      call px_poll_in(recip%fd, 200, readable, e)
+      call check_(error, readable, 'embargo finish: recipient is answered')
+      if (allocated(error)) return
+      call recv_on(recip%fd, ansid, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. ansid == aq .and. is_exc, &
+                  'embargo finish: recipient gets the exception')
+      call check_(error, prov_a%exports(0)%used .and. prov_a%exports(0)%refcount == refs, &
+                  'embargo finish: introducer export is untouched')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+
+      ! Closing the introducer's connection answers the recipient too.
+      call px_socketpair(ia, pa, e)
+      call px_socketpair(ra, pb, e)
+      boot => local_echo
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, qboot, e)
+      call rpc_result_cap(intro, qboot, [integer ::], cap, e)
+      refs = prov_a%exports(0)%refcount
+      call rpc_provide_send(intro, cap%id, '127.0.0.1', 9, 89_int64, pq, e)
+      call rpc_pump_once(prov_a, e)
+      call rpc_wait(intro, pq, e)
+      call rpc_accept_send(recip, 89_int64, .true., aq, e)
+      call rpc_pump_once(prov_b, e)
+      call rpc_conn_close(prov_a)
+      call px_poll_in(recip%fd, 200, readable, e)
+      call check_(error, readable, 'embargo close: recipient is answered')
+      if (allocated(error)) return
+      call recv_on(recip%fd, ansid, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. ansid == aq .and. is_exc, &
+                  'embargo close: recipient gets the exception')
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_b)
+   end subroutine t_embargo_finish_answers_recipient
+
+   !> Read one Return from an arbitrary connection.
+   subroutine recv_on(fd, ansid, is_exc, kind, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(out) :: ansid
+      logical, intent(out) :: is_exc
+      integer, intent(out) :: kind, e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      ansid = -1_int64
+      is_exc = .false.
+      kind = CAPNP_PK_NULL
+      call rpc_recv_message(fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) then
+         e = CAPNP_ERR_KIND
+         call capnp_message_free(m)
+         return
+      end if
+      r = message_return_get(msg, e)
+      if (e /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      ansid = return_answer_id_get(r)
+      is_exc = return_which(r) /= RETURN_RESULTS_TAG
+      call capnp_message_free(m)
+   end subroutine recv_on
 
 end module test_rpc

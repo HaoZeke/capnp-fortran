@@ -242,6 +242,9 @@ module capnp_rpc
       !> wrapper when the recipient's own export is released.
       integer :: source_eid = -1
       type(rpc_conn_t), pointer :: host => null()
+      !> The connection that sent Accept. Its question and export ids are
+      !> not ids on `host`.
+      type(rpc_conn_t), pointer :: recipient => null()
       !> The introducer's Provide question, which is how a later
       !> Disembargo names this arrangement (rpc.capnp,
       !> Disembargo.context.provide).
@@ -661,14 +664,37 @@ contains
    !> Provisions whose source export lives on this connection.
    subroutine release_hosted_provisions(conn)
       type(rpc_conn_t), intent(inout), target :: conn
-      integer :: i
+      integer :: i, ferr
       do i = 0, MAXPROV - 1
          if (.not. conn%vat%provisions(i)%used) cycle
          if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
-         call release_provision_pin(conn%vat%provisions(i))
-         conn%vat%provisions(i) = rpc_provision_slot_t()
+         call abandon_provision(conn%vat%provisions(i), ferr)
       end do
    end subroutine release_hosted_provisions
+
+   !> Drop a provision. An embargoed Accept is answered on the recipient
+   !> connection, and that connection's export is the one released.
+   subroutine abandon_provision(slot, err)
+      type(rpc_provision_slot_t), intent(inout) :: slot
+      integer, intent(out) :: err
+      type(rpc_conn_t), pointer :: recip
+      integer :: ae
+      integer(int64) :: aq
+      err = CAPNP_OK
+      recip => null()
+      ae = -1
+      aq = -1_int64
+      if (slot%embargoed) then
+         recip => slot%recipient
+         ae = slot%eid
+         aq = slot%accept_qid
+      end if
+      call release_provision_pin(slot)
+      slot = rpc_provision_slot_t()
+      if (.not. associated(recip)) return
+      if (ae >= 0) call drop_export(recip, ae, 1)
+      call send_answer_exception(recip, aq, 'provide finished', err)
+   end subroutine abandon_provision
 
    ! ------------------------------------------------------------------
    ! Client side
@@ -2259,9 +2285,11 @@ contains
                ! in flight through the introducer, and answering now
                ! would let one sent straight to us overtake them. The
                ! introducer lifts it with Disembargo.provide. The pin
-               ! stays until that Return is sent.
+               ! stays until that Return is sent. The answer and the
+               ! export live on this connection, not the introducer's.
                conn%vat%provisions(i)%embargoed = .true.
                conn%vat%provisions(i)%accept_qid = qid
+               conn%vat%provisions(i)%recipient => conn
             else
                call release_provision_pin(conn%vat%provisions(i))
                conn%vat%provisions(i) = rpc_provision_slot_t()
@@ -2319,6 +2347,7 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: provide_qid
       integer, intent(out) :: err
+      type(rpc_conn_t), pointer :: recip
       integer(int64) :: qid
       integer :: i, eid
       err = CAPNP_OK
@@ -2328,9 +2357,11 @@ contains
          if (conn%vat%provisions(i)%qid /= provide_qid) cycle
          qid = conn%vat%provisions(i)%accept_qid
          eid = conn%vat%provisions(i)%eid
+         recip => conn%vat%provisions(i)%recipient
          call release_provision_pin(conn%vat%provisions(i))
          conn%vat%provisions(i) = rpc_provision_slot_t()
-         call send_accepted_cap(conn, qid, eid, err)
+         if (.not. associated(recip)) recip => conn
+         call send_accepted_cap(recip, qid, eid, err)
          return
       end do
       ! A Disembargo naming nothing we hold is the sender's problem, not
@@ -2833,25 +2864,14 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
-      integer :: i, ae
-      integer(int64) :: aq
+      integer :: i
       err = CAPNP_OK
       if (.not. associated(conn%vat)) return
       do i = 0, MAXPROV - 1
          if (.not. conn%vat%provisions(i)%used) cycle
          if (conn%vat%provisions(i)%qid /= qid) cycle
          if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
-         if (conn%vat%provisions(i)%embargoed) then
-            ae = conn%vat%provisions(i)%eid
-            aq = conn%vat%provisions(i)%accept_qid
-            call release_provision_pin(conn%vat%provisions(i))
-            conn%vat%provisions(i) = rpc_provision_slot_t()
-            if (ae >= 0) call drop_export(conn, ae, 1)
-            call send_answer_exception(conn, aq, 'provide finished', err)
-         else
-            call release_provision_pin(conn%vat%provisions(i))
-            conn%vat%provisions(i) = rpc_provision_slot_t()
-         end if
+         call abandon_provision(conn%vat%provisions(i), err)
          return
       end do
    end subroutine release_finished_provide
