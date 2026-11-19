@@ -39,10 +39,11 @@ contains
                    new_unittest("dynamic-group-union", run_group_union), &
                    new_unittest("dynamic-union-clear", run_union_clear), &
                    new_unittest("dynamic-scalars", run_scalars), &
+                   new_unittest("dynamic-two-hop-brand", run_two_hop_brand), &
                    new_unittest("dynamic-reader-default", run_reader_default), &
                    new_unittest("dynamic-unset-which", run_unset_which), &
                    new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer), &
-                   new_unittest("dynamic-two-hop-brand", run_two_hop_brand)]
+                   new_unittest("dynamic-default-arena", run_default_arena)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -853,59 +854,6 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_unset_which
 
-   !> An unbound Box(T) field is AnyPointer, as in the C++ schema loader.
-   subroutine run_unbound_anypointer(error)
-      type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema
-      type(capnp_dyn_brand_t) :: empty, brand
-      type(capnp_ptr_t) :: raw
-      integer(int8), allocatable :: bytes(:)
-      integer(int64) :: scope_id
-      integer :: err, box_idx, tw
-
-      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
-      if (err /= CAPNP_OK) then
-         call skip_test(error, 'fixtures not found (run from project root)')
-         return
-      end if
-      call capnp_dyn_load(schema, bytes, err)
-      box_idx = capnp_dyn_find(schema, 'Box', err)
-      raw = capnp_dyn_field_schema(schema, box_idx, 'value', err)
-      scope_id = type_param_scope_id(raw)
-      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. &
-                  scope_id == node_id(schema%nodes(box_idx)) .and. scope_id /= 0_int64, &
-                  'unbound: parameter scope is the Box node')
-
-      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=empty)
-      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
-                  'unbound: empty brand is AnyPointer')
-
-      allocate (brand%scopes(1))
-      brand%scopes(1)%id = scope_id
-      brand%scopes(1)%inherited = .false.
-      allocate (brand%scopes(1)%bindings(1))
-      brand%scopes(1)%bindings(1)%unbound = .true.
-      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
-      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
-                  'unbound: unbound binding is AnyPointer')
-
-      deallocate (brand%scopes(1)%bindings)
-      allocate (brand%scopes(1)%bindings(0))
-      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
-      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
-                  'unbound: index past the bindings is AnyPointer')
-
-      brand%scopes(1)%id = 0_int64
-      deallocate (brand%scopes(1)%bindings)
-      allocate (brand%scopes(1)%bindings(1))
-      brand%scopes(1)%bindings(1)%unbound = .true.
-      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
-      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
-                  'unbound: missing scope is AnyPointer')
-
-      call capnp_dyn_free(schema)
-   end subroutine run_unbound_anypointer
-
    !> Box(parameter of Nest) plus Nest(Item). Cap'n Proto 1.4.0 resolves
    !> that walk to Item.
    subroutine run_two_hop_brand(error)
@@ -988,5 +936,104 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_two_hop_brand
 
+   !> An unbound Box(T) field is AnyPointer, as in the C++ schema loader.
+   subroutine run_unbound_anypointer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: empty, brand
+      type(capnp_ptr_t) :: raw
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: scope_id
+      integer :: err, box_idx, tw
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      raw = capnp_dyn_field_schema(schema, box_idx, 'value', err)
+      scope_id = type_param_scope_id(raw)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. &
+                  scope_id == node_id(schema%nodes(box_idx)) .and. scope_id /= 0_int64, &
+                  'unbound: parameter scope is the Box node')
+
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=empty)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: empty brand is AnyPointer')
+
+      allocate (brand%scopes(1))
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%inherited = .false.
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .true.
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: unbound binding is AnyPointer')
+
+      deallocate (brand%scopes(1)%bindings)
+      allocate (brand%scopes(1)%bindings(0))
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: index past the bindings is AnyPointer')
+
+      brand%scopes(1)%id = 0_int64
+      deallocate (brand%scopes(1)%bindings)
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .true.
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: missing scope is AnyPointer')
+
+      call capnp_dyn_free(schema)
+   end subroutine run_unbound_anypointer
+
+
+   !> A second read of a defaulted pointer must not grow the reader arena.
+   subroutine run_default_arena(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(sink_t) :: sink
+      type(capnp_ptr_t) :: root, origin
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: len1
+      integer :: err, sink_idx, vec_idx, n1, i
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call capnp_message_init_builder(built, err)
+      sink = sink_new_root(built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. schema%ro_ready .and. schema%ro_arena%nsegs >= 1, &
+                  'arena: first read copies once')
+      n1 = schema%ro_arena%nsegs
+      len1 = schema%ro_arena%segs(1)%len
+      do i = 1, 32
+         origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check_(error, err == CAPNP_OK .and. schema%ro_arena%nsegs == n1 .and. &
+                  schema%ro_arena%segs(1)%len == len1 .and. len1 > 8_int64, &
+                  'arena: later reads do not allocate')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'arena: cached default still reads 1.5')
+
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_default_arena
 
 end module test_dynamic
