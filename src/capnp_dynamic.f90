@@ -283,6 +283,29 @@ contains
       call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, err)
    end subroutine dyn_select_field
 
+   !> C++ DynamicStruct::get rejects a union arm that is not selected.
+   subroutine dyn_require_active(schema, idx, p, f, err)
+      use capnp_union, only: capnp_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f
+      integer, intent(out) :: err
+      integer :: disc, off
+      err = CAPNP_OK
+      disc = field_discriminant(f)
+      if (disc == NO_DISCRIMINANT) return
+      if (idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      off = int(node_struct_discriminant_offset(schema%nodes(idx)))
+      if (capnp_which(p, off) /= disc) err = CAPNP_ERR_KIND
+   end subroutine dyn_require_active
+
    subroutine dyn_annotations(list, annotations, err)
       type(capnp_ptr_t), intent(in) :: list
       type(capnp_dyn_annotation_t), allocatable, intent(out) :: annotations(:)
@@ -448,6 +471,8 @@ contains
       v = 0_int64
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
@@ -485,6 +510,8 @@ contains
       v = 0.0_real64
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
@@ -511,6 +538,8 @@ contains
       v = .false.
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       if (type_which(t) /= TYPE_BOOL) then
@@ -531,6 +560,8 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
@@ -558,6 +589,8 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
@@ -589,6 +622,8 @@ contains
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: f, t, dv
       call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
          q = p
@@ -926,6 +961,8 @@ contains
       type(capnp_ptr_t) :: value, f, t
       capidx = 0_int64
       call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
