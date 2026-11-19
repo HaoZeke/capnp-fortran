@@ -110,8 +110,9 @@ contains
       end if
       call fmt_g(real(x, real64), 6, s)
       call capnp_parse_f32(s, y, err)
-      ! strtof sets ERANGE for a subnormal, so KJ retries at FLT_DIG+2
-      ! even when the shorter text parses back to the same bits.
+      ! glibc strtof sets ERANGE for every subnormal, so the C++ printer
+      ! rejects the six-digit form and reprints with eight digits. A libc
+      ! that does not set ERANGE can keep the shorter text.
       if (err /= CAPNP_OK .or. .not. f32_same(y, x) .or. f32_subnormal(x)) &
          call fmt_g(real(x, real64), 8, s)
    end subroutine capnp_fmt_f32
