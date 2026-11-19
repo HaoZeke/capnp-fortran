@@ -21,6 +21,12 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Stream readers take a reader options value (traversal budget and nesting
+  limit) and builder messages take a builder options value (first segment
+  size and allocation strategy). The defaults stay 8 Mi words, nesting 64,
+  a 1024-word first segment, and doubling of later segments. A first
+  segment above the segment cap is rejected, later segments stop at that
+  cap, and packed input is not expanded past the traversal budget.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.

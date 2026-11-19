@@ -24,8 +24,18 @@ convention. Word offsets and lengths are `integer(int64)`.
 | `CAPNP_ERR_IO` | file I/O failure |
 
 Guards default to `CAPNP_DEFAULT_TRAVERSAL_WORDS` (8 Mi words) and
-`CAPNP_DEFAULT_DEPTH_LIMIT` (64); both are per-message and settable through
-the deserialize entry points.
+`CAPNP_DEFAULT_DEPTH_LIMIT` (64). `capnp_reader_options_t` carries both
+(`traversal_words`, `nesting_limit`) into deserialize and stream readers.
+Stream readers apply the traversal budget to the segment table before
+allocating the body. Packed bytes are expanded only up to that budget
+plus the largest segment table, so a zero-run cannot allocate without
+bound. `capnp_builder_options_t` carries
+`first_segment_words` (default `CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS`, 1024)
+and `allocation_strategy` (`CAPNP_ALLOC_GROW_HEURISTICALLY` doubles each
+later segment; `CAPNP_ALLOC_FIXED_SIZE` repeats the first-segment size
+unless one object is larger). A first segment above the segment word cap
+is rejected, and heuristic growth stops at that cap. Omitting the options
+keeps those defaults.
 
 Element-size codes for `capnp_new_list`: `CAPNP_SZ_VOID` (0), `_BIT`,
 `_BYTE`, `_TWO`, `_FOUR`, `_EIGHT`, `_PTR`, `_COMPOSITE` (7). Handle kinds:
@@ -38,7 +48,7 @@ the `target` attribute.
 
 | Procedure | Signature | Notes |
 |-----------|-----------|-------|
-| `capnp_message_init_builder` | `(msg, err [, first_words])` | fresh builder; reserves the zeroed root word |
+| `capnp_message_init_builder` | `(msg, err [, first_words, options])` | fresh builder; reserves the zeroed root word. `options` is `capnp_builder_options_t` |
 | `capnp_message_free` | `(msg)` | releases owned segments; safe on views |
 
 ## Objects and pointers (`capnp_message`)
@@ -111,14 +121,14 @@ as primitive via field `@0`).
 | Procedure | Signature | Notes |
 |-----------|-----------|-------|
 | `capnp_serialize_bytes` | `(msg, bytes, err)` | segment table + segments |
-| `capnp_deserialize_bytes` | `(bytes, msg, err [, traversal_words, depth_limit])` | copies segments; frees `msg` first |
+| `capnp_deserialize_bytes` | `(bytes, msg, err [, traversal_words, depth_limit, options])` | copies segments; frees `msg` first. `options` is `capnp_reader_options_t`; explicit limits override it |
 | `capnp_deserialize_view` | `(bytes, msg, err [, ...])` | zero-copy: segments alias the caller's `target` buffer |
 | `capnp_serialize_packed_bytes` / `capnp_deserialize_packed_bytes` | as above | packed framing |
 | `capnp_write_file` / `capnp_read_file` | `(path, bytes, err)` | raw byte I/O |
 | `capnp_write_message` / `capnp_read_message` | `(path, msg, err)` | framed message file I/O |
 | `capnp_write_message_packed` / `capnp_read_message_packed` | `(path, msg, err)` | |
-| `capnp_read_message_unit` | `(unit, msg, err)` | one framed message from an open stream unit; back-to-back messages read in sequence |
-| `capnp_read_message_packed_unit` | `(unit, msg, err)` | same for packed streams (C++ `PackedMessageReader`) |
+| `capnp_read_message_unit` | `(unit, msg, err [, options])` | one framed message from an open stream unit; the segment table is bounded by the reader traversal budget |
+| `capnp_read_message_packed_unit` | `(unit, msg, err [, options])` | same for packed streams (C++ `PackedMessageReader`) |
 
 ## Packed codec (`capnp_packed`)
 
