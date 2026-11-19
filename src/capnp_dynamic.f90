@@ -21,6 +21,8 @@ module capnp_dynamic
    public :: capnp_dyn_get_capability, capnp_dyn_set_capability
    public :: capnp_dyn_get_any_struct, capnp_dyn_get_any_list
    public :: capnp_dyn_select, capnp_dyn_which, capnp_dyn_field_type
+   public :: capnp_dyn_brand_t, capnp_dyn_brand_scope_t, capnp_dyn_brand_binding_t
+   public :: capnp_dyn_field_schema, capnp_dyn_load_brand
    public :: capnp_dyn_annotation_t, capnp_dyn_node_annotations
    public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
    public :: capnp_dyn_method_annotations
@@ -40,6 +42,21 @@ module capnp_dynamic
       type(capnp_ptr_t) :: value
       type(capnp_ptr_t) :: brand
    end type capnp_dyn_annotation_t
+
+   type :: capnp_dyn_brand_binding_t
+      logical :: unbound = .false.
+      type(capnp_ptr_t) :: type
+   end type capnp_dyn_brand_binding_t
+
+   type :: capnp_dyn_brand_scope_t
+      integer(int64) :: id = 0_int64
+      logical :: inherited = .false.
+      type(capnp_dyn_brand_binding_t), allocatable :: bindings(:)
+   end type capnp_dyn_brand_scope_t
+
+   type :: capnp_dyn_brand_t
+      type(capnp_dyn_brand_scope_t), allocatable :: scopes(:)
+   end type capnp_dyn_brand_t
 
 contains
 
@@ -170,6 +187,63 @@ contains
       end do
       err = CAPNP_ERR_ARG
    end subroutine dyn_field
+
+   function capnp_dyn_field_schema(schema, idx, fname, err) result(t)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: fname
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: t, f
+      t = capnp_ptr_t()
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      t = field_slot_type(f, err)
+   end function capnp_dyn_field_schema
+
+   subroutine capnp_dyn_load_brand(t, brand, err)
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_dyn_brand_t), intent(out) :: brand
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: raw, scopes, scope, bindings, binding
+      integer(int64) :: i, j
+      err = CAPNP_OK
+      if (allocated(brand%scopes)) deallocate (brand%scopes)
+      raw = type_brand(t, err)
+      if (err /= CAPNP_OK) return
+      if (raw%kind == CAPNP_PK_NULL) then
+         allocate (brand%scopes(0))
+         return
+      end if
+      scopes = brand_scopes(raw, err)
+      if (err /= CAPNP_OK) return
+      allocate (brand%scopes(capnp_list_len(scopes)))
+      do i = 0_int64, capnp_list_len(scopes) - 1_int64
+         scope = capnp_list_get_struct(scopes, int(i), err)
+         if (err /= CAPNP_OK) return
+         brand%scopes(i + 1)%id = scope_scope_id(scope)
+         brand%scopes(i + 1)%inherited = scope_which(scope) == SCOPE_INHERIT
+         if (brand%scopes(i + 1)%inherited) then
+            allocate (brand%scopes(i + 1)%bindings(0))
+            cycle
+         end if
+         bindings = scope_bindings(scope, err)
+         if (err /= CAPNP_OK) return
+         allocate (brand%scopes(i + 1)%bindings(capnp_list_len(bindings)))
+         do j = 0_int64, capnp_list_len(bindings) - 1_int64
+            binding = capnp_list_get_struct(bindings, int(j), err)
+            if (err /= CAPNP_OK) return
+            brand%scopes(i + 1)%bindings(j + 1)%unbound = binding_which(binding) == BINDING_UNBOUND
+            if (.not. brand%scopes(i + 1)%bindings(j + 1)%unbound) then
+               brand%scopes(i + 1)%bindings(j + 1)%type = binding_type(binding, err)
+               if (err /= CAPNP_OK) return
+            end if
+         end do
+      end do
+   end subroutine capnp_dyn_load_brand
 
    subroutine dyn_select_field(schema, idx, p, f, err)
       use capnp_union, only: capnp_set_which
