@@ -29,6 +29,7 @@ program test_gate2
    call case_26()
    call case_27()
    call case_28()
+   call case_29()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -804,4 +805,46 @@ contains
          '2-seg.r; echo $? > /tmp/g2-seg.e2; cmp -s /tmp/g2-seg.o /tmp' // &
          '/g2-seg.r && cmp -s /tmp/g2-seg.e1 /tmp/g2-seg.e2')
    end subroutine case_28
+
+   subroutine case_29()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'command -v meson > /dev/null && command -v ninja > /dev/null' // &
+         ' || exit 77' // &
+         achar(10) // &
+         'P=$(dirname "$(dirname "$(command -v capnp)")")' // &
+         achar(10) // &
+         '# Build like scripts/fypp-gen.sh: g++ and the pkg-config fil' // &
+         'es beside capnp.' // &
+         achar(10) // &
+         'if [ -z "${CXX:-}" ] && command -v g++ > /dev/null; then CXX' // &
+         '=g++; export CXX; fi' // &
+         achar(10) // &
+         'PKG_CONFIG_PATH="$P/lib/pkgconfig:$P/lib64/pkgconfig${PKG_CO' // &
+         'NFIG_PATH:+:$PKG_CONFIG_PATH}"; export PKG_CONFIG_PATH' // &
+         achar(10) // &
+         'd=/tmp/g2-mb-$$' // &
+         achar(10) // &
+         'meson setup "$d" . > /dev/null 2>&1 || { rm -rf "$d"; exit 7' // &
+         '7; }' // &
+         achar(10) // &
+         'ninja -C "$d" -t query interop/rpc_client_f > /dev/null 2>&1' // &
+         ' || { rm -rf "$d"; exit 77; }' // &
+         achar(10) // &
+         'ninja -C "$d" -t query interop/rpc_client_rebuild.f90 2>/dev' // &
+         '/null | grep -q ' // &
+         achar(39) // &
+         '| .*src/capnp_message.f90' // &
+         achar(39) // &
+         '; r=$?' // &
+         achar(10) // &
+         'rm -rf "$d"; exit $r')
+   end subroutine case_29
 end program test_gate2

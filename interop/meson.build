@@ -57,9 +57,24 @@ else
       override_options: ['cpp_std=c++17'],
     )
 
+    # Fortran callers inline the layout of library types. Relinking the
+    # client after a library edit is not enough: the source has to be
+    # compiled again. Copying it when a library source changes does that.
+    rpc_client_built = custom_target(
+      'rpc-client-rebuild',
+      input: 'rpc_client.f90',
+      output: 'rpc_client_rebuild.f90',
+      command: [
+        find_program('python3'), '-c',
+        'import shutil,sys; shutil.copyfile(sys.argv[1], sys.argv[2])',
+        '@INPUT@', '@OUTPUT@',
+      ],
+      depend_files: capnp_fsrc,
+    )
+
     rpc_client_f = executable(
       'rpc_client_f',
-      'rpc_client.f90',
+      rpc_client_built,
       link_with: capnp_flib,
     )
 
