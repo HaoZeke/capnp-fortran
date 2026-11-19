@@ -71,7 +71,7 @@ capnpc_fortran = executable(
 
 capnpf = executable(
   'capnpf',
-  'app/capnpf.f90',
+  ['app/os_errno.c', 'app/os_errno.f90', 'app/capnpf.f90'],
   link_with: capnp_flib,
   install: true,
 )

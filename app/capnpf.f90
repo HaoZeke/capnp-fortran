@@ -4,6 +4,7 @@
 program capnpf
    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, c_size_t, &
       c_null_char, c_associated, c_intptr_t, c_long
+   use os_errno, only: os_errno_value, os_eintr
    use capnp
    use capnp_schema
    use capnp_codec
@@ -810,7 +811,12 @@ contains
       do while (left > 0_c_size_t)
          p = transfer(addr, p)
          nw = c_write(int(fd, c_int), p, left)
-         if (nw <= 0_c_long) then
+         if (nw < 0_c_long) then
+            ! A signal during write is retried, as kj does.
+            if (os_errno_value() == os_eintr()) cycle
+            err = CAPNP_ERR_IO
+            return
+         else if (nw == 0_c_long) then
             err = CAPNP_ERR_IO
             return
          end if

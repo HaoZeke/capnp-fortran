@@ -34,6 +34,7 @@ SOURCES=(
   src/stream_capnp.f90
   app/capnpc_emit.f90
   app/main.f90
+  app/os_errno.f90
   app/capnpf.f90
   test/addressbook_schema.f90
   test/generated/common_capnp.f90
