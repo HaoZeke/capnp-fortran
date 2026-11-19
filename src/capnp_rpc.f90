@@ -641,30 +641,20 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      if (err /= CAPNP_OK) return
-      pv = message_provide_init(msg, err)
-      if (err /= CAPNP_OK) return
-      call provide_question_id_set(pv, qid, err)
-      if (err /= CAPNP_OK) return
-      tgt = provide_target_init(pv, err)
-      if (err /= CAPNP_OK) return
-      call message_target_imported_cap_set(tgt, imported_cap, err)
-      if (err /= CAPNP_OK) return
-      rid = recipient_id_new(m, err)
-      if (err /= CAPNP_OK) return
-      call recipient_id_nonce_set(rid, nonce, err)
-      if (err /= CAPNP_OK) return
-      vat = recipient_id_vat_init(rid, err)
-      if (err /= CAPNP_OK) return
-      call vat_id_host_set(vat, host, err)
-      if (err /= CAPNP_OK) return
-      call vat_id_port_set(vat, port, err)
-      if (err /= CAPNP_OK) return
-      call provide_recipient_set(pv, rid%p, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) pv = message_provide_init(msg, err)
+      if (err == CAPNP_OK) call provide_question_id_set(pv, qid, err)
+      if (err == CAPNP_OK) tgt = provide_target_init(pv, err)
+      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, imported_cap, err)
+      if (err == CAPNP_OK) rid = recipient_id_new(m, err)
+      if (err == CAPNP_OK) call recipient_id_nonce_set(rid, nonce, err)
+      if (err == CAPNP_OK) vat = recipient_id_vat_init(rid, err)
+      if (err == CAPNP_OK) call vat_id_host_set(vat, host, err)
+      if (err == CAPNP_OK) call vat_id_port_set(vat, port, err)
+      if (err == CAPNP_OK) call provide_recipient_set(pv, rid%p, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) call release_question(conn, qid)
    end subroutine rpc_provide_send
 
    !> `Accept`: claim a capability a third vat provided for us. The
@@ -686,24 +676,16 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      if (err /= CAPNP_OK) return
-      ac = message_accept_init(msg, err)
-      if (err /= CAPNP_OK) return
-      call accept_question_id_set(ac, qid, err)
-      if (err /= CAPNP_OK) return
-      if (embargo) then
-         call accept_embargo_set(ac, .true., err)
-         if (err /= CAPNP_OK) return
-      end if
-      pid = provision_id_new(m, err)
-      if (err /= CAPNP_OK) return
-      call provision_id_nonce_set(pid, nonce, err)
-      if (err /= CAPNP_OK) return
-      call accept_provision_set(ac, pid%p, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) ac = message_accept_init(msg, err)
+      if (err == CAPNP_OK) call accept_question_id_set(ac, qid, err)
+      if (err == CAPNP_OK .and. embargo) call accept_embargo_set(ac, .true., err)
+      if (err == CAPNP_OK) pid = provision_id_new(m, err)
+      if (err == CAPNP_OK) call provision_id_nonce_set(pid, nonce, err)
+      if (err == CAPNP_OK) call accept_provision_set(ac, pid%p, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) call release_question(conn, qid)
    end subroutine rpc_accept_send
 
    !> Lift the embargo on the Accept this vat arranged with `Provide`.
@@ -740,12 +722,16 @@ contains
          return
       end if
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      b = message_bootstrap_init(msg, err)
-      call bootstrap_question_id_set(b, qid, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) b = message_bootstrap_init(msg, err)
+      if (err == CAPNP_OK) call bootstrap_question_id_set(b, qid, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
       call capnp_message_free(m)
+      if (err /= CAPNP_OK) then
+         call release_question(conn, qid)
+         cap = rpc_cap_t()
+         return
+      end if
       cap%kind = RPC_CAP_PIPELINE
       cap%id = qid
       cap%nops = 0
@@ -789,30 +775,39 @@ contains
       conn%questions(int(qid))%membrane => target%membrane
       conn%questions(int(qid))%membrane_reverse = target%membrane_reverse
       call capnp_message_init_builder(m, err)
-      if (err /= CAPNP_OK) return
-      msg = message_new_root(m, err)
-      c = message_call_init(msg, err)
-      call call_question_id_set(c, qid, err)
-      call call_interface_id_set(c, interface_id, err)
-      call call_method_id_set(c, method_id, err)
-      call call_send_results_to_caller_set(c, err)
-      tgt = call_target_init(c, err)
-      select case (target%kind)
-      case (RPC_CAP_IMPORT)
-         call message_target_imported_cap_set(tgt, target%id, err)
-      case (RPC_CAP_PIPELINE)
-         pa = message_target_promised_answer_init(tgt, err)
-         call promised_answer_question_id_set(pa, target%id, err)
-         ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
-         do i = 0, target%nops - 1
-            op%p = capnp_list_get_struct(ops, i, err)
-            call promised_answer_op_get_pointer_field_set(op, target%ops(i), err)
-         end do
-      case default
-         err = CAPNP_ERR_ARG
-         return
-      end select
-      params = call_params_init(c, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) c = message_call_init(msg, err)
+      if (err == CAPNP_OK) call call_question_id_set(c, qid, err)
+      if (err == CAPNP_OK) call call_interface_id_set(c, interface_id, err)
+      if (err == CAPNP_OK) call call_method_id_set(c, method_id, err)
+      if (err == CAPNP_OK) call call_send_results_to_caller_set(c, err)
+      if (err == CAPNP_OK) tgt = call_target_init(c, err)
+      if (err == CAPNP_OK) then
+         select case (target%kind)
+         case (RPC_CAP_IMPORT)
+            call message_target_imported_cap_set(tgt, target%id, err)
+         case (RPC_CAP_PIPELINE)
+            pa = message_target_promised_answer_init(tgt, err)
+            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, target%id, err)
+            if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
+            if (err == CAPNP_OK) then
+               do i = 0, target%nops - 1
+                  op%p = capnp_list_get_struct(ops, i, err)
+                  if (err /= CAPNP_OK) exit
+                  call promised_answer_op_get_pointer_field_set(op, target%ops(i), err)
+                  if (err /= CAPNP_OK) exit
+               end do
+            end if
+         case default
+            err = CAPNP_ERR_ARG
+         end select
+      end if
+      if (err == CAPNP_OK) params = call_params_init(c, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         call release_question(conn, qid)
+         qid = -1_int64
+      end if
    end subroutine rpc_call_begin
 
    subroutine rpc_call_send(conn, m, err)
@@ -840,12 +835,13 @@ contains
                           RPC_PERSISTENT_SAVE, m, params, qid, err)
       if (err /= CAPNP_OK) return
       save_params = capnp_new_struct(m, 0, 1, err)
-      if (err /= CAPNP_OK) return
-      if (present(owner)) then
-         call capnp_setp(save_params, 0, owner, err)
-         if (err /= CAPNP_OK) return
+      if (err == CAPNP_OK .and. present(owner)) call capnp_setp(save_params, 0, owner, err)
+      if (err == CAPNP_OK) call payload_content_set(params, save_params, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         call release_question(conn, qid)
+         qid = -1_int64
       end if
-      call payload_content_set(params, save_params, err)
    end subroutine rpc_persistent_save_begin
 
    !> Wait for Persistent.save and return SaveResults.sturdyRef. The
