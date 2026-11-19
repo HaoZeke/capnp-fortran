@@ -22,6 +22,7 @@ module capnp_codec
    public :: capnp_cescape_text, capnp_cescape_data, capnp_cunescape
    public :: capnp_as_i8, capnp_as_i16, capnp_as_i32u
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
+   public :: capnp_u64_to_f64, capnp_f64_to_u64, capnp_f64_to_i64
    public :: capnp_quiet_nan
    public :: capnp_dec_digit, capnp_oct_digit, capnp_hex_digit
    public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
@@ -705,6 +706,64 @@ contains
       integer(int64) :: u
       u = iand(int(s, int64), 4294967295_int64)
    end function capnp_u_of_i32
+
+   pure function capnp_u64_to_f64(bits) result(x)
+      integer(int64), intent(in) :: bits
+      real(real64) :: x
+      integer(int64) :: half
+      if (iand(bits, int(z'8000000000000000', int64)) == 0_int64) then
+         x = real(bits, real64)
+      else
+         half = ior(iand(shiftr(bits, 1), int(z'7fffffffffffffff', int64)), iand(bits, 1_int64))
+         x = real(half, real64)*2.0_real64
+      end if
+   end function capnp_u64_to_f64
+
+   subroutine capnp_f64_to_u64(x, uv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: uv
+      integer, intent(out) :: err
+      real(real64), parameter :: two63 = 9223372036854775808.0_real64
+      real(real64), parameter :: max_u64_f64 = 18446744073709549568.0_real64
+      err = CAPNP_OK
+      uv = 0_int64
+      if (.not. ieee_is_finite(x)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < 0.0_real64 .or. x > max_u64_f64 .or. aint(x) /= x) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < two63) then
+         uv = int(x, int64)
+      else
+         uv = ieor(int(x - two63, int64), int(z'8000000000000000', int64))
+      end if
+   end subroutine capnp_f64_to_u64
+
+   subroutine capnp_f64_to_i64(x, iv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: iv
+      integer, intent(out) :: err
+      real(real64), parameter :: min_i64_f64 = -9223372036854775808.0_real64
+      real(real64), parameter :: max_i64_f64 = 9223372036854774784.0_real64
+      err = CAPNP_OK
+      iv = 0_int64
+      if (.not. ieee_is_finite(x)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x < min_i64_f64 .or. x > max_i64_f64 .or. aint(x) /= x) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (x == min_i64_f64) then
+         iv = int(z'8000000000000000', int64)
+      else
+         iv = int(x, int64)
+      end if
+   end subroutine capnp_f64_to_i64
 
    subroutine fmt_g(val, prec, s)
       real(real64), intent(in) :: val
