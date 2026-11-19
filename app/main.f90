@@ -56,11 +56,18 @@ program capnpc_fortran
    end do
 
    ! Main-program allocatables are not freed at exit; release them so leak
-   ! checkers see a clean run.
-   if (allocated(fname)) deallocate (fname)
-   if (allocated(bytes)) deallocate (bytes)
+   ! checkers see a clean run. die() releases the same set.
+   call release_cli()
 
 contains
+
+   subroutine release_cli()
+      if (allocated(arg)) deallocate (arg)
+      if (allocated(fname)) deallocate (fname)
+      if (allocated(bytes)) deallocate (bytes)
+      call capnp_message_free(msg)
+   end subroutine release_cli
+
 
    !> Drain stdin (a pipe: no queryable size) into a byte buffer.
    subroutine read_stdin(b, err)
@@ -102,8 +109,10 @@ contains
    subroutine die(what, code)
       character(len=*), intent(in) :: what
       integer, intent(in) :: code
+      call release_cli()
       write (*, '(a,a,a,i0)') 'capnpc-fortran: ', what, ', err=', code
-      error stop 1
+      ! stop runs atexit handlers, so a leak checker reports an error-path leak.
+      stop 1
    end subroutine die
 
 end program capnpc_fortran

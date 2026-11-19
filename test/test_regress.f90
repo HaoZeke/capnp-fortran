@@ -28,7 +28,8 @@ contains
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("json-unloaded-guard", run_json_unloaded), &
          new_unittest("long-argument", run_long_arg), &
-         new_unittest("schema-pipe", run_schema_pipe) &
+         new_unittest("schema-pipe", run_schema_pipe), &
+         new_unittest("plugin-release", run_plugin_release) &
          ]
    end subroutine collect_regress
 
@@ -459,6 +460,31 @@ contains
          if (local /= CAPNP_OK) call test_failed(err_ignored, 'write '//path)
       end if
    end subroutine spit
+
+   !> The schema plugin must release the command argument, the request
+   !> buffer, the file name, and the message on the success path and on
+   !> every error path. A sanitized build exits nonzero if any remain.
+   subroutine run_plugin_release(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: ptmp = '/tmp/capnpf-regress/plugin'
+      if (.not. sh('mkdir -p '//ptmp &
+         //' && root=$(pwd)' &
+         //' && set -- build/gfortran_*/app/capnpc-fortran && test $# -eq 1' &
+         //' && CAP=$root/$1' &
+         //' && cp test/fixtures/addressbook.cgr.bin '//ptmp//'/req.bin' &
+         //' && (cd '//ptmp//' && "$CAP" req.bin)' &
+         //' && test -s '//ptmp//'/addressbook_capnp.f90' &
+         //' && export ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}exitcode=23"' &
+         //' && rc=0; "$CAP" '//ptmp//'/missing.bin >/dev/null 2>'//ptmp//'/miss.err || rc=$?' &
+         //'; test "$rc" -eq 1 && ! grep -q LeakSanitizer '//ptmp//'/miss.err' &
+         //' && ! grep -q "ERROR STOP" '//ptmp//'/miss.err' &
+         //' && rc=0; printf "" | "$CAP" >/dev/null 2>'//ptmp//'/empty.err || rc=$?' &
+         //'; test "$rc" -eq 1 && ! grep -q LeakSanitizer '//ptmp//'/empty.err' &
+         //' && ! grep -q "ERROR STOP" '//ptmp//'/empty.err')) then
+         call test_failed(error, 'plugin release paths failed')
+         return
+      end if
+   end subroutine run_plugin_release
 
    subroutine run_schema_pipe(error)
       type(error_type), allocatable, intent(out) :: error
