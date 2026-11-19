@@ -561,7 +561,7 @@ contains
    end function rpc_pipeline_cap
 
    !> Pump the connection until question qid has returned.
-   subroutine rpc_wait(conn, qid, err)
+   recursive subroutine rpc_wait(conn, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
@@ -921,7 +921,8 @@ contains
    ! ------------------------------------------------------------------
 
    !> Receive and handle exactly one message. Blocking.
-   subroutine rpc_pump_once(conn, err)
+   !> A server's dispatch may call back into the pump, so this is recursive.
+   recursive subroutine rpc_pump_once(conn, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(out) :: err
       type(capnp_message_t), target :: m
@@ -982,7 +983,7 @@ contains
    !> within timeout_ms. handled=.false. on timeout. The multiplexing
    !> building block: a single thread can round-robin several
    !> connections without blocking on any one of them.
-   subroutine rpc_pump_poll(conn, timeout_ms, handled, err)
+   recursive subroutine rpc_pump_poll(conn, timeout_ms, handled, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: timeout_ms
       logical, intent(out) :: handled
@@ -1003,7 +1004,7 @@ contains
    !> Blocking server loop: pump until the peer disconnects. A clean
    !> peer shutdown returns CAPNP_OK; aborts surface their reason via
    !> rpc_conn_reason.
-   subroutine rpc_serve(conn, err)
+   recursive subroutine rpc_serve(conn, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(out) :: err
       err = CAPNP_OK
@@ -1053,7 +1054,7 @@ contains
       call finish_answer(conn, qid, rm, ctx, err)
    end subroutine handle_bootstrap
 
-   subroutine handle_call(conn, msg, err)
+   recursive subroutine handle_call(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
