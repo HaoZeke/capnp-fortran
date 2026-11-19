@@ -70,7 +70,7 @@ and capnp-C++:
 | RPC level 2 (`Persistent.save`) | no | partial | yes (`rpc_persistent_save_begin` / `_wait`, app-defined SturdyRef and Owner) |
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes, two-party sender and receiver (upstream C++ has none) |
-| `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
+| `-> stream` flow control and cancellation | no | yes | yes (`rpc_stream_t`, windowed, Finish cancellation) |
 | Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
 | Generics in generated code | no | yes | brand-resolved instantiations (direct, list-element, list-binding, nested) |
 | Dynamic reflection API | no | yes | yes (`capnp_dynamic`, by-name read/write) |
@@ -156,6 +156,15 @@ test exists. Generics and
 reflection sit outside both this project's and capnpc-c's generated-code
 scope; the wire format carries generic types either way, so messages
 produced by C++ users of those features still read correctly here.
+
+Cancellation uses `Finish` with
+`requireEarlyCancellationWorkaround = false`, matching Cap'n Proto 1.0
+and newer. `rpc_request_cancellation` abandons one question and
+`rpc_stream_cancel` applies the same request to every outstanding stream
+call. A callee may still run application code to completion unless its
+method opts into cancellation, matching C++'s `allowCancellation`
+annotation. The live C++ interop peer includes an opted-in method whose
+never-ending promise is dropped by the Fortran cancellation request.
 
 ## Changelog
 
