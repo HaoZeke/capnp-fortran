@@ -561,8 +561,8 @@ contains
          '(id = 11, mode = (custom = (city = "Riga", code = 1050)), extra = (on = "ready"))', &
          'multi-union: custom/on')
 
-      ! A non-string discriminator is an error. An unknown string leaves
-      ! the union unchanged and does not apply other union fields.
+      ! A non-string discriminator is an error. An unknown string selects
+      ! no arm by itself; member keys are still applied.
       idx = capnp_dyn_find(schema, 'TaggedEvent', err)
       call capnp_json_decode(schema, idx, '{"kind":123}', decoded, err)
       call check_(error, err /= CAPNP_OK, 'disc: reject non-string tag')

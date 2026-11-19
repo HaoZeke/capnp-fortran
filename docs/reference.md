@@ -172,8 +172,10 @@ and unknown ordinals are numbers. NaN and infinities are `"NaN"`,
 The active union arm is still written when its pointer is null: text and
 data use the schema default, or are empty when the arm has none.
 Primitives, groups, and that arm are written, with non-union fields
-emitted before the union arm. An unknown discriminator string leaves the
-union unchanged and does not apply other union fields in that object. A
+emitted before the union arm. An unknown discriminator string does not
+select an arm. Plain member keys in that object are still applied in
+document order, and a value that appears before the tag is applied after
+it. A repeated known tag is rejected. A void arm accepts any payload. A
 non-string discriminator is rejected. Unknown JSON fields are ignored on
 decode. Pretty output matches `capnp convert binary:json`; pass
 `pretty=.false.` for `--short`, and use `capnp_json_span` to step through
