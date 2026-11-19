@@ -2,6 +2,7 @@
 module test_regress
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use, intrinsic :: iso_fortran_env, only: int64, real64
+   use, intrinsic :: iso_c_binding, only: c_int
    use capnp
    use capnp_dynamic
    use capnp_text
@@ -12,12 +13,46 @@ module test_regress
    private
    public :: collect_regress
 
-   character(len=*), parameter :: tmp = '/tmp/capnpf-regress'
+   character(len=:), allocatable :: tmp
+
+   interface
+      function c_getpid() bind(c, name="getpid") result(pid)
+         import :: c_int
+         integer(c_int) :: pid
+      end function c_getpid
+   end interface
 
 contains
 
+   subroutine init_tmp()
+      character(len=16) :: buf
+      integer(c_int) :: pid
+      if (allocated(tmp)) return
+      pid = c_getpid()
+      write (buf, '(i0)') pid
+      tmp = '/tmp/capnpf-regress-'//trim(buf)
+   end subroutine init_tmp
+
+   !> True only when both arrays have the same length. The element compare
+   !> runs after that check, so a short reference fails the test instead of
+   !> aborting under a bounds check.
+   function same_i8(a, b) result(y)
+      integer(int8), intent(in) :: a(:), b(:)
+      logical :: y
+      y = size(a) == size(b)
+      if (y) y = all(a == b)
+   end function same_i8
+
+   function same_int(a, b) result(y)
+      integer, intent(in) :: a(:), b(:)
+      logical :: y
+      y = size(a) == size(b)
+      if (y) y = all(a == b)
+   end function same_int
+
    subroutine collect_regress(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
+      call init_tmp()
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
@@ -177,12 +212,18 @@ contains
       end if
       call capnp_read_file(tmp//'/two.bin', got, err)
       call capnp_read_file(tmp//'/two.ref', ref, err)
-      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
-                  'stdout: two messages match capnp')
+      if (err == CAPNP_OK .and. allocated(got) .and. allocated(ref)) then
+         call check_(error, same_i8(got, ref), 'stdout: two messages match capnp')
+      else
+         call check_(error, .false., 'stdout: two messages match capnp')
+      end if
       call capnp_read_file(tmp//'/app.bin', got, err)
       call capnp_read_file(tmp//'/app.ref', ref, err)
-      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
-                  'stdout: append keeps both messages')
+      if (err == CAPNP_OK .and. allocated(got) .and. allocated(ref)) then
+         call check_(error, same_i8(got, ref), 'stdout: append keeps both messages')
+      else
+         call check_(error, .false., 'stdout: append keeps both messages')
+      end if
    end subroutine run_binary_stdout
 
    subroutine run_list_linear(error)
@@ -387,8 +428,11 @@ contains
       call check_(error, err == CAPNP_OK .and. count == 3_int64, 'json: count field kept')
       call capnp_canonicalize(decoded, ours, err)
       call capnp_read_file(tmp//'/miss.can', cref, err)
-      call check_(error, err == CAPNP_OK .and. size(ours) == size(cref) .and. all(ours == cref), &
-                  'json: missing discriminator matches capnp')
+      if (err == CAPNP_OK .and. allocated(ours) .and. allocated(cref)) then
+         call check_(error, same_i8(ours, cref), 'json: missing discriminator matches capnp')
+      else
+         call check_(error, .false., 'json: missing discriminator matches capnp')
+      end if
       call capnp_message_free(decoded)
       call capnp_dyn_free(schema)
    end subroutine run_json_void_missing
@@ -415,7 +459,7 @@ contains
       call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
       call check_(error, err == CAPNP_OK, 'surrogate: title')
       got = codes(text)
-      call check_(error, size(got) == 4 .and. all(got == [240, 159, 152, 128]), &
+      call check_(error, same_int(got, [240, 159, 152, 128]), &
                   'surrogate: grinning face is one scalar')
       call capnp_message_free(decoded)
       call capnp_json_decode(schema, idx, '{"display_name":"\uD83D"}', decoded, err)
@@ -423,7 +467,7 @@ contains
       root = capnp_root(decoded, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
       got = codes(text)
-      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 160, 189]), &
+      call check_(error, err == CAPNP_OK .and. same_int(got, [237, 160, 189]), &
                   'surrogate: lone high is WTF-8')
       call capnp_message_free(decoded)
       call capnp_json_decode(schema, idx, '{"display_name":"\uDE00"}', decoded, err)
@@ -431,7 +475,7 @@ contains
       root = capnp_root(decoded, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
       got = codes(text)
-      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 184, 128]), &
+      call check_(error, err == CAPNP_OK .and. same_int(got, [237, 184, 128]), &
                   'surrogate: lone low is WTF-8')
       call capnp_message_free(decoded)
       call capnp_json_decode(schema, idx, '{"display_name":"\uD800\uD800\uDC00"}', decoded, err)
@@ -439,8 +483,8 @@ contains
       root = capnp_root(decoded, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
       got = codes(text)
-      call check_(error, err == CAPNP_OK .and. size(got) == 7 .and. &
-                  all(got == [237, 160, 128, 240, 144, 128, 128]), &
+      call check_(error, err == CAPNP_OK .and. &
+                  same_int(got, [237, 160, 128, 240, 144, 128, 128]), &
                   'surrogate: only the adjacent pair is combined')
       call capnp_message_free(decoded)
       call match_capnp_json(error, schema, idx, '{"display_name":"\uD83D"}', &
@@ -712,8 +756,9 @@ contains
       end if
       call capnp_canonicalize(decoded, ours, err)
       call capnp_read_file(tmp//'/uj.can', ref, err)
-      if (err /= CAPNP_OK .or. .not. allocated(ours) .or. .not. allocated(ref) .or. &
-          size(ours) /= size(ref) .or. .not. all(ours == ref)) then
+      if (err /= CAPNP_OK .or. .not. allocated(ours) .or. .not. allocated(ref)) then
+         call test_failed(error, 'union-diff: bytes '//tname//' '//js)
+      else if (.not. same_i8(ours, ref)) then
          call test_failed(error, 'union-diff: bytes '//tname//' '//js)
       end if
       call capnp_message_free(decoded)
@@ -952,8 +997,12 @@ contains
       end if
       call capnp_read_file(tmp//'/pipe.bin', got, err)
       call capnp_read_file(tmp//'/pipe.ref', ref, err)
-      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
-                  'schema: pipe matches capnp and leaves the symlink target')
+      if (err == CAPNP_OK .and. allocated(got) .and. allocated(ref)) then
+         call check_(error, same_i8(got, ref), &
+                     'schema: pipe matches capnp and leaves the symlink target')
+      else
+         call check_(error, .false., 'schema: pipe matches capnp and leaves the symlink target')
+      end if
    end subroutine run_schema_pipe
 
    subroutine run_string_linear(error)
@@ -1190,8 +1239,11 @@ contains
       call check_(error, err == CAPNP_OK, 'f32: decode '//text)
       call capnp_canonicalize(msg, ours, err)
       call capnp_read_file(tmp//'/f32.can', ref, err)
-      call check_(error, err == CAPNP_OK .and. allocated(ours) .and. allocated(ref) .and. &
-                  size(ours) == size(ref) .and. all(ours == ref), 'f32: encode bytes '//text)
+      if (err == CAPNP_OK .and. allocated(ours) .and. allocated(ref)) then
+         call check_(error, same_i8(ours, ref), 'f32: encode bytes '//text)
+      else
+         call check_(error, .false., 'f32: encode bytes '//text)
+      end if
       call capnp_message_free(msg)
    end subroutine f32_match_encode
 
@@ -1369,8 +1421,11 @@ contains
       call check_(error, err == CAPNP_OK, label//': decode')
       call capnp_canonicalize(decoded, ours, err)
       call capnp_read_file(tmp//'/one.can', ref, err)
-      call check_(error, err == CAPNP_OK .and. allocated(ours) .and. allocated(ref) .and. &
-                  size(ours) == size(ref) .and. all(ours == ref), label)
+      if (err == CAPNP_OK .and. allocated(ours) .and. allocated(ref)) then
+         call check_(error, same_i8(ours, ref), label)
+      else
+         call check_(error, .false., label)
+      end if
       call capnp_message_free(decoded)
    end subroutine match_capnp_json
 
