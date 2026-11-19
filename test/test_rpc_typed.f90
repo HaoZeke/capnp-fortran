@@ -1,7 +1,7 @@
 !> Typed generated-code RPC: the emitter's client helpers and abstract
 !> server base carry an Adder call end to end over a socketpair.
 module test_rpc_typed
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use adder_capnp
    use capnp_posix
@@ -16,7 +16,9 @@ contains
 
    subroutine collect_rpc_typed(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("rpc-typed", run_rpc_typed)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "rpc-typed"
+      testsuite(1)%test => run_rpc_typed
    end subroutine collect_rpc_typed
 
    subroutine check_(error, cond, name)

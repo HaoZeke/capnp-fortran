@@ -2,7 +2,7 @@
 !> pointer-field defaults (data, struct, list), enums from another module,
 !> List(Text)/List(Data)/List(List)/List(struct), anyPointer.
 module test_kitchen
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use common_capnp
    use kitchen_capnp
@@ -16,10 +16,13 @@ contains
 
    subroutine collect_kitchen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("consts", t_consts), &
-           new_unittest("defaults-on-fresh-struct", t_defaults_on_fresh_struct), &
-           new_unittest("values-roundtrip", t_values_roundtrip)]
+      allocate (testsuite(3))
+      testsuite(1)%name = "consts"
+      testsuite(1)%test => t_consts
+      testsuite(2)%name = "defaults-on-fresh-struct"
+      testsuite(2)%test => t_defaults_on_fresh_struct
+      testsuite(3)%name = "values-roundtrip"
+      testsuite(3)%test => t_values_roundtrip
    end subroutine collect_kitchen
 
    subroutine check_(error, cond, name)

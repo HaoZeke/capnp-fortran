@@ -2,7 +2,7 @@
 !> binary:canonical` output for the addressbook fixture, byte for byte,
 !> and canonicalization must be idempotent.
 module test_canonical
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    implicit none
 
@@ -13,7 +13,9 @@ contains
 
    subroutine collect_canonical(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("canonical", run_canonical)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "canonical"
+      testsuite(1)%test => run_canonical
    end subroutine collect_canonical
 
    subroutine check_(error, cond, name)

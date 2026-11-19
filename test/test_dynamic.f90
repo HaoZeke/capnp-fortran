@@ -3,7 +3,7 @@
 !> addressbook; kitchen is used only to seed bool/f64 wire values that
 !> capnp_dyn_get_bool / capnp_dyn_get_f64 then re-read by name.
 module test_dynamic
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
@@ -30,23 +30,39 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("dynamic", run_dynamic), &
-           new_unittest("dynamic-default-isolation", run_default_isolation), &
-           new_unittest("dynamic-malformed-text", run_malformed_text), &
-           new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
-           new_unittest("dynamic-init-null", run_init_null), &
-           new_unittest("dynamic-assign-types", run_assign_types), &
-           new_unittest("dynamic-group-union", run_group_union), &
-           new_unittest("dynamic-union-clear", run_union_clear), &
-           new_unittest("dynamic-scalars", run_scalars), &
-           new_unittest("dynamic-two-hop-brand", run_two_hop_brand), &
-           new_unittest("dynamic-reader-default", run_reader_default), &
-           new_unittest("dynamic-unset-which", run_unset_which), &
-           new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer), &
-           new_unittest("dynamic-default-arena", run_default_arena), &
-           new_unittest("dynamic-schema-inout", run_schema_inout), &
-           new_unittest("dynamic-null-reader", run_null_reader)]
+      allocate (testsuite(16))
+      testsuite(1)%name = "dynamic"
+      testsuite(1)%test => run_dynamic
+      testsuite(2)%name = "dynamic-default-isolation"
+      testsuite(2)%test => run_default_isolation
+      testsuite(3)%name = "dynamic-malformed-text"
+      testsuite(3)%test => run_malformed_text
+      testsuite(4)%name = "dynamic-unloaded-schema"
+      testsuite(4)%test => run_unloaded_schema
+      testsuite(5)%name = "dynamic-init-null"
+      testsuite(5)%test => run_init_null
+      testsuite(6)%name = "dynamic-assign-types"
+      testsuite(6)%test => run_assign_types
+      testsuite(7)%name = "dynamic-group-union"
+      testsuite(7)%test => run_group_union
+      testsuite(8)%name = "dynamic-union-clear"
+      testsuite(8)%test => run_union_clear
+      testsuite(9)%name = "dynamic-scalars"
+      testsuite(9)%test => run_scalars
+      testsuite(10)%name = "dynamic-two-hop-brand"
+      testsuite(10)%test => run_two_hop_brand
+      testsuite(11)%name = "dynamic-reader-default"
+      testsuite(11)%test => run_reader_default
+      testsuite(12)%name = "dynamic-unset-which"
+      testsuite(12)%test => run_unset_which
+      testsuite(13)%name = "dynamic-unbound-anypointer"
+      testsuite(13)%test => run_unbound_anypointer
+      testsuite(14)%name = "dynamic-default-arena"
+      testsuite(14)%test => run_default_arena
+      testsuite(15)%name = "dynamic-schema-inout"
+      testsuite(15)%test => run_schema_inout
+      testsuite(16)%name = "dynamic-null-reader"
+      testsuite(16)%test => run_null_reader
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)

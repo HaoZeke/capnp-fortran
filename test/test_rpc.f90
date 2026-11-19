@@ -2,7 +2,7 @@
 !> lockstep: bootstrap, pipelined and settled calls, capability results,
 !> exceptions, finish/release bookkeeping, and the unimplemented reply.
 module test_rpc
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use rpc_capnp
    ! The vat speaks the three-party network layer, which names a third
@@ -28,7 +28,9 @@ contains
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One ordered suite: cases share a socketpair connection (setup once).
-      testsuite = [new_unittest("rpc", run_rpc)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "rpc"
+      testsuite(1)%test => run_rpc
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)

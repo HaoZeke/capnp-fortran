@@ -1,6 +1,6 @@
 !> Wire / codec unit tests using fortran-lang test-drive.
 module test_wire
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp
    implicit none
    private
@@ -11,28 +11,49 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("endian", test_endian), &
-           new_unittest("pointer-words", test_pointer_words), &
-           new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset), &
-           new_unittest("golden-single-struct", test_golden_single_struct), &
-           new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
-           new_unittest("text-data", test_text_data), &
-           new_unittest("lists", test_lists), &
-           new_unittest("composite-list", test_composite_list), &
-           new_unittest("frozen-list-element", test_frozen_list_element), &
-           new_unittest("composite-list-adversarial", test_bad_composite), &
-           new_unittest("nested-struct", test_nested_struct), &
-           new_unittest("far-pointer", test_far_pointer), &
-           new_unittest("double-far-e2e", test_double_far_e2e), &
-           new_unittest("wire-capability", test_wire_capability), &
-           new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
-           new_unittest("packed-roundtrip", test_packed_roundtrip), &
-           new_unittest("packed-incremental", test_packed_incremental), &
-           new_unittest("framing-errors", test_framing_errors), &
-           new_unittest("traversal-limit", test_traversal_limit), &
-           new_unittest("depth-limit", test_depth_limit), &
-           new_unittest("depth-limit-nested", test_depth_limit_nested)]
+      allocate (testsuite(21))
+      testsuite(1)%name = "endian"
+      testsuite(1)%test => test_endian
+      testsuite(2)%name = "pointer-words"
+      testsuite(2)%test => test_pointer_words
+      testsuite(3)%name = "empty-struct-offset-minus-one"
+      testsuite(3)%test => test_empty_struct_offset
+      testsuite(4)%name = "golden-single-struct"
+      testsuite(4)%test => test_golden_single_struct
+      testsuite(5)%name = "struct-fields-roundtrip"
+      testsuite(5)%test => test_struct_fields_roundtrip
+      testsuite(6)%name = "text-data"
+      testsuite(6)%test => test_text_data
+      testsuite(7)%name = "lists"
+      testsuite(7)%test => test_lists
+      testsuite(8)%name = "composite-list"
+      testsuite(8)%test => test_composite_list
+      testsuite(9)%name = "frozen-list-element"
+      testsuite(9)%test => test_frozen_list_element
+      testsuite(10)%name = "composite-list-adversarial"
+      testsuite(10)%test => test_bad_composite
+      testsuite(11)%name = "nested-struct"
+      testsuite(11)%test => test_nested_struct
+      testsuite(12)%name = "far-pointer"
+      testsuite(12)%test => test_far_pointer
+      testsuite(13)%name = "double-far-e2e"
+      testsuite(13)%test => test_double_far_e2e
+      testsuite(14)%name = "wire-capability"
+      testsuite(14)%test => test_wire_capability
+      testsuite(15)%name = "packed-spec-vectors"
+      testsuite(15)%test => test_packed_spec_vectors
+      testsuite(16)%name = "packed-roundtrip"
+      testsuite(16)%test => test_packed_roundtrip
+      testsuite(17)%name = "packed-incremental"
+      testsuite(17)%test => test_packed_incremental
+      testsuite(18)%name = "framing-errors"
+      testsuite(18)%test => test_framing_errors
+      testsuite(19)%name = "traversal-limit"
+      testsuite(19)%test => test_traversal_limit
+      testsuite(20)%name = "depth-limit"
+      testsuite(20)%test => test_depth_limit
+      testsuite(21)%name = "depth-limit-nested"
+      testsuite(21)%test => test_depth_limit_nested
    end subroutine collect_wire
 
    subroutine test_endian(error)

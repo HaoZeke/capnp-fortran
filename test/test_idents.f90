@@ -1,7 +1,7 @@
 !> Generated names must be legal Fortran, including a generic struct
 !> default and identifiers that would otherwise exceed 63 characters.
 module test_idents
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp
    use idents_capnp
    implicit none
@@ -12,7 +12,9 @@ contains
 
    subroutine collect_idents(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("idents-generic-default", run_idents)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "idents-generic-default"
+      testsuite(1)%test => run_idents
    end subroutine collect_idents
 
    subroutine run_idents(error)

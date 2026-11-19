@@ -14,7 +14,7 @@
 !> lets Bob hand the capability over without taking Carol's word for who
 !> sent her.
 module test_rpc_handoff
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp
    use rpc_capnp
    use rpc_threeparty_capnp
@@ -33,7 +33,9 @@ contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("handoff", run_handoff)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "handoff"
+      testsuite(1)%test => run_handoff
    end subroutine collect_rpc_handoff
 
    subroutine check_(error, cond, name)

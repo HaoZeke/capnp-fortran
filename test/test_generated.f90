@@ -3,7 +3,7 @@
 !> Decode the reference `capnp encode` bytes through the generated API, then
 !> build the same book with it and re-verify.
 module test_generated
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_stream
    use addressbook_capnp
@@ -16,7 +16,9 @@ contains
 
    subroutine collect_generated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("generated", run_generated)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "generated"
+      testsuite(1)%test => run_generated
    end subroutine collect_generated
 
    subroutine check_(error, cond, name)

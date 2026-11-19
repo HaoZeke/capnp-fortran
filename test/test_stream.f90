@@ -2,7 +2,7 @@
 !> ordinary Call/Return wire traffic, plus the streaming error rule
 !> (first failure surfaces at finish; later sends fail fast).
 module test_stream
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use streamer_capnp
    use capnp_posix
@@ -17,7 +17,9 @@ contains
 
    subroutine collect_stream(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("stream", run_stream)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "stream"
+      testsuite(1)%test => run_stream
    end subroutine collect_stream
 
    subroutine check_(error, cond, name)
