@@ -122,7 +122,7 @@ if(CAPNP_FORTRAN_INSTALL)
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
   if(CAPNP_FORTRAN_BUILD_PLUGIN)
-    install(TARGETS capnpc-fortran
+    install(TARGETS capnpc-fortran capnpf
       EXPORT capnp_fortranTargets
       RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )
