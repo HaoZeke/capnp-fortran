@@ -26,7 +26,8 @@ contains
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [new_unittest("dynamic", run_dynamic), &
-                   new_unittest("dynamic-default-isolation", run_default_isolation)]
+                   new_unittest("dynamic-default-isolation", run_default_isolation), &
+                   new_unittest("dynamic-malformed-text", run_malformed_text)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -368,5 +369,51 @@ contains
       call capnp_message_free(b)
       call capnp_dyn_free(schema)
    end subroutine run_default_isolation
+
+   !> Text whose last byte is not NUL is malformed, not a truncated string.
+   subroutine run_malformed_text(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: person, raw
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, person_idx
+
+      call capnp_message_init_builder(msg, err)
+      person = capnp_new_struct(msg, 0, 1, err)
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 2_int64, err)
+      raw%msg%segs(raw%seg)%bytes(raw%off) = int(iachar('a'), int8)
+      raw%msg%segs(raw%seg)%bytes(raw%off + 1_int64) = int(iachar('b'), int8)
+      call capnp_setp(person, 0, raw, err)
+      call capnp_get_text(person, 0, s, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'text: missing NUL is rejected')
+
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 1_int64, err)
+      raw%msg%segs(raw%seg)%bytes(raw%off) = int(iachar('Z'), int8)
+      call capnp_setp(person, 0, raw, err)
+      call capnp_get_text(person, 0, s, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'text: lone non-NUL byte is rejected')
+
+      call capnp_read_file('test/fixtures/addressbook.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(msg)
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      person_idx = capnp_dyn_find(schema, 'Person', err)
+      person = capnp_new_struct(msg, 1, 4, err)
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 2_int64, err)
+      raw%msg%segs(raw%seg)%bytes(raw%off) = int(iachar('a'), int8)
+      raw%msg%segs(raw%seg)%bytes(raw%off + 1_int64) = int(iachar('b'), int8)
+      call capnp_dyn_setp(schema, person_idx, person, 'name', raw, err)
+      call check_(error, err == CAPNP_OK, 'text: byte list can be stored')
+      call capnp_dyn_get_text(schema, person_idx, person, 'name', s, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'text: dynamic read rejects missing NUL')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_malformed_text
 
 end module test_dynamic
