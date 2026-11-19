@@ -78,7 +78,7 @@ and capnp-C++:
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
 | Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
 | Text format (`capnp decode` / `encode`) | no | yes | yes (`capnp_text`) |
-| JSON codec (`capnp/compat/json.h` defaults) | no | yes | yes (`capnp_json`, `$Json.name` / base64 / hex) |
+| JSON codec (`capnp/compat/json.h` defaults) | no | yes | yes (`capnp_json`, `$Json.name` / flatten / discriminator / base64 / hex) |
 | `capnp` encode, decode, convert, eval | no | yes | yes (`capnpf`) |
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
