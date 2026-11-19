@@ -30,9 +30,11 @@ SOURCES=(
   src/capnp_dynamic.f90
   src/capnp_codec.f90
   src/capnp_text.f90
+  src/capnp_json.f90
   src/stream_capnp.f90
   app/capnpc_emit.f90
   app/main.f90
+  app/capnpf.f90
   test/addressbook_schema.f90
   test/generated/common_capnp.f90
   test/generated/addressbook_capnp.f90
