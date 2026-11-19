@@ -1007,7 +1007,8 @@ contains
       ! The default object lives in the schema message. A reader gets a
       ! frozen view of one cached copy of this field. A builder copies
       ! into its own message, as the C++ runtime does, so a write cannot
-      ! change later defaults.
+      ! change later defaults. Association is tested before the builder
+      ! flag: Fortran does not promise to skip the second operand of or.
       if (.not. associated(p%msg)) then
          call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
       else if (.not. p%msg%is_builder) then

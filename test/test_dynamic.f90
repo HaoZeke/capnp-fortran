@@ -41,7 +41,8 @@ contains
                    new_unittest("dynamic-unset-which", run_unset_which), &
                    new_unittest("dynamic-unbound-anypointer", run_unbound_anypointer), &
                    new_unittest("dynamic-default-arena", run_default_arena), &
-                   new_unittest("dynamic-schema-inout", run_schema_inout)]
+                   new_unittest("dynamic-schema-inout", run_schema_inout), &
+                   new_unittest("dynamic-null-reader", run_null_reader)]
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -963,6 +964,40 @@ contains
       call check_(error, file_has('docs/reference.md', sentence), &
                   'inout: reference states the cache')
    end subroutine run_schema_inout
+
+   !> A reader handle with no message still receives the default, and the
+   !> reader branch does not dereference that message to ask if it is a builder.
+   subroutine run_null_reader(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_ptr_t) :: bare, origin
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+      character(len=*), parameter :: bad = &
+         'associated(p%msg) .or. .not. p%msg%is_builder'
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      bare = capnp_ptr_t()
+      bare%kind = CAPNP_PK_STRUCT
+      bare%pwords = 1
+      origin = capnp_dyn_getp(schema, sink_idx, bare, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT .and. origin%frozen, &
+                  'null reader: default view')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'null reader: reads 1.5')
+      call check_(error, .not. file_has('src/capnp_dynamic.f90', bad), &
+                  'null reader: builder flag is not read through or')
+      call capnp_dyn_free(schema)
+   end subroutine run_null_reader
 
    function file_has(path, needle) result(found)
       character(len=*), intent(in) :: path, needle
