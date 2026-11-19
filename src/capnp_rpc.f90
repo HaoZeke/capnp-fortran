@@ -36,7 +36,8 @@ module capnp_rpc
                                    recipient_id_vat_init, &
                                    vat_id_t, vat_id_host_get, vat_id_port_get, &
                                    vat_id_host_set, vat_id_port_set
-   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in
+   use capnp_posix, only: PX_BAD_FD, px_close, px_shutdown_wr, px_poll_in, &
+                         px_tcp_connect_host
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message
    implicit none
    private
@@ -55,6 +56,7 @@ module capnp_rpc
    public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
    public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
    public :: rpc_introduction_done, rpc_write_third_party_cap
+   public :: rpc_introduction_dial
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE
    public :: RPC_ERR_EXCEPTION, RPC_ERR_DEAD
    public :: RPC_PERSISTENT_IFACE, RPC_PERSISTENT_SAVE
@@ -1279,6 +1281,30 @@ contains
          n = n + 1
       end do
    end function rpc_pending_introductions
+
+   !> Open the connection named by an outstanding third-party
+   !> introduction. The returned connection is ready for rpc_accept_send;
+   !> successful acceptance must be followed by rpc_introduction_done on
+   !> the introducing connection so its vine can be released.
+   subroutine rpc_introduction_dial(conn, nonce, introduced, bootstrap, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: nonce
+      type(rpc_conn_t), intent(inout), target :: introduced
+      class(rpc_server_t), pointer, intent(in) :: bootstrap
+      integer, intent(out) :: err
+      integer :: fd, i
+      err = CAPNP_ERR_BOUNDS
+      do i = 0, MAXINTRO - 1
+         if (.not. conn%introductions(i)%used) cycle
+         if (conn%introductions(i)%nonce /= nonce) cycle
+         call px_tcp_connect_host( &
+            conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
+            conn%introductions(i)%port, fd, err)
+         if (err /= CAPNP_OK) return
+         call rpc_conn_init(introduced, fd, bootstrap)
+         return
+      end do
+   end subroutine rpc_introduction_dial
 
    !> Finish the pickup for `nonce`: releases the vine, which the sender
    !> treats as the signal to close its Provide. Call this only once the
