@@ -48,7 +48,9 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, box_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx
+      integer :: dual_idx, dynamic_idx, choice_idx, service_idx, box_idx
+      integer :: tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
@@ -159,10 +161,18 @@ contains
       call check_(error, err == CAPNP_OK .and. &
                   capnp_dyn_get_int(kschema, sink_idx, q, 'count', err) == -7_int64, &
                   'dyn: scalar schema evolution default')
+      call capnp_dyn_get_text(kschema, sink_idx, q, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', 'dyn: text pointer default')
+      call capnp_dyn_get_data(kschema, sink_idx, q, 'payload', data, err)
+      call check_(error, err == CAPNP_OK .and. size(data) == 4 .and. &
+                  data(lbound(data, 1)) == -34_int8 .and. data(ubound(data, 1)) == -17_int8, &
+                  'dyn: data pointer default')
       q = capnp_dyn_getp(kschema, sink_idx, q, 'origin', err)
       call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT .and. &
                   abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'z', err) + 3.5_real64) < 1.0e-15_real64, &
                   'dyn: pointer schema evolution default')
+      q = capnp_dyn_getp(kschema, sink_idx, sink%p, 'count', err)
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: getp rejects scalar field')
       call capnp_dyn_set_bool(kschema, sink_idx, sink%p, 'flag', .false., err)
       call capnp_dyn_set_f64(kschema, sink_idx, sink%p, 'ratio', 3.5_real64, err)
       data = [-34_int8, -83_int8, -66_int8]
@@ -240,10 +250,18 @@ contains
       call capnp_dyn_load(aschema, bytes, err)
       dynamic_idx = capnp_dyn_find(aschema, 'Dynamic', err)
       choice_idx = capnp_dyn_find(aschema, 'Dynamic.choice', err)
-      call check_(error, err == CAPNP_OK .and. dynamic_idx > 0 .and. choice_idx > 0, &
-                  'dyn: Dynamic and Choice nodes found')
+      service_idx = capnp_dyn_find(aschema, 'AnnotatedService', err)
+      call check_(error, err == CAPNP_OK .and. dynamic_idx > 0 .and. choice_idx > 0 .and. service_idx > 0, &
+                  'dyn: Dynamic, Choice, and AnnotatedService nodes found')
+      call capnp_dyn_method_annotations(aschema, service_idx, 'ping', annotations, err)
+      call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
+                  value_which(annotations(1)%value) == TYPE_TEXT, 'dyn: method annotation metadata')
+      call value_text(annotations(1)%value, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'ping method', 'dyn: method annotation value')
       call capnp_message_init_builder(amsg, err)
       q = capnp_dyn_new_root(aschema, dynamic_idx, amsg, err)
+      call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 4294967296_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'dyn: capability index range check')
       call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 41_int64, err)
       call check_(error, err == CAPNP_OK .and. &
                   capnp_dyn_get_capability(aschema, dynamic_idx, q, 'capability', err) == 41_int64, &
@@ -252,6 +270,9 @@ contains
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyStruct', people, err)
       people = capnp_dyn_get_any_struct(aschema, dynamic_idx, q, 'anyStruct', err)
       call check_(error, err == CAPNP_OK .and. people%kind == CAPNP_PK_STRUCT, 'dyn: AnyStruct')
+      root = capnp_dyn_getp(aschema, dynamic_idx, q, 'choice', err)
+      call capnp_dyn_setp(aschema, choice_idx, root, 'items', people, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: setp rejects wrong list kind')
       people = capnp_new_list(amsg, CAPNP_SZ_FOUR, 1_int64, err)
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyList', people, err)
       people = capnp_dyn_get_any_list(aschema, dynamic_idx, q, 'anyList', err)
@@ -266,6 +287,16 @@ contains
       call capnp_dyn_get_text(aschema, choice_idx, people, 'label', s, err)
       call check_(error, err == CAPNP_OK .and. s == 'selected' .and. &
                   capnp_dyn_which(aschema, choice_idx, people, err) == 1, 'dyn: select and text union')
+      tag = capnp_dyn_get_int(aschema, choice_idx, people, 'number', err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(aschema, choice_idx, people, err) == 1, &
+                  'dyn: integer read does not select union')
+      q = capnp_dyn_init_list(aschema, choice_idx, people, 'items', 2_int64, err)
+      call check_(error, err == CAPNP_OK .and. capnp_list_len(q) == 2_int64 .and. &
+                  capnp_dyn_which(aschema, choice_idx, people, err) == 2, &
+                  'dyn: init list selects union')
+      call capnp_dyn_set_int(aschema, choice_idx, people, 'number', 74_int64, err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(aschema, choice_idx, people, err) == 0, &
+                  'dyn: integer write selects union')
 
       call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
       call check_(error, err == CAPNP_OK, 'dyn: box cgr reads')

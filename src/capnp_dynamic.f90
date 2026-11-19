@@ -172,7 +172,15 @@ contains
       character(len=:), allocatable :: nm
       integer(int64) :: i
       err = CAPNP_OK
+      if (.not. schema%loaded .or. .not. allocated(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -225,22 +233,34 @@ contains
          scope = capnp_list_get_struct(scopes, int(i), err)
          if (err /= CAPNP_OK) return
          brand%scopes(i + 1)%id = scope_scope_id(scope)
-         brand%scopes(i + 1)%inherited = scope_which(scope) == SCOPE_INHERIT
-         if (brand%scopes(i + 1)%inherited) then
+         select case (scope_which(scope))
+         case (SCOPE_INHERIT)
+            brand%scopes(i + 1)%inherited = .true.
             allocate (brand%scopes(i + 1)%bindings(0))
             cycle
-         end if
+         case (SCOPE_BIND)
+            brand%scopes(i + 1)%inherited = .false.
+         case default
+            err = CAPNP_ERR_KIND
+            return
+         end select
          bindings = scope_bindings(scope, err)
          if (err /= CAPNP_OK) return
          allocate (brand%scopes(i + 1)%bindings(capnp_list_len(bindings)))
          do j = 0_int64, capnp_list_len(bindings) - 1_int64
             binding = capnp_list_get_struct(bindings, int(j), err)
             if (err /= CAPNP_OK) return
-            brand%scopes(i + 1)%bindings(j + 1)%unbound = binding_which(binding) == BINDING_UNBOUND
-            if (.not. brand%scopes(i + 1)%bindings(j + 1)%unbound) then
+            select case (binding_which(binding))
+            case (BINDING_UNBOUND)
+               brand%scopes(i + 1)%bindings(j + 1)%unbound = .true.
+            case (BINDING_BOUND_TYPE)
+               brand%scopes(i + 1)%bindings(j + 1)%unbound = .false.
                brand%scopes(i + 1)%bindings(j + 1)%type = binding_type(binding, err)
                if (err /= CAPNP_OK) return
-            end if
+            case default
+               err = CAPNP_ERR_KIND
+               return
+            end select
          end do
       end do
    end subroutine capnp_dyn_load_brand
@@ -432,8 +452,6 @@ contains
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
@@ -511,7 +529,7 @@ contains
       character(len=*), intent(in) :: fname
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -520,7 +538,15 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      call capnp_get_text(p, int(field_slot_offset(f)), s, err)
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call capnp_get_text(p, int(field_slot_offset(f)), s, err)
+         return
+      end if
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call value_text(dv, s, err)
    end subroutine capnp_dyn_get_text
 
    subroutine capnp_dyn_get_data(schema, idx, p, fname, bytes, err)
@@ -530,7 +556,7 @@ contains
       character(len=*), intent(in) :: fname
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -540,7 +566,15 @@ contains
          allocate (bytes(0:-1))
          return
       end if
-      call capnp_get_data(p, int(field_slot_offset(f)), bytes, err)
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call capnp_get_data(p, int(field_slot_offset(f)), bytes, err)
+         return
+      end if
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call value_data(dv, bytes, err)
    end subroutine capnp_dyn_get_data
 
    !> Resolved pointer field (Text, Data, List, struct, anyPointer). For
@@ -560,16 +594,17 @@ contains
          q = p
          return
       end if
-      q = capnp_getp(p, int(field_slot_offset(f)), err)
-      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
             TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
       case default
+         err = CAPNP_ERR_KIND
          return
       end select
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
@@ -681,6 +716,15 @@ contains
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      select case (type_which(t))
+      case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
+            TYPE_INT64, TYPE_UINT64, TYPE_ENUM)
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
@@ -740,6 +784,12 @@ contains
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      select case (type_which(t))
+      case (TYPE_FLOAT32, TYPE_FLOAT64)
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
       call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
@@ -809,20 +859,29 @@ contains
       select case (type_which(t))
       case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
             TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
-         if ((type_which(t) == TYPE_STRUCT .or. type_which(t) == TYPE_ANY_STRUCT) .and. &
-             value%kind /= CAPNP_PK_STRUCT .and. value%kind /= CAPNP_PK_NULL) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
-         if ((type_which(t) == TYPE_LIST .or. type_which(t) == TYPE_ANY_LIST) .and. &
-             value%kind /= CAPNP_PK_LIST .and. value%kind /= CAPNP_PK_NULL) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
-         if ((type_which(t) == TYPE_INTERFACE .or. type_which(t) == TYPE_CAPABILITY) .and. &
-             value%kind /= CAPNP_PK_CAP .and. value%kind /= CAPNP_PK_NULL) then
-            err = CAPNP_ERR_KIND
-            return
+         if (value%kind /= CAPNP_PK_NULL) then
+            select case (type_which(t))
+            case (TYPE_STRUCT, TYPE_ANY_STRUCT)
+               if (value%kind /= CAPNP_PK_STRUCT) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_LIST, TYPE_ANY_LIST)
+               if (value%kind /= CAPNP_PK_LIST) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_TEXT, TYPE_DATA)
+               if (value%kind /= CAPNP_PK_LIST .or. value%esize /= CAPNP_SZ_BYTE) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            case (TYPE_INTERFACE, TYPE_CAPABILITY)
+               if (value%kind /= CAPNP_PK_CAP) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+            end select
          end if
          call dyn_select_field(schema, idx, p, f, err)
          if (err /= CAPNP_OK) return
@@ -868,6 +927,10 @@ contains
       integer(int64), intent(in) :: capidx
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value
+      if (capidx < 0_int64 .or. capidx > 4294967295_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       value = capnp_ptr_t()
       if (associated(p%msg)) value%msg => p%msg
       value%kind = CAPNP_PK_CAP
@@ -921,6 +984,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
       if (err == CAPNP_OK) call capnp_setp(p, int(field_slot_offset(f)), value, err)
@@ -945,6 +1010,12 @@ contains
          return
       end if
       elem = type_list_element(t, err)
+      if (err /= CAPNP_OK) return
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
