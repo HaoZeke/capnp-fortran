@@ -154,6 +154,9 @@ into a new builder, applying schema defaults on the way in. Comments (`#`),
 trailing commas, `0x"..."` data, and adjacent string literals are accepted.
 `capnp_text_encode_value` renders a schema `Value` (a const or a field
 default). `capnp_text_span` finds the next top-level value in a stream.
+It recognizes quoted strings while splitting, so parentheses and `#` inside
+a string do not end a message. The capnp 1.4.0 command-line splitter counts
+those characters and can reject the same valid stream.
 
 External constants and embedded files are not accepted.
 
@@ -180,13 +183,21 @@ applied after it. A repeated known tag is rejected. A void value accepts
 any payload. A flattened struct is reused for later keys in the same
 object, and a nested flattened union keeps the tag it already saw.
 A non-string discriminator is rejected. Unknown JSON fields
-are ignored on decode. Pretty output matches `capnp convert binary:json`; pass
-`pretty=.false.` for `--short`, and use `capnp_json_span` to step through
-multi-value JSON streams. A high UTF-16 surrogate followed by a low
-surrogate is one scalar, and an unquoted integer past 2^53 keeps its
-exact value. These two reads differ from capnp 1.4.0 only by adding
-precision or correctness, and both accept every input that version
-accepts.
+are ignored on decode. If a duplicate key has an earlier value of the wrong
+type, the later valid value is used; capnp 1.4.0 rejects the earlier value.
+Pretty output matches `capnp convert binary:json`; pass `pretty=.false.` for
+`--short`, and use `capnp_json_span` to step through multi-value JSON streams.
+The span routine recognizes strings, so braces, `#`, and `//` inside a string
+do not split a message. The capnp 1.4.0 command-line splitter can reject those
+valid streams. A high UTF-16 surrogate followed by a low surrogate is one
+Unicode scalar and is emitted as valid UTF-8. capnp 1.4.0 instead keeps the
+two UTF-16 surrogate code units as six invalid WTF-8 bytes. An unquoted
+integer past 2^53 keeps every digit.
+capnp 1.4.0 rounds that token through a double and accepts the rounded value
+when it fits the destination field. It rejects an integer the double cannot
+hold. `{"i64":9223372036854775807}` and
+`{"u64":18446744073709551615}` are two such inputs: this decoder accepts
+them and capnp 1.4.0 does not.
 
 ## capnpf
 
@@ -203,9 +214,15 @@ capnpf eval [-I DIR] [--short] [-b|-p|--flat|-o FORMAT] SCHEMA NAME
 
 `FROM`, `TO`, and `FORMAT` are `binary`, `packed`, `flat`, `flat-packed`,
 `canonical`, `text`, or `json` (`SCHEMA TYPE` may be omitted on `convert`
-when neither side is `text` or `json`). `eval` traverses constants, nested
+when neither side is `text` or `json`). The reader limits are the
+maximum, matching the capnp tool. `--segment-size` repeats that word
+count for every segment. Flat, flat-packed, and canonical output
+write every message on the input, one after another. `eval` traverses
 constants, struct field defaults, groups, and arbitrarily deep `.field` and
 `[index]` paths, and emits struct targets in any supported format.
+Unlike capnp 1.4.0, `capnpf` does not reject plausible input based on a
+command-line format sniff before the selected decoder runs. Its `--quiet`
+option is therefore accepted as a compatibility no-op.
 
 ## Canonical form (`capnp_canonical`)
 
