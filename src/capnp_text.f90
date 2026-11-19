@@ -670,6 +670,7 @@ contains
       integer(int8), allocatable :: raw(:)
       integer(int64) :: iv, uv
       real(real64) :: fv
+      real(real32) :: f32v
       integer :: tw, ord
       logical :: bv
       err = CAPNP_OK
@@ -698,38 +699,34 @@ contains
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err)
+         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
          if (err /= CAPNP_OK) return
          call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
       case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
-         call capnp_parse_u64(tok, uv, err)
+         call capnp_parse_u64(tok, uv, err, allow_octal=.true.)
          if (err /= CAPNP_OK) return
          call capnp_put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
-      case (TYPE_FLOAT32, TYPE_FLOAT64)
+      case (TYPE_FLOAT32)
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
-         if (float_from_int(tok)) then
-            call capnp_parse_i64(tok, iv, err)
-            if (err /= CAPNP_OK) return
-            fv = real(iv, real64)
+         call parse_text_f32(tok, f32v, err)
+         if (err /= CAPNP_OK) return
+         if (in_list) then
+            call capnp_list_set_f32(p, ix, f32v, err)
          else
-            call capnp_parse_f64(tok, fv, err)
-            if (err /= CAPNP_OK) return
+            call capnp_set_f32(p, off*4_int64, f32v, err, default=capnp_def_f32(dv))
          end if
-         if (tw == TYPE_FLOAT32) then
-            if (in_list) then
-               call capnp_list_set_f32(p, ix, real(fv, real32), err)
-            else
-               call capnp_set_f32(p, off*4_int64, real(fv, real32), err, default=capnp_def_f32(dv))
-            end if
+      case (TYPE_FLOAT64)
+         call read_numeric(sc, tok, err)
+         if (err /= CAPNP_OK) return
+         call parse_text_f64(tok, fv, err)
+         if (err /= CAPNP_OK) return
+         if (in_list) then
+            call capnp_list_set_f64(p, ix, fv, err)
          else
-            if (in_list) then
-               call capnp_list_set_f64(p, ix, fv, err)
-            else
-               call capnp_set_f64(p, off*8_int64, fv, err, default=capnp_def_f64(dv))
-            end if
+            call capnp_set_f64(p, off*8_int64, fv, err, default=capnp_def_f64(dv))
          end if
       case (TYPE_TEXT)
          call read_string(sc, s, err)
@@ -760,6 +757,75 @@ contains
       end select
    end subroutine store_scalar
 
+   subroutine parse_text_f64(tok, fv, err)
+      character(len=*), intent(in) :: tok
+      real(real64), intent(out) :: fv
+      integer, intent(out) :: err
+      integer(int64) :: iv, uv
+      err = CAPNP_OK
+      fv = 0.0_real64
+      if (has_alpha_non_hex(tok)) then
+         if (tok == 'nan') then
+            fv = capnp_quiet_nan()
+         else if (tok == 'inf' .or. tok == '-inf') then
+            call capnp_parse_f64(tok, fv, err)
+         else
+            err = CAPNP_ERR_ARG
+         end if
+         return
+      end if
+      if (float_from_int(tok)) then
+         if (tok(1:1) == '-') then
+            call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
+            if (err == CAPNP_OK) fv = real(iv, real64)
+         else
+            call capnp_parse_u64(tok, uv, err, allow_octal=.true.)
+            if (err == CAPNP_OK) fv = capnp_u64_to_f64(uv)
+         end if
+      else
+         call capnp_parse_f64(tok, fv, err)
+      end if
+   end subroutine parse_text_f64
+
+   subroutine parse_text_f32(tok, fv, err)
+      character(len=*), intent(in) :: tok
+      real(real32), intent(out) :: fv
+      integer, intent(out) :: err
+      integer(int64) :: iv, uv
+      character(len=:), allocatable :: dec
+      err = CAPNP_OK
+      fv = 0.0_real32
+      if (has_alpha_non_hex(tok)) then
+         if (tok == 'nan') then
+            fv = real(capnp_quiet_nan(), real32)
+         else if (tok == 'inf' .or. tok == '-inf') then
+            call capnp_parse_f32(tok, fv, err)
+         else
+            err = CAPNP_ERR_ARG
+         end if
+         return
+      end if
+      if (float_from_int(tok)) then
+         if (tok(1:1) == '-') then
+            call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
+            if (err /= CAPNP_OK) return
+            if (iv == 0_int64) then
+               fv = 0.0_real32
+            else
+               call capnp_fmt_i64(iv, dec)
+               call capnp_parse_f32(dec, fv, err)
+            end if
+         else
+            call capnp_parse_u64(tok, uv, err, allow_octal=.true.)
+            if (err /= CAPNP_OK) return
+            call capnp_fmt_u64(uv, dec)
+            call capnp_parse_f32(dec, fv, err)
+         end if
+      else
+         call capnp_parse_f32(tok, fv, err)
+      end if
+   end subroutine parse_text_f32
+
    subroutine parse_enum(schema, t, sc, ord, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t
@@ -775,7 +841,7 @@ contains
          sc%i = sc%i + 1
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err)
+         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
          if (err /= CAPNP_OK) return
          call expect_ch(sc, ')', err)
          if (err /= CAPNP_OK) return
@@ -789,7 +855,7 @@ contains
       if (is_num_start(peek(sc))) then
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err)
+         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
          if (err /= CAPNP_OK) return
          if (iv < 0_int64 .or. iv > 65535_int64) then
             err = CAPNP_ERR_ARG
@@ -1289,23 +1355,39 @@ contains
       y = is_ident_start(c) .or. (c >= '0' .and. c <= '9')
    end function is_ident_cont
 
-   function float_from_int(tok) result(y)
+   pure function has_alpha_non_hex(tok) result(y)
       character(len=*), intent(in) :: tok
       logical :: y
-      integer :: i
+      integer :: k
+      y = .false.
+      if (len(tok) == 0) return
+      k = 1
+      if (tok(1:1) == '+' .or. tok(1:1) == '-') k = 2
+      if (k > len(tok)) return
+      if (is_ident_start(tok(k:k))) y = .true.
+   end function has_alpha_non_hex
+
+   pure function float_from_int(tok) result(y)
+      character(len=*), intent(in) :: tok
+      logical :: y
+      integer :: i, k
       character(len=1) :: c
-      y = .true.
-      do i = 1, len(tok)
+      y = .false.
+      if (len(tok) == 0) return
+      k = 1
+      if (tok(1:1) == '+' .or. tok(1:1) == '-') k = 2
+      if (k > len(tok)) return
+      if (k + 1 <= len(tok)) then
+         if (tok(k:k) == '0' .and. (tok(k + 1:k + 1) == 'x' .or. tok(k + 1:k + 1) == 'X')) then
+            y = .true.
+            return
+         end if
+      end if
+      do i = k, len(tok)
          c = tok(i:i)
-         if (c == '.' .or. c == 'e' .or. c == 'E' .or. c == 'x' .or. c == 'X') then
-            y = .false.
-            return
-         end if
-         if ((c >= 'A' .and. c <= 'Z') .or. (c >= 'a' .and. c <= 'z')) then
-            y = .false.
-            return
-         end if
+         if (c < '0' .or. c > '9') return
       end do
+      y = .true.
    end function float_from_int
 
    pure function is_num_start(c) result(y)
