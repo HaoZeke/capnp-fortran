@@ -23,6 +23,8 @@ contains
       type(adder_add_results_t), intent(in) :: results
       integer, intent(out) :: err
       err = CAPNP_OK
+      associate (server => self)
+      end associate
       call adder_add_results_sum_set(results, &
                                      adder_add_params_a_get(params) + &
                                      adder_add_params_b_get(params), err)

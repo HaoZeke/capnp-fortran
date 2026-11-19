@@ -33,7 +33,7 @@ module schema__kitchen_capnp
    integer(int8), parameter :: HOME_DEFAULT(0:39) = [integer(int8) :: &
       0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,  &
       0, 0, 0, 0, 0, 0, -16, -65, 0, 0, 0, 0, 0, 0, -32, 63,  &
-      0, 0, 0, 0, 0, -128, 34, 64]
+      0, 0, 0, 0, 0, -huge(0_int8)-1_int8, 34, 64]
    integer(int8), parameter :: SINK_PAYLOAD_DEFAULT(0:3) = [integer(int8) :: &
       -34, -83, -66, -17]
    integer(int8), parameter :: SINK_ORIGIN_DEFAULT(0:39) = [integer(int8) :: &
