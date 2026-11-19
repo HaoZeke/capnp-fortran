@@ -6,6 +6,7 @@ program tester
    use test_wire, only: collect_wire
    use test_addressbook, only: collect_addressbook
    use test_canonical, only: collect_canonical
+   use test_codecs, only: collect_codecs
    use test_dynamic, only: collect_dynamic
    use test_generated, only: collect_generated
    use test_generic, only: collect_generic
@@ -28,6 +29,7 @@ program tester
         new_testsuite("wire", collect_wire), &
         new_testsuite("addressbook", collect_addressbook), &
         new_testsuite("canonical", collect_canonical), &
+        new_testsuite("codecs", collect_codecs), &
         new_testsuite("dynamic", collect_dynamic), &
         new_testsuite("generated", collect_generated), &
         new_testsuite("generic", collect_generic), &
