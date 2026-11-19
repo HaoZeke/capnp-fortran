@@ -75,6 +75,7 @@ contains
       if (.not. allocated(error)) call t_join_all_parts_unresolvable(error)
       if (.not. allocated(error)) call t_join_client_api(error)
       if (.not. allocated(error)) call t_join_incomplete_set_is_silent(error)
+      if (.not. allocated(error)) call t_request_cancellation(error)
 
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
@@ -726,6 +727,48 @@ contains
       call check_(error, err == CAPNP_OK, 'join: poll for a premature reply')
       call check_(error, .not. readable, 'join: incomplete set draws no reply')
    end subroutine t_join_incomplete_set_is_silent
+
+   !> Cancellation is a Finish sent before Return, with the legacy early
+   !> cancellation workaround disabled as required by modern peers.
+   subroutine t_request_cancellation(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_cap_t) :: target
+      type(capnp_message_t), target :: m, wire
+      type(message_t) :: msg
+      type(payload_t) :: params
+      type(finish_t) :: finish
+      integer(int64) :: qid
+      integer :: a, b, n
+      call two_live_exports(a, b, n)
+      call check_(error, n >= 1, 'cancel: server has a live export')
+      if (allocated(error)) return
+      target%kind = RPC_CAP_IMPORT
+      target%id = int(a, int64)
+      call rpc_call_begin(cli, target, ECHO_IFACE, 0, m, params, qid, err)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, err), err)
+      call rpc_call_send(cli, m, err)
+      call rpc_request_cancellation(cli, qid, err)
+      call check_(error, err == CAPNP_OK, 'cancel: Finish sent')
+
+      ! Drain the Call and inspect the following Finish without dispatching
+      ! the call, which models cancellation before application delivery.
+      call rpc_recv_message(srv%fd, wire, err)
+      call capnp_message_free(wire)
+      call rpc_recv_message(srv%fd, wire, err)
+      msg = message_read_root(wire, err)
+      call check_(error, message_which(msg) == MESSAGE_FINISH_TAG, &
+                  'cancel: request is Finish')
+      finish = message_finish_get(msg, err)
+      call check_(error, finish_question_id_get(finish) == qid, &
+                  'cancel: question id')
+      call check_(error, finish_release_result_caps_get(finish), &
+                  'cancel: result caps released')
+      call check_(error, .not. finish_require_early_cancellation_workaround_get(finish), &
+                  'cancel: modern cancellation semantics')
+      call check_(error, .not. cli%questions(int(qid))%used, &
+                  'cancel: local question released')
+      call capnp_message_free(wire)
+   end subroutine t_request_cancellation
 
    !> Bootstrap, then a call on the still-promised bootstrap cap
    !> (pipelining), then settle the cap and call again.

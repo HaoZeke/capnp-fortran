@@ -52,10 +52,12 @@ module capnp_rpc
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
    public :: rpc_finish_send, rpc_release_send
+   public :: rpc_request_cancellation
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
+   public :: rpc_stream_cancel
    public :: rpc_pending_provisions, rpc_embargoed_accepts
    public :: rpc_vat_t, rpc_conn_set_vat
    public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
@@ -834,6 +836,7 @@ contains
       f = message_finish_init(msg, err)
       call finish_question_id_set(f, qid, err)
       call finish_release_result_caps_set(f, .not. retain_caps, err)
+      call finish_require_early_cancellation_workaround_set(f, .false., err)
       if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
       call capnp_message_free(m)
       if (conn%questions(int(qid))%used) then
@@ -841,6 +844,36 @@ contains
          call question_slot_clear(conn%questions(int(qid)))
       end if
    end subroutine rpc_finish_send
+
+   !> Request cancellation by sending Finish before a Return. Modern
+   !> peers receive requireEarlyCancellationWorkaround=false, matching
+   !> Cap'n Proto 1.0 and newer. Whether delivered application code is
+   !> interruptible remains the callee's static method policy.
+   subroutine rpc_request_cancellation(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      integer :: q
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      f = message_finish_init(msg, err)
+      call finish_question_id_set(f, qid, err)
+      call finish_release_result_caps_set(f, .true., err)
+      call finish_require_early_cancellation_workaround_set(f, .false., err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%fd, m, err)
+      call capnp_message_free(m)
+      q = int(qid)
+      if (q >= 0 .and. q < MAXQ) then
+         if (conn%questions(q)%used) then
+            if (conn%questions(q)%returned) call capnp_message_free(conn%questions(q)%retmsg)
+            call question_slot_clear(conn%questions(q))
+         end if
+      end if
+   end subroutine rpc_request_cancellation
 
    !> Clear a question slot.
    !>
@@ -944,6 +977,25 @@ contains
       err = first_err
       if (stream%failed .and. err == CAPNP_OK) err = RPC_ERR_EXCEPTION
    end subroutine rpc_stream_finish
+
+   !> Request cancellation of every outstanding stream call and discard
+   !> the local window. This is useful for abandoning a producer; a
+   !> remote method that does not opt into cancellation may still run to
+   !> completion, as in capnp-C++.
+   subroutine rpc_stream_cancel(conn, stream, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      integer, intent(out) :: err
+      integer :: i, cerr
+      err = CAPNP_OK
+      do i = 0, stream%nout - 1
+         call rpc_request_cancellation(conn, stream%qids(i), cerr)
+         if (cerr /= CAPNP_OK .and. err == CAPNP_OK) err = cerr
+      end do
+      stream%nout = 0
+      stream%qids = -1_int64
+      stream%failed = .true.
+   end subroutine rpc_stream_cancel
 
    subroutine retire_oldest(conn, stream, err)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -1985,6 +2037,13 @@ contains
       q = int(qid)
       if (q < 0 .or. q >= MAXQ) then
          err = CAPNP_ERR_BOUNDS
+         call capnp_message_free(m)
+         return
+      end if
+      ! A Return racing with a Finish for a canceled question is legal.
+      ! The Finish ended our interest in the answer, so absorb it.
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_OK
          call capnp_message_free(m)
          return
       end if
