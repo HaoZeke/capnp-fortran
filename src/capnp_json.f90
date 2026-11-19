@@ -1,16 +1,22 @@
 !> JSON codec with the defaults and annotations of capnp/compat/json.h.
 !>
-!> Primitives are always encoded. Null pointers are omitted. Int64 and
-!> UInt64 are decimal strings. Data is an array of byte values unless the
-!> field carries $Json.base64 or $Json.hex. Enums are names, or the raw
-!> number when the ordinal is unknown. $Json.name renames fields, groups,
-!> unions, and enumerants; $Json.flatten inlines sub-structs, groups, and
-!> discriminated union variants with an optional prefix; $Json.discriminator
-!> tags unions with an explicit variant field and optional valueName. NaN
-!> and infinities are the strings "NaN", "Infinity", and "-Infinity".
-module capnp_json
-   use capnp
-   use capnp_schema
+!> Primitives are always encoded. A null pointer outside a union is
+!> omitted. The active union arm is still written when its pointer is
+!> null, using the schema default for text and data, or empty when the
+!> arm has none. Int64 and UInt64 are decimal strings. Data is an array
+!> of byte values unless the field carries $Json.base64 or $Json.hex.
+!> Enums are names, or the raw number when the ordinal is unknown.
+!> $Json.name renames fields, groups, unions, and enumerants.
+!> $Json.flatten inlines sub-structs, groups, and discriminated union
+!> variants with an optional prefix. $Json.discriminator tags unions
+!> with an explicit variant field and optional valueName. An unknown
+!> discriminator string leaves the union unchanged and does not apply
+!> other union fields in that object. A non-string discriminator is
+!> rejected. NaN and infinities are the strings "NaN", "Infinity", and
+!> "-Infinity". A high surrogate followed by a low surrogate is one
+!> scalar, and an unquoted integer past 2^53 keeps its exact value.
+!> These two reads differ from capnp 1.4.0 only by adding precision or
+!> correctness, and both accept every input that version accepts.
 module capnp_json
    use capnp
    use capnp_schema
