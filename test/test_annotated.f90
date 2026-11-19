@@ -1,7 +1,7 @@
 !> An annotated interface must come out as Fortran that compiles: the
 !> method note is a module parameter, and the server type can be extended.
 module test_annotated
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp_rpc, only: rpc_call_ctx_t
    use dynamic_capnp
    implicit none
@@ -17,7 +17,9 @@ contains
 
    subroutine collect_annotated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("annotated-interface", run_annotated)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "annotated-interface"
+      testsuite(1)%test => run_annotated
    end subroutine collect_annotated
 
    subroutine ping_srv(self, ctx, params, results, err)

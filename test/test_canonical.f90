@@ -2,7 +2,7 @@
 !> binary:canonical` output for the addressbook fixture, byte for byte,
 !> and canonicalization must be idempotent.
 module test_canonical
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    implicit none
 
@@ -13,15 +13,21 @@ contains
 
    subroutine collect_canonical(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("canonical", run_canonical), &
-           new_unittest("canonical-bool-padding", test_bool_padding), &
-           new_unittest("canonical-depth-limit", test_depth_limit), &
-           new_unittest("canonical-traversal-limit", test_traversal_limit), &
-           new_unittest("canonical-is-canonical-cases", test_is_canonical_cases), &
-           new_unittest("canonical-depth-boundary", test_depth_boundary), &
-           new_unittest("canonical-far-pointers", test_far_pointers) &
-           ]
+      allocate (testsuite(7))
+      testsuite(1)%name = "canonical"
+      testsuite(1)%test => run_canonical
+      testsuite(2)%name = "canonical-bool-padding"
+      testsuite(2)%test => test_bool_padding
+      testsuite(3)%name = "canonical-depth-limit"
+      testsuite(3)%test => test_depth_limit
+      testsuite(4)%name = "canonical-traversal-limit"
+      testsuite(4)%test => test_traversal_limit
+      testsuite(5)%name = "canonical-is-canonical-cases"
+      testsuite(5)%test => test_is_canonical_cases
+      testsuite(6)%name = "canonical-depth-boundary"
+      testsuite(6)%test => test_depth_boundary
+      testsuite(7)%name = "canonical-far-pointers"
+      testsuite(7)%test => test_far_pointers
    end subroutine collect_canonical
 
    subroutine check_(error, cond, name)

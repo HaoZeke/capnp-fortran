@@ -2,7 +2,7 @@
 !> (flat and packed), reread, verify every field. Mirrors the capnp C++
 !> sample data so the same bytes can later be fed to `capnp decode`.
 module test_addressbook
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_stream
    use addressbook_schema
@@ -15,7 +15,9 @@ contains
 
    subroutine collect_addressbook(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("addressbook", run_addressbook)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "addressbook"
+      testsuite(1)%test => run_addressbook
    end subroutine collect_addressbook
 
    subroutine check_(error, cond, name)

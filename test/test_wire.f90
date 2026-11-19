@@ -1,6 +1,6 @@
 !> Wire / codec unit tests using fortran-lang test-drive.
 module test_wire
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp
    implicit none
    private
@@ -11,57 +11,107 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("endian", test_endian), &
-           new_unittest("pointer-words", test_pointer_words), &
-           new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset), &
-           new_unittest("golden-single-struct", test_golden_single_struct), &
-           new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
-           new_unittest("text-data", test_text_data), &
-           new_unittest("overwrite-text-zero", test_overwrite_text_zero), &
-           new_unittest("lists", test_lists), &
-           new_unittest("list-count-limit", test_list_count_limit), &
-           new_unittest("void-list-struct", test_void_list_struct), &
-           new_unittest("list-struct-depth", test_list_struct_depth), &
-           new_unittest("void-list-amplify", test_void_list_amplify), &
-           new_unittest("empty-list-amplify", test_empty_list_amplify), &
-           new_unittest("composite-list", test_composite_list), &
-           new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
-           new_unittest("frozen-list-element", test_frozen_list_element), &
-           new_unittest("composite-list-adversarial", test_bad_composite), &
-           new_unittest("nested-struct", test_nested_struct), &
-           new_unittest("far-pointer", test_far_pointer), &
-           new_unittest("far-chain-rejected", test_far_chain_rejected), &
-           new_unittest("double-far-e2e", test_double_far_e2e), &
-           new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
-           new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
-           new_unittest("cross-message-copy-clears-slot", test_cross_message_copy_clears_slot), &
-           new_unittest("overwrite-zeroing", test_overwrite_zeroing), &
-           new_unittest("wire-capability", test_wire_capability), &
-           new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
-           new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
-           new_unittest("packed-roundtrip", test_packed_roundtrip), &
-           new_unittest("packed-incremental", test_packed_incremental), &
-           new_unittest("packed-unpack-finish", test_packed_unpack_finish), &
-           new_unittest("packed-size-limit", test_packed_size_limit), &
-           new_unittest("packed-segment-boundary", test_packed_segment_boundary), &
-           new_unittest("packed-header-boundary", test_packed_header_boundary), &
-           new_unittest("framing-errors", test_framing_errors), &
-           new_unittest("framing-many-segments", test_framing_many_segments), &
-           new_unittest("framing-file-limits", test_framing_file_limits), &
-           new_unittest("read-empty-file", test_read_empty_file), &
-           new_unittest("stream-reader-options", test_stream_reader_options), &
-           new_unittest("amplified-lists", test_amplified_lists), &
-           new_unittest("zero-size-target-clamp", test_zero_size_target_clamp), &
-           new_unittest("far-pointer-parity", test_far_pointer_parity), &
-           new_unittest("traversal-limit", test_traversal_limit), &
-           new_unittest("traversal-root-words", test_traversal_root_words), &
-           new_unittest("traversal-single-far", test_traversal_single_far), &
-           new_unittest("traversal-double-far", test_traversal_double_far), &
-           new_unittest("depth-limit", test_depth_limit), &
-           new_unittest("depth-limit-nested", test_depth_limit_nested), &
-           new_unittest("nest-limit-64", test_nest_limit_64), &
-           new_unittest("far-depth-one", test_far_depth_one)]
+      allocate (testsuite(50))
+      testsuite(1)%name = "endian"
+      testsuite(1)%test => test_endian
+      testsuite(2)%name = "pointer-words"
+      testsuite(2)%test => test_pointer_words
+      testsuite(3)%name = "empty-struct-offset-minus-one"
+      testsuite(3)%test => test_empty_struct_offset
+      testsuite(4)%name = "golden-single-struct"
+      testsuite(4)%test => test_golden_single_struct
+      testsuite(5)%name = "struct-fields-roundtrip"
+      testsuite(5)%test => test_struct_fields_roundtrip
+      testsuite(6)%name = "text-data"
+      testsuite(6)%test => test_text_data
+      testsuite(7)%name = "overwrite-text-zero"
+      testsuite(7)%test => test_overwrite_text_zero
+      testsuite(8)%name = "lists"
+      testsuite(8)%test => test_lists
+      testsuite(9)%name = "list-count-limit"
+      testsuite(9)%test => test_list_count_limit
+      testsuite(10)%name = "void-list-struct"
+      testsuite(10)%test => test_void_list_struct
+      testsuite(11)%name = "list-struct-depth"
+      testsuite(11)%test => test_list_struct_depth
+      testsuite(12)%name = "void-list-amplify"
+      testsuite(12)%test => test_void_list_amplify
+      testsuite(13)%name = "empty-list-amplify"
+      testsuite(13)%test => test_empty_list_amplify
+      testsuite(14)%name = "composite-list"
+      testsuite(14)%test => test_composite_list
+      testsuite(15)%name = "composite-count-unsigned"
+      testsuite(15)%test => test_composite_count_unsigned
+      testsuite(16)%name = "frozen-list-element"
+      testsuite(16)%test => test_frozen_list_element
+      testsuite(17)%name = "composite-list-adversarial"
+      testsuite(17)%test => test_bad_composite
+      testsuite(18)%name = "nested-struct"
+      testsuite(18)%test => test_nested_struct
+      testsuite(19)%name = "far-pointer"
+      testsuite(19)%test => test_far_pointer
+      testsuite(20)%name = "far-chain-rejected"
+      testsuite(20)%test => test_far_chain_rejected
+      testsuite(21)%name = "double-far-e2e"
+      testsuite(21)%test => test_double_far_e2e
+      testsuite(22)%name = "far-segment-overflow-zero"
+      testsuite(22)%test => test_far_segment_overflow_zero
+      testsuite(23)%name = "far-landing-pad-zero"
+      testsuite(23)%test => test_far_landing_pad_zero
+      testsuite(24)%name = "cross-message-copy-clears-slot"
+      testsuite(24)%test => test_cross_message_copy_clears_slot
+      testsuite(25)%name = "overwrite-zeroing"
+      testsuite(25)%test => test_overwrite_zeroing
+      testsuite(26)%name = "wire-capability"
+      testsuite(26)%test => test_wire_capability
+      testsuite(27)%name = "cap-reserved-bits"
+      testsuite(27)%test => test_cap_reserved_bits
+      testsuite(28)%name = "packed-spec-vectors"
+      testsuite(28)%test => test_packed_spec_vectors
+      testsuite(29)%name = "packed-roundtrip"
+      testsuite(29)%test => test_packed_roundtrip
+      testsuite(30)%name = "packed-incremental"
+      testsuite(30)%test => test_packed_incremental
+      testsuite(31)%name = "packed-unpack-finish"
+      testsuite(31)%test => test_packed_unpack_finish
+      testsuite(32)%name = "packed-size-limit"
+      testsuite(32)%test => test_packed_size_limit
+      testsuite(33)%name = "packed-segment-boundary"
+      testsuite(33)%test => test_packed_segment_boundary
+      testsuite(34)%name = "packed-header-boundary"
+      testsuite(34)%test => test_packed_header_boundary
+      testsuite(35)%name = "framing-errors"
+      testsuite(35)%test => test_framing_errors
+      testsuite(36)%name = "framing-many-segments"
+      testsuite(36)%test => test_framing_many_segments
+      testsuite(37)%name = "framing-file-limits"
+      testsuite(37)%test => test_framing_file_limits
+      testsuite(38)%name = "read-empty-file"
+      testsuite(38)%test => test_read_empty_file
+      testsuite(39)%name = "stream-reader-options"
+      testsuite(39)%test => test_stream_reader_options
+      testsuite(40)%name = "amplified-lists"
+      testsuite(40)%test => test_amplified_lists
+      testsuite(41)%name = "zero-size-target-clamp"
+      testsuite(41)%test => test_zero_size_target_clamp
+      testsuite(42)%name = "far-pointer-parity"
+      testsuite(42)%test => test_far_pointer_parity
+      testsuite(43)%name = "traversal-limit"
+      testsuite(43)%test => test_traversal_limit
+      testsuite(44)%name = "traversal-root-words"
+      testsuite(44)%test => test_traversal_root_words
+      testsuite(45)%name = "traversal-single-far"
+      testsuite(45)%test => test_traversal_single_far
+      testsuite(46)%name = "traversal-double-far"
+      testsuite(46)%test => test_traversal_double_far
+      testsuite(47)%name = "depth-limit"
+      testsuite(47)%test => test_depth_limit
+      testsuite(48)%name = "depth-limit-nested"
+      testsuite(48)%test => test_depth_limit_nested
+      testsuite(49)%name = "nest-limit-64"
+      testsuite(49)%test => test_nest_limit_64
+      testsuite(50)%name = "far-depth-one"
+      testsuite(50)%test => test_far_depth_one
    end subroutine collect_wire
 
    subroutine test_endian(error)

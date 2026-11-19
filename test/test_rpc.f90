@@ -2,7 +2,7 @@
 !> lockstep: bootstrap, pipelined and settled calls, capability results,
 !> exceptions, finish/release bookkeeping, and the unimplemented reply.
 module test_rpc
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use iso_c_binding, only: c_int, c_funptr, c_funloc
    use capnp
    use capnp_any, only: capability_client_t
@@ -76,16 +76,21 @@ contains
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One ordered suite: cases share a socketpair connection (setup once).
-      testsuite = [ &
-         new_unittest("rpc", run_rpc), &
-         new_unittest("posix-recv-eintr-retried", t_recv_all_retries_eintr), &
-         new_unittest("rpc-framing-511-accepted", t_framing_511_accepted), &
-         new_unittest("rpc-framing-512-rejected", t_framing_512_rejected), &
-         new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected), &
-         new_unittest("rpc-framing-negative-traversal-rejected", &
-                      t_framing_negative_traversal_rejected), &
-         new_unittest("rpc-framing-short-and-padded", t_framing_short_and_padded) &
-      ]
+      allocate (testsuite(7))
+      testsuite(1)%name = "rpc"
+      testsuite(1)%test => run_rpc
+      testsuite(2)%name = "posix-recv-eintr-retried"
+      testsuite(2)%test => t_recv_all_retries_eintr
+      testsuite(3)%name = "rpc-framing-511-accepted"
+      testsuite(3)%test => t_framing_511_accepted
+      testsuite(4)%name = "rpc-framing-512-rejected"
+      testsuite(4)%test => t_framing_512_rejected
+      testsuite(5)%name = "rpc-framing-oversized-rejected"
+      testsuite(5)%test => t_framing_oversized_rejected
+      testsuite(6)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(6)%test => t_framing_negative_traversal_rejected
+      testsuite(7)%name = "rpc-framing-short-and-padded"
+      testsuite(7)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)

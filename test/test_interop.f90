@@ -2,7 +2,7 @@
 !> (flat and packed fixtures checked in under test/fixtures) with this
 !> runtime and verify every field of the sample AddressBook.
 module test_interop
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_stream
    use addressbook_schema
@@ -15,7 +15,9 @@ contains
 
    subroutine collect_interop(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("interop", run_interop)]
+      allocate (testsuite(1))
+      testsuite(1)%name = "interop"
+      testsuite(1)%test => run_interop
    end subroutine collect_interop
 
    subroutine check_(error, cond, name)

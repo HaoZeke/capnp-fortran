@@ -1,7 +1,7 @@
 !> Generator regressions: multi-file generics, suffixed names, annotation
 !> stems, and checked-in modules that drift from the plugin.
 module test_codegen
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed
+   use testdrive, only: unittest_type, error_type, check, test_failed
    implicit none
    private
    public :: collect_codegen
@@ -10,13 +10,19 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("codegen-multifile-generics", run_multifile), &
-           new_unittest("codegen-suffix-clamp", run_suffix), &
-           new_unittest("codegen-annotation-stem", run_annot), &
-           new_unittest("codegen-dynamic-fresh", run_fresh), &
-           new_unittest("codegen-named-plugin", run_named_plugin), &
-           new_unittest("codegen-helper-starts", run_helper_starts)]
+      allocate (testsuite(6))
+      testsuite(1)%name = "codegen-multifile-generics"
+      testsuite(1)%test => run_multifile
+      testsuite(2)%name = "codegen-suffix-clamp"
+      testsuite(2)%test => run_suffix
+      testsuite(3)%name = "codegen-annotation-stem"
+      testsuite(3)%test => run_annot
+      testsuite(4)%name = "codegen-dynamic-fresh"
+      testsuite(4)%test => run_fresh
+      testsuite(5)%name = "codegen-named-plugin"
+      testsuite(5)%test => run_named_plugin
+      testsuite(6)%name = "codegen-helper-starts"
+      testsuite(6)%test => run_helper_starts
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
