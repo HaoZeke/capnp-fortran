@@ -643,13 +643,17 @@ contains
       ctx%nexp = 0
    end subroutine rollback_staged
 
-   !> Drop the source-export pin a provision took in handle_provide.
+   !> Drop both pins a provision took in handle_provide.
    subroutine release_provision_pin(slot)
       type(rpc_provision_slot_t), intent(inout) :: slot
+      class(*), pointer :: held
       if (associated(slot%host) .and. slot%source_eid >= 0 .and. &
           slot%source_eid < MAXE) then
          call drop_export(slot%host, slot%source_eid, 1)
       end if
+      held => slot%srv
+      slot%srv => null()
+      call release_server(held)
       slot%host => null()
       slot%source_eid = -1
    end subroutine release_provision_pin
@@ -2196,10 +2200,12 @@ contains
             conn%vat%provisions(i)%host => conn
             conn%vat%provisions(i)%qid = qid
             conn%vat%provisions(i)%embargoed = .false.
-            ! Pin the source export for the life of the arrangement. The
-            ! recipient takes its own export, and its own object reference
-            ! when the server is an owned membrane.
+            ! Two pins. The export count keeps the slot from being
+            ! reused while the arrangement is open. The object reference
+            ! keeps an owned wrapper alive even if a later Release
+            ! consumes every export ref, including this one.
             conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+            call retain_server(conn%exports(eid)%srv)
             call send_empty_answer(conn, qid, err)
             return
          end if
@@ -2896,12 +2902,27 @@ contains
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
       type(release_t) :: rel
-      integer(int64) :: eid
+      integer(int64) :: eid, nref
+      integer :: id
       rel = message_release_get(msg, err)
       if (err /= CAPNP_OK) return
       eid = release_id_get(rel)
-      if (eid >= 0_int64 .and. eid < int(MAXE, int64)) &
-         call drop_export(conn, int(eid), int(release_reference_count_get(rel)))
+      nref = release_reference_count_get(rel)
+      ! A Release of more refs than the export holds is a protocol
+      ! error. Applying it would wrap the subtraction and free the
+      ! object while a provision may still name it.
+      if (eid < 0_int64 .or. eid >= int(MAXE, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      id = int(eid)
+      if (.not. conn%exports(id)%used .or. nref < 0_int64 .or. &
+          nref > int(conn%exports(id)%refcount, int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (nref == 0_int64) return
+      call drop_export(conn, id, int(nref))
    end subroutine handle_release
 
    subroutine drop_export(conn, eid, count)
@@ -2911,6 +2932,7 @@ contains
       class(*), pointer :: held
       if (eid < 0 .or. eid >= MAXE) return
       if (.not. conn%exports(eid)%used) return
+      if (count <= 0 .or. count > conn%exports(eid)%refcount) return
       left = conn%exports(eid)%refcount - count
       ! A dispatch still on the stack owns one reference per entry.
       if (left < conn%exports(eid)%dispatching) left = conn%exports(eid)%dispatching

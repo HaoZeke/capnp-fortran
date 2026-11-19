@@ -262,6 +262,7 @@ contains
       if (.not. allocated(error)) call t_call_send_failure_releases(error)
       if (.not. allocated(error)) call t_malformed_root_is_freed(error)
       if (.not. allocated(error)) call t_membrane_unwrap_frees(error)
+      if (.not. allocated(error)) call t_provide_overrelease_keeps_server(error)
       if (.not. allocated(error)) call t_membrane(error)
       if (.not. allocated(error)) call t_export_table_full(error)
       if (.not. allocated(error)) call t_pluggable_transport(error)
@@ -2815,5 +2816,88 @@ contains
       call check_(error, rpc_membrane_owned_live() == live, &
                   'membrane unwrap: the owned wrapper is freed')
    end subroutine t_membrane_unwrap_frees
+
+   !> Releasing more refs than an export holds is a protocol error. The
+   !> provision's own reference keeps the server alive for Accept.
+   subroutine t_provide_overrelease_keeps_server(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(echo_srv_t), target :: plain
+      type(stage_srv_t), target :: inner_fwd
+      type(rpc_membrane_server_t) :: fwd
+      type(counting_membrane_policy_t), target :: policy
+      class(rpc_membrane_policy_t), pointer :: pol
+      class(rpc_server_t), pointer :: pfwd, owned_boot
+      type(rpc_call_ctx_t) :: ctx
+      type(rpc_conn_t), target :: cconn, sconn
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      integer(int64) :: qboot, qacc
+      integer :: fa, fb, e, live, refs
+      pol => policy
+      inner_fwd%staged => plain
+      pfwd => inner_fwd
+      call rpc_membrane_server_init(fwd, pfwd, pol, reverse=.false.)
+      ctx%interface_id = 1_int64
+      ctx%method_id = 0
+      call fwd%dispatch(ctx, e)
+      call check_(error, e == CAPNP_OK, 'overrelease: wrapper built')
+      if (allocated(error)) return
+      select type (s => ctx%staged(0)%s)
+      class is (rpc_server_t)
+         owned_boot => s
+      class default
+         call check_(error, .false., 'overrelease: wrapper is a server')
+         return
+      end select
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(sconn, fb, owned_boot)
+      owned_boot => null()
+      call rpc_conn_init(cconn, fa, owned_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK .and. sconn%exports(0)%used, &
+                  'overrelease: bootstrap exported')
+      if (allocated(error)) return
+      call rpc_provide_send(cconn, cap%id, '127.0.0.1', 9, 77_int64, qboot, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      live = rpc_membrane_owned_live()
+      refs = sconn%exports(0)%refcount
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, int(refs, int64) + 1_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == CAPNP_ERR_BOUNDS, 'overrelease: too many refs is an error')
+      call check_(error, sconn%exports(0)%used .and. sconn%exports(0)%refcount == refs, &
+                  'overrelease: export count is unchanged')
+      ! A Release of every remaining ref, including the pin, must not
+      ! free the wrapper the provision still holds.
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, int(refs, int64), e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == CAPNP_OK, 'overrelease: releasing the pin is legal')
+      call check_(error, rpc_membrane_owned_live() == live, &
+                  'overrelease: the server is not freed')
+      call rpc_accept_send(cconn, 77_int64, .false., qacc, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qacc, e)
+      call check_(error, e == CAPNP_OK, 'overrelease: Accept still resolves')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_provide_overrelease_keeps_server
 
 end module test_rpc
