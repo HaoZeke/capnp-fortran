@@ -65,7 +65,7 @@ and capnp-C++:
 | Canonical form | yes (0.3.0) | yes | yes (byte-parity tested) |
 | Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
-| Generated annotations and reflection metadata | no | yes | yes |
+| Generated annotations and reflection metadata | no | yes | partial (annotation constants only) |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
