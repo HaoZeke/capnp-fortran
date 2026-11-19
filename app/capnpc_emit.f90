@@ -389,18 +389,29 @@ contains
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) return
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+         mine = node_id(g_nodes(i)%p) == file_id .or. &
+                (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
          if (.not. mine) cycle
+         call emit_node_annotations_decl(g_nodes(i)%p, err)
+         if (err /= CAPNP_OK) return
          select case (node_which(g_nodes(i)%p))
          case (NODE_STRUCT)
             if (.not. node_struct_is_group(g_nodes(i)%p)) then
+               call emit_struct_annotations_decl(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) return
                call emit_struct_procs(g_nodes(i)%p, err)
                if (err /= CAPNP_OK) return
             end if
+         case (NODE_ENUM)
+            call emit_enum_decl(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
          case (NODE_CONST)
             call emit_const_decl(g_nodes(i)%p, err)
             if (err /= CAPNP_OK) return
             call emit_const_proc(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
+         case (NODE_ANNOTATION)
+            call emit_annotation_node_decl(g_nodes(i)%p, err)
             if (err /= CAPNP_OK) return
          case (NODE_INTERFACE)
             g_has_iface = .true.
@@ -444,16 +455,23 @@ contains
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) exit
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+         mine = node_id(g_nodes(i)%p) == file_id .or. &
+                (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
          if (.not. mine) cycle
+         call emit_node_annotations_decl(g_nodes(i)%p, err)
+         if (err /= CAPNP_OK) exit
          select case (node_which(g_nodes(i)%p))
          case (NODE_ENUM)
             call emit_enum_decl(g_nodes(i)%p, err)
          case (NODE_CONST)
             call emit_const_decl(g_nodes(i)%p, err)
          case (NODE_STRUCT)
-            if (.not. node_struct_is_group(g_nodes(i)%p)) &
+            if (.not. node_struct_is_group(g_nodes(i)%p)) then
+               call emit_struct_annotations_decl(g_nodes(i)%p, err)
                call emit_struct_decl(g_nodes(i)%p, err)
+            end if
+         case (NODE_ANNOTATION)
+            call emit_annotation_node_decl(g_nodes(i)%p, err)
          end select
          if (err /= CAPNP_OK) exit
       end do
@@ -485,14 +503,20 @@ contains
          do i = 1, size(g_nodes)
             call node_display_name(g_nodes(i)%p, dn, err)
             if (err /= CAPNP_OK) exit
-            mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+            mine = node_id(g_nodes(i)%p) == file_id .or. &
+                   (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
             if (.not. mine) cycle
+            call emit_node_annotations_proc(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) exit
             select case (node_which(g_nodes(i)%p))
             case (NODE_STRUCT)
                if (.not. node_struct_is_group(g_nodes(i)%p)) then
                   call emit_struct_procs(g_nodes(i)%p, err)
                   if (err /= CAPNP_OK) exit
                end if
+            case (NODE_ENUM)
+               call emit_enum_annotation_procs(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) exit
             case (NODE_CONST)
                call emit_const_proc(g_nodes(i)%p, err)
                if (err /= CAPNP_OK) exit
@@ -518,7 +542,7 @@ contains
    subroutine emit_enum_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: el, en
+      type(capnp_ptr_t) :: el, en, al
       character(len=:), allocatable :: tn, nm
       integer(int64) :: i
       call node_fname(np, tn, err)
@@ -534,9 +558,35 @@ contains
          ! enumerant `set`) would collide with prefix_kind_set (field accessor).
          call w('   integer, parameter :: '// &
                 ident_fit(upcase(tn)//'_'//upcase(snake(nm))//'_E')//' = '//itoa(i))
+         al = enumerant_annotations(en, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(snake(nm))), err)
+         if (err /= CAPNP_OK) return
       end do
       call w('')
    end subroutine emit_enum_decl
+
+   subroutine emit_enum_annotation_procs(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: el, en, al
+      character(len=:), allocatable :: tn, nm
+      integer(int64) :: i
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      el = node_enumerants(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(el) - 1_int64
+         en = capnp_list_get_struct(el, int(i), err)
+         if (err /= CAPNP_OK) return
+         call enumerant_name(en, nm, err)
+         if (err /= CAPNP_OK) return
+         al = enumerant_annotations(en, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_proc(al, ident_fit(upcase(tn)//'_'//upcase(snake(nm))), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_enum_annotation_procs
 
    subroutine emit_const_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -668,6 +718,188 @@ contains
       end select
    end function const_int_value
 
+   ! --- annotations -----------------------------------------------------------
+
+   !> Generated annotation values are named after the annotated declaration
+   !> and the annotation declaration. This keeps independently applied
+   !> annotations distinct while exposing their schema identity and value.
+   subroutine annotation_symbol(a, target, o, err)
+      type(capnp_ptr_t), intent(in) :: a
+      character(len=*), intent(in) :: target
+      character(len=:), allocatable, intent(out) :: o
+      integer, intent(out) :: err
+      character(len=:), allocatable :: an
+      integer :: idx
+      idx = find_node(annotation_id(a))
+      if (idx == 0) then
+         o = ident_fit(upcase(target)//'_ANNOTATION_'//itoa(annotation_id(a)))
+         err = CAPNP_OK
+         return
+      end if
+      call node_fname(g_nodes(idx)%p, an, err)
+      if (err /= CAPNP_OK) return
+      o = ident_fit(upcase(target)//'_ANNOTATION_'//upcase(an))
+   end subroutine annotation_symbol
+
+   subroutine emit_annotation_node_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      character(len=:), allocatable :: an
+      call node_fname(np, an, err)
+      if (err /= CAPNP_OK) return
+      call w('   integer(int64), parameter :: '//upcase(an)//'_ANNOTATION_ID = '// &
+             itoa(node_id(np))//'_int64')
+      call w('')
+   end subroutine emit_annotation_node_decl
+
+   subroutine emit_annotation_value_decl(name, v, err)
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(in) :: v
+      integer, intent(out) :: err
+      character(len=:), allocatable :: s
+      integer(int8), allocatable :: db(:)
+      logical :: has
+      integer :: k
+      err = CAPNP_OK
+      k = value_which(v)
+      call w('   integer, parameter :: '//name//'_KIND = '//itoa(int(k, int64)))
+      select case (k)
+      case (TYPE_VOID)
+      case (TYPE_BOOL)
+         if (value_bool(v)) then
+            call w('   logical, parameter :: '//name//' = .true.')
+         else
+            call w('   logical, parameter :: '//name//' = .false.')
+         end if
+      case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, TYPE_ENUM, &
+            TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
+         call w('   integer(int64), parameter :: '//name//' = '// &
+                itoa(const_int_value(v))//'_int64')
+      case (TYPE_FLOAT32)
+         call w('   real(real32), parameter :: '//name//' = transfer('// &
+                itoa(int(cp_f32_bits(value_f32(v)), int64))//'_int32, 1.0_real32)')
+      case (TYPE_FLOAT64)
+         call w('   real(real64), parameter :: '//name//' = transfer('// &
+                itoa(cp_f64_bits(value_f64(v)))//'_int64, 1.0_real64)')
+      case (TYPE_TEXT)
+         call value_text(v, s, err)
+         if (err /= CAPNP_OK) return
+         call w('   character(len=*), parameter :: '//name//" = '"//fquote(s)//"'")
+      case (TYPE_DATA)
+         call value_data(v, db, err)
+         if (err /= CAPNP_OK) return
+         if (size(db) == 0) then
+            call w('   integer(int8), parameter :: '//name// &
+                   '(0:-1) = [integer(int8) ::]')
+         else if (g_suppress) then
+            call note_blob(name, db)
+         end if
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+         has = register_default_blob(name, v)
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      call w('')
+   end subroutine emit_annotation_value_decl
+
+   subroutine emit_annotation_value_proc(name, v, err)
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(in) :: v
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: p
+      err = CAPNP_OK
+      select case (value_which(v))
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+      case default
+         return
+      end select
+      p = value_pointer(v, err)
+      if (err /= CAPNP_OK) return
+      call w('   function '//name//'(err) result(o)')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: o')
+      if (p%kind == CAPNP_PK_NULL) then
+         call w('      err = CAPNP_OK')
+      else
+         call w('      type(capnp_message_t), save, target :: cmsg')
+         call w('      logical, save :: loaded = .false.')
+         call w('      err = CAPNP_OK')
+         call w('      if (.not. loaded) then')
+         call w('         call capnp_deserialize_bytes('//name//'_DEFAULT, cmsg, err)')
+         call w('         if (err /= CAPNP_OK) return')
+         call w('         loaded = .true.')
+         call w('      end if')
+         call w('      o = capnp_root(cmsg, err)')
+      end if
+      call w('   end function '//name)
+      call w('')
+   end subroutine emit_annotation_value_proc
+
+   subroutine emit_annotations_decl(al, target, err)
+      type(capnp_ptr_t), intent(in) :: al
+      character(len=*), intent(in) :: target
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: a, v
+      character(len=:), allocatable :: name
+      integer(int64) :: i
+      err = CAPNP_OK
+      do i = 0_int64, capnp_list_len(al) - 1_int64
+         a = capnp_list_get_struct(al, int(i), err)
+         if (err /= CAPNP_OK) return
+         call annotation_symbol(a, target, name, err)
+         if (err /= CAPNP_OK) return
+         v = annotation_value(a, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotation_value_decl(name, v, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_annotations_decl
+
+   subroutine emit_annotations_proc(al, target, err)
+      type(capnp_ptr_t), intent(in) :: al
+      character(len=*), intent(in) :: target
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: a, v
+      character(len=:), allocatable :: name
+      integer(int64) :: i
+      err = CAPNP_OK
+      do i = 0_int64, capnp_list_len(al) - 1_int64
+         a = capnp_list_get_struct(al, int(i), err)
+         if (err /= CAPNP_OK) return
+         call annotation_symbol(a, target, name, err)
+         if (err /= CAPNP_OK) return
+         v = annotation_value(a, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotation_value_proc(name, v, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_annotations_proc
+
+   subroutine emit_node_annotations_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      al = node_annotations(np, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_decl(al, upcase(tn), err)
+   end subroutine emit_node_annotations_decl
+
+   subroutine emit_node_annotations_proc(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      al = node_annotations(np, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_proc(al, upcase(tn), err)
+   end subroutine emit_node_annotations_proc
+
    ! --- structs ------------------------------------------------------------------
 
    subroutine emit_struct_decl(np, err)
@@ -722,6 +954,56 @@ contains
          end if
       end do
    end subroutine emit_union_tag_decls
+
+   recursive subroutine emit_fields_annotation_decls(np, pfx, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=*), intent(in) :: pfx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f, al
+      character(len=:), allocatable :: fn, an
+      integer :: gidx
+      integer(int64) :: i
+      fl = node_struct_fields(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         call field_name(f, fn, err)
+         if (err /= CAPNP_OK) return
+         an = accessor_base(pfx, fn)
+         al = field_annotations(f, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, upcase(an), err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) /= FIELD_GROUP) cycle
+         gidx = find_node(field_group_type_id(f))
+         if (gidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call emit_fields_annotation_decls(g_nodes(gidx)%p, an, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_fields_annotation_decls
+
+   subroutine emit_struct_annotations_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      call emit_fields_annotation_decls(np, tn, err)
+   end subroutine emit_struct_annotations_decl
+
+   subroutine emit_field_annotation_procs(f, an, err)
+      type(capnp_ptr_t), intent(in) :: f
+      character(len=*), intent(in) :: an
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      al = field_annotations(f, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_proc(al, upcase(an), err)
+   end subroutine emit_field_annotation_procs
 
    subroutine emit_struct_procs(np, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -798,6 +1080,8 @@ contains
       call field_name(f, fn, err)
       if (err /= CAPNP_OK) return
       an = accessor_base(pfx, fn)
+      call emit_field_annotation_procs(f, an, err)
+      if (err /= CAPNP_OK) return
       disc = field_discriminant(f)
       gset = ''
       if (disc /= NO_DISCRIMINANT) then
@@ -1610,7 +1894,7 @@ contains
    subroutine emit_interface_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: ml, mp
+      type(capnp_ptr_t) :: ml, mp, al
       character(len=:), allocatable :: tn, mn, pn, rn
       integer(int64) :: i
       call node_fname(np, tn, err)
@@ -1630,6 +1914,10 @@ contains
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
          mn = snake(mn)
+         al = method_annotations(mp, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
+         if (err /= CAPNP_OK) return
          call w('      procedure('//tn//'_'//mn//'_ifc), deferred :: '//mn)
       end do
       call w('      procedure :: dispatch => '//tn//'_dispatch')
@@ -1665,7 +1953,7 @@ contains
    subroutine emit_interface_procs(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: ml, mp
+      type(capnp_ptr_t) :: ml, mp, al
       character(len=:), allocatable :: tn, mn, pn, rn
       integer(int64) :: i
       call node_fname(np, tn, err)
@@ -1678,6 +1966,10 @@ contains
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
          mn = snake(mn)
+         al = method_annotations(mp, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_proc(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
+         if (err /= CAPNP_OK) return
          call method_types(mp, pn, rn, err)
          if (err /= CAPNP_OK) return
          call w('   subroutine '//tn//'_'//mn//'_begin(conn, client, m, params, qid, err)')
