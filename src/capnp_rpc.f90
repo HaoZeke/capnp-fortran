@@ -177,6 +177,14 @@ module capnp_rpc
          integer, intent(in) :: method_id
          integer, intent(out) :: err
       end subroutine rpc_membrane_check_ifc
+
+      !> Return allow=.false. to refuse a third-party dial. A null hook
+      !> allows every recorded introduction.
+      subroutine rpc_dial_allow_ifc(host, port, allow)
+         character(len=*), intent(in) :: host
+         integer, intent(in) :: port
+         logical, intent(out) :: allow
+      end subroutine rpc_dial_allow_ifc
    end interface
 
    type :: rpc_export_slot_t
@@ -317,6 +325,10 @@ module capnp_rpc
       type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
+      !> Null allows every dial. Otherwise the hook is asked before connect.
+      procedure(rpc_dial_allow_ifc), pointer, nopass :: dial_allow => null()
+      !> Connect timeout for an introduction dial, in milliseconds.
+      integer :: dial_timeout_ms = 10000
    end type rpc_conn_t
 
 contains
@@ -340,6 +352,8 @@ contains
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
+      conn%dial_allow => null()
+      conn%dial_timeout_ms = 10000
       ! Its own vat until told otherwise, which is what a two-party
       ! deployment wants.
       conn%vat => conn%own_vat
@@ -365,6 +379,8 @@ contains
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
+      conn%dial_allow => null()
+      conn%dial_timeout_ms = 10000
       conn%vat => conn%own_vat
    end subroutine rpc_conn_init_stream
 
@@ -1968,13 +1984,24 @@ contains
       class(rpc_server_t), pointer, intent(in) :: bootstrap
       integer, intent(out) :: err
       integer :: fd, i
+      logical :: allow
       err = CAPNP_ERR_BOUNDS
       do i = 0, MAXINTRO - 1
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
+         allow = .true.
+         if (associated(conn%dial_allow)) then
+            call conn%dial_allow( &
+               conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
+               conn%introductions(i)%port, allow)
+         end if
+         if (.not. allow) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
          call px_tcp_connect_host( &
             conn%introductions(i)%host(1:conn%introductions(i)%host_len), &
-            conn%introductions(i)%port, fd, err)
+            conn%introductions(i)%port, fd, err, timeout_ms=conn%dial_timeout_ms)
          if (err /= CAPNP_OK) return
          call rpc_conn_init(introduced, fd, bootstrap)
          return
