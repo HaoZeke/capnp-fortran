@@ -27,6 +27,7 @@ contains
       type(capnp_message_t), target :: canon
       type(capnp_ptr_t) :: root, croot
       integer(int64) :: need, n, remaining, after
+      integer :: stat
 
       root = capnp_root(msg, err)
       if (err /= CAPNP_OK) return
@@ -57,13 +58,19 @@ contains
          return
       end if
       if (canon%nsegs /= 1) then
-         err = CAPNP_ERR_BOUNDS ! measurement bug; never canonical
          call capnp_message_free(canon)
          msg%traversal_words = after
+         err = CAPNP_ERR_BOUNDS ! measurement bug; never canonical
          return
       end if
       n = canon%segs(1)%len
-      allocate (bytes(0:n - 1))
+      allocate (bytes(0:n - 1), stat=stat)
+      if (stat /= 0) then
+         call capnp_message_free(canon)
+         msg%traversal_words = after
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       bytes = canon%segs(1)%bytes(0:n - 1)
       call capnp_message_free(canon)
       msg%traversal_words = after

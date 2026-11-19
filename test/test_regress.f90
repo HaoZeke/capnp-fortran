@@ -21,6 +21,7 @@ contains
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
          new_unittest("list-linear", run_list_linear), &
+         new_unittest("canonical-release", run_canonical_release), &
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("text-leniency", run_text_leniency), &
@@ -176,6 +177,36 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_list_linear
+
+   subroutine run_canonical_release(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, cap
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call check_(error, err == CAPNP_OK, 'canon: struct')
+      call capnp_set_root(msg, root, err)
+      cap = capnp_ptr_t()
+      cap%kind = CAPNP_PK_CAP
+      cap%capidx = 1_int64
+      cap%msg => msg
+      call capnp_setp(root, 0, cap, err)
+      call check_(error, err == CAPNP_OK, 'canon: set capability')
+      call capnp_canonicalize(msg, bytes, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'canon: capability has no canonical form')
+      call capnp_message_free(msg)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_set_i32(root, 0_int64, 7_int32, err)
+      call capnp_canonicalize(msg, bytes, err)
+      call check_(error, err == CAPNP_OK .and. allocated(bytes) .and. size(bytes) > 0, &
+                  'canon: later call still works')
+      call capnp_message_free(msg)
+      call check_canon_alloc(error)
+   end subroutine run_canonical_release
 
    subroutine run_json_collisions(error)
       type(error_type), allocatable, intent(out) :: error
@@ -505,4 +536,71 @@ contains
          call test_failed(error, 'guard: bounds-checked json encode')
       end if
    end subroutine run_json_unloaded
+   !> The second 200-byte malloc is the canonical byte buffer. The parent
+   !> allocates it without a status check and aborts. The fix returns
+   !> an allocation error and a later canonicalization still works.
+   subroutine check_canon_alloc(error)
+      type(error_type), allocatable, intent(inout) :: error
+      if (allocated(error)) return
+      ! ASan replaces malloc, so the preload hook cannot see the byte buffer.
+      if (.not. sh('test -z "${ASAN_OPTIONS:-}"')) return
+      if (.not. sh('mkdir -p '//tmp &
+         //' && cat > '//tmp//'/faili.c <<''EOF'' &&'//achar(10)// &
+         '#define _GNU_SOURCE'//achar(10)// &
+         '#include <dlfcn.h>'//achar(10)// &
+         '#include <stdlib.h>'//achar(10)// &
+         '#include <stddef.h>'//achar(10)// &
+         'static int seen;'//achar(10)// &
+         'void *malloc(size_t s) {'//achar(10)// &
+         '  static void *(*real)(size_t);'//achar(10)// &
+         '  char *es, *ei; int want, index;'//achar(10)// &
+         '  if (!real) real = dlsym(RTLD_NEXT, "malloc");'//achar(10)// &
+         '  es = getenv("FAIL_SIZE"); ei = getenv("FAIL_INDEX");'//achar(10)// &
+         '  want = es ? atoi(es) : 0; index = ei ? atoi(ei) : 1;'//achar(10)// &
+         '  if (want > 0 && (int)s == want) {'//achar(10)// &
+         '    seen++; if (seen == index) return 0;'//achar(10)// &
+         '  }'//achar(10)// &
+         '  return real(s);'//achar(10)// &
+         '}'//achar(10)// &
+         'EOF'//achar(10)// &
+         'gcc -shared -fPIC -o '//tmp//'/faili.so '//tmp//'/faili.c -ldl' &
+         //' && cat > '//tmp//'/once.f90 <<''EOF'' &&'//achar(10)// &
+         'program c'//achar(10)// &
+         '  use iso_fortran_env, only: int8, int32, int64'//achar(10)// &
+         '  use capnp_arena, only: capnp_message_t, capnp_message_init_builder,' &
+         //' capnp_message_free'//achar(10)// &
+         '  use capnp_message, only: capnp_ptr_t, capnp_new_struct,' &
+         //' capnp_set_root, capnp_set_i32'//achar(10)// &
+         '  use capnp_canonical, only: capnp_canonicalize'//achar(10)// &
+         '  use capnp_kinds, only: capnp_err_alloc, capnp_ok'//achar(10)// &
+         '  implicit none'//achar(10)// &
+         '  type(capnp_message_t), target :: msg'//achar(10)// &
+         '  type(capnp_ptr_t) :: root'//achar(10)// &
+         '  integer(int8), allocatable :: bytes(:)'//achar(10)// &
+         '  integer :: err'//achar(10)// &
+         '  call capnp_message_init_builder(msg, err)'//achar(10)// &
+         '  root = capnp_new_struct(msg, 24, 0, err)'//achar(10)// &
+         '  call capnp_set_root(msg, root, err)'//achar(10)// &
+         '  call capnp_set_i32(root, 184_int64, 7_int32, err)'//achar(10)// &
+         '  call capnp_canonicalize(msg, bytes, err)'//achar(10)// &
+         '  if (err /= capnp_err_alloc) stop 2'//achar(10)// &
+         '  call capnp_message_free(msg)'//achar(10)// &
+         '  call capnp_message_init_builder(msg, err)'//achar(10)// &
+         '  root = capnp_new_struct(msg, 1, 0, err)'//achar(10)// &
+         '  call capnp_set_root(msg, root, err)'//achar(10)// &
+         '  call capnp_set_i32(root, 0_int64, 9_int32, err)'//achar(10)// &
+         '  call capnp_canonicalize(msg, bytes, err)'//achar(10)// &
+         '  if (err /= capnp_ok .or. .not. allocated(bytes)) stop 3'//achar(10)// &
+         'end program'//achar(10)// &
+         'EOF'//achar(10)// &
+         'mod=$(find build -name capnp_canonical.mod | xargs ls -t | head -1)' &
+         //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
+         //' && dir=$(dirname "$mod")' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && gfortran $san -I "$dir" '//tmp//'/once.f90 "$lib" -o '//tmp//'/once' &
+         //' && FAIL_SIZE=200 FAIL_INDEX=2 LD_PRELOAD='//tmp//'/faili.so ' &
+         //tmp//'/once')) then
+         call test_failed(error, 'canon: failed byte allocation is reported')
+      end if
+   end subroutine check_canon_alloc
 end module test_regress
