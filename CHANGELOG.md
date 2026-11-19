@@ -8,6 +8,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- Text-format encode and decode (`capnp_text`), matching `capnp decode` /
+  `capnp encode` for structs, lists, unions, groups, enums, and Data.
+
 ### Fixed
 
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
