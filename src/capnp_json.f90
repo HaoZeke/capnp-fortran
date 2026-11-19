@@ -265,33 +265,33 @@ contains
       case (TYPE_VOID)
          out = 'null'
       case (TYPE_BOOL)
-         if (capnp_get_bool(p, off, default=def_bool(dv))) then
+         if (capnp_get_bool(p, off, default=capnp_def_bool(dv))) then
             out = 'true'
          else
             out = 'false'
          end if
       case (TYPE_INT8)
-         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=def_i8(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i8(p, off, default=capnp_def_i8(dv)), int64), out)
       case (TYPE_INT16)
-         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=def_i16(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i16(p, off*2_int64, default=capnp_def_i16(dv)), int64), out)
       case (TYPE_INT32)
-         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=def_i32(dv)), int64), out)
+         call capnp_fmt_i64(int(capnp_get_i32(p, off*4_int64, default=capnp_def_i32(dv)), int64), out)
       case (TYPE_INT64)
-         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=def_i64(dv)), out)
+         call capnp_fmt_i64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), out)
          out = json_quote(out)
       case (TYPE_UINT8)
-         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=def_u8(dv)), int64), out)
+         call capnp_fmt_u64(int(capnp_get_u8(p, off, default=capnp_def_u8(dv)), int64), out)
       case (TYPE_UINT16)
-         call capnp_fmt_u64(int(capnp_get_u16(p, off*2_int64, default=def_u16(dv)), int64), out)
+         call capnp_fmt_u64(int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv)), int64), out)
       case (TYPE_UINT32)
-         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=def_u32(dv)), out)
+         call capnp_fmt_u64(capnp_get_u32(p, off*4_int64, default=capnp_def_u32(dv)), out)
       case (TYPE_UINT64)
-         call capnp_fmt_u64(capnp_get_i64(p, off*8_int64, default=def_i64(dv)), out)
+         call capnp_fmt_u64(capnp_get_i64(p, off*8_int64, default=capnp_def_i64(dv)), out)
          out = json_quote(out)
       case (TYPE_FLOAT32)
-         out = json_float(real(capnp_get_f32(p, off*4_int64, default=def_f32(dv)), real64))
+         out = json_float(real(capnp_get_f32(p, off*4_int64, default=capnp_def_f32(dv)), real64))
       case (TYPE_FLOAT64)
-         out = json_float(capnp_get_f64(p, off*8_int64, default=def_f64(dv)))
+         out = json_float(capnp_get_f64(p, off*8_int64, default=capnp_def_f64(dv)))
       case (TYPE_TEXT)
          call capnp_get_text(p, int(off), out, err)
          if (err /= CAPNP_OK) return
@@ -299,7 +299,7 @@ contains
       case (TYPE_DATA)
          call enc_data_field(p, int(off), mode, pretty, out, err)
       case (TYPE_ENUM)
-         call enc_enum(schema, t, int(capnp_get_u16(p, off*2_int64, default=def_u16(dv))), out, err)
+         call enc_enum(schema, t, int(capnp_get_u16(p, off*2_int64, default=capnp_def_u16(dv))), out, err)
       case (TYPE_LIST)
          q = capnp_getp(p, int(off), err)
          if (err /= CAPNP_OK) return
@@ -657,7 +657,7 @@ contains
          if (in_list) then
             call capnp_list_set_bool(p, ix, bv, err)
          else
-            call capnp_set_bool(p, off, bv, err, default=def_bool(dv))
+            call capnp_set_bool(p, off, bv, err, default=capnp_def_bool(dv))
          end if
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64)
          call j_signed(jv, iv, err)
@@ -674,13 +674,13 @@ contains
             if (in_list) then
                call capnp_list_set_f32(p, ix, real(fv, real32), err)
             else
-               call capnp_set_f32(p, off*4_int64, real(fv, real32), err, default=def_f32(dv))
+               call capnp_set_f32(p, off*4_int64, real(fv, real32), err, default=capnp_def_f32(dv))
             end if
          else
             if (in_list) then
                call capnp_list_set_f64(p, ix, fv, err)
             else
-               call capnp_set_f64(p, off*8_int64, fv, err, default=def_f64(dv))
+               call capnp_set_f64(p, off*8_int64, fv, err, default=capnp_def_f64(dv))
             end if
          end if
       case (TYPE_TEXT)
@@ -699,7 +699,7 @@ contains
          if (in_list) then
             call capnp_list_set_i16(p, ix, capnp_as_i16(ord), err)
          else
-            call capnp_set_u16(p, off*2_int64, int(ord, int32), err, default=def_u16(dv))
+            call capnp_set_u16(p, off*2_int64, int(ord, int32), err, default=capnp_def_u16(dv))
          end if
       case default
          err = CAPNP_ERR_KIND
@@ -1461,67 +1461,6 @@ contains
       end select
    end function elem_esize
 
-   function def_bool(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      logical :: d
-      d = .false.
-      if (dv%kind /= CAPNP_PK_NULL) d = value_bool(dv)
-   end function def_bool
-   function def_i8(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int8) :: d
-      d = 0_int8
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i8(dv)
-   end function def_i8
-   function def_i16(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int16) :: d
-      d = 0_int16
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i16(dv)
-   end function def_i16
-   function def_i32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int32) :: d
-      d = 0_int32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i32(dv)
-   end function def_i32
-   function def_i64(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int64) :: d
-      d = 0_int64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_i64(dv)
-   end function def_i64
-   function def_u8(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int16) :: d
-      d = 0_int16
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u8(dv)
-   end function def_u8
-   function def_u16(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int32) :: d
-      d = 0_int32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u16(dv)
-   end function def_u16
-   function def_u32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      integer(int64) :: d
-      d = 0_int64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_u32(dv)
-   end function def_u32
-   function def_f32(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      real(real32) :: d
-      d = 0.0_real32
-      if (dv%kind /= CAPNP_PK_NULL) d = value_f32(dv)
-   end function def_f32
-   function def_f64(dv) result(d)
-      type(capnp_ptr_t), intent(in) :: dv
-      real(real64) :: d
-      d = 0.0_real64
-      if (dv%kind /= CAPNP_PK_NULL) d = value_f64(dv)
-   end function def_f64
-
    subroutine put_signed(p, off, tw, iv, in_list, ix, dv, err)
       type(capnp_ptr_t), intent(in) :: p, dv
       integer(int64), intent(in) :: off, iv, ix
@@ -1538,7 +1477,7 @@ contains
          if (in_list) then
             call capnp_list_set_i8(p, ix, int(iv, int8), err)
          else
-            call capnp_set_i8(p, off, int(iv, int8), err, default=def_i8(dv))
+            call capnp_set_i8(p, off, int(iv, int8), err, default=capnp_def_i8(dv))
          end if
       case (TYPE_INT16)
          if (iv < -32768_int64 .or. iv > 32767_int64) then
@@ -1548,7 +1487,7 @@ contains
          if (in_list) then
             call capnp_list_set_i16(p, ix, int(iv, int16), err)
          else
-            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=def_i16(dv))
+            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=capnp_def_i16(dv))
          end if
       case (TYPE_INT32)
          if (iv < -2147483648_int64 .or. iv > 2147483647_int64) then
@@ -1558,13 +1497,13 @@ contains
          if (in_list) then
             call capnp_list_set_i32(p, ix, int(iv, int32), err)
          else
-            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=def_i32(dv))
+            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=capnp_def_i32(dv))
          end if
       case default
          if (in_list) then
             call capnp_list_set_i64(p, ix, iv, err)
          else
-            call capnp_set_i64(p, off*8_int64, iv, err, default=def_i64(dv))
+            call capnp_set_i64(p, off*8_int64, iv, err, default=capnp_def_i64(dv))
          end if
       end select
    end subroutine put_signed
@@ -1585,7 +1524,7 @@ contains
          if (in_list) then
             call capnp_list_set_i8(p, ix, capnp_as_i8(int(uv)), err)
          else
-            call capnp_set_u8(p, off, int(uv, int16), err, default=def_u8(dv))
+            call capnp_set_u8(p, off, int(uv, int16), err, default=capnp_def_u8(dv))
          end if
       case (TYPE_UINT16)
          if (uv < 0_int64 .or. uv > 65535_int64) then
@@ -1595,7 +1534,7 @@ contains
          if (in_list) then
             call capnp_list_set_i16(p, ix, capnp_as_i16(int(uv)), err)
          else
-            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=def_u16(dv))
+            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=capnp_def_u16(dv))
          end if
       case (TYPE_UINT32)
          if (uv < 0_int64 .or. uv > 4294967295_int64) then
@@ -1605,13 +1544,13 @@ contains
          if (in_list) then
             call capnp_list_set_i32(p, ix, capnp_as_i32u(uv), err)
          else
-            call capnp_set_u32(p, off*4_int64, uv, err, default=def_u32(dv))
+            call capnp_set_u32(p, off*4_int64, uv, err, default=capnp_def_u32(dv))
          end if
       case default
          if (in_list) then
             call capnp_list_set_i64(p, ix, uv, err)
          else
-            call capnp_set_i64(p, off*8_int64, uv, err, default=def_i64(dv))
+            call capnp_set_i64(p, off*8_int64, uv, err, default=capnp_def_i64(dv))
          end if
       end select
    end subroutine put_unsigned

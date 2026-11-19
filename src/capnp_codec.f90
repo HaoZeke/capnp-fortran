@@ -24,6 +24,8 @@ module capnp_codec
    public :: capnp_u_of_i8, capnp_u_of_i16, capnp_u_of_i32
    public :: capnp_quiet_nan
    public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
+   public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
+   public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
 
    interface
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
@@ -421,6 +423,76 @@ contains
          y = .true.
       end select
    end function capnp_codec_field_present
+
+   function capnp_def_bool(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      logical :: d
+      d = .false.
+      if (dv%kind /= CAPNP_PK_NULL) d = value_bool(dv)
+   end function capnp_def_bool
+
+   function capnp_def_i8(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int8) :: d
+      d = 0_int8
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i8(dv)
+   end function capnp_def_i8
+
+   function capnp_def_i16(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int16) :: d
+      d = 0_int16
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i16(dv)
+   end function capnp_def_i16
+
+   function capnp_def_i32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int32) :: d
+      d = 0_int32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i32(dv)
+   end function capnp_def_i32
+
+   function capnp_def_i64(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int64) :: d
+      d = 0_int64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_i64(dv)
+   end function capnp_def_i64
+
+   function capnp_def_u8(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int16) :: d
+      d = 0_int16
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u8(dv)
+   end function capnp_def_u8
+
+   function capnp_def_u16(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int32) :: d
+      d = 0_int32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u16(dv)
+   end function capnp_def_u16
+
+   function capnp_def_u32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int64) :: d
+      d = 0_int64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_u32(dv)
+   end function capnp_def_u32
+
+   function capnp_def_f32(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      real(real32) :: d
+      d = 0.0_real32
+      if (dv%kind /= CAPNP_PK_NULL) d = value_f32(dv)
+   end function capnp_def_f32
+
+   function capnp_def_f64(dv) result(d)
+      type(capnp_ptr_t), intent(in) :: dv
+      real(real64) :: d
+      d = 0.0_real64
+      if (dv%kind /= CAPNP_PK_NULL) d = value_f64(dv)
+   end function capnp_def_f64
 
    pure function capnp_as_i8(u) result(v)
       integer, intent(in) :: u
