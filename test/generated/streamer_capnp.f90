@@ -207,7 +207,8 @@ contains
             type(writer_write_params_t) :: params
             type(stream_result_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, STREAM_RESULT_DWORDS, STREAM_RESULT_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               STREAM_RESULT_DWORDS, STREAM_RESULT_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%write(params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
@@ -217,7 +218,8 @@ contains
             type(writer_done_params_t) :: params
             type(writer_done_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, WRITER_DONE_RESULTS_DWORDS, WRITER_DONE_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               WRITER_DONE_RESULTS_DWORDS, WRITER_DONE_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%done(params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)

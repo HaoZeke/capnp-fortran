@@ -125,7 +125,8 @@ contains
             type(echo_ping_params_t) :: params
             type(echo_ping_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%ping(params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
