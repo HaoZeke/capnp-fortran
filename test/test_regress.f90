@@ -27,6 +27,7 @@ contains
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("json-surrogate", run_json_surrogate), &
+         new_unittest("json-exact-int", run_json_exact_int), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
@@ -443,6 +444,126 @@ contains
                             'surrogate: bmp escape matches capnp')
       call capnp_dyn_free(schema)
    end subroutine run_json_surrogate
+
+   subroutine run_json_exact_int(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root, scores
+      integer(int64) :: v
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, idx > 0, 'exact: Sample')
+      call read_int(error, schema, idx, '{"big":9007199254740993}', 'big', &
+                    9007199254740993_int64, 'exact: 2^53+1')
+      call read_int(error, schema, idx, '{"big":-9007199254740993}', 'big', &
+                    -9007199254740993_int64, 'exact: -(2^53+1)')
+      call read_int(error, schema, idx, '{"ubig":18446744073709551615}', 'ubig', &
+                    -1_int64, 'exact: uint64 max')
+      call read_int(error, schema, idx, '{"ubig":"18446744073709551615"}', 'ubig', &
+                    -1_int64, 'exact: quoted uint64 max value')
+      call read_int(error, schema, idx, '{"ubig":9223372036854775808}', 'ubig', &
+                    int(z'8000000000000000', int64), 'exact: int64 max plus one')
+      call read_int(error, schema, idx, '{"ubig":"9223372036854775808"}', 'ubig', &
+                    int(z'8000000000000000', int64), 'exact: quoted int64 max plus one')
+      call read_int(error, schema, idx, '{"big":"-9223372036854775808"}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: int64 min value')
+      call read_int(error, schema, idx, '{"big":-9223372036854775808}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: unquoted int64 min')
+      call read_int(error, schema, idx, '{"big":-9223372036854775809}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: unquoted int64 min minus one')
+      call read_int(error, schema, idx, '{"ubig":" -1"}', 'ubig', -1_int64, &
+                    'exact: quoted space minus one')
+      call read_int(error, schema, idx, '{"big":" 42"}', 'big', 42_int64, &
+                    'exact: quoted leading space')
+      call read_int(error, schema, idx, '{"big":"+42"}', 'big', 42_int64, &
+                    'exact: quoted plus')
+      call read_int(error, schema, idx, '{"ubig":" -0"}', 'ubig', 0_int64, &
+                    'exact: quoted space minus zero')
+      call read_int(error, schema, idx, '{"ubig":-0}', 'ubig', 0_int64, &
+                    'exact: numeric minus zero')
+      call read_int(error, schema, idx, '{"big":1.0}', 'big', 1_int64, 'exact: 1.0')
+      call read_int(error, schema, idx, '{"big":1e2}', 'big', 100_int64, 'exact: 1e2')
+      call capnp_json_decode(schema, idx, '{"scores":[9007199254740993]}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'exact: list decodes')
+      root = capnp_root(decoded, err)
+      scores = capnp_dyn_getp(schema, idx, root, 'scores', err)
+      v = 0_int64
+      if (err == CAPNP_OK) v = capnp_list_get_i64(scores, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v == 9007199254740993_int64, &
+                  'exact: list element')
+      call capnp_message_free(decoded)
+      call reject_json(error, schema, idx, '{"big":"+0x10"}', 'exact: reject +0x10')
+      call reject_json(error, schema, idx, '{"ubig":"-0"}', 'exact: reject quoted -0')
+      call reject_json(error, schema, idx, '{"big":1.5}', 'exact: reject 1.5')
+      call reject_json(error, schema, idx, '{"where":{"zip":65536}}', 'exact: reject uint16')
+      call reject_json(error, schema, idx, '{"big":9223372036854775808}', &
+                       'exact: reject int64 overflow')
+      call reject_json(error, schema, idx, '{"big":"-9223372036854775809"}', &
+                       'exact: reject int64 min minus one')
+      call reject_json(error, schema, idx, '{"ubig":18446744073709551616}', &
+                       'exact: reject uint64 max plus one')
+      call reject_json(error, schema, idx, '{"ubig":"-1"}', &
+                       'exact: reject uint64 minus one')
+      call match_capnp_json(error, schema, idx, '{"big":"9007199254740993"}', &
+                            'exact: quoted 2^53+1')
+      call match_capnp_json(error, schema, idx, '{"ubig":"18446744073709551615"}', &
+                            'exact: quoted uint64 max')
+      call match_capnp_json(error, schema, idx, '{"big":"0777"}', 'exact: quoted 0777')
+      call match_capnp_json(error, schema, idx, '{"big":"0x10"}', 'exact: quoted hex')
+      call match_capnp_json(error, schema, idx, '{"big":"-0x10"}', 'exact: quoted neg hex')
+      call match_capnp_json(error, schema, idx, '{"big":"-9223372036854775808"}', &
+                            'exact: quoted int64 min')
+      call match_capnp_json(error, schema, idx, '{"ubig":9223372036854775808}', &
+                            'exact: uint64 2^63')
+      call match_capnp_json(error, schema, idx, '{"big":1e2}', 'exact: 1e2 matches capnp')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_exact_int
+
+   subroutine read_int(error, schema, idx, js, fname, expect, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, fname, label
+      integer(int64), intent(in) :: expect
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      integer(int64) :: v
+      integer :: err
+      if (allocated(error)) return
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_OK, label//': decode')
+      root = capnp_root(decoded, err)
+      v = capnp_dyn_get_int(schema, idx, root, fname, err)
+      call check_(error, err == CAPNP_OK .and. v == expect, label)
+      call capnp_message_free(decoded)
+   end subroutine read_int
+
+   subroutine reject_json(error, schema, idx, js, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, label
+      type(capnp_message_t), target :: decoded
+      integer :: err
+      if (allocated(error)) return
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err /= CAPNP_OK, label)
+      call capnp_message_free(decoded)
+      call spit(tmp//'/bad.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
+         //tmp//'/bad.json > '//tmp//'/bad.can 2>/dev/null')) then
+         return
+      end if
+      call test_failed(error, label//': capnp accepted it')
+   end subroutine reject_json
 
    subroutine run_text_leniency(error)
       type(error_type), allocatable, intent(out) :: error
