@@ -63,6 +63,7 @@ else
       'rpc_client_f',
       'rpc_client.f90',
       link_with: capnp_flib,
+      link_language: 'fortran',
     )
 
     test(

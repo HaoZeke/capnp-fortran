@@ -1,7 +1,10 @@
-!> Thin bind(c) surface over the POSIX socket API: no C sources, only
-!> interfaces into libc. Enough for the two-party RPC transport: stream
-!> sockets (TCP and Unix-domain), socketpair loopbacks for tests, and
-!> poll-based readiness.
+!> Thin bind(c) surface over the POSIX socket API. Enough for the
+!> two-party RPC transport: stream sockets (TCP and Unix-domain),
+!> socketpair loopbacks for tests, and poll-based readiness.
+!>
+!> O_NONBLOCK, EINTR, and EINPROGRESS come from the host C library,
+!> because those numbers are not portable. The other values below are
+!> the POSIX ones.
 module capnp_posix
    use iso_c_binding
    use capnp_kinds, only: int8, int64, CAPNP_OK, CAPNP_ERR_IO
@@ -24,16 +27,26 @@ module capnp_posix
    integer(c_int), parameter :: SOL_SOCKET = 1
    integer(c_int), parameter :: SO_REUSEADDR = 2
    integer(c_short), parameter :: POLLIN = 1_c_short
-   integer(c_int), parameter :: EINTR = 4_c_int
    integer(c_short), parameter :: POLLOUT = 4_c_short
    integer(c_short), parameter :: POLLERR = 8_c_short
    integer(c_int), parameter :: F_GETFL = 3_c_int
    integer(c_int), parameter :: F_SETFL = 4_c_int
-   integer(c_int), parameter :: O_NONBLOCK = 2048_c_int
    integer(c_int), parameter :: SO_ERROR = 4_c_int
-   ! errno value for a connect still in progress. Anything else has already
-   ! failed, and SO_ERROR will not carry it.
-   integer(c_int), parameter :: EINPROGRESS = 115_c_int
+
+   interface
+      function capnp_posix_o_nonblock() bind(c, name="capnp_posix_o_nonblock")
+         import :: c_int
+         integer(c_int) :: capnp_posix_o_nonblock
+      end function capnp_posix_o_nonblock
+      function capnp_posix_eintr() bind(c, name="capnp_posix_eintr")
+         import :: c_int
+         integer(c_int) :: capnp_posix_eintr
+      end function capnp_posix_eintr
+      function capnp_posix_einprogress() bind(c, name="capnp_posix_einprogress")
+         import :: c_int
+         integer(c_int) :: capnp_posix_einprogress
+      end function capnp_posix_einprogress
+   end interface
 
    type, bind(c) :: c_pollfd
       integer(c_int) :: fd
@@ -247,7 +260,7 @@ contains
                       int(n - off, c_size_t), 0_c_int)
          if (got < 0_c_long) then
             call c_f_pointer(c_errno_location(), errno)
-            if (errno == EINTR) cycle
+            if (errno == capnp_posix_eintr()) cycle
          end if
          if (got <= 0_c_long) then
             err = CAPNP_ERR_IO
@@ -375,7 +388,7 @@ contains
       end if
       flags = c_fcntl(sfd, F_GETFL, 0_c_int)
       if (flags < 0_c_int .or. &
-          c_fcntl(sfd, F_SETFL, ior(flags, O_NONBLOCK)) < 0_c_int) then
+          c_fcntl(sfd, F_SETFL, ior(flags, capnp_posix_o_nonblock())) < 0_c_int) then
          err = CAPNP_ERR_IO
          call px_close(int(sfd))
          return
@@ -384,7 +397,7 @@ contains
          ! ENETUNREACH and other hard errors are finished. Only a connect
          ! that is still in progress is completed through poll and SO_ERROR.
          cerr = px_errno()
-         if (cerr /= EINPROGRESS .and. cerr /= EINTR) then
+         if (cerr /= capnp_posix_einprogress() .and. cerr /= capnp_posix_eintr()) then
             err = CAPNP_ERR_IO
             call px_close(int(sfd))
             return
