@@ -274,15 +274,16 @@ module capnp_rpc
       integer :: eids(0:MAXJOINPARTS - 1) = -1
    end type rpc_join_slot_t
 
-   !> Client-side flow control for `-> stream` methods: a bounded window
-   !> of unacknowledged stream calls. The wire carries ordinary
-   !> Call/Return pairs (StreamResult results); the window is policy, as
-   !> in capnp-C++. After any stream call fails, subsequent sends fail
-   !> immediately and the failure surfaces at finish, per the streaming
-   !> error-propagation rule.
+   !> Client-side flow control for `-> stream` methods. The window is a
+   !> byte budget, matching RpcFlowController::DEFAULT_WINDOW_SIZE. The
+   !> first call is sent even when it is larger than the window; the next
+   !> waits until acknowledged bytes bring the in-flight total back under
+   !> it. After any stream call fails, later sends fail immediately.
    type :: rpc_stream_t
-      integer :: window = 16
+      integer :: window = 65536
       integer :: nout = 0
+      integer :: used_bytes = 0
+      integer :: sizes(0:63) = 0
       integer(int64) :: qids(0:63) = -1_int64
       logical :: failed = .false.
    end type rpc_stream_t
@@ -1363,8 +1364,28 @@ contains
    subroutine rpc_stream_init(stream, window)
       type(rpc_stream_t), intent(out) :: stream
       integer, intent(in), optional :: window
-      if (present(window)) stream%window = max(1, min(window, 64))
+      if (present(window)) stream%window = max(1, window)
    end subroutine rpc_stream_init
+
+   !> Bytes on the wire for one message: framing header plus segment
+   !> bodies. This is what the stream window counts.
+   function framed_message_bytes(m) result(n)
+      type(capnp_message_t), intent(in) :: m
+      integer :: n
+      integer(int64) :: total
+      integer :: i
+      total = ((1_int64 + int(m%nsegs, int64))*4_int64 + 7_int64)/8_int64*8_int64
+      if (allocated(m%segs)) then
+         do i = 1, m%nsegs
+            total = total + m%segs(i)%len
+         end do
+      end if
+      if (total > int(huge(n), int64)) then
+         n = huge(n)
+      else
+         n = int(total)
+      end if
+   end function framed_message_bytes
 
    !> Send a prepared stream call (from a generated _begin) without
    !> waiting for its return. Blocks only when the window is full, and
@@ -1375,6 +1396,7 @@ contains
       type(capnp_message_t), intent(inout) :: m
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
+      integer :: bytes
       err = CAPNP_OK
       if (stream%failed) then
          call capnp_message_free(m)
@@ -1382,17 +1404,24 @@ contains
          err = RPC_ERR_EXCEPTION
          return
       end if
-      if (stream%nout >= stream%window) then
+      do while (stream%nout > 0 .and. &
+                (stream%nout >= 64 .or. stream%used_bytes >= stream%window))
          call retire_oldest(conn, stream, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(m)
             call release_question(conn, qid)
             return
          end if
-      end if
+      end do
+      bytes = framed_message_bytes(m)
       call rpc_call_send(conn, m, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call release_question(conn, qid)
+         return
+      end if
       stream%qids(stream%nout) = qid
+      stream%sizes(stream%nout) = bytes
+      stream%used_bytes = stream%used_bytes + bytes
       stream%nout = stream%nout + 1
    end subroutine rpc_stream_send
 
@@ -1432,6 +1461,8 @@ contains
       end do
       stream%nout = 0
       stream%qids = -1_int64
+      stream%sizes = 0
+      stream%used_bytes = 0
       stream%failed = .true.
    end subroutine rpc_stream_cancel
 
@@ -1441,14 +1472,17 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: content
       integer(int64) :: qid
-      integer :: i, werr
+      integer :: i, werr, bytes
       err = CAPNP_OK
       if (stream%nout == 0) return
       qid = stream%qids(0)
+      bytes = stream%sizes(0)
       do i = 0, stream%nout - 2
          stream%qids(i) = stream%qids(i + 1)
+         stream%sizes(i) = stream%sizes(i + 1)
       end do
       stream%nout = stream%nout - 1
+      stream%used_bytes = stream%used_bytes - bytes
       call rpc_wait(conn, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(conn, qid, content, werr)
