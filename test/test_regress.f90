@@ -35,7 +35,8 @@ contains
          new_unittest("schema-pipe", run_schema_pipe), &
          new_unittest("plugin-release", run_plugin_release), &
          new_unittest("cli-locate", run_cli_locate), &
-         new_unittest("string-linear", run_string_linear) &
+         new_unittest("string-linear", run_string_linear), &
+         new_unittest("write-error", run_write_error) &
          ]
    end subroutine collect_regress
 
@@ -915,6 +916,35 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_string_linear
+
+   subroutine run_write_error(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && printf "(x = 1, y = 0, z = 0)\n"' &
+         //' | capnp encode schema/common.capnp Vec3 > '//tmp//'/one.bin')) then
+         call test_failed(error, 'io: reference encode failed')
+         return
+      end if
+      call check_(error, sh(cap_setup()//' && "$CAP" decode schema/common.capnp Vec3 < ' &
+         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: text decode exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" convert binary:text schema/common.capnp Vec3 < ' &
+         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: text convert exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" convert binary:json schema/common.capnp Vec3 < ' &
+         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: json convert exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" --help >/dev/full; test $? -ne 0'), &
+                  'io: help exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" --version >/dev/full; test $? -ne 0'), &
+                  'io: version exits')
+      call check_(error, sh(cap_setup()//' && printf "(x = 1, y = 0, z = 0)\n"' &
+         //' | "$CAP" encode schema/common.capnp Vec3 >/dev/full; test $? -ne 0'), &
+         'io: binary encode exits')
+      call check_(error, sh(cap_setup()//' && "$CAP" decode schema/common.capnp Vec3 < ' &
+         //tmp//'/one.bin >/dev/null'), 'io: text decode still succeeds')
+   end subroutine run_write_error
 
    function clock_msg(label, elapsed) result(s)
       character(len=*), intent(in) :: label
