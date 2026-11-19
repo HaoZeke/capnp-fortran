@@ -71,7 +71,7 @@ and capnp-C++:
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (`Persistent.save`) | no | partial | yes (`rpc_persistent_save_begin` / `_wait`, app-defined SturdyRef and Owner) |
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
-| RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
+| RPC level 4 (`Join`, reference equality) | no | no | yes, two-party sender and receiver (upstream C++ has none) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
@@ -149,10 +149,12 @@ The two-party network defines this fully, and it is implemented here.
 Parts accumulate against their `joinId`, and every part is answered only
 once the whole set has arrived, since no single part is answerable
 alone; equal export ids then mean the same object, and exactly one
-`JoinResult` carries the joined capability. Upstream C++ has no `Join`
-case at all -- it falls through to the default branch and replies
-`unimplemented` -- so this is the one place the family is ahead of the
-reference implementation rather than catching up to it. Generics and
+`JoinResult` carries the joined capability. `rpc_join_send` emits the
+complete set before `rpc_join_wait` collects and settles that one
+capability, so equality checks can cross a two-party connection rather
+than being limited to local export ids. Capnp-C++ 1.4.0 has no `Join`
+case at all and replies `unimplemented`, so no live C++ Join interop
+test exists. Generics and
 reflection sit outside both this project's and capnpc-c's generated-code
 scope; the wire format carries generic types either way, so messages
 produced by C++ users of those features still read correctly here.
