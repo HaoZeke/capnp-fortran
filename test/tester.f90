@@ -22,12 +22,14 @@ program tester
    use test_codegen_parity, only: collect_codegen_parity
    use test_idents, only: collect_idents
    use test_regress, only: collect_regress
+   use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
    type(testsuite_type), allocatable :: testsuites(:)
    character(len=*), parameter :: fmt = '("#", *(1x, a))'
 
+   call publish_cli_paths()
    stat = 0
    testsuites = [ &
         new_testsuite("wire", collect_wire), &
