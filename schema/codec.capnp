@@ -124,3 +124,13 @@ const evalConst :EvalRoot = (
   ],
   hue = blue
 );
+
+struct GroupArm $Json.discriminator(name = "kind") {
+  union {
+    box :group {
+      x @0 :Int32;
+      y @1 :Int32;
+    }
+    n @2 :Int32;
+  }
+}
