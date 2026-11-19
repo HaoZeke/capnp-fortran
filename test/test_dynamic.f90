@@ -268,6 +268,8 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'ping method', 'dyn: method annotation value')
       call capnp_message_init_builder(amsg, err)
       q = capnp_dyn_new_root(aschema, dynamic_idx, amsg, err)
+      tag = capnp_dyn_which(aschema, 0, q, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. tag == -1, 'dyn: which rejects index 0')
       call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 4294967296_int64, err)
       call check_(error, err == CAPNP_ERR_ARG, 'dyn: capability index range check')
       call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 41_int64, err)
