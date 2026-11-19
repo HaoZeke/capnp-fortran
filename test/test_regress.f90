@@ -1215,30 +1215,47 @@ contains
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
+      if (.not. sh('test -e /dev/full && test -w /dev/full')) then
+         call skip_test(error, '/dev/full is not writable')
+         return
+      end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
          //' && printf "(x = 1, y = 0, z = 0)\n"' &
          //' | capnp encode schema/common.capnp Vec3 > '//tmp//'/one.bin')) then
          call test_failed(error, 'io: reference encode failed')
          return
       end if
-      call check_(error, sh(cap_setup()//' && "$CAP" decode schema/common.capnp Vec3 < ' &
-         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: text decode exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" convert binary:text schema/common.capnp Vec3 < ' &
-         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: text convert exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" convert binary:json schema/common.capnp Vec3 < ' &
-         //tmp//'/one.bin >/dev/full; test $? -ne 0'), 'io: json convert exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" --help >/dev/full; test $? -eq 0'), &
-                  'io: help exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" --version >/dev/full; test $? -eq 0'), &
-                  'io: version exits')
-      call check_(error, sh(cap_setup()//' && "$CAP" eval schema/kitchen.capnp answer >/dev/full' &
-         //'; test $? -eq 0'), 'io: eval exits')
-      call check_(error, sh(cap_setup()//' && printf "(x = 1, y = 0, z = 0)\n"' &
-         //' | "$CAP" encode schema/common.capnp Vec3 >/dev/full; test $? -ne 0'), &
-         'io: binary encode exits')
+      call io_fail(error, '"$CAP" decode schema/common.capnp Vec3 < '//tmp//'/one.bin', &
+                   'io: text decode')
+      call io_fail(error, '"$CAP" convert binary:text schema/common.capnp Vec3 < '//tmp//'/one.bin', &
+                   'io: text convert')
+      call io_fail(error, '"$CAP" convert binary:json schema/common.capnp Vec3 < '//tmp//'/one.bin', &
+                   'io: json convert')
+      call io_ok(error, '"$CAP" --help', 'io: help')
+      call io_ok(error, '"$CAP" --version', 'io: version')
+      call io_ok(error, '"$CAP" eval schema/kitchen.capnp answer', 'io: eval')
+      call io_fail(error, 'printf "(x = 1, y = 0, z = 0)\n" | "$CAP" encode schema/common.capnp Vec3', &
+                   'io: binary encode')
       call check_(error, sh(cap_setup()//' && "$CAP" decode schema/common.capnp Vec3 < ' &
          //tmp//'/one.bin >/dev/null'), 'io: text decode still succeeds')
    end subroutine run_write_error
+
+   !> Status 1 and the write diagnostic. A crash or a missing message fails.
+   subroutine io_fail(error, cmd, label)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: cmd, label
+      if (allocated(error)) return
+      call check_(error, sh(cap_setup()//' && '//cmd//' >/dev/full 2>'//tmp//'/io.err; rc=$?; ' &
+         //'test "$rc" -eq 1 && grep -q "cannot write stdout" '//tmp//'/io.err'), label)
+   end subroutine io_fail
+
+   subroutine io_ok(error, cmd, label)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: cmd, label
+      if (allocated(error)) return
+      call check_(error, sh(cap_setup()//' && '//cmd//' >/dev/full 2>'//tmp//'/io.err; test $? -eq 0'), &
+                  label)
+   end subroutine io_ok
 
    function clock_msg(label, elapsed) result(s)
       character(len=*), intent(in) :: label
