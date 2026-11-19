@@ -24,6 +24,9 @@ contains
          new_unittest("canonical-release", run_canonical_release), &
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
+         new_unittest("json-surrogate", run_json_surrogate), &
+         new_unittest("json-exact-int", run_json_exact_int), &
+         new_unittest("json-null-disc", run_json_null_disc), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("long-argument", run_long_arg), &
@@ -357,6 +360,262 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_json_void_missing
 
+   subroutine run_json_surrogate(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: text
+      integer :: err, idx
+      integer, allocatable :: got(:)
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, idx > 0, 'surrogate: Sample')
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD83D\uDE00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: pair decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: title')
+      got = codes(text)
+      call check_(error, size(got) == 4 .and. all(got == [240, 159, 152, 128]), &
+                  'surrogate: grinning face is one scalar')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD83D"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: lone high decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 160, 189]), &
+                  'surrogate: lone high is WTF-8')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uDE00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: lone low decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 3 .and. all(got == [237, 184, 128]), &
+                  'surrogate: lone low is WTF-8')
+      call capnp_message_free(decoded)
+      call capnp_json_decode(schema, idx, '{"display_name":"\uD800\uD800\uDC00"}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'surrogate: high high low decodes')
+      root = capnp_root(decoded, err)
+      call capnp_dyn_get_text(schema, idx, root, 'title', text, err)
+      got = codes(text)
+      call check_(error, err == CAPNP_OK .and. size(got) == 7 .and. &
+                  all(got == [237, 160, 128, 240, 144, 128, 128]), &
+                  'surrogate: only the adjacent pair is combined')
+      call capnp_message_free(decoded)
+      call match_capnp_json(error, schema, idx, '{"display_name":"\uD83D"}', &
+                            'surrogate: lone high matches capnp')
+      call match_capnp_json(error, schema, idx, '{"display_name":"\u00e9"}', &
+                            'surrogate: bmp escape matches capnp')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_surrogate
+
+   subroutine run_json_exact_int(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root, scores
+      integer(int64) :: v
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, idx > 0, 'exact: Sample')
+      call read_int(error, schema, idx, '{"big":9007199254740993}', 'big', &
+                    9007199254740993_int64, 'exact: 2^53+1')
+      call read_int(error, schema, idx, '{"big":-9007199254740993}', 'big', &
+                    -9007199254740993_int64, 'exact: -(2^53+1)')
+      call read_int(error, schema, idx, '{"ubig":18446744073709551615}', 'ubig', &
+                    -1_int64, 'exact: uint64 max')
+      call read_int(error, schema, idx, '{"ubig":"18446744073709551615"}', 'ubig', &
+                    -1_int64, 'exact: quoted uint64 max value')
+      call read_int(error, schema, idx, '{"ubig":9223372036854775808}', 'ubig', &
+                    int(z'8000000000000000', int64), 'exact: int64 max plus one')
+      call read_int(error, schema, idx, '{"ubig":"9223372036854775808"}', 'ubig', &
+                    int(z'8000000000000000', int64), 'exact: quoted int64 max plus one')
+      call read_int(error, schema, idx, '{"big":"-9223372036854775808"}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: int64 min value')
+      call read_int(error, schema, idx, '{"big":-9223372036854775808}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: unquoted int64 min')
+      call read_int(error, schema, idx, '{"big":-9223372036854775809}', 'big', &
+                    int(z'8000000000000000', int64), 'exact: unquoted int64 min minus one')
+      call read_int(error, schema, idx, '{"ubig":" -1"}', 'ubig', -1_int64, &
+                    'exact: quoted space minus one')
+      call read_int(error, schema, idx, '{"big":" 42"}', 'big', 42_int64, &
+                    'exact: quoted leading space')
+      call read_int(error, schema, idx, '{"big":"+42"}', 'big', 42_int64, &
+                    'exact: quoted plus')
+      call read_int(error, schema, idx, '{"ubig":" -0"}', 'ubig', 0_int64, &
+                    'exact: quoted space minus zero')
+      call read_int(error, schema, idx, '{"ubig":-0}', 'ubig', 0_int64, &
+                    'exact: numeric minus zero')
+      call read_int(error, schema, idx, '{"big":1.0}', 'big', 1_int64, 'exact: 1.0')
+      call read_int(error, schema, idx, '{"big":1e2}', 'big', 100_int64, 'exact: 1e2')
+      call capnp_json_decode(schema, idx, '{"scores":[9007199254740993]}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'exact: list decodes')
+      root = capnp_root(decoded, err)
+      scores = capnp_dyn_getp(schema, idx, root, 'scores', err)
+      v = 0_int64
+      if (err == CAPNP_OK) v = capnp_list_get_i64(scores, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v == 9007199254740993_int64, &
+                  'exact: list element')
+      call capnp_message_free(decoded)
+      call reject_json(error, schema, idx, '{"big":"+0x10"}', 'exact: reject +0x10')
+      call reject_json(error, schema, idx, '{"ubig":"-0"}', 'exact: reject quoted -0')
+      call reject_json(error, schema, idx, '{"big":1.5}', 'exact: reject 1.5')
+      call reject_json(error, schema, idx, '{"where":{"zip":65536}}', 'exact: reject uint16')
+      call reject_json(error, schema, idx, '{"big":9223372036854775808}', &
+                       'exact: reject int64 overflow')
+      call reject_json(error, schema, idx, '{"big":"-9223372036854775809"}', &
+                       'exact: reject int64 min minus one')
+      call reject_json(error, schema, idx, '{"ubig":18446744073709551616}', &
+                       'exact: reject uint64 max plus one')
+      call reject_json(error, schema, idx, '{"ubig":"-1"}', &
+                       'exact: reject uint64 minus one')
+      call match_capnp_json(error, schema, idx, '{"big":"9007199254740993"}', &
+                            'exact: quoted 2^53+1')
+      call match_capnp_json(error, schema, idx, '{"ubig":"18446744073709551615"}', &
+                            'exact: quoted uint64 max')
+      call match_capnp_json(error, schema, idx, '{"big":"0777"}', 'exact: quoted 0777')
+      call match_capnp_json(error, schema, idx, '{"big":"0x10"}', 'exact: quoted hex')
+      call match_capnp_json(error, schema, idx, '{"big":"-0x10"}', 'exact: quoted neg hex')
+      call match_capnp_json(error, schema, idx, '{"big":"-9223372036854775808"}', &
+                            'exact: quoted int64 min')
+      call match_capnp_json(error, schema, idx, '{"ubig":9223372036854775808}', &
+                            'exact: uint64 2^63')
+      call match_capnp_json(error, schema, idx, '{"big":1e2}', 'exact: 1e2 matches capnp')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_exact_int
+
+   subroutine run_json_null_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: text
+      integer(int64) :: seq, tail
+      integer :: err, uidx, tidx, disc
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      uidx = capnp_dyn_find(schema, 'UnionDefaults', err)
+      tidx = capnp_dyn_find(schema, 'TaggedEvent', err)
+      call check_(error, uidx > 0 .and. tidx > 0, 'null-disc: nodes')
+      do disc = 0, 1
+         call capnp_message_init_builder(msg, err)
+         root = capnp_dyn_new_root(schema, uidx, msg, err)
+         call capnp_set_i32(root, 0_int64, 11_int32, err)
+         call capnp_set_which(root, 2, disc, err)
+         call capnp_set_i32(root, 8_int64, 22_int32, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_write_file(tmp//'/nd.bin', bytes, err)
+         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
+            //' UnionDefaults < '//tmp//'/nd.bin > '//tmp//'/nd.json')) then
+            call test_failed(error, 'null-disc: capnp convert')
+            call capnp_message_free(msg)
+            call capnp_dyn_free(schema)
+            return
+         end if
+         call capnp_json_encode(schema, uidx, root, text, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK, 'null-disc: encode')
+         call check_file_text(error, text, tmp//'/nd.json', 'null-disc: matches capnp')
+         if (disc == 0) then
+            call check_(error, index(text, '"u0ptr":""') > 0 .and. index(text, '"u0ptr":null') == 0, &
+                        'null-disc: zero arm is an empty string')
+         else
+            call check_(error, index(text, '"u1ptr":"fallback"') > 0, &
+                        'null-disc: null arm keeps its default')
+         end if
+         call capnp_message_free(msg)
+      end do
+      call capnp_json_decode(schema, tidx, &
+                             '{"seq":5,"kind":"nope","tail":9,"count":3}', decoded, err)
+      call check_(error, err == CAPNP_OK, 'null-disc: unknown tag decodes')
+      root = capnp_root(decoded, err)
+      seq = capnp_dyn_get_int(schema, tidx, root, 'seq', err)
+      call check_(error, err == CAPNP_OK .and. seq == 5_int64, 'null-disc: seq kept')
+      tail = capnp_dyn_get_int(schema, tidx, root, 'tail', err)
+      call check_(error, err == CAPNP_OK .and. tail == 9_int64, 'null-disc: tail kept')
+      seq = capnp_dyn_get_int(schema, tidx, root, 'count', err)
+      call check_(error, err /= CAPNP_OK, 'null-disc: unknown tag does not select count')
+      call capnp_json_decode(schema, tidx, '{"kind":1}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'null-disc: non-string tag is rejected')
+      call capnp_message_free(decoded)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_null_disc
+
+   subroutine check_file_text(error, text, path, label)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: text, path, label
+      character(len=:), allocatable :: ref
+      integer :: err
+      if (allocated(error)) return
+      call slurp(path, ref, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, label//': read')
+         return
+      end if
+      if (len(ref) > 0) then
+         if (ref(len(ref):len(ref)) == achar(10)) ref = ref(1:len(ref) - 1)
+      end if
+      call check_(error, text == ref, label)
+   end subroutine check_file_text
+
+   subroutine read_int(error, schema, idx, js, fname, expect, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, fname, label
+      integer(int64), intent(in) :: expect
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      integer(int64) :: v
+      integer :: err
+      if (allocated(error)) return
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_OK, label//': decode')
+      root = capnp_root(decoded, err)
+      v = capnp_dyn_get_int(schema, idx, root, fname, err)
+      call check_(error, err == CAPNP_OK .and. v == expect, label)
+      call capnp_message_free(decoded)
+   end subroutine read_int
+
+   subroutine reject_json(error, schema, idx, js, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, label
+      type(capnp_message_t), target :: decoded
+      integer :: err
+      if (allocated(error)) return
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err /= CAPNP_OK, label)
+      call capnp_message_free(decoded)
+      call spit(tmp//'/bad.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
+         //tmp//'/bad.json > '//tmp//'/bad.can 2>/dev/null')) then
+         return
+      end if
+      call test_failed(error, label//': capnp accepted it')
+   end subroutine reject_json
+
    subroutine run_text_leniency(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -509,6 +768,61 @@ contains
          v = int(x, int8)
       end if
    end function i8_of
+
+   function codes(s) result(b)
+      character(len=*), intent(in) :: s
+      integer, allocatable :: b(:)
+      integer :: i
+      allocate (b(len(s)))
+      do i = 1, len(s)
+         b(i) = iachar(s(i:i))
+      end do
+   end function codes
+
+   subroutine load_codec(error, schema)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(out) :: schema
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (allocated(error)) return
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
+         call test_failed(error, 'capnp compile codec schema')
+         return
+      end if
+      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      if (err /= CAPNP_OK) call test_failed(error, 'load codec schema')
+   end subroutine load_codec
+
+   subroutine match_capnp_json(error, schema, idx, js, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, label
+      type(capnp_message_t), target :: decoded
+      integer(int8), allocatable :: ours(:), ref(:)
+      integer :: err
+      if (allocated(error)) return
+      call spit(tmp//'/one.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
+         //tmp//'/one.json > '//tmp//'/one.can')) then
+         call test_failed(error, label//': capnp')
+         return
+      end if
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_OK, label//': decode')
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/one.can', ref, err)
+      call check_(error, err == CAPNP_OK .and. allocated(ours) .and. allocated(ref) .and. &
+                  size(ours) == size(ref) .and. all(ours == ref), label)
+      call capnp_message_free(decoded)
+   end subroutine match_capnp_json
 
    function clash_schema() result(s)
       character(len=:), allocatable :: s
