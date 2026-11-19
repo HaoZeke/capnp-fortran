@@ -68,7 +68,7 @@ module capnp_schema
    public :: node_interface_superclasses, superclass_id
    public :: field_annotations, enumerant_annotations, method_annotations
    public :: method_implicit_count
-   public :: annotation_id, annotation_value
+   public :: annotation_id, annotation_value, annotation_brand
 
    integer, parameter, public :: ANYPTR_UNCONSTRAINED = 0
    integer, parameter, public :: ANYPTR_PARAMETER = 1
@@ -628,5 +628,12 @@ contains
       type(capnp_ptr_t) :: v
       v = capnp_getp(p, 0, err)
    end function annotation_value
+
+   function annotation_brand(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 1, err)
+   end function annotation_brand
 
 end module capnp_schema

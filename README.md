@@ -32,7 +32,8 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   bootstrap capnpc-c uses). Generates one module per schema file: handle
   types, accessors with scalar defaults, Text/Data/struct/list pointer
   defaults embedded as blobs, enums, constants, unions and groups,
-  cross-file imports, `List(Text)`/`List(Data)` element helpers, anyPointer.
+  cross-file imports, schema annotations, `List(Text)`/`List(Data)` element
+  helpers, anyPointer.
 - A `bind(c)` shim (`capnp_cabi`) and a cmocka golden-master tier that
   builds identical messages with this runtime and with
   [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
@@ -62,8 +63,9 @@ and capnp-C++:
 | Deep copy / cross-message set | no | yes | yes |
 | Orphans (disown/adopt) | no | yes | yes |
 | Canonical form | yes (0.3.0) | yes | yes (byte-parity tested) |
-| Code generator plugin (`capnp compile -o`) | yes | yes | partial (`capnpc-fortran`; annotations are not yet generated) |
+| Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
+| Generated annotations and reflection metadata | no | yes | yes |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |

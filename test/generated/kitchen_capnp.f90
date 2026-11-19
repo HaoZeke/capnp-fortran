@@ -34,6 +34,10 @@ module schema__kitchen_capnp
       3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,  &
       4, 0, 0, 0, 0, 0, 0, 0]
 
+   integer(int64), parameter :: SCHEMA__A826_NOTE_ID = -382609556834940135_int64
+   character(len=*), parameter :: SCHEMA__A826_SINK_NOTE = 'sink type'
+   character(len=*), parameter :: SCHEMA__A826_SINK_FLAG_NOTE = 'flag field'
+   character(len=*), parameter :: KITCHEN_CAPNP_NOTE = 'kitchen schema'
 contains
 
    function primes(err) result(o)
