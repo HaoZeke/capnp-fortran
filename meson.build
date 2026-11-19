@@ -114,7 +114,7 @@ else
   message(
     'c-capnproto sources not found under ' + ccapnp_lib_dir + '; the golden '
     + 'master tests will be skipped. Fetch with `git clone '
-    + 'https://github.com/opensourcerouting/c-capnproto '
+    + 'https://github.com/HaoZeke/c-capnproto '
     + 'third_party/c-capnproto`.',
   )
 endif
