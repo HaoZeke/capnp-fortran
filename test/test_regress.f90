@@ -218,6 +218,17 @@ contains
       call check_(error, idx > 0, 'list: type')
       call capnp_message_init_builder(msg, err)
       root = capnp_dyn_new_root(schema, idx, msg, err)
+      n = 50000_int64
+      lst = capnp_dyn_init_list(schema, idx, root, 'xs', n, err)
+      call check_(error, err == CAPNP_OK, 'list: small allocated')
+      call system_clock(c1, rate)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
+      call system_clock(c2)
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      call capnp_message_free(msg)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
       n = 200000_int64
       lst = capnp_dyn_init_list(schema, idx, root, 'xs', n, err)
       call check_(error, err == CAPNP_OK .and. capnp_list_len(lst) == n, 'list: allocated')
@@ -227,9 +238,9 @@ contains
       call system_clock(c1, rate)
       call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
       call system_clock(c2)
-      elapsed = real(c2 - c1)/real(rate)
       call check_(error, err == CAPNP_OK, 'list: encode')
-      call check_(error, elapsed < 3.0, 'list: encode under 3s')
+      call check_(error, subquad(elapsed, clock_span(c1, c2, rate)), &
+                  'list: encode grows sub-quadratically')
       call check_(error, index(text, '(xs = [0, 0, 0,') == 1, 'list: prefix')
       call check_(error, index(text, '1') == 0, 'list: only zeros')
       call spit(tmp//'/big.txt', text, err)
@@ -931,10 +942,14 @@ contains
       character(len=*), parameter :: jpfx = '{"display_name":"'
       character(len=*), parameter :: tpfx = '(title = '
       integer(int64) :: c1, c2, rate
-      real :: elapsed
+      real :: elapsed, small
       integer, parameter :: nch = 160000
       integer, parameter :: ntext = 640000
       integer, parameter :: nbytes = 640000
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
       call load_codec(error, schema)
       if (allocated(error)) return
       idx = capnp_dyn_find(schema, 'Sample', err)
@@ -952,16 +967,20 @@ contains
       js(np + nch + 1:np + nch + 1) = '"'
       js(np + nch + 2:np + nch + 2) = '}'
       call system_clock(c1, rate)
+      call capnp_json_decode(schema, idx, jpfx//repeat('a', nch/4)//'"}', msg, err)
+      call system_clock(c2)
+      small = clock_span(c1, c2, rate)
+      call capnp_message_free(msg)
+      call system_clock(c1, rate)
       call capnp_json_decode(schema, idx, js, msg, err)
       call system_clock(c2)
-      elapsed = 0.0
-      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      elapsed = clock_span(c1, c2, rate)
       call check_(error, err == CAPNP_OK, 'linear: json string decodes')
       root = capnp_root(msg, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
       call check_(error, err == CAPNP_OK .and. len(got) == nch .and. got == repeat('a', nch), &
                   'linear: json string bytes')
-      call check_(error, elapsed < 1.0, clock_msg('json string', elapsed))
+      call check_(error, subquad(small, elapsed), 'linear: json string grows sub-quadratically')
       call capnp_message_free(msg)
       nt = len(tpfx)
       allocate (character(len=nt + 4*ntext + 1) :: tx)
@@ -971,15 +990,19 @@ contains
       end do
       tx(nt + 4*ntext + 1:nt + 4*ntext + 1) = ')'
       call system_clock(c1, rate)
+      call capnp_text_decode(schema, idx, tpfx//repeat('"a" ', ntext/4)//')', msg, err)
+      call system_clock(c2)
+      small = clock_span(c1, c2, rate)
+      call capnp_message_free(msg)
+      call system_clock(c1, rate)
       call capnp_text_decode(schema, idx, tx(1:nt + 4*ntext + 1), msg, err)
       call system_clock(c2)
-      elapsed = 0.0
-      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      elapsed = clock_span(c1, c2, rate)
       call check_(error, err == CAPNP_OK, 'linear: adjacent text decodes')
       root = capnp_root(msg, err)
       call capnp_dyn_get_text(schema, idx, root, 'title', got, err)
       call check_(error, err == CAPNP_OK .and. got == repeat('a', ntext), 'linear: adjacent text bytes')
-      call check_(error, elapsed < 1.0, clock_msg('adjacent text', elapsed))
+      call check_(error, subquad(small, elapsed), 'linear: adjacent text grows sub-quadratically')
       call capnp_message_free(msg)
       call capnp_message_init_builder(msg, err)
       root = capnp_dyn_new_root(schema, idx, msg, err)
@@ -990,22 +1013,31 @@ contains
       raw(2) = -1_int8
       call capnp_dyn_set_data(schema, idx, root, 'hexed', raw, err)
       call check_(error, err == CAPNP_OK, 'linear: set hex data')
+      call capnp_dyn_set_data(schema, idx, root, 'hexed', raw(0:nbytes/4 - 1), err)
       call system_clock(c1, rate)
       call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
       call system_clock(c2)
-      elapsed = 0.0
-      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      small = clock_span(c1, c2, rate)
+      call capnp_dyn_set_data(schema, idx, root, 'hexed', raw, err)
+      call system_clock(c1, rate)
+      call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
+      call system_clock(c2)
+      elapsed = clock_span(c1, c2, rate)
       call check_(error, err == CAPNP_OK .and. allocated(js) .and. index(js, '"hexed":"0001ff') > 0 .and. &
                   index(js, repeat('41', 8)) > 0, 'linear: hex prefix')
-      call check_(error, elapsed < 1.0, clock_msg('hex encode', elapsed))
+      call check_(error, subquad(small, elapsed), 'linear: hex encode grows sub-quadratically')
+      call capnp_dyn_set_data(schema, idx, root, 'b64', raw(0:nbytes/4 - 1), err)
+      call system_clock(c1, rate)
+      call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
+      call system_clock(c2)
+      small = clock_span(c1, c2, rate)
       call capnp_dyn_set_data(schema, idx, root, 'b64', raw, err)
       call system_clock(c1, rate)
       call capnp_json_encode(schema, idx, root, js, err, pretty=.false.)
       call system_clock(c2)
-      elapsed = 0.0
-      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+      elapsed = clock_span(c1, c2, rate)
       call check_(error, err == CAPNP_OK .and. index(js, '"b64":"AAH/') > 0, 'linear: base64 prefix')
-      call check_(error, elapsed < 1.0, clock_msg('base64 encode', elapsed))
+      call check_(error, subquad(small, elapsed), 'linear: base64 encode grows sub-quadratically')
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_string_linear
@@ -1250,14 +1282,22 @@ contains
                   label)
    end subroutine io_ok
 
-   function clock_msg(label, elapsed) result(s)
-      character(len=*), intent(in) :: label
-      real, intent(in) :: elapsed
-      character(len=:), allocatable :: s
-      character(len=64) :: buf
-      write (buf, '(a,f8.3,a)') label//' took', elapsed, 's'
-      s = trim(buf)
-   end function clock_msg
+   function clock_span(c1, c2, rate) result(elapsed)
+      integer(int64), intent(in) :: c1, c2, rate
+      real :: elapsed
+      elapsed = 0.0
+      if (rate > 0_int64) elapsed = real(c2 - c1)/real(rate)
+   end function clock_span
+
+   !> Four times the input of a quadratic walk is about sixteen times the
+   !> time. Ten times, plus a quarter second, is still under that and
+   !> absorbs a noisy sample.
+   function subquad(small, big) result(y)
+      real, intent(in) :: small, big
+      logical :: y
+      y = big < small*10.0 + 0.25
+   end function subquad
+
 
    subroutine slurp(path, s, err)
       character(len=*), intent(in) :: path
