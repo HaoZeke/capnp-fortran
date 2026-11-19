@@ -407,9 +407,29 @@ contains
          else
             hex(i:i) = achar(iachar('a') + d - 10)
          end if
-         h = h / 16_int64
+         h = ishft(h, -4)
       end do
    end function ident_hash_hex
+
+   !> Lowercase hex of the 64-bit pattern. Division would be signed, and
+   !> a decimal rendering of a high-bit id puts a minus into the name.
+   pure function u64_hex(v) result(hex)
+      integer(int64), intent(in) :: v
+      character(len=16) :: hex
+      integer(int64) :: x
+      integer :: i, d
+      x = v
+      hex = '0000000000000000'
+      do i = 16, 1, -1
+         d = int(iand(x, 15_int64))
+         if (d < 10) then
+            hex(i:i) = achar(iachar('0') + d)
+         else
+            hex(i:i) = achar(iachar('a') + d - 10)
+         end if
+         x = ishft(x, -4)
+      end do
+   end function u64_hex
 
    !> Clamp an identifier to max_len (default F_IDENT_MAX). Over-long names
    !> become head_hash_tail so every occurrence of the logical name maps to
@@ -437,6 +457,20 @@ contains
       o = o//'_'//hex//'_'//s(len(s) - right + 1:len(s))
       if (len(o) > lim) o = o(1:lim)
    end function ident_fit
+
+   !> Parameter name, clamped so a suffix cannot push it past 63 characters.
+   pure function ident_const(s) result(o)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: o
+      o = ident_fit(s)
+   end function ident_const
+
+   !> One spelling for a default blob, shared by the parameter and its use.
+   pure function blob_name(an) result(o)
+      character(len=*), intent(in) :: an
+      character(len=:), allocatable :: o
+      o = ident_fit(upcase(an)//'_DEFAULT')
+   end function blob_name
 
    !> Field-path base (pfx_field): leave room for `_set_elem`.
    pure function accessor_base(pfx, field) result(o)
@@ -479,11 +513,7 @@ contains
       end do
       o = snake(o)
       if (len(o) > 32) then
-         write (hexid, '(z16.16)') node_id(np)
-         do i = 1, 16
-            if (hexid(i:i) >= 'A' .and. hexid(i:i) <= 'F') &
-               hexid(i:i) = achar(iachar(hexid(i:i)) + 32)
-         end do
+         hexid = u64_hex(node_id(np))
          o = o(1:15)
          if (o(15:15) == '_') o = o(1:14)
          o = o//'_'//hexid
@@ -1990,7 +2020,7 @@ contains
          call w('      logical, save :: loaded = .false.')
          call w('      err = CAPNP_OK')
          call w('      if (.not. loaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(cn)//'_DEFAULT, cmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(cn)//', cmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         loaded = .true.')
          call w('      end if')
@@ -2043,7 +2073,7 @@ contains
       end do
       idx = find_node(annotation_id(a))
       if (idx == 0) then
-         cand = upcase(target)//'_ANNOTATION_'//itoa(annotation_id(a))
+         cand = upcase(target)//'_ANNOTATION_'//u64_hex(annotation_id(a))
       else
          call node_fname(g_nodes(idx)%p, an, err)
          if (err /= CAPNP_OK) return
@@ -2111,7 +2141,8 @@ contains
       integer :: k
       err = CAPNP_OK
       k = value_which(v)
-      call w('   integer, parameter :: '//name//'_KIND = '//itoa(int(k, int64)))
+      call w('   integer, parameter :: '//ident_const(name//'_KIND')//' = '// &
+             itoa(int(k, int64)))
       select case (k)
       case (TYPE_VOID)
       case (TYPE_BOOL)
@@ -2176,7 +2207,7 @@ contains
          call w('      logical, save :: loaded = .false.')
          call w('      err = CAPNP_OK')
          call w('      if (.not. loaded) then')
-         call w('         call capnp_deserialize_bytes('//name//'_DEFAULT, cmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(name)//', cmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         loaded = .true.')
          call w('      end if')
@@ -2556,7 +2587,7 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_serialize_bytes(tmp, bytes, err)
       if (err /= CAPNP_OK) return
-      call note_blob(upcase(an)//'_DEFAULT', bytes)
+      call note_blob(blob_name(an), bytes)
       call capnp_message_free(tmp)
    end function register_default_blob
 
@@ -2925,7 +2956,7 @@ contains
       if (value_which(dv) == TYPE_DATA) then
          call value_data(dv, db, err)
          if (err /= CAPNP_OK) return
-         if (size(db) > 0 .and. g_suppress) call note_blob(upcase(an)//'_DEFAULT', db)
+         if (size(db) > 0 .and. g_suppress) call note_blob(blob_name(an), db)
       else
          allocate (db(0))
       end if
@@ -2938,7 +2969,7 @@ contains
          call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
-         call w('         b = '//upcase(an)//'_DEFAULT')
+         call w('         b = '//blob_name(an))
          call w('         return')
          call w('      end if')
       end if
@@ -2994,7 +3025,7 @@ contains
          call w('      o%p = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. o%p%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(an)//'_DEFAULT, defmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(an)//', defmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         defloaded = .true.')
          call w('      end if')
@@ -3091,7 +3122,7 @@ contains
          call w('      l = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. l%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(an)//'_DEFAULT, defmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(an)//', defmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         defloaded = .true.')
          call w('      end if')
@@ -4019,7 +4050,8 @@ contains
       if (err /= CAPNP_OK) return
       call server_bindings(np, tn, own, n_own, ex, nex, seen, 0, err)
       if (err /= CAPNP_OK) return
-      call w('   integer(int64), parameter :: '//upcase(tn)//'_INTERFACE_ID = '// &
+      call w('   integer(int64), parameter :: '// &
+             ident_const(upcase(tn)//'_INTERFACE_ID')//' = '// &
              itoa(node_id(np))//'_int64')
       ! Annotation values are module data, not type-bound procedure bindings.
       do i = 0_int64, capnp_list_len(ml) - 1_int64
@@ -4115,8 +4147,9 @@ contains
          call w('      integer(int64), intent(out) :: qid')
          call w('      integer, intent(out) :: err')
          call w('      type('//rpcn('payload_t')//') :: pl')
-         call w('      call rpc_call_begin(conn, client%cap, '//upcase(tn)// &
-                '_INTERFACE_ID, '//itoa(i)//', m, pl, qid, err)')
+         call w('      call rpc_call_begin(conn, client%cap, '// &
+                ident_const(upcase(tn)//'_INTERFACE_ID')//', '//itoa(i)// &
+                ', m, pl, qid, err)')
          call w('      if (err /= CAPNP_OK) return')
          call w('      params%p = capnp_new_struct(m, '//upcase(pn)//'_DWORDS, '// &
                 upcase(pn)//'_PWORDS, err)')
@@ -4160,12 +4193,14 @@ contains
          ! capnpc-c++.c++ dispatchCallInternal switches on the superclass
          ! interface id and forwards. The parent dispatch accepts this
          ! extended server.
-         call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) then')
+         call w('      if (ctx%interface_id /= '// &
+                ident_const(upcase(tn)//'_INTERFACE_ID')//') then')
          call w('         call '//parent//'_dispatch(self, ctx, err)')
          call w('         return')
          call w('      end if')
       else
-         call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) return')
+         call w('      if (ctx%interface_id /= '// &
+                ident_const(upcase(tn)//'_INTERFACE_ID')//') return')
       end if
       call w('      select case (ctx%method_id)')
       do i = 0_int64, capnp_list_len(ml) - 1_int64
@@ -4259,7 +4294,8 @@ contains
          ml = node_interface_methods(g_nodes(sidx)%p, err)
          if (err /= CAPNP_OK) return
          if (mode == 'c') then
-            call w('      if (ctx%interface_id == '//upcase(sn)//'_INTERFACE_ID) then')
+            call w('      if (ctx%interface_id == '// &
+                   ident_const(upcase(sn)//'_INTERFACE_ID')//') then')
             call w('         select case (ctx%method_id)')
          end if
          do i = 0_int64, capnp_list_len(ml) - 1_int64

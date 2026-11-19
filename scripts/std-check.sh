@@ -42,6 +42,7 @@ SOURCES=(
   test/generated/dual_capnp.f90
   test/generated/holder_capnp.f90
   test/generated/dynamic_capnp.f90
+  test/generated/idents_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
