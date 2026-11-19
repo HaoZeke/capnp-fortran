@@ -499,6 +499,7 @@ contains
          call question_slot_clear(conn%questions(i))
          call answer_slot_clear(conn%answers(i))
       end do
+      call free_hi_answers(conn)
       if (associated(conn%vat)) call release_hosted_provisions(conn)
       do i = 0, MAXE - 1
          if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
@@ -1557,9 +1558,134 @@ contains
       type(rpc_answer_slot_t), intent(inout) :: slot
       slot%used = .false.
       slot%has_results = .false.
+      slot%redirected = .false.
       slot%nexp = 0
       slot%exports = -1
    end subroutine answer_slot_clear
+
+   !> Drop every overflow answer. Export refcounts are the export
+   !> table's job; this only frees the saved Return messages.
+   subroutine free_hi_answers(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_hi_node_t), pointer :: node, nxt
+      integer :: b
+      do b = 0, HIBUCKETS - 1
+         node => conn%hi_buckets(b)%head
+         do while (associated(node))
+            nxt => node%next
+            if (node%slot%used) call capnp_message_free(node%slot%retmsg)
+            deallocate (node)
+            node => nxt
+         end do
+         conn%hi_buckets(b)%head => null()
+      end do
+   end subroutine free_hi_answers
+
+   !> Validate CapDescriptor rows of a payload cap table.
+   subroutine note_payload_imports(conn, pl, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(payload_t), intent(in) :: pl
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer :: i, n, ierr
+      err = CAPNP_OK
+      if (pl%p%kind /= CAPNP_PK_STRUCT) return
+      ctab = payload_cap_table_get(pl, ierr)
+      if (ierr /= CAPNP_OK) return
+      n = int(capnp_list_len(ctab))
+      do i = 0, n - 1
+         cd%p = capnp_list_get_struct(ctab, i, ierr)
+         if (ierr /= CAPNP_OK) cycle
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_NONE_TAG)
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+         case default
+            call abort_conn(conn, 'unknown CapDescriptor type', err)
+            return
+         end select
+      end do
+   end subroutine note_payload_imports
+
+   pure function hi_bucket(qid) result(b)
+      integer(int64), intent(in) :: qid
+      integer :: b
+      integer(int64) :: x
+      x = ieor(qid, shiftr(qid, 33))
+      b = int(iand(x, int(HIBUCKETS - 1, int64)))
+   end function hi_bucket
+
+   !> Locate the answer slot for qid. Low ids always resolve to the
+   !> fixed table. Higher ids resolve only when a node was claimed.
+   subroutine answer_find(conn, qid, slot, found)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_answer_slot_t), pointer, intent(out) :: slot
+      logical, intent(out) :: found
+      type(rpc_hi_node_t), pointer :: node
+      found = .false.
+      slot => null()
+      if (qid < 0_int64) return
+      if (qid < int(MAXQ, int64)) then
+         slot => conn%answers(int(qid))
+         found = .true.
+         return
+      end if
+      node => conn%hi_buckets(hi_bucket(qid))%head
+      do while (associated(node))
+         if (node%qid == qid) then
+            slot => node%slot
+            found = .true.
+            return
+         end if
+         node => node%next
+      end do
+   end subroutine answer_find
+
+   !> Add an overflow node for a question id the fixed table cannot hold.
+   subroutine answer_add_hi(conn, qid, slot)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_answer_slot_t), pointer, intent(out) :: slot
+      type(rpc_hi_node_t), pointer :: node
+      integer :: b
+      allocate (node)
+      node%qid = qid
+      b = hi_bucket(qid)
+      node%next => conn%hi_buckets(b)%head
+      conn%hi_buckets(b)%head => node
+      slot => node%slot
+   end subroutine answer_add_hi
+
+   !> Unlink one overflow answer after its Finish. The caller has
+   !> already freed the saved message.
+   subroutine answer_drop_hi(conn, qid)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_hi_node_t), pointer :: node, prev
+      integer :: b
+      prev => null()
+      b = hi_bucket(qid)
+      node => conn%hi_buckets(b)%head
+      do while (associated(node))
+         if (node%qid == qid) then
+            if (associated(prev)) then
+               prev%next => node%next
+            else
+               conn%hi_buckets(b)%head => node%next
+            end if
+            deallocate (node)
+            return
+         end if
+         prev => node
+         node => node%next
+      end do
+   end subroutine answer_drop_hi
+
 
    !> Drop refcount on an imported capability.
    subroutine rpc_release_send(conn, cap, err)
@@ -1850,8 +1976,7 @@ contains
       case (MESSAGE_ABORT_TAG)
          call handle_abort(conn, msg, err)
       case (MESSAGE_UNIMPLEMENTED_TAG)
-         ! Peer did not understand something we sent; nothing to do at
-         ! level 1 (we only send level 1 messages).
+         call handle_unimplemented(conn, msg, err)
       case (MESSAGE_PROVIDE_TAG)
          call handle_provide(conn, msg, err)
       case (MESSAGE_ACCEPT_TAG)
@@ -1936,6 +2061,51 @@ contains
       call capnp_message_free(m)
    end subroutine abort_conn
 
+   !> True when qid can still be answered. A duplicate, a negative id,
+   !> or an id already sitting in a Join set aborts the connection
+   !> instead of publishing another export. Ids past the fixed table
+   !> are stored on an overflow list until Finish.
+   function claim_question(conn, qid, err) result(ok)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      logical :: ok
+      integer :: i, k
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      ok = .false.
+      if (qid < 0_int64) then
+         call abort_conn(conn, &
+                         'questionId is outside the supported range', err)
+         return
+      end if
+      call answer_find(conn, qid, slot, found)
+      ! A missing overflow slot is not in use. .and. would still read it.
+      if (found) then
+         if (slot%used) then
+            call abort_conn(conn, 'questionId is already in use', err)
+            return
+         end if
+      end if
+      do i = 0, MAXJOINS - 1
+         if (.not. conn%joins(i)%used) cycle
+         do k = 0, conn%joins(i)%part_count - 1
+            if (conn%joins(i)%seen(k) .and. conn%joins(i)%qids(k) == qid) then
+               call abort_conn(conn, 'questionId is already in use', err)
+               return
+            end if
+         end do
+      end do
+      if (.not. found) call answer_add_hi(conn, qid, slot)
+      slot%used = .true.
+      slot%has_results = .false.
+      slot%redirected = .false.
+      slot%nexp = 0
+      slot%exports = -1
+      ok = .true.
+      err = CAPNP_OK
+   end function claim_question
+
    subroutine handle_bootstrap(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
@@ -1950,6 +2120,7 @@ contains
       b = message_bootstrap_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = bootstrap_question_id_get(b)
+      if (.not. claim_question(conn, qid, err)) return
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -1990,14 +2161,21 @@ contains
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
+      if (.not. claim_question(conn, qid, err)) return
+      if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_THIRD_PARTY_TAG .or. &
+          (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
+           call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_YOURSELF_TAG)) then
+         ! Level 3 third-party tail calls are in the schema. Cap'n Proto
+         ! C++ 1.4.0 does not implement them and aborts the connection.
+         call abort_conn(conn, "Unsupported `Call.sendResultsTo`.", err)
+         return
+      end if
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
       r = message_return_init(rmsg, err)
       call return_answer_id_set(r, qid, err)
       if (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG) then
-         ! Tail calls (yourself/thirdParty) redirect results; failing the
-         ! call is legal, silently answering the caller instead is not.
          call release_unflushed(conn, ctx)
          call fill_exception(r, 'sendResultsTo mode unsupported (caller only)', err)
          call finish_answer(conn, qid, rm, ctx, err)
@@ -2008,8 +2186,31 @@ contains
       ! capability lives.
       params = call_params_get(c, err)
       if (err == CAPNP_OK) call note_introductions(conn, params, err)
+      if (err == CAPNP_OK) call note_payload_imports(conn, params, err)
+      if (conn%dead .or. err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
 
       call resolve_target(conn, c, eid, err)
+      if (conn%dead) then
+         call capnp_message_free(rm)
+         return
+      end if
+      block
+         type(message_target_t) :: tgt
+         integer :: terr
+         tgt = call_target_get(c, terr)
+         if (terr == CAPNP_OK) then
+            if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
+                eid < 0) then
+               call capnp_message_free(rm)
+               call abort_conn(conn, &
+                               'Message target is not a current export ID.', err)
+               return
+            end if
+         end if
+      end block
       if (err /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
          call fill_exception(r, 'no such capability', err)
@@ -2085,7 +2286,9 @@ contains
       type(payload_t) :: apl
       type(cap_descriptor_t) :: cd
       integer(int64) :: aqid, eid
-      integer :: i, q
+      integer :: i
+      type(rpc_answer_slot_t), pointer :: aslot
+      logical :: afound
       out_eid = -1
       err = CAPNP_OK
       select case (message_target_which(tgt))
@@ -2100,13 +2303,10 @@ contains
          pa = message_target_promised_answer_get(tgt, err)
          if (err /= CAPNP_OK) return
          aqid = promised_answer_question_id_get(pa)
-         q = int(aqid)
-         if (q < 0 .or. q >= MAXQ) then
-            err = CAPNP_ERR_BOUNDS
-            return
-         end if
-         if (.not. conn%answers(q)%has_results) return
-         amsg = message_read_root(conn%answers(q)%retmsg, err)
+         call answer_find(conn, aqid, aslot, afound)
+         if (.not. afound) return
+         if (.not. aslot%has_results) return
+         amsg = message_read_root(aslot%retmsg, err)
          ar = message_return_get(amsg, err)
          apl = return_results_get(ar, err)
          p = payload_content_get(apl, err)
@@ -2116,10 +2316,15 @@ contains
          do i = 0, int(capnp_list_len(ops)) - 1
             op%p = capnp_list_get_struct(ops, i, err)
             if (err /= CAPNP_OK) return
-            if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) then
+            select case (promised_answer_op_which(op))
+            case (PROMISED_ANSWER_OP_NOOP_TAG)
+            case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
                p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
                if (err /= CAPNP_OK) return
-            end if
+            case default
+               call abort_conn(conn, 'Unsupported pipeline op.', err)
+               return
+            end select
          end do
          if (p%kind /= CAPNP_PK_CAP) return
          ctab = payload_cap_table_get(apl, err)
@@ -2131,6 +2336,8 @@ contains
          if (eid >= 0_int64 .and. eid < int(MAXE, int64)) then
             if (conn%exports(int(eid))%used) out_eid = int(eid)
          end if
+      case default
+         call abort_conn(conn, 'Unknown message target type.', err)
       end select
    end subroutine resolve_message_target
 
@@ -2317,6 +2524,7 @@ contains
       pv = message_provide_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = provide_question_id_get(pv)
+      if (.not. claim_question(conn, qid, err)) return
 
       tgt = provide_target_get(pv, err)
       if (err /= CAPNP_OK) return
@@ -2376,6 +2584,7 @@ contains
       ac = message_accept_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = accept_question_id_get(ac)
+      if (.not. claim_question(conn, qid, err)) return
 
       pp = accept_provision_get(ac, err)
       if (err /= CAPNP_OK) return
@@ -2602,6 +2811,7 @@ contains
       j = message_join_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = join_question_id_get(j)
+      if (.not. claim_question(conn, qid, err)) return
 
       kpp = join_key_part_get(j, err)
       if (err /= CAPNP_OK) return
@@ -2903,9 +3113,32 @@ contains
       type(rpc_call_ctx_t), intent(in) :: ctx
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
-      integer :: q, i
-      ! Close from inside dispatch drops the transport and frees the
-      ! server when this call returns. There is no peer left to answer.
+      integer :: i
+      logical :: found
+      type(rpc_answer_slot_t), pointer :: slot
+      err = CAPNP_OK
+      if (qid < 0_int64) then
+         do i = 0, ctx%nexp - 1
+            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+         end do
+         call capnp_message_free(rm)
+         call abort_conn(conn, 'questionId is outside the supported range', err)
+         return
+      end if
+      call answer_find(conn, qid, slot, found)
+      if (.not. found) call answer_add_hi(conn, qid, slot)
+      if (slot%has_results) then
+         ! A question that already has a Return must not drop the
+         ! exports of that earlier answer.
+         do i = 0, ctx%nexp - 1
+            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+         end do
+         call capnp_message_free(rm)
+         call abort_conn(conn, 'questionId is already in use', err)
+         return
+      end if
+      ! Close from inside dispatch drops the transport. The server
+      ! is freed when this call returns, and there is no peer left.
       if (.not. associated(conn%transport)) then
          err = CAPNP_ERR_IO
       else
@@ -2919,19 +3152,16 @@ contains
          call capnp_message_free(rm)
          return
       end if
-      q = int(qid)
-      if (q >= 0 .and. q < MAXQ) then
-         if (conn%answers(q)%used) call capnp_message_free(conn%answers(q)%retmsg)
-         call capnp_serialize_bytes(rm, bytes, err)
-         if (err == CAPNP_OK) then
-            call capnp_deserialize_bytes(bytes, conn%answers(q)%retmsg, err)
-            conn%answers(q)%used = .true.
-            conn%answers(q)%has_results = .true.
-            conn%answers(q)%nexp = ctx%nexp
-            do i = 0, ctx%nexp - 1
-               conn%answers(q)%exports(i) = ctx%staged_eids(i)
-            end do
-         end if
+      call capnp_serialize_bytes(rm, bytes, err)
+      if (err == CAPNP_OK) then
+         call capnp_deserialize_bytes(bytes, slot%retmsg, err)
+         slot%used = .true.
+         slot%has_results = .true.
+         slot%redirected = .false.
+         slot%nexp = ctx%nexp
+         do i = 0, ctx%nexp - 1
+            slot%exports(i) = ctx%staged_eids(i)
+         end do
       end if
       call capnp_message_free(rm)
    end subroutine finish_answer
@@ -2951,36 +3181,70 @@ contains
          return
       end if
       qid = return_answer_id_get(r)
+      ! Pipeline-only question ids carry the high bit. C++ ignores a
+      ! Return for those rather than treating the id as unknown.
+      if (iand(qid, QID_HIGH_BIT) /= 0_int64) then
+         err = CAPNP_OK
+         call capnp_message_free(m)
+         return
+      end if
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+         call capnp_message_free(m)
+         call abort_conn(conn, 'Invalid question ID in Return message.', err)
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         call capnp_message_free(m)
+         call abort_conn(conn, 'Invalid question ID in Return message.', err)
+         return
+      end if
+      ! A Return racing with a Finish for a canceled question is legal.
+      ! The id was kept reserved so it could not be reused; the Return
+      ! ends that reservation and is not delivered to a later call.
+      if (conn%questions(q)%canceled) then
+         err = CAPNP_OK
+         call capnp_message_free(m)
+         if (.not. conn%dead) call question_slot_clear(conn%questions(q))
+         return
+      end if
+      ! A second Return must not replace the result already stored.
+      if (conn%questions(q)%returned) then
+         call capnp_message_free(m)
+         call abort_conn(conn, 'Duplicate Return.', err)
+         return
+      end if
+      if (return_which(r) == RETURN_CANCELED_TAG) then
+         call capnp_message_free(m)
+         call abort_conn(conn, &
+                         'Return message falsely claims call was canceled.', err)
+         return
+      end if
+      if (return_which(r) /= RETURN_RESULTS_TAG .and. &
+          return_which(r) /= RETURN_EXCEPTION_TAG .and. &
+          return_which(r) /= RETURN_RESULTS_SENT_ELSEWHERE_TAG .and. &
+          return_which(r) /= RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+         call capnp_message_free(m)
+         call abort_conn(conn, "Unknown 'Return' type.", err)
+         return
+      end if
       if (return_which(r) == RETURN_RESULTS_TAG) then
          block
             type(payload_t) :: rpl
             integer :: ierr
             rpl = return_results_get(r, ierr)
             if (ierr == CAPNP_OK) call note_introductions(conn, rpl, ierr)
+            if (ierr == CAPNP_OK) call note_payload_imports(conn, rpl, ierr)
+            if (ierr /= CAPNP_OK) then
+               call capnp_message_free(m)
+               err = ierr
+               return
+            end if
          end block
-      end if
-      q = int(qid)
-      if (q < 0 .or. q >= MAXQ) then
-         err = CAPNP_ERR_BOUNDS
-         call capnp_message_free(m)
-         return
-      end if
-      ! A Return racing with a Finish for a canceled question is legal.
-      ! The id was kept reserved so it could not be reused; the Return
-      ! ends that reservation and is not delivered to a later call.
-      if (.not. conn%questions(q)%used .or. conn%questions(q)%canceled) then
-         err = CAPNP_OK
-         call capnp_message_free(m)
-         if (q >= 0 .and. q < MAXQ) then
-            if (conn%questions(q)%used) call question_slot_clear(conn%questions(q))
-         end if
-         return
       end if
       ! Own the Return bytes in the question slot.
       call capnp_serialize_bytes(m, bytes, err)
       if (err == CAPNP_OK) then
-         if (conn%questions(q)%used .and. conn%questions(q)%returned) &
-            call capnp_message_free(conn%questions(q)%retmsg)
          call capnp_deserialize_bytes(bytes, conn%questions(q)%retmsg, err)
          conn%questions(q)%returned = .true.
       end if
@@ -3011,7 +3275,9 @@ contains
       integer, intent(out) :: err
       type(finish_t) :: f
       integer(int64) :: qid
-      integer :: q, i, k, eid, jerr
+      integer :: i, k, eid, jerr
+      type(rpc_answer_slot_t), pointer :: jslot
+      logical :: jfound
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
@@ -3029,21 +3295,34 @@ contains
                                           'join finished', jerr)
                if (jerr /= CAPNP_OK) err = jerr
             end do
+            ! The finished part is not answered. Drop the reservation
+            ! so the question id can be used again.
+            if (qid >= 0_int64) then
+               call answer_find(conn, qid, jslot, jfound)
+               if (jfound) then
+                  if (jslot%used .and. .not. jslot%has_results) then
+                     call answer_slot_clear(jslot)
+                     if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+                  end if
+               end if
+            end if
             conn%joins(i) = rpc_join_slot_t()
             return
          end if
       end do
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
-      q = int(qid)
-      if (.not. conn%answers(q)%used) return
+      if (qid < 0_int64) return
+      call answer_find(conn, qid, jslot, jfound)
+      if (.not. jfound) return
+      if (.not. jslot%used) return
       if (finish_release_result_caps_get(f)) then
-         do i = 0, conn%answers(q)%nexp - 1
-            eid = conn%answers(q)%exports(i)
+         do i = 0, jslot%nexp - 1
+            eid = jslot%exports(i)
             if (eid >= 0 .and. eid < MAXE) call drop_export(conn, eid, 1)
          end do
       end if
-      call capnp_message_free(conn%answers(q)%retmsg)
-      call answer_slot_clear(conn%answers(q))
+      call capnp_message_free(jslot%retmsg)
+      call answer_slot_clear(jslot)
+      if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
    end subroutine handle_finish
 
    subroutine handle_release(conn, msg, err)
@@ -3165,6 +3444,60 @@ contains
                       "'Disembargo' of type 'senderLoopback' sent to an " // &
                       "object that does not point back to the sender.", err)
    end subroutine handle_disembargo
+
+   !> Unimplemented(Resolve) releases the export the Resolve named.
+   !> Any other unimplemented message aborts. Leaving a Call, Bootstrap,
+   !> or Return unanswered would block rpc_wait forever.
+   subroutine handle_unimplemented(conn, msg, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_t), intent(in) :: msg
+      integer, intent(out) :: err
+      type(message_t) :: inner
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(third_party_cap_descriptor_t) :: tp
+      integer(int64) :: id
+      integer :: ierr
+      inner = message_unimplemented_get(msg, err)
+      if (err /= CAPNP_OK) return
+      if (message_which(inner) == MESSAGE_RESOLVE_TAG) then
+         rv = message_resolve_get(inner, ierr)
+         if (ierr /= CAPNP_OK) return
+         if (resolve_which(rv) /= RESOLVE_CAP_TAG) return
+         cd = resolve_cap_get(rv, ierr)
+         if (ierr /= CAPNP_OK) return
+         id = -1_int64
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            id = cap_descriptor_sender_hosted_get(cd)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            id = cap_descriptor_sender_promise_get(cd)
+         case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG, CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+            err = CAPNP_OK
+            return
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            tp = cap_descriptor_third_party_hosted_get(cd, ierr)
+            if (ierr /= CAPNP_OK) return
+            id = third_party_cap_descriptor_vine_id_get(tp)
+         case (CAP_DESCRIPTOR_NONE_TAG)
+            err = CAPNP_OK
+            return
+         case default
+            call abort_conn(conn, 'unknown CapDescriptor type', err)
+            return
+         end select
+         if (id < 0_int64 .or. id >= int(MAXE, int64) .or. &
+             .not. conn%exports(int(id))%used) then
+            call abort_conn(conn, 'Tried to release invalid export ID.', err)
+            return
+         end if
+         call drop_export(conn, int(id), 1)
+         err = CAPNP_OK
+         return
+      end if
+      call abort_conn(conn, &
+                      'Peer did not implement required RPC message type.', err)
+   end subroutine handle_unimplemented
 
    subroutine handle_abort(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
