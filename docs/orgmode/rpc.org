@@ -125,6 +125,19 @@ cooperative after application delivery: methods that do not opt in may
 continue to completion, matching capnp-C++ ``allowCancellation``. The
 live C++ interop test cancels an opted-in never-ending method and then
 checks that the C++ promise was dropped.
+
+Membranes are local wrappers, not wire messages.
+``rpc_membrane_policy_t`` defines inbound and outbound call checks.
+``rpc_membrane_cap`` applies a policy to an imported client capability,
+while ``rpc_membrane_server_t`` applies it to a local server capability.
+Servers exported through a membraned result are recursively wrapped in
+the same policy. If a wrapper crosses back through that policy in the
+opposite direction it is unwrapped, preserving object identity rather
+than stacking a second membrane. ``rpc_membrane_revoke`` disables all
+wrappers sharing the policy. These are the applicable
+``capnp/membrane.h`` semantics for the runtime's current capability
+surface; C++ interop is not relevant because no membrane state appears
+on the wire.
 #+end_export
 
 * Procedure reference
@@ -143,6 +156,9 @@ checks that the C++ promise was dropped.
 | ~rpc_join_wait~         | ~(conn, qids, joined, succeeded, err)~                                | collect and settle the Join result                    |
 | ~rpc_request_cancellation~ | ~(conn, qid, err)~                                                | abandon a question with modern Finish semantics       |
 | ~rpc_stream_cancel~     | ~(conn, stream, err)~                                                | cancel all outstanding calls in a stream window       |
+| ~rpc_membrane_cap~      | ~(cap, policy, reverse) result(wrapped)~                              | wrap an imported client capability                    |
+| ~rpc_membrane_server_init~ | ~(wrapper, inner, policy, reverse)~                              | wrap a local server capability                        |
+| ~rpc_membrane_revoke~   | ~(policy, reason)~                                                   | revoke every wrapper sharing the policy               |
 | ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |
