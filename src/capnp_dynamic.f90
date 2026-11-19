@@ -32,6 +32,10 @@ module capnp_dynamic
       type(capnp_message_t) :: cgr
       type(capnp_ptr_t), allocatable :: nodes(:)
       logical :: loaded = .false.
+      !> Copies of pointer defaults handed to readers. The schema message
+      !> itself stays untouched. Freed with the schema.
+      type(capnp_message_t) :: ro_arena
+      logical :: ro_ready = .false.
    end type capnp_dyn_schema_t
 
    !> An annotation use as exposed by the C++ schema API. `value` and
@@ -96,6 +100,8 @@ contains
    subroutine capnp_dyn_free(schema)
       type(capnp_dyn_schema_t), intent(inout) :: schema
       call capnp_message_free(schema%cgr)
+      if (schema%ro_ready) call capnp_message_free(schema%ro_arena)
+      schema%ro_ready = .false.
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
    end subroutine capnp_dyn_free
@@ -902,7 +908,7 @@ contains
    !> groups the parent handle itself addresses the members, so groups
    !> return p unchanged.
    function capnp_dyn_getp(schema, idx, p, fname, err) result(q)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
@@ -931,14 +937,43 @@ contains
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
       if (err /= CAPNP_OK) return
-      ! The default object lives in the schema message. Handing that
-      ! pointer back would let a write change every later default.
-      call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
+      ! The default object lives in the schema message. A reader gets a
+      ! frozen view of a copy. A builder copies into its own message, as
+      ! the C++ runtime does, so a write cannot change later defaults.
+      if (.not. associated(p%msg) .or. .not. p%msg%is_builder) then
+         call dyn_reader_view(schema, q, err)
+      else
+         call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
+      end if
       if (err == CAPNP_OK .and. type_which(t) == TYPE_STRUCT .and. &
           q%kind == CAPNP_PK_STRUCT) then
          q%schema_id = type_type_id(t)
       end if
+      if (err == CAPNP_OK .and. (.not. associated(p%msg) .or. .not. p%msg%is_builder)) &
+         q%frozen = .true.
    end function capnp_dyn_getp
+
+   !> Copy a schema default into a reader-owned arena and freeze the handle.
+   subroutine dyn_reader_view(schema, q, err)
+      type(capnp_dyn_schema_t), intent(inout), target :: schema
+      type(capnp_ptr_t), intent(inout) :: q
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: copied
+      integer(int64) :: sid
+      err = CAPNP_OK
+      if (q%kind == CAPNP_PK_NULL) return
+      sid = q%schema_id
+      if (.not. schema%ro_ready) then
+         call capnp_message_init_builder(schema%ro_arena, err)
+         if (err /= CAPNP_OK) return
+         schema%ro_ready = .true.
+      end if
+      copied = capnp_copy(schema%ro_arena, q, err)
+      if (err /= CAPNP_OK) return
+      copied%schema_id = sid
+      copied%frozen = .true.
+      q = copied
+   end subroutine dyn_reader_view
 
    !> Copy a schema default into the caller's builder and, when the slot
    !> exists, store that copy in the field.
@@ -1406,7 +1441,7 @@ contains
    end subroutine capnp_dyn_set_capability
 
    function capnp_dyn_get_any_struct(schema, idx, p, fname, err) result(value)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
@@ -1431,7 +1466,7 @@ contains
    end function capnp_dyn_get_any_struct
 
    function capnp_dyn_get_any_list(schema, idx, p, fname, err) result(value)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
