@@ -27,6 +27,7 @@ program test_gate2
    call case_24()
    call case_25()
    call case_26()
+   call case_27()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -761,4 +762,24 @@ contains
          'cmp -s /tmp/g2-lit.o /tmp/g2-lit.r && cmp -s /tmp/g2-lit.e1 ' // &
          '/tmp/g2-lit.e2')
    end subroutine case_26
+
+   subroutine case_27()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"big": 1.}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-dot.in; "$CAP" convert json:json schema/codec.cap' // &
+         'np Sample < /tmp/g2-dot.in > /tmp/g2-dot.o; echo $? > /tmp/g' // &
+         '2-dot.e1; capnp convert json:json schema/codec.capnp Sample ' // &
+         '< /tmp/g2-dot.in > /tmp/g2-dot.r; echo $? > /tmp/g2-dot.e2; ' // &
+         'cmp -s /tmp/g2-dot.o /tmp/g2-dot.r && cmp -s /tmp/g2-dot.e1 ' // &
+         '/tmp/g2-dot.e2')
+   end subroutine case_27
 end program test_gate2
