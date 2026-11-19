@@ -12,7 +12,8 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [new_unittest("codegen-multifile-generics", run_multifile), &
                    new_unittest("codegen-suffix-clamp", run_suffix), &
-                   new_unittest("codegen-annotation-stem", run_annot)]
+                   new_unittest("codegen-annotation-stem", run_annot), &
+                   new_unittest("codegen-dynamic-fresh", run_fresh)]
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -29,6 +30,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_mode(error, 'annot', 'codegen: annotation stem')
    end subroutine run_annot
+
+   subroutine run_fresh(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_mode(error, 'fresh', 'codegen: dynamic module is fresh')
+   end subroutine run_fresh
 
    subroutine run_mode(error, mode, what)
       type(error_type), allocatable, intent(out) :: error
