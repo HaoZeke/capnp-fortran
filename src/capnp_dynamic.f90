@@ -479,7 +479,7 @@ contains
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
-      type(capnp_ptr_t) :: f
+      type(capnp_ptr_t) :: f, t, dv
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
@@ -487,6 +487,18 @@ contains
          return
       end if
       q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      select case (type_which(t))
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
+            TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
+      case default
+         return
+      end select
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      q = value_pointer(dv, err)
    end function capnp_dyn_getp
 
    !> Union discriminant of struct node idx read from p.
