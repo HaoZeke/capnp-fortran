@@ -2,7 +2,8 @@
 !> the capnp tool. Schemas are compiled with the capnp driver
 !> (`capnp compile -o-`) and loaded as a CodeGeneratorRequest.
 program capnpf
-   use, intrinsic :: iso_c_binding, only: c_int
+   use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, c_size_t, &
+      c_null_char, c_associated, c_intptr_t, c_long
    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
    use capnp
    use capnp_schema
@@ -13,14 +14,38 @@ program capnpf
    implicit none
 
    interface
-      function c_getpid() bind(c, name="getpid") result(p)
-         import c_int
-         integer(c_int) :: p
-      end function c_getpid
       subroutine c_exit(code) bind(c, name="exit")
          import c_int
          integer(c_int), value :: code
       end subroutine c_exit
+      function c_popen(cmd, mode) bind(c, name="popen") result(fp)
+         import c_ptr
+         type(c_ptr), value :: cmd, mode
+         type(c_ptr) :: fp
+      end function c_popen
+      function c_fread(buf, sz, nmemb, fp) bind(c, name="fread") result(n)
+         import c_ptr, c_size_t
+         type(c_ptr), value :: buf, fp
+         integer(c_size_t), value :: sz, nmemb
+         integer(c_size_t) :: n
+      end function c_fread
+      function c_pclose(fp) bind(c, name="pclose") result(st)
+         import c_ptr, c_int
+         type(c_ptr), value :: fp
+         integer(c_int) :: st
+      end function c_pclose
+      function c_ferror(fp) bind(c, name="ferror") result(st)
+         import c_ptr, c_int
+         type(c_ptr), value :: fp
+         integer(c_int) :: st
+      end function c_ferror
+      function c_write(fd, buf, n) bind(c, name="write") result(nw)
+         import c_int, c_ptr, c_size_t, c_long
+         integer(c_int), value :: fd
+         type(c_ptr), value :: buf
+         integer(c_size_t), value :: n
+         integer(c_long) :: nw
+      end function c_write
    end interface
 
    integer :: exit_code
@@ -32,7 +57,7 @@ contains
 
    subroutine main_run(rc)
       integer, intent(out) :: rc
-      character(len=4096) :: arg, next_arg
+      character(len=:), allocatable :: arg, next_arg
       character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
       character(len=:), allocatable :: from_fmt, to_fmt
       logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc
@@ -62,7 +87,7 @@ contains
       end if
       i = 1
       do while (i <= n)
-         call get_command_argument(i, arg)
+         call take_arg(i, arg)
          if (trim(arg) == '--help' .or. trim(arg) == '-h') then
             call print_usage(output_unit)
             return
@@ -81,9 +106,9 @@ contains
                return
             end if
             i = i + 1
-            call get_command_argument(i, next_arg)
-            inc_flags = inc_flags//' -I'//shell_quote(trim(next_arg))
-         else if (len_trim(arg) > 2 .and. arg(1:2) == '-I') then
+            call take_arg(i, next_arg)
+            inc_flags = inc_flags//' -I'//shell_quote(next_arg)
+         else if (starts_with(arg, '-I') .and. len(arg) > 2) then
             inc_flags = inc_flags//' -I'//shell_quote(trim(arg(3:)))
          else if (index(trim(arg), '--import-path=') == 1) then
             inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
@@ -106,16 +131,16 @@ contains
                return
             end if
             i = i + 1
-            call get_command_argument(i, next_arg)
-            ofmt = trim(next_arg)
+            call take_arg(i, next_arg)
+            ofmt = next_arg
             ofmt_explicit = .true.
-         else if (len_trim(arg) > 2 .and. arg(1:2) == '-o') then
+         else if (starts_with(arg, '-o') .and. len(arg) > 2) then
             ofmt = trim(arg(3:))
             ofmt_explicit = .true.
          else if (index(trim(arg), '--output=') == 1) then
             ofmt = trim(arg(10:))
             ofmt_explicit = .true.
-         else if (arg(1:1) == '-') then
+         else if (starts_with(arg, '-')) then
             call fail('unknown option '//trim(arg), rc)
             return
          else if (len(cmd) == 0) then
@@ -291,42 +316,126 @@ contains
       q = q//"'"
    end function shell_quote
 
-   subroutine remove_file(path)
-      character(len=*), intent(in) :: path
-      integer :: u, ios
-      open (newunit=u, file=path, status='old', iostat=ios)
-      if (ios == 0) close (u, status='delete', iostat=ios)
-   end subroutine remove_file
-
    subroutine load_schema(path, extra_inc, no_std, sch, err)
       character(len=*), intent(in) :: path, extra_inc
       logical, intent(in) :: no_std
       type(capnp_dyn_schema_t), intent(inout), target :: sch
       integer, intent(out) :: err
-      character(len=96) :: tmp
       character(len=:), allocatable :: shcmd
       integer(int8), allocatable :: bytes(:)
-      integer :: st, cs
-      write (tmp, '(a,i0,a)') '/tmp/capnpf-', c_getpid(), '.cgr'
       if (no_std) then
          shcmd = 'capnp compile --no-standard-import'//extra_inc//' -o- ' &
-                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+                 //shell_quote(trim(path))
       else
          shcmd = 'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
                  //'capnp compile -I"$INC"'//extra_inc//' -o- ' &
-                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+                 //shell_quote(trim(path))
       end if
-      call execute_command_line(shcmd, exitstat=st, cmdstat=cs, wait=.true.)
-      if (cs /= 0 .or. st /= 0) then
-         call remove_file(trim(tmp))
-         err = CAPNP_ERR_IO
-         return
-      end if
-      call capnp_read_file(trim(tmp), bytes, err)
-      call remove_file(trim(tmp))
+      call read_pipe(shcmd, bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(sch, bytes, err)
    end subroutine load_schema
+
+   !> Read the stdout of a shell command. No temporary path is created.
+   subroutine read_pipe(shcmd, bytes, err)
+      character(len=*), intent(in) :: shcmd
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      character(kind=c_char), allocatable, target :: cmd(:), mode(:)
+      integer(int8), allocatable, target :: acc(:)
+      integer(int8), allocatable :: grown(:)
+      type(c_ptr) :: fp
+      integer(c_size_t) :: nread
+      integer(c_intptr_t) :: addr
+      integer :: got, cap, stat, st
+      err = CAPNP_OK
+      call to_cchars(shcmd, cmd)
+      call to_cchars('r', mode)
+      fp = c_popen(c_loc(cmd(1)), c_loc(mode(1)))
+      if (.not. c_associated(fp)) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      cap = 65536
+      got = 0
+      allocate (acc(0:cap - 1), stat=stat)
+      if (stat /= 0) then
+         st = c_pclose(fp)
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do
+         if (got + 4096 > cap) then
+            if (cap > ishft(huge(cap), -1)) then
+               st = c_pclose(fp)
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+            allocate (grown(0:cap*2 - 1), stat=stat)
+            if (stat /= 0) then
+               st = c_pclose(fp)
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+            grown(0:got - 1) = acc(0:got - 1)
+            call move_alloc(grown, acc)
+            cap = cap*2
+         end if
+         addr = transfer(c_loc(acc(got)), addr)
+         nread = c_fread(transfer(addr, fp), 1_c_size_t, 4096_c_size_t, fp)
+         if (nread == 0_c_size_t) exit
+         got = got + int(nread)
+      end do
+      if (c_ferror(fp) /= 0) then
+         st = c_pclose(fp)
+         err = CAPNP_ERR_IO
+         return
+      end if
+      st = c_pclose(fp)
+      if (st /= 0) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      if (got <= 0) then
+         allocate (bytes(0))
+      else
+         allocate (bytes(0:got - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         bytes = acc(0:got - 1)
+      end if
+   end subroutine read_pipe
+
+   subroutine to_cchars(s, a)
+      character(len=*), intent(in) :: s
+      character(kind=c_char), allocatable, intent(out) :: a(:)
+      integer :: i
+      allocate (a(len(s) + 1))
+      do i = 1, len(s)
+         a(i) = s(i:i)
+      end do
+      a(len(s) + 1) = c_null_char
+   end subroutine to_cchars
+
+   subroutine take_arg(i, s)
+      integer, intent(in) :: i
+      character(len=:), allocatable, intent(out) :: s
+      integer :: n
+      call get_command_argument(i, length=n)
+      if (n < 0) n = 0
+      allocate (character(len=n) :: s)
+      if (n > 0) call get_command_argument(i, s)
+   end subroutine take_arg
+
+   pure function starts_with(s, pfx) result(y)
+      character(len=*), intent(in) :: s, pfx
+      logical :: y
+      y = .false.
+      if (len(s) < len(pfx)) return
+      y = s(1:len(pfx)) == pfx
+   end function starts_with
 
    subroutine cmd_encode(sch, idx, to_fmt, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
@@ -631,7 +740,8 @@ contains
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       character(len=:), allocatable :: text
-      integer :: err, unit
+      integer(int8), allocatable :: outb(:)
+      integer :: err
       rc = 0
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
@@ -648,27 +758,52 @@ contains
          end if
          write (output_unit, '(a)') text
       else
-         open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-               action='write', status='old', iostat=err)
-         if (err /= 0) then
-            call fail('cannot write stdout', rc)
+         call write_binary_message(msg, to, seg_words, outb, err)
+         if (err /= CAPNP_OK) then
+            call fail('binary encode failed', rc)
             return
          end if
-         call write_binary_message(unit, msg, to, seg_words, err)
-         close (unit)
-         if (err /= CAPNP_OK) call fail('binary encode failed', rc)
+         call write_stdout(outb, err)
+         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
       end if
    end subroutine emit_one
 
-   subroutine write_binary_message(unit, msg, to, seg_words, err)
-      integer, intent(in) :: unit
+   !> Append bytes to stdout. One descriptor for every message, so a
+   !> redirected file keeps each message in order.
+   subroutine write_stdout(buf, err)
+      integer(int8), intent(in), target :: buf(:)
+      integer, intent(out) :: err
+      integer(c_intptr_t) :: addr
+      integer(c_size_t) :: left
+      integer(c_long) :: nw
+      integer :: lb
+      type(c_ptr) :: p
+      err = CAPNP_OK
+      if (size(buf) <= 0) return
+      lb = lbound(buf, 1)
+      addr = transfer(c_loc(buf(lb)), addr)
+      left = int(size(buf), c_size_t)
+      do while (left > 0_c_size_t)
+         p = transfer(addr, p)
+         nw = c_write(1_c_int, p, left)
+         if (nw <= 0_c_long) then
+            err = CAPNP_ERR_IO
+            return
+         end if
+         addr = addr + int(nw, c_intptr_t)
+         left = left - int(nw, c_size_t)
+      end do
+   end subroutine write_stdout
+
+   subroutine write_binary_message(msg, to, seg_words, outb, err)
       type(capnp_message_t), intent(inout), target :: msg
+      integer(int8), allocatable, intent(out) :: outb(:)
       character(len=*), intent(in) :: to
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: err
       type(capnp_message_t), target :: reseg
       type(capnp_ptr_t) :: root, croot
-      integer(int8), allocatable :: outb(:), flatb(:)
+      integer(int8), allocatable :: flatb(:)
       err = CAPNP_OK
       if (to == 'canonical') then
          call capnp_canonicalize(msg, outb, err)
@@ -704,8 +839,6 @@ contains
       else
          call capnp_serialize_bytes(msg, outb, err)
       end if
-      if (err /= CAPNP_OK) return
-      if (size(outb) > 0) write (unit) outb
    end subroutine write_binary_message
 
    subroutine to_flat_bytes(msg, flatb, err)
@@ -761,7 +894,8 @@ contains
       integer(int8) :: w8(0:7)
       integer(int8) :: hdr(0:2055)
       integer(int64) :: nsegs64, header_words, total_words, nwords, i, n
-      integer :: zero_left, raw_left
+      integer(int64) :: rem, room
+      integer :: zero_left, raw_left, stat
       err = CAPNP_OK
       zero_left = 0
       raw_left = 0
@@ -782,10 +916,22 @@ contains
       total_words = 0_int64
       do i = 1_int64, nsegs64
          n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
-         total_words = total_words + n
+         call capnp_add_segment_words(total_words, n, err)
+         if (err /= CAPNP_OK) return
       end do
+      rem = size(raw, kind=int64) - off
+      call capnp_packed_room(rem, zero_left, raw_left, room, err)
+      if (err /= CAPNP_OK) return
+      if (total_words > room) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
       nwords = header_words + total_words
-      allocate (framed(0:nwords*8_int64 - 1))
+      allocate (framed(0:nwords*8_int64 - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       framed = 0_int8
       framed(0:header_words*8_int64 - 1) = hdr(0:header_words*8_int64 - 1)
       do i = header_words + 1_int64, nwords
@@ -993,7 +1139,19 @@ contains
          end if
       end if
 
-      if (node_which(sch%nodes(idx)) /= NODE_STRUCT .or. len(rest) < 2 .or. rest(1:1) /= '.') then
+      if (idx < 1 .or. idx > size(sch%nodes)) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (node_which(sch%nodes(idx)) /= NODE_STRUCT) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (len(rest) < 2) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (rest(1:1) /= '.') then
          call fail('eval requires a constant or struct field', rc)
          return
       end if
@@ -1292,7 +1450,11 @@ contains
       err = CAPNP_OK
       fname = ''
       n = len(rest)
-      if (pos > n .or. rest(pos:pos) /= '.') then
+      if (pos > n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (rest(pos:pos) /= '.') then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1332,7 +1494,11 @@ contains
       err = CAPNP_OK
       ix = -1_int64
       n = len(rest)
-      if (pos > n .or. rest(pos:pos) /= '[') then
+      if (pos > n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (rest(pos:pos) /= '[') then
          err = CAPNP_ERR_ARG
          return
       end if
