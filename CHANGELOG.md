@@ -55,6 +55,13 @@ Pre-1.0 minor releases may include breaking API changes.
 - Missing optional c-capnproto/cmocka golden dependencies do not bypass the
   independent live capnp-C++ RPC interop target.
 - The golden-master C harness is clean under strict compiler warnings.
+- A JSON integer above 2^53 keeps every digit. capnp 1.4.0 rounds it
+  through a double and rejects a value that double cannot hold, including
+  `{"i64":9223372036854775807}` and `{"u64":18446744073709551615}`,
+  which this decoder accepts.
+- A JSON string joins a high UTF-16 surrogate and the following low
+  surrogate into one Unicode scalar. capnp 1.4.0 keeps the two
+  UTF-16 surrogate code units as six CESU-8 bytes.
 
 ## [0.3.1] - 2026-08-15
 
