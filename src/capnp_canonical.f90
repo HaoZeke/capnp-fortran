@@ -483,6 +483,10 @@ contains
             do i = 0_int64, p%nelem - 1_int64
                q = capnp_list_get_struct(p, int(i), err)
                if (err /= CAPNP_OK) return
+               ! layout.c++ setListPointer(canonical=true) copies element
+               ! pointers using the list's nestingLimit, after getStructElement
+               ! already checked nestingLimit > 0.
+               q%depth = p%depth
                do k = 0, min(np, q%pwords) - 1
                   block
                      type(capnp_ptr_t) :: r
@@ -568,6 +572,7 @@ contains
             do i = 0_int64, p%nelem - 1_int64
                sel = capnp_list_get_struct(p, int(i), err)
                if (err /= CAPNP_OK) return
+               sel%depth = p%depth
                del = capnp_list_get_struct(q, int(i), err)
                if (err /= CAPNP_OK) return
                nb = min(int(nd, int64)*8_int64, int(sel%dwords, int64)*8_int64)

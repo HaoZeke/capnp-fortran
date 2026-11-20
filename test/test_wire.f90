@@ -22,6 +22,7 @@ contains
            new_unittest("lists", test_lists), &
            new_unittest("list-count-limit", test_list_count_limit), &
            new_unittest("void-list-struct", test_void_list_struct), &
+           new_unittest("list-struct-depth", test_list_struct_depth), &
            new_unittest("void-list-amplify", test_void_list_amplify), &
            new_unittest("empty-list-amplify", test_empty_list_amplify), &
            new_unittest("composite-list", test_composite_list), &
@@ -30,6 +31,10 @@ contains
            new_unittest("far-pointer", test_far_pointer), &
            new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
+           new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
+           new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
+           new_unittest("cross-message-copy-clears-slot", test_cross_message_copy_clears_slot), &
+           new_unittest("overwrite-zeroing", test_overwrite_zeroing), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -361,6 +366,9 @@ contains
       lst = capnp_new_composite_list(msg, 536870912_int64, 1, 0, err)
       call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 composite rejected')
       if (allocated(error)) return
+      lst = capnp_new_composite_list(msg, 536870912_int64, 0, 0, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 empty composite rejected')
+      if (allocated(error)) return
       lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870911_int64, err)
       call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 536870911_int64, &
                   'list-count: 2^29-1 void accepted')
@@ -399,6 +407,120 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_void_list_struct
+
+   subroutine test_list_struct_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, list, el, child
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: words
+      integer :: err, i
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      list = capnp_new_composite_list(msg, 1_int64, 0, 1, err)
+      el = capnp_list_get_struct(list, 0, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 17_int64, err)
+      call capnp_setp(el, 0, child, err)
+      call capnp_setp(root, 0, list, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+
+      ! Limit 2: ListReader::getStructElement itself fails nestingLimit > 0.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK, 'list-depth: list resolves at limit 2')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'list-depth: get_struct fails at limit 2')
+      call capnp_message_free(rmsg)
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Limit 3: get_struct succeeds, child pointer fails at decremented depth.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=3)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_OK, 'list-depth: get_struct succeeds at limit 3')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      child = capnp_getp(el, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'list-depth: element consumes nesting level')
+      call capnp_message_free(rmsg)
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Limit 4: child resolves cleanly.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=4)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      el = capnp_list_get_struct(list, 0, err)
+      child = capnp_getp(el, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(child, 0_int64) == 17_int64, &
+                 'list-depth: child resolves at limit 4')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+      if (allocated(error)) return
+
+      ! Data-only composite list at limit 2: totalSize succeeds while get_struct fails.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      list = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call capnp_setp(root, 0, list, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      words = capnp_total_size(list, err)
+      call check(error, err == CAPNP_OK .and. words == 2_int64, &
+                 'list-depth: totalSize succeeds on data-only composite list at limit 2')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, &
+                 'list-depth: data-only get_struct fails at limit 2')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      ! Builders carry no nesting limit in C++: a 40-level chain of struct
+      ! lists reads back through the builder.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      el = root
+      do i = 1, 40
+         list = capnp_new_composite_list(msg, 1_int64, 0, 1, err)
+         call capnp_setp(el, 0, list, err)
+         el = capnp_list_get_struct(list, 0, err)
+      end do
+      el = capnp_root(msg, err)
+      do i = 1, 40
+         list = capnp_getp(el, 0, err)
+         if (err /= CAPNP_OK) exit
+         el = capnp_list_get_struct(list, 0, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check(error, err == CAPNP_OK, 'list-depth: builder list chain reads back past 32 levels')
+      call capnp_message_free(msg)
+   end subroutine test_list_struct_depth
    !> List(Void) of 10^7 elements has no payload bytes but costs one word
    !> each (layout.c++ amplifiedRead). The default limit is 2^23 words.
    subroutine test_void_list_amplify(error)
@@ -585,6 +707,288 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_far_pointer
+
+   subroutine test_far_segment_overflow_zero(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 2, 0, err)
+      call capnp_set_root(msg, root, err)
+      ! 2^31 - 1 overflows int32 addition `int(seg) + 1` before bounds checks.
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.false., 0_int64, 2147483647_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'far-segment: max int32 id is ignored while zeroing')
+      if (allocated(error)) return
+
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.false., 0_int64, 2147483648_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'far-segment: bit-31 id is ignored while zeroing')
+      if (allocated(error)) return
+
+      ! Double-far with out-of-range pad word 0 still zeroes its 16-byte pad.
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, &
+                      wp_make_far(.false., 0_int64, 2147483647_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, &
+                      wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.true., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64, &
+                 'far-segment: double-far out-of-range id zeroes landing pad')
+      call capnp_message_free(msg)
+   end subroutine test_far_segment_overflow_zero
+
+   subroutine test_far_landing_pad_zero(error)
+      use capnp_arena, only: capnp_arena_alloc_in
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, cur, nxt
+      integer :: err, i
+      integer(int64) :: pad_off
+
+      ! A chained landing pad is followed like C++ zeroObject: the body and
+      ! every pad word in the chain are cleared.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 5, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 24_int64, 99_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 24_int64) == 0_int64, &
+                 'far-pad-zero: far-to-far chain is cleared')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Every hop of a 65-pad chain reaches the body.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 70, 0, err)
+      call capnp_set_root(msg, root, err)
+      do i = 1, 65
+         call cp_put_i64(msg%segs(1)%bytes, int(i, int64)*8_int64, &
+                         wp_make_far(.false., int(i + 1, int64), 0_int64))
+      end do
+      call cp_put_i64(msg%segs(1)%bytes, 66_int64*8_int64, &
+                      wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 67_int64*8_int64, 99_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 66_int64*8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 67_int64*8_int64) == 0_int64, &
+                 'far-pad-zero: every far hop reaches and zeroes the body')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! A self-looping pad and a two-pad cycle both terminate.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 2, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64, &
+                 'far-pad-zero: self-looping far pad terminates cleanly')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 3, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64, &
+                 'far-pad-zero: two-pad far cycle terminates cleanly')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Pad word 0 of a double-far may carry the double-far bit, as in C++.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 5, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.true., 3_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 24_int64, 55_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.true., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 24_int64) == 0_int64, &
+                 'far-pad-zero: double-far pad word 0 ignores the double-far bit')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Valid single-far hop at depth = CAPNP_DEFAULT_DEPTH_LIMIT - 1 preserves depth.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      cur = root
+      do i = 2, CAPNP_DEFAULT_DEPTH_LIMIT - 1
+         nxt = capnp_new_struct(msg, 0, 1, err)
+         call capnp_setp(cur, 0, nxt, err)
+         cur = nxt
+      end do
+      nxt = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(nxt, 0_int64, 77_int64, err)
+      ! Place a valid single-far landing pad pointing to the 64th struct.
+      call capnp_arena_alloc_in(msg, nxt%seg, 1_int64, pad_off, err)
+      call cp_put_i64(msg%segs(nxt%seg)%bytes, pad_off, &
+                      wp_make_struct(int((nxt%off - (pad_off + 8_int64))/8_int64, int32), &
+                                     1_int32, 0_int32))
+      call cp_put_i64(msg%segs(cur%seg)%bytes, cur%off, &
+                      wp_make_far(.false., pad_off/8_int64, int(nxt%seg - 1, int64)))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(nxt%seg)%bytes, nxt%off) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(nxt%seg)%bytes, pad_off) == 0_int64, &
+                 'far-pad-zero: valid single-far at max depth zeroes target')
+      call capnp_message_free(msg)
+   end subroutine test_far_landing_pad_zero
+
+   subroutine test_cross_message_copy_clears_slot(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: dst, src, rsrc
+      type(capnp_ptr_t) :: old_root, sroot, schild, rroot
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(dst, err)
+      old_root = capnp_new_struct(dst, 1, 0, err)
+      call capnp_set_i64(old_root, 0_int64, 42_int64, err)
+      call capnp_set_root(dst, old_root, err)
+
+      call capnp_message_init_builder(src, err)
+      sroot = capnp_new_struct(src, 0, 1, err)
+      schild = capnp_new_struct(src, 1, 0, err)
+      call capnp_set_i64(schild, 0_int64, 99_int64, err)
+      call capnp_setp(sroot, 0, schild, err)
+      call capnp_set_root(src, sroot, err)
+      call capnp_serialize_bytes(src, bytes, err)
+      call capnp_deserialize_bytes(bytes, rsrc, err, depth_limit=1)
+      rroot = capnp_root(rsrc, err)
+      call check(error, err == CAPNP_OK, 'cross-copy-clear: foreign root resolves at limit 1')
+      if (allocated(error)) then
+         call capnp_message_free(dst)
+         call capnp_message_free(src)
+         call capnp_message_free(rsrc)
+         return
+      end if
+
+      call capnp_set_root(dst, rroot, err)
+      call check(error, err == CAPNP_ERR_DEPTH .and. &
+                 cp_get_i64(dst%segs(old_root%seg)%bytes, old_root%off) == 0_int64 .and. &
+                 cp_get_i64(dst%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'cross-copy-clear: failed cross-message copy leaves slot zeroed')
+      call capnp_message_free(dst)
+      call capnp_message_free(src)
+      call capnp_message_free(rsrc)
+   end subroutine test_cross_message_copy_clears_slot
+
+   subroutine test_overwrite_zeroing(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, child
+      integer(int64) :: slot, far_w, pad_off
+      integer :: err, pad_seg
+
+      ! Recursive zeroing: overwriting root clears child body.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 1, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 123_int64, err)
+      call capnp_setp(root, 0, child, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(child%seg)%bytes, child%off) == 0_int64, &
+                 'overwrite: recursive target is zeroed')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Same-segment self-alias guard: writing the same target retains it.
+      root = capnp_new_struct(msg, 1, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 456_int64, err)
+      call capnp_setp(root, 0, child, err)
+      call capnp_setp(root, 0, child, err)
+      call check(error, err == CAPNP_OK .and. &
+                 capnp_get_i64(child, 0_int64) == 456_int64, &
+                 'overwrite: self-alias retains the target')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Cross-segment far overwrite: zeroes both remote body and landing pad.
+      call capnp_message_init_builder(msg, err, first_words=2_int64)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      child = capnp_new_struct(msg, 2, 0, err)
+      call check(error, child%seg /= root%seg, 'overwrite: child on second segment')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+      call capnp_set_i64(child, 0_int64, 789_int64, err)
+      call capnp_setp(root, 0, child, err)
+      slot = root%off + int(root%dwords, int64)*8_int64
+      far_w = cp_get_i64(msg%segs(root%seg)%bytes, slot)
+      call check(error, wp_kind(far_w) == CAPNP_WK_FAR .and. .not. wp_far_two(far_w), &
+                 'overwrite: cross-segment slot encodes single far pointer')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+      pad_seg = int(wp_far_seg(far_w)) + 1
+      pad_off = wp_far_off(far_w)*8_int64
+
+      ! Cross-segment far self-alias guard retains remote target.
+      call capnp_setp(root, 0, child, err)
+      call check(error, err == CAPNP_OK .and. &
+                 capnp_get_i64(child, 0_int64) == 789_int64, &
+                 'overwrite: far self-alias retains the target')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Overwriting far slot with null zeroes landing pad and remote body.
+      far_w = cp_get_i64(msg%segs(root%seg)%bytes, slot)
+      pad_seg = int(wp_far_seg(far_w)) + 1
+      pad_off = wp_far_off(far_w)*8_int64
+      call capnp_setp(root, 0, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(child%seg)%bytes, child%off) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(pad_seg)%bytes, pad_off) == 0_int64, &
+                 'overwrite: far overwrite zeroes target and landing pad')
+      call capnp_message_free(msg)
+   end subroutine test_overwrite_zeroing
    !> A single far whose landing pad is another far is not a struct.
    !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
    subroutine test_far_chain_rejected(error)
