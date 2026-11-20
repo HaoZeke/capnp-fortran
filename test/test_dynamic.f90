@@ -31,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(29))
+      allocate (testsuite(30))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -90,6 +90,8 @@ contains
       testsuite(28)%test => run_deep_groups
       testsuite(29)%name = "dynamic-nested-union-clear"
       testsuite(29)%test => run_nested_union_clear
+      testsuite(30)%name = "dynamic-null-struct-pointers"
+      testsuite(30)%test => run_null_struct_pointers
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1811,5 +1813,79 @@ contains
       call capnp_dyn_free(cschema)
       call capnp_message_free(cgr)
    end subroutine run_nested_union_clear
+
+   !> Reading pointer fields through a null struct handle that is attached to
+   !> a message returns the field defaults, matching C++ StructReader.
+   subroutine run_null_struct_pointers(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: bmsg, rmsg
+      type(capnp_ptr_t) :: broot, bnull, rnull, origin, scores, tags, q
+      integer(int8), allocatable :: bytes(:), raw(:), blob(:)
+      character(len=:), allocatable :: s
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call check_(error, err == CAPNP_OK .and. sink_idx > 0 .and. vec_idx > 0, &
+                  'null-ptr: nodes found')
+
+      ! Empty reader message: root handle is CAPNP_PK_NULL with msg associated.
+      call capnp_message_init_builder(bmsg, err)
+      call capnp_serialize_bytes(bmsg, raw, err)
+      call capnp_deserialize_bytes(raw, rmsg, err)
+      rnull = capnp_root(rmsg, err)
+      call check_(error, err == CAPNP_OK .and. rnull%kind == CAPNP_PK_NULL .and. &
+                  associated(rnull%msg), 'null-ptr: associated reader null')
+
+      q = capnp_getp(rnull, 0, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL, &
+                  'null-ptr: capnp_getp on reader null returns null')
+      call capnp_dyn_get_text(schema, sink_idx, rnull, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', &
+                  'null-ptr: reader text default')
+      call capnp_dyn_get_data(schema, sink_idx, rnull, 'payload', blob, err)
+      call check_(error, err == CAPNP_OK .and. size(blob) == 4 .and. &
+                  iand(int(blob(lbound(blob, 1))), 255) == int(z'de') .and. &
+                  iand(int(blob(ubound(blob, 1))), 255) == int(z'ef'), &
+                  'null-ptr: reader data default')
+      origin = capnp_dyn_getp(schema, sink_idx, rnull, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT, &
+                  'null-ptr: reader struct default')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'null-ptr: reader nested struct default x')
+      scores = capnp_dyn_getp(schema, sink_idx, rnull, 'scores', err)
+      call check_(error, err == CAPNP_OK .and. scores%kind == CAPNP_PK_LIST .and. &
+                  capnp_list_len(scores) == 3_int64, 'null-ptr: reader list default')
+      tags = capnp_dyn_getp(schema, sink_idx, rnull, 'tags', err)
+      call check_(error, err == CAPNP_OK .and. tags%kind == CAPNP_PK_NULL, &
+                  'null-ptr: reader unset list without default')
+
+      ! Associated builder null handle (unset pointer slot on a builder struct).
+      broot = capnp_new_struct(bmsg, 0, 1, err)
+      bnull = capnp_getp(broot, 0, err)
+      call check_(error, err == CAPNP_OK .and. bnull%kind == CAPNP_PK_NULL .and. &
+                  associated(bnull%msg), 'null-ptr: associated builder null')
+      call capnp_dyn_get_text(schema, sink_idx, bnull, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', &
+                  'null-ptr: builder text default')
+      origin = capnp_dyn_getp(schema, sink_idx, bnull, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT .and. &
+                  origin%frozen, 'null-ptr: builder null returns frozen default')
+      call capnp_dyn_set_f64(schema, vec_idx, origin, 'x', 9.0_real64, err)
+      call check_(error, err /= CAPNP_OK, 'null-ptr: frozen default rejects write')
+
+      call capnp_message_free(rmsg)
+      call capnp_message_free(bmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_null_struct_pointers
 
 end module test_dynamic

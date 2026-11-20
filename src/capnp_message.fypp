@@ -380,8 +380,14 @@ contains
       if (.not. associated(p%msg)) return
       q%msg => p%msg
       select case (p%kind)
+      case (CAPNP_PK_NULL)
+         if (p%frozen) q%frozen = .true.
+         return
       case (CAPNP_PK_STRUCT)
-         if (i < 0 .or. i >= p%pwords) return
+         if (i < 0 .or. i >= p%pwords) then
+            if (p%frozen) q%frozen = .true.
+            return
+         end if
          slot = p%off + int(p%dwords, int64)*8_int64 + int(i, int64)*8_int64
       case (CAPNP_PK_LIST)
          if (i < 0 .or. int(i, int64) >= p%nelem) then

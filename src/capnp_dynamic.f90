@@ -1211,10 +1211,11 @@ contains
       ! frozen view of one cached copy of this field. A builder copies
       ! into its own message, as the C++ runtime does, so a write cannot
       ! change later defaults. A frozen view is read-only, so it reads as
-      ! a reader even though its arena is a builder. Association is tested
+      ! a reader even though its arena is a builder. A null parent reads
+      ! defaults without allocating in its message. Association is tested
       ! before the builder flag: Fortran does not promise to skip the
       ! second operand of or.
-      if (.not. associated(p%msg)) then
+      if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
          call dyn_reader_view(schema, idx, f, q, err)
       else if (p%frozen .or. .not. p%msg%is_builder) then
          call dyn_reader_view(schema, idx, f, q, err)
@@ -1226,7 +1227,7 @@ contains
          q%schema_id = type_type_id(t)
       end if
       if (err == CAPNP_OK) then
-         if (.not. associated(p%msg)) then
+         if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
             q%frozen = .true.
          else if (p%frozen .or. .not. p%msg%is_builder) then
             q%frozen = .true.
