@@ -19,6 +19,7 @@ program test_gate2
    call case_15()
    call case_16()
    call case_17()
+   call case_18()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -504,4 +505,40 @@ contains
          '/tmp/g2-jg.o /tmp/g2-jg.r && cmp -s /tmp/g2-jg.e1 /tmp/g2-jg' // &
          '.e2')
    end subroutine case_17
+
+   subroutine case_18()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'd=/tmp/g2-plug-$$; mkdir -p "$d"; cp test/fixtures/box.cgr.b' // &
+         'in "$d/req.bin"' // &
+         achar(10) // &
+         'P=$(dirname "$CAP")/capnpc-fortran' // &
+         achar(10) // &
+         '(cd "$d" && "$P" req.bin) > /dev/null 2>&1 && test -s "$d/sc' // &
+         'hema/box_capnp.f90" || { rm -rf "$d"; exit 1; }' // &
+         achar(10) // &
+         'rm -f "$d/schema/box_capnp.f90"' // &
+         achar(10) // &
+         'long="req.bin$(printf ' // &
+         achar(39) // &
+         '%4200s' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         achar(39) // &
+         ')x"' // &
+         achar(10) // &
+         '(cd "$d" && "$P" "$long") > /dev/null 2>&1; r=$?' // &
+         achar(10) // &
+         'test $r -ne 0 && test ! -e "$d/schema/box_capnp.f90"; r=$?' // &
+         achar(10) // &
+         'rm -rf "$d"; exit $r')
+   end subroutine case_18
 end program test_gate2

@@ -19,12 +19,15 @@ program capnpc_fortran
    type(capnp_ptr_t) :: root, files, rf
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: fname
-   character(len=4096) :: arg
-   integer :: err, i, n
+   character(len=:), allocatable :: arg
+   integer :: err, i, n, alen
 
    if (command_argument_count() >= 1) then
-      call get_command_argument(1, arg)
-      call capnp_read_file(trim(arg), bytes, err)
+      call get_command_argument(1, length=alen)
+      if (alen < 0) alen = 0
+      allocate (character(len=alen) :: arg)
+      if (alen > 0) call get_command_argument(1, arg)
+      call capnp_read_file(arg, bytes, err)
    else
       call read_stdin(bytes, err)
    end if
