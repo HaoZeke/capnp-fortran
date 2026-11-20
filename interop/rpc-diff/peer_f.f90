@@ -1,8 +1,8 @@
 !> Fortran peer for the RPC differential checker.
 !> Usage: peer_f <port>
 !> Serves diff.capnp Target as its bootstrap, the same contract as
-!> peer_cpp.c++. slow waits for the driver's Callback.ping inside the
-!> dispatch, so nested slow calls finish in reverse order.
+!> peer_cpp.c++. slow defers its answer until the driver's Callback.ping
+!> returns, as the C++ server returns a promise.
 module diff_peer
    use capnp
    use rpc_capnp
@@ -11,12 +11,21 @@ module diff_peer
    private
 
    public :: target_srv_t, g_conn, g_cb, TARGET_IFACE, CALLBACK_IFACE
+   public :: settle_slow
 
    integer(int64), parameter :: TARGET_IFACE = -3314929971793887215_int64   ! 0xd1ff00c0ffee0011
    integer(int64), parameter :: CALLBACK_IFACE = -3314929971793887214_int64 ! 0xd1ff00c0ffee0012
 
    type(rpc_conn_t), pointer :: g_conn => null()
    type(rpc_cap_t) :: g_cb
+
+   !> A deferred slow call and the ping question it waits on.
+   type :: slow_wait_t
+      integer(int64) :: answer = -1_int64
+      integer(int64) :: ping = -1_int64
+      logical :: make = .false.
+   end type slow_wait_t
+   type(slow_wait_t), allocatable :: g_slow(:)
 
    type, extends(rpc_server_t) :: target_srv_t
       integer(int64) :: base = 0_int64
@@ -126,18 +135,17 @@ contains
       if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
    end subroutine reflect_driver
 
-   !> Ping the driver and answer with its n, or with a new Target whose
-   !> base is that n when `make` is set.
-   recursive subroutine slow_call(ctx, n, make, err)
+   !> Ping the driver. Once it returns, settle_slow answers with its n,
+   !> or with a new Target whose base is that n when `make` is set.
+   subroutine slow_call(ctx, n, make, err)
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer(int64), intent(in) :: n
       logical, intent(in) :: make
       integer, intent(out) :: err
       type(capnp_message_t), target :: m
       type(payload_t) :: params
-      type(capnp_ptr_t) :: s, content
-      integer(int64) :: q, got
-      integer :: e
+      type(capnp_ptr_t) :: s
+      integer(int64) :: q
       type(message_t) :: msg
       type(call_t) :: c
       call rpc_call_begin(g_conn, g_cb, CALLBACK_IFACE, 0, m, params, q, err)
@@ -154,20 +162,47 @@ contains
       if (err /= CAPNP_OK) return
       call rpc_call_send(g_conn, m, err)
       if (err /= CAPNP_OK) return
-      call rpc_wait(g_conn, q, err)
-      if (err == CAPNP_OK) call rpc_result_content(g_conn, q, content, err)
-      if (err == CAPNP_OK) got = capnp_get_i64(content, 0_int64)
-      call rpc_finish_send(g_conn, q, .false., e)
-      if (err /= CAPNP_OK) return
-      if (make) then
-         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
-         if (err /= CAPNP_OK) return
-         call put_new_target(ctx, s, 0, got, err)
-         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
-      else
-         call set_n(ctx, got, err)
-      end if
+      call rpc_ctx_defer(ctx)
+      if (.not. allocated(g_slow)) allocate (g_slow(0))
+      g_slow = [g_slow, slow_wait_t(ctx%answer_id, q, make)]
    end subroutine slow_call
+
+   !> Answer each deferred slow call whose ping has returned, oldest
+   !> first. The ping is finished before the answer, as in C++, where
+   !> the response goes before the server's promise resolves.
+   recursive subroutine settle_slow(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s, content
+      type(slow_wait_t) :: w
+      integer(int64) :: got
+      integer :: i, err, e
+      if (.not. allocated(g_slow)) return
+      i = 1
+      do while (i <= size(g_slow))
+         if (.not. rpc_question_returned(conn, g_slow(i)%ping)) then
+            i = i + 1
+            cycle
+         end if
+         w = g_slow(i)
+         g_slow = [g_slow(:i - 1), g_slow(i + 1:)]
+         call rpc_result_content(conn, w%ping, content, err)
+         if (err == CAPNP_OK) got = capnp_get_i64(content, 0_int64)
+         call rpc_finish_send(conn, w%ping, .false., e)
+         ctx => rpc_deferred_ctx(conn, w%answer)
+         if (.not. associated(ctx)) cycle
+         if (err == CAPNP_OK) then
+            if (w%make) then
+               s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+               if (err == CAPNP_OK) call put_new_target(ctx, s, 0, got, err)
+               if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+            else
+               call set_n(ctx, got, err)
+            end if
+         end if
+         call rpc_deferred_return(conn, w%answer, e, failed=err /= CAPNP_OK)
+      end do
+   end subroutine settle_slow
 
 end module diff_peer
 
@@ -207,7 +242,11 @@ program peer_f
       if (err == CAPNP_OK) call rpc_result_cap(conn, q, [integer ::], g_cb, err)
       call rpc_finish_send(conn, q, .true., err)
    end if
-   call rpc_serve(conn, err)
+   do
+      call rpc_pump_once(conn, err)
+      if (err /= CAPNP_OK) exit
+      call settle_slow(conn)
+   end do
    call rpc_conn_close(conn)
    deallocate (boot)
 end program peer_f
