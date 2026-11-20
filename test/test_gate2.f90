@@ -9,6 +9,7 @@ program test_gate2
    call case_5()
    call case_6()
    call case_7()
+   call case_8()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -247,4 +248,25 @@ contains
          achar(10) // &
          'done')
    end subroutine case_7
+
+   subroutine case_8()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c ' // &
+         achar(39) // &
+         'print(chr(123)+chr(34)+"title"+chr(34)+": "+chr(34)+("ab"*20' // &
+         '0)+chr(34)+chr(125))' // &
+         achar(39) // &
+         ' > /tmp/g2-qs.in; "$CAP" convert json:json schema/codec.capn' // &
+         'p Sample < /tmp/g2-qs.in > /tmp/g2-qs.o; echo $? > /tmp/g2-q' // &
+         's.e1; capnp convert json:json schema/codec.capnp Sample < /t' // &
+         'mp/g2-qs.in > /tmp/g2-qs.r; echo $? > /tmp/g2-qs.e2; cmp -s ' // &
+         '/tmp/g2-qs.o /tmp/g2-qs.r && cmp -s /tmp/g2-qs.e1 /tmp/g2-qs' // &
+         '.e2')
+   end subroutine case_8
 end program test_gate2

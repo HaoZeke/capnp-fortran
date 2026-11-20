@@ -1171,31 +1171,38 @@ contains
    function json_quote(s) result(out)
       character(len=*), intent(in) :: s
       character(len=:), allocatable :: out
-      integer :: i, ub
+      character(len=:), allocatable :: buf
+      integer :: i, m, ub
       character(len=2) :: hh
       character(len=*), parameter :: hexd = '0123456789abcdef'
-      out = '"'
+      allocate (character(len=len(s)*6 + 2) :: buf)
+      buf(1:1) = '"'
+      m = 1
       do i = 1, len(s)
          ub = iachar(s(i:i))
          select case (ub)
-         case (34); out = out//'\"'
-         case (92); out = out//'\\'
-         case (8); out = out//'\b'
-         case (12); out = out//'\f'
-         case (10); out = out//'\n'
-         case (13); out = out//'\r'
-         case (9); out = out//'\t'
+         case (34); buf(m + 1:m + 2) = '\"'; m = m + 2
+         case (92); buf(m + 1:m + 2) = '\\'; m = m + 2
+         case (8); buf(m + 1:m + 2) = '\b'; m = m + 2
+         case (12); buf(m + 1:m + 2) = '\f'; m = m + 2
+         case (10); buf(m + 1:m + 2) = '\n'; m = m + 2
+         case (13); buf(m + 1:m + 2) = '\r'; m = m + 2
+         case (9); buf(m + 1:m + 2) = '\t'; m = m + 2
          case default
             if (ub < 32) then
                hh(1:1) = hexd(ub/16 + 1:ub/16 + 1)
                hh(2:2) = hexd(mod(ub, 16) + 1:mod(ub, 16) + 1)
-               out = out//'\u00'//hh
+               buf(m + 1:m + 6) = '\u00'//hh
+               m = m + 6
             else
-               out = out//s(i:i)
+               m = m + 1
+               buf(m:m) = s(i:i)
             end if
          end select
       end do
-      out = out//'"'
+      m = m + 1
+      buf(m:m) = '"'
+      out = buf(1:m)
    end function json_quote
 
    function json_float(x) result(s)
