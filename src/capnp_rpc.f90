@@ -1289,8 +1289,13 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: target_qid
       integer, intent(out) :: err
-      type(rpc_pipe_wait_t), pointer :: node, prev, nxt
+      type(rpc_pipe_wait_t), pointer :: node, prev, nxt, waiting, tail
       err = CAPNP_OK
+      ! Detach all eligible calls before entering any one of them. A
+      ! nested local call can itself drain `pipe_wait`, so retaining a
+      ! predecessor in the connection list across dispatch is unsafe.
+      waiting => null()
+      tail => null()
       prev => null()
       node => conn%pipe_wait
       do while (associated(node))
@@ -1301,26 +1306,40 @@ contains
             else
                conn%pipe_wait => nxt
             end if
-            call dispatch_local_pipeline(conn, node%msg, node%call_qid, &
-                                         target_qid, err)
-            call capnp_message_free(node%msg)
-            deallocate (node)
+            node%next => null()
+            if (associated(tail)) then
+               tail%next => node
+            else
+               waiting => node
+            end if
+            tail => node
          else
             prev => node
          end if
          node => nxt
-         if (err /= CAPNP_OK) exit
+      end do
+      node => waiting
+      do while (associated(node))
+         nxt => node%next
+         if (err == CAPNP_OK) &
+            call dispatch_local_pipeline(conn, node%msg, node%call_qid, &
+                                         target_qid, err)
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
       end do
    end subroutine drain_pipe_waits
 
    !> A canceled local question will not produce a result. Waiting
    !> pipelines fail with that fact instead of sitting on the list.
-   subroutine fail_pipe_waits(conn, target_qid, err)
+   recursive subroutine fail_pipe_waits(conn, target_qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: target_qid
       integer, intent(out) :: err
-      type(rpc_pipe_wait_t), pointer :: node, prev, nxt
+      type(rpc_pipe_wait_t), pointer :: node, prev, nxt, waiting, tail
       err = CAPNP_OK
+      waiting => null()
+      tail => null()
       prev => null()
       node => conn%pipe_wait
       do while (associated(node))
@@ -1331,17 +1350,30 @@ contains
             else
                conn%pipe_wait => nxt
             end if
-            call reject_local_question(conn, node%call_qid, 'call canceled', err)
-            call capnp_message_free(node%msg)
-            deallocate (node)
+            node%next => null()
+            if (associated(tail)) then
+               tail%next => node
+            else
+               waiting => node
+            end if
+            tail => node
          else
             prev => node
          end if
          node => nxt
       end do
+      node => waiting
+      do while (associated(node))
+         nxt => node%next
+         if (err == CAPNP_OK) &
+            call reject_local_question(conn, node%call_qid, 'call canceled', err)
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
    end subroutine fail_pipe_waits
 
-   subroutine reject_local_question(conn, qid, reason, err)
+   recursive subroutine reject_local_question(conn, qid, reason, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       character(len=*), intent(in) :: reason
@@ -1370,6 +1402,8 @@ contains
          conn%questions(int(qid))%local_call = .true.
       end if
       call capnp_message_free(rm)
+      if (err == CAPNP_OK .and. conn%questions(int(qid))%returned) &
+         call drain_pipe_waits(conn, qid, err)
    end subroutine reject_local_question
 
    subroutine enqueue_pipeline(conn, m, call_qid, target_qid, err)
@@ -1377,19 +1411,27 @@ contains
       type(capnp_message_t), intent(inout) :: m
       integer(int64), intent(in) :: call_qid, target_qid
       integer, intent(out) :: err
-      type(rpc_pipe_wait_t), pointer :: node
+      type(rpc_pipe_wait_t), pointer :: node, tail
       integer(int8), allocatable :: bytes(:)
       allocate (node)
       node%call_qid = call_qid
       node%target_qid = target_qid
-      node%next => conn%pipe_wait
+      node%next => null()
       call capnp_serialize_bytes(m, bytes, err)
       if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
       if (err /= CAPNP_OK) then
          deallocate (node)
          return
       end if
-      conn%pipe_wait => node
+      if (.not. associated(conn%pipe_wait)) then
+         conn%pipe_wait => node
+      else
+         tail => conn%pipe_wait
+         do while (associated(tail%next))
+            tail => tail%next
+         end do
+         tail%next => node
+      end if
       if (call_qid >= 0_int64 .and. call_qid < int(MAXQ, int64)) &
          conn%questions(int(call_qid))%local_call = .true.
       err = CAPNP_OK
@@ -1432,6 +1474,7 @@ contains
          if (err /= CAPNP_OK) return
          conn%questions(int(call_qid))%returned = .true.
          conn%questions(int(call_qid))%local_call = .true.
+         call drain_pipe_waits(conn, call_qid, err)
          return
       end if
       pl = return_results_get(tr, err)

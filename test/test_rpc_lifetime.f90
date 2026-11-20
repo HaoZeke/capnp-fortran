@@ -31,6 +31,8 @@ module test_rpc_lifetime
    integer :: next_token = 0
    integer :: inside_deaths = -1
    integer :: touched = 0
+   integer :: pipeline_log(2) = 0
+   integer :: pipeline_count = 0
    type(counted_srv_t), pointer :: held => null()
    type(rpc_conn_t), pointer :: gsrv => null()
 
@@ -38,7 +40,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(8))
+      allocate (testsuite(9))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -55,6 +57,8 @@ contains
       testsuite(7)%test => run_partial_flush
       testsuite(8)%name = "failed flush keeps a reused export"
       testsuite(8)%test => run_partial_reused
+      testsuite(9)%name = "local chained pipelines preserve call order"
+      testsuite(9)%test => run_local_pipeline_order
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -81,6 +85,11 @@ contains
          touched = self%token
       else if (self%token < 0 .or. ctx%method_id < 0) then
          err = CAPNP_ERR_ARG
+      else if (ctx%method_id >= 20 .and. ctx%method_id <= 30) then
+         if (pipeline_count < size(pipeline_log)) then
+            pipeline_count = pipeline_count + 1
+            pipeline_log(pipeline_count) = ctx%method_id
+         end if
       end if
    end subroutine counted_dispatch
 
@@ -468,6 +477,46 @@ contains
       if (opened) call check_(error, final_count == 1, &
                               'release-in-dispatch: close frees nothing more')
    end subroutine run_release_during_dispatch
+
+   subroutine run_local_pipeline_order(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local, pipeline
+      type(capnp_message_t), target :: m1, m2, m3
+      type(payload_t) :: p1, p2, p3
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: q1, q2, q3
+      integer :: err
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         pipeline_count = 0
+         pipeline_log = 0
+         call rpc_call_begin(srv, local, LIFE_IFACE, 3, m1, p1, q1, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m1, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p1, s, err)
+         pipeline%kind = RPC_CAP_PIPELINE
+         pipeline%id = q1
+         pipeline%nops = 1
+         pipeline%ops(0) = 0
+         if (err == CAPNP_OK) call rpc_call_begin(srv, pipeline, LIFE_IFACE, 20, m2, p2, q2, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m2, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p2, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m2, err)
+         if (err == CAPNP_OK) call rpc_call_begin(srv, pipeline, LIFE_IFACE, 30, m3, p3, q3, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m3, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p3, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m3, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m1, err)
+         call check_(error, err == CAPNP_OK .and. pipeline_count == 2 .and. &
+                     pipeline_log(1) == 20 .and. pipeline_log(2) == 30, &
+                     'local chained pipelines preserve call order')
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_local_pipeline_order
 
    !> With the export table full, the overflow calls are exception Returns
    !> and only the servers that were not exported are freed before close.
