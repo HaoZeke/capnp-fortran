@@ -89,3 +89,17 @@ struct DeepGroups {
     }
   }
 }
+
+# A union group arm that contains its own inner union: clearing the outer arm
+# must reset the inner discriminant as well as the slots.
+struct NestedUnion {
+  union {
+    a @0 :Int32;
+    g :group {
+      union {
+        x @1 :Int32;
+        y @2 :Text;
+      }
+    }
+  }
+}

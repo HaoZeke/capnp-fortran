@@ -562,8 +562,10 @@ contains
       end select
    end subroutine dyn_zero_slot
 
-   !> Zero every slot of a struct or group, including nested groups.
+   !> Zero every slot and inner union discriminant of a struct or group,
+   !> including nested groups.
    recursive subroutine dyn_clear_slots(schema, idx, p, depth, err)
+      use capnp_union, only: capnp_set_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -579,6 +581,10 @@ contains
       if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
+      end if
+      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) then
+         call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), 0, err)
+         if (err /= CAPNP_OK) return
       end if
       fl = node_struct_fields(schema%nodes(idx), err)
       if (err /= CAPNP_OK) return

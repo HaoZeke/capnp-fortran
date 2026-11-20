@@ -66,6 +66,16 @@ module schema__dynamic_capnp
    integer, parameter :: DEEP_GROUPS_A_TAG = 0
    integer, parameter :: DEEP_GROUPS_G1_TAG = 1
 
+   integer, parameter :: NESTED_UNION_DWORDS = 1
+   integer, parameter :: NESTED_UNION_PWORDS = 1
+   type :: nested_union_t
+      type(capnp_ptr_t) :: p
+   end type nested_union_t
+   integer, parameter :: NESTED_UNION_A_TAG = 0
+   integer, parameter :: NESTED_UNION_G_TAG = 1
+   integer, parameter :: NESTED_UNION_G_X_TAG = 0
+   integer, parameter :: NESTED_UNION_G_Y_TAG = 1
+
    integer(int64), parameter :: SCHEMA__9768_METHOD_NOTE_ID = -2113916645833798051_int64
    character(len=*), parameter :: SCHEMA__9768_ANNOTATED_SERVICE_PING_METHOD_NOTE = 'ping method'
    private :: cap_resolve
@@ -870,6 +880,102 @@ contains
       integer, intent(out) :: err
       call capnp_set_i32(h%p, 40_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_set
+
+   function nested_union_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nested_union_t) :: h
+      h%p = capnp_new_struct(msg, NESTED_UNION_DWORDS, NESTED_UNION_PWORDS, err)
+   end function nested_union_new
+
+   function nested_union_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nested_union_t) :: h
+      h = nested_union_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function nested_union_new_root
+
+   function nested_union_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(nested_union_t) :: h
+      h%p = capnp_root(msg, err)
+   end function nested_union_read_root
+
+   function nested_union_which(h) result(tag)
+      type(nested_union_t), intent(in) :: h
+      integer :: tag
+      tag = int(capnp_get_u16(h%p, 4_int64))
+   end function nested_union_which
+
+   function nested_union_a_get(h) result(v)
+      type(nested_union_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 0_int64)
+   end function nested_union_a_get
+
+   subroutine nested_union_a_set(h, v, err)
+      type(nested_union_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 4_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_i32(h%p, 0_int64, v, err)
+   end subroutine nested_union_a_set
+
+   subroutine nested_union_g_select(h, err)
+      type(nested_union_t), intent(in) :: h
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
+   end subroutine nested_union_g_select
+
+   function nested_union_g_which(h) result(tag)
+      type(nested_union_t), intent(in) :: h
+      integer :: tag
+      tag = int(capnp_get_u16(h%p, 6_int64))
+   end function nested_union_g_which
+
+   function nested_union_g_x_get(h) result(v)
+      type(nested_union_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 0_int64)
+   end function nested_union_g_x_get
+
+   subroutine nested_union_g_x_set(h, v, err)
+      type(nested_union_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 6_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_i32(h%p, 0_int64, v, err)
+   end subroutine nested_union_g_x_set
+
+   function nested_union_g_y_has(h) result(v)
+      type(nested_union_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function nested_union_g_y_has
+
+   subroutine nested_union_g_y_get(h, s, err)
+      type(nested_union_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 0, s, err)
+   end subroutine nested_union_g_y_get
+
+   subroutine nested_union_g_y_set(h, s, err)
+      type(nested_union_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 6_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_text(h%p, 0, s, err)
+   end subroutine nested_union_g_y_set
 
    subroutine cap_resolve(ctab, idx, cap, err)
       type(capnp_ptr_t), intent(in) :: ctab
