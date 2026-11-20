@@ -163,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(126))
+      allocate (testsuite(127))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -404,18 +404,20 @@ contains
       testsuite(119)%test => w_finish_cancels_queued_call
       testsuite(120)%name = "rpc-early-finish-keeps-queued-call"
       testsuite(120)%test => w_early_finish_keeps_queued_call
-      testsuite(121)%name = "posix-recv-eintr-retried"
-      testsuite(121)%test => t_recv_all_retries_eintr
-      testsuite(122)%name = "rpc-framing-511-accepted"
-      testsuite(122)%test => t_framing_511_accepted
-      testsuite(123)%name = "rpc-framing-512-rejected"
-      testsuite(123)%test => t_framing_512_rejected
-      testsuite(124)%name = "rpc-framing-oversized-rejected"
-      testsuite(124)%test => t_framing_oversized_rejected
-      testsuite(125)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(125)%test => t_framing_negative_traversal_rejected
-      testsuite(126)%name = "rpc-framing-short-and-padded"
-      testsuite(126)%test => t_framing_short_and_padded
+      testsuite(121)%name = "rpc-disembargo-on-forwarded-answer"
+      testsuite(121)%test => w_disembargo_on_forwarded_answer
+      testsuite(122)%name = "posix-recv-eintr-retried"
+      testsuite(122)%test => t_recv_all_retries_eintr
+      testsuite(123)%name = "rpc-framing-511-accepted"
+      testsuite(123)%test => t_framing_511_accepted
+      testsuite(124)%name = "rpc-framing-512-rejected"
+      testsuite(124)%test => t_framing_512_rejected
+      testsuite(125)%name = "rpc-framing-oversized-rejected"
+      testsuite(125)%test => t_framing_oversized_rejected
+      testsuite(126)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(126)%test => t_framing_negative_traversal_rejected
+      testsuite(127)%name = "rpc-framing-short-and-padded"
+      testsuite(127)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -913,6 +915,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_early_finish_keeps_queued_call(error)
    end subroutine w_early_finish_keeps_queued_call
+
+   subroutine w_disembargo_on_forwarded_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_disembargo_on_forwarded_answer(error)
+   end subroutine w_disembargo_on_forwarded_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10131,5 +10138,75 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_early_finish_keeps_queued_call
+
+   !> senderLoopback aimed at an answer that was forwarded to the peer is
+   !> echoed on the forwarded question. C++ 1.4.0 resolves that answer to
+   !> its tail call pipeline and writes promisedAnswer(tq, transform).
+   subroutine t_disembargo_on_forwarded_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply, m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(capnp_ptr_t) :: ops
+      integer(int64) :: qboot, qadder, eid, tq
+      integer :: e, n
+      logical :: ok, echoed
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send(sconn, 30_int64, qadder, [0])
+      call rpc_pump_once(cconn, e)
+      tq = -1_int64
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) &
+               tq = call_question_id_get(c)
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, tq >= 0_int64, 'forwarded disembargo: the call is forwarded')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(d, 900_int64, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, 30_int64, e)
+      ops = promised_answer_transform_init(pa, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      echoed = .false.
+      call raw_next(sconn%fd, reply, msg, ok)
+      if (ok .and. message_which(msg) == MESSAGE_DISEMBARGO_TAG) then
+         d = message_disembargo_get(msg, e)
+         tgt = disembargo_target_get(d, e)
+         if (disembargo_context_which(d) == DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG .and. &
+             message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+            pa = message_target_promised_answer_get(tgt, e)
+            ops = promised_answer_transform_get(pa, e)
+            echoed = disembargo_context_receiver_loopback_get(d) == 900_int64 .and. &
+                     promised_answer_question_id_get(pa) == tq .and. &
+                     capnp_list_len(ops) == 0_int64
+         end if
+      end if
+      if (ok) call capnp_message_free(reply)
+      call check_(error, rpc_conn_alive(cconn) .and. echoed, &
+                  'forwarded disembargo: echoed on the forwarded question')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_disembargo_on_forwarded_answer
 
 end module test_rpc

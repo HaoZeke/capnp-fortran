@@ -3337,11 +3337,13 @@ contains
 
    !> Echo of senderLoopback aimed at a pipeline client. writeTarget
    !> copies the promisedAnswer (rpc.c++ PipelineClient, 948-953).
-   subroutine send_receiver_loopback_answer(conn, embargo_id, src, err)
+   !> `on_qid`, when given, replaces the question of `src`.
+   subroutine send_receiver_loopback_answer(conn, embargo_id, src, err, on_qid)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: embargo_id
       type(promised_answer_t), intent(in) :: src
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: on_qid
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(disembargo_t) :: d
@@ -3352,6 +3354,7 @@ contains
       integer(int64) :: qid
       integer :: i, n
       qid = promised_answer_question_id_get(src)
+      if (present(on_qid)) qid = on_qid
       ops = promised_answer_transform_get(src, err)
       if (err /= CAPNP_OK) return
       n = int(capnp_list_len(ops))
@@ -7464,6 +7467,15 @@ contains
       if (err /= CAPNP_OK) return
       ar = message_return_get(amsg, err)
       if (err /= CAPNP_OK) return
+      if (return_which(ar) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG .and. &
+          aslot%forward_qid >= 0_int64) then
+         ! A forwarded answer is the pipeline of our question to the peer
+         ! (rpc.c++ directTailCall). That pipeline client writes
+         ! promisedAnswer(question, transform) as its target.
+         call send_receiver_loopback_answer(conn, embargo_id, pa, err, aslot%forward_qid)
+         if (err == CAPNP_ERR_KIND) call abort_conn(conn, 'Unsupported pipeline op.', err)
+         return
+      end if
       if (return_which(ar) /= RETURN_RESULTS_TAG) then
          call abort_conn(conn, back, err)
          return
