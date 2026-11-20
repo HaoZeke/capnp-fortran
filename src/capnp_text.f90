@@ -35,14 +35,23 @@ contains
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      type(capnp_brand_env_t) :: env
       integer :: ind
       err = CAPNP_OK
       text = ''
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       ind = 1
       if (present(pretty)) then
          if (.not. pretty) ind = 0
       end if
-      call enc_struct(schema, idx, p, ind, MODE_BARE, 0, text, err)
+      call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode
 
    subroutine capnp_text_decode(schema, idx, text, msg, err)
@@ -52,10 +61,15 @@ contains
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_ptr_t) :: root
+      type(capnp_brand_env_t) :: env
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      if (idx < 1 .or. .not. schema%loaded .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -71,7 +85,7 @@ contains
       sc%s = text
       sc%n = len(text)
       sc%i = 1
-      call parse_struct(schema, idx, root, sc, 0, err)
+      call parse_struct(schema, idx, root, env, sc, 0, err)
       if (err /= CAPNP_OK) return
       call skip_ws(sc)
       if (sc%i <= sc%n) err = CAPNP_ERR_ARG
@@ -84,6 +98,7 @@ contains
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      type(capnp_brand_env_t) :: env, cenv
       integer :: ind, tw, ord, idx
       type(capnp_ptr_t) :: q, et
       integer(int8), allocatable :: raw(:)
@@ -154,7 +169,7 @@ contains
          end if
          et = type_list_element(typ, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, ind, MODE_BARE, 0, text, err)
+         call enc_list(schema, et, q, env, ind, MODE_BARE, 0, text, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (val%kind /= CAPNP_PK_NULL) then
@@ -166,7 +181,9 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, q, ind, MODE_BARE, 0, text, err)
+         call capnp_brand_enter(env, typ, cenv, err)
+         if (err /= CAPNP_OK) return
+         call enc_struct(schema, idx, q, cenv, ind, MODE_BARE, 0, text, err)
       case (TYPE_ANY_POINTER)
          text = '<opaque pointer>'
       case (TYPE_INTERFACE)
@@ -206,10 +223,11 @@ contains
       end if
    end subroutine capnp_text_span
 
-   recursive subroutine enc_struct(schema, idx, p, indent, mode, depth, out, err)
+   recursive subroutine enc_struct(schema, idx, p, env, indent, mode, depth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, indent, mode, depth
       type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       type(piece_t), allocatable :: items(:)
@@ -253,7 +271,7 @@ contains
          end if
          call field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         call enc_field_value(schema, f, p, next_ind(indent), MODE_PREF, depth + 1, val, err)
+         call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth + 1, val, err)
          if (err /= CAPNP_OK) return
          call push(items, n, nm//' = '//val)
       end do
@@ -261,13 +279,15 @@ contains
       out = '('//body//')'
    end subroutine enc_struct
 
-   recursive subroutine enc_field_value(schema, f, p, indent, mode, depth, out, err)
+   recursive subroutine enc_field_value(schema, f, p, env, indent, mode, depth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
       integer, intent(in) :: indent, mode, depth
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, q, et, dv
+      type(capnp_ptr_t) :: raw_t, t, q, et, dv
+      type(capnp_brand_env_t) :: cenv
       character(len=:), allocatable :: s, esc
       integer(int8), allocatable :: raw(:)
       integer :: tw, idx, ord
@@ -280,11 +300,12 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, p, indent, mode, depth, out, err)
+         call enc_struct(schema, idx, p, env, indent, mode, depth, out, err)
          return
       end if
-      t = field_slot_type(f, err)
+      raw_t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       tw = type_which(t)
@@ -375,7 +396,7 @@ contains
          end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, indent, mode, depth, out, err)
+         call enc_list(schema, et, q, env, indent, mode, depth, out, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
@@ -391,7 +412,9 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, q, indent, mode, depth, out, err)
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
+         call enc_struct(schema, idx, q, cenv, indent, mode, depth, out, err)
       case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
@@ -401,26 +424,33 @@ contains
       end select
    end subroutine enc_field_value
 
-   recursive subroutine enc_list(schema, et, lst, indent, mode, depth, out, err)
+   recursive subroutine enc_list(schema, raw_et, lst, env, indent, mode, depth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, lst
+      type(capnp_ptr_t), intent(in) :: raw_et, lst
+      type(capnp_brand_env_t), intent(in) :: env
       integer, intent(in) :: indent, mode, depth
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       type(piece_t), allocatable :: items(:)
+      type(capnp_ptr_t) :: et
       character(len=:), allocatable :: el, body
       integer(int64) :: i, nlen
       integer :: n
       err = CAPNP_OK
       out = ''
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (lst%kind /= CAPNP_PK_LIST) then
          out = '[]'
          return
       end if
+      et = capnp_brand_resolve(env, raw_et)
       nlen = capnp_list_len(lst)
       n = 0
       do i = 0_int64, nlen - 1_int64
-         call enc_element(schema, et, lst, i, next_ind(indent), MODE_BARE, depth + 1, el, err)
+         call enc_element(schema, et, lst, i, env, next_ind(indent), MODE_BARE, depth + 1, el, err)
          if (err /= CAPNP_OK) return
          call push(items, n, el)
       end do
@@ -428,14 +458,16 @@ contains
       out = '['//body//']'
    end subroutine enc_list
 
-   recursive subroutine enc_element(schema, et, lst, i, indent, mode, depth, out, err)
+   recursive subroutine enc_element(schema, et, lst, i, env, indent, mode, depth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       integer(int64), intent(in) :: i
+      type(capnp_brand_env_t), intent(in) :: env
       integer, intent(in) :: indent, mode, depth
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q, inner, el
+      type(capnp_brand_env_t) :: cenv
       character(len=:), allocatable :: s, esc
       integer(int8), allocatable :: raw(:)
       integer :: tw, idx, ord
@@ -492,7 +524,7 @@ contains
          if (err /= CAPNP_OK) return
          inner = type_list_element(et, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, inner, q, indent, mode, depth, out, err)
+         call enc_list(schema, inner, q, env, indent, mode, depth, out, err)
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -501,16 +533,23 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, el, indent, mode, depth, out, err)
+         call capnp_brand_enter(env, et, cenv, err)
+         if (err /= CAPNP_OK) return
+         call enc_struct(schema, idx, el, cenv, indent, mode, depth, out, err)
+      case (TYPE_ANY_POINTER)
+         out = '<opaque pointer>'
+      case (TYPE_INTERFACE)
+         out = '<external capability>'
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine enc_element
 
-   recursive subroutine parse_struct(schema, idx, p, sc, depth, err)
+   recursive subroutine parse_struct(schema, idx, p, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f
@@ -544,7 +583,7 @@ contains
             call capnp_dyn_select(schema, idx, p, name, err)
             if (err /= CAPNP_OK) return
          end if
-         call parse_field_value(schema, f, p, sc, depth + 1, err)
+         call parse_field_value(schema, f, p, env, sc, depth + 1, err)
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (peek(sc) == ',') then
@@ -560,13 +599,15 @@ contains
       end do
    end subroutine parse_struct
 
-   recursive subroutine parse_field_value(schema, f, p, sc, depth, err)
+   recursive subroutine parse_field_value(schema, f, p, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(in) :: depth
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, q, et
+      type(capnp_ptr_t) :: raw_t, t, q, et, dv
+      type(capnp_brand_env_t) :: cenv
       integer :: tw, idx, dw, pw
       integer(int64) :: off
       err = CAPNP_OK
@@ -576,45 +617,55 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call parse_struct(schema, idx, p, sc, depth, err)
+         call parse_struct(schema, idx, p, env, sc, depth, err)
          return
       end if
-      t = field_slot_type(f, err)
+      raw_t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
       tw = type_which(t)
       off = field_slot_offset(f)
       select case (tw)
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call parse_list(schema, et, p, int(off), sc, depth, err)
+         call parse_list(schema, et, p, int(off), env, sc, depth, err)
       case (TYPE_STRUCT)
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
          dw = node_struct_data_words(schema%nodes(idx))
          pw = node_struct_pointer_count(schema%nodes(idx))
          q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call parse_struct(schema, idx, q, sc, depth, err)
+         call parse_struct(schema, idx, q, cenv, sc, depth, err)
       case default
-         call parse_scalar(schema, f, p, sc, err)
+         dv = field_slot_default(f, err)
+         if (err /= CAPNP_OK) return
+         call store_scalar(schema, t, p, off, sc, .false., 0_int64, dv, err)
       end select
    end subroutine parse_field_value
 
-   recursive subroutine parse_list(schema, et, parent, slot, sc, depth, err)
+   recursive subroutine parse_list(schema, raw_et, parent, slot, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, parent
+      type(capnp_ptr_t), intent(in) :: raw_et, parent
       integer, intent(in) :: slot, depth
+      type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: lst
+      type(capnp_ptr_t) :: lst, et
       integer :: n, i, at
       err = CAPNP_OK
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       call skip_ws(sc)
       if (peek(sc) /= '[') then
          err = CAPNP_ERR_ARG
@@ -625,7 +676,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      lst = capnp_codec_alloc_list(parent, et, n, schema, err)
+      et = capnp_brand_resolve(env, raw_et)
+      lst = capnp_codec_alloc_list(parent, et, n, schema, err, env=env)
       if (err /= CAPNP_OK) return
       call capnp_setp(parent, slot, lst, err)
       if (err /= CAPNP_OK) return
@@ -635,7 +687,7 @@ contains
          return
       end if
       do i = 0, n - 1
-         call parse_element(schema, et, lst, int(i, int64), sc, depth + 1, err)
+         call parse_element(schema, et, lst, int(i, int64), env, sc, depth + 1, err)
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (i < n - 1) then
@@ -653,14 +705,16 @@ contains
       if (err /= CAPNP_OK) sc%i = at
    end subroutine parse_list
 
-   recursive subroutine parse_element(schema, et, lst, i, sc, depth, err)
+   recursive subroutine parse_element(schema, et, lst, i, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       integer(int64), intent(in) :: i
+      type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(in) :: depth
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: inner, el
+      type(capnp_ptr_t) :: inner, el, dummy
+      type(capnp_brand_env_t) :: cenv
       integer :: tw, idx
       err = CAPNP_OK
       tw = type_which(et)
@@ -668,7 +722,7 @@ contains
       case (TYPE_LIST)
          inner = type_list_element(et, err)
          if (err /= CAPNP_OK) return
-         call parse_list(schema, inner, lst, int(i), sc, depth, err)
+         call parse_list(schema, inner, lst, int(i), env, sc, depth, err)
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -677,42 +731,19 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call parse_struct(schema, idx, el, sc, depth, err)
+         call capnp_brand_enter(env, et, cenv, err)
+         if (err /= CAPNP_OK) return
+         call parse_struct(schema, idx, el, cenv, sc, depth, err)
       case (TYPE_TEXT, TYPE_DATA, TYPE_VOID, TYPE_BOOL, TYPE_ENUM, &
             TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64, &
             TYPE_FLOAT32, TYPE_FLOAT64)
-         call parse_scalar_elem(schema, et, lst, i, sc, err)
+         dummy = capnp_ptr_t()
+         call store_scalar(schema, et, lst, 0_int64, sc, .true., i, dummy, err)
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine parse_element
-
-   subroutine parse_scalar(schema, f, p, sc, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: f, p
-      type(scan_t), intent(inout) :: sc
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, dv
-      integer(int64) :: off
-      t = field_slot_type(f, err)
-      if (err /= CAPNP_OK) return
-      dv = field_slot_default(f, err)
-      if (err /= CAPNP_OK) return
-      off = field_slot_offset(f)
-      call store_scalar(schema, t, p, off, sc, .false., 0_int64, dv, err)
-   end subroutine parse_scalar
-
-   subroutine parse_scalar_elem(schema, et, lst, i, sc, err)
-      type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, lst
-      integer(int64), intent(in) :: i
-      type(scan_t), intent(inout) :: sc
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: dummy
-      dummy = capnp_ptr_t()
-      call store_scalar(schema, et, lst, 0_int64, sc, .true., i, dummy, err)
-   end subroutine parse_scalar_elem
 
    subroutine store_scalar(schema, t, p, off, sc, in_list, ix, dv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema

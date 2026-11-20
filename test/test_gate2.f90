@@ -4,6 +4,7 @@ program test_gate2
    call case_0()
    call case_1()
    call case_2()
+   call case_3()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -117,4 +118,46 @@ contains
          achar(10) // &
          'done')
    end subroutine case_2
+
+   subroutine case_3()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '(textBox = (value = "hi", label = "l"), listBox = (value = [' // &
+         '"a", "b"]), nest = (inner = (value = "n"), boxes = [(value =' // &
+         ' "m")]))\n' // &
+         achar(39) // &
+         ' > /tmp/g2-bt.in' // &
+         achar(10) // &
+         'for t in text binary; do' // &
+         achar(10) // &
+         '  "$CAP" convert text:$t schema/box.capnp BoxUse < /tmp/g2-b' // &
+         't.in > /tmp/g2-bt.o; echo $? >> /tmp/g2-bt.o' // &
+         achar(10) // &
+         '  capnp convert text:$t schema/box.capnp BoxUse < /tmp/g2-bt' // &
+         '.in > /tmp/g2-bt.r; echo $? >> /tmp/g2-bt.r' // &
+         achar(10) // &
+         '  cmp -s /tmp/g2-bt.o /tmp/g2-bt.r || exit 1' // &
+         achar(10) // &
+         'done' // &
+         achar(10) // &
+         'capnp convert text:binary schema/box.capnp BoxUse < /tmp/g2-' // &
+         'bt.in > /tmp/g2-bt.bin' // &
+         achar(10) // &
+         '"$CAP" convert binary:text schema/box.capnp BoxUse < /tmp/g2' // &
+         '-bt.bin > /tmp/g2-bt.o; echo $? >> /tmp/g2-bt.o' // &
+         achar(10) // &
+         'capnp convert binary:text schema/box.capnp BoxUse < /tmp/g2-' // &
+         'bt.bin > /tmp/g2-bt.r; echo $? >> /tmp/g2-bt.r' // &
+         achar(10) // &
+         'cmp -s /tmp/g2-bt.o /tmp/g2-bt.r')
+   end subroutine case_3
 end program test_gate2
