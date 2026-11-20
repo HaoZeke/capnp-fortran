@@ -125,7 +125,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(109))
+      allocate (testsuite(110))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -332,18 +332,20 @@ contains
       testsuite(102)%test => w_finish_released_result_export
       testsuite(103)%name = "rpc-resolve-unknown-receiver-answer"
       testsuite(103)%test => w_resolve_unknown_receiver_answer
-      testsuite(104)%name = "posix-recv-eintr-retried"
-      testsuite(104)%test => t_recv_all_retries_eintr
-      testsuite(105)%name = "rpc-framing-511-accepted"
-      testsuite(105)%test => t_framing_511_accepted
-      testsuite(106)%name = "rpc-framing-512-rejected"
-      testsuite(106)%test => t_framing_512_rejected
-      testsuite(107)%name = "rpc-framing-oversized-rejected"
-      testsuite(107)%test => t_framing_oversized_rejected
-      testsuite(108)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(108)%test => t_framing_negative_traversal_rejected
-      testsuite(109)%name = "rpc-framing-short-and-padded"
-      testsuite(109)%test => t_framing_short_and_padded
+      testsuite(104)%name = "rpc-call-bootstrap-answer-transform"
+      testsuite(104)%test => w_call_bootstrap_answer_transform
+      testsuite(105)%name = "posix-recv-eintr-retried"
+      testsuite(105)%test => t_recv_all_retries_eintr
+      testsuite(106)%name = "rpc-framing-511-accepted"
+      testsuite(106)%test => t_framing_511_accepted
+      testsuite(107)%name = "rpc-framing-512-rejected"
+      testsuite(107)%test => t_framing_512_rejected
+      testsuite(108)%name = "rpc-framing-oversized-rejected"
+      testsuite(108)%test => t_framing_oversized_rejected
+      testsuite(109)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(109)%test => t_framing_negative_traversal_rejected
+      testsuite(110)%name = "rpc-framing-short-and-padded"
+      testsuite(110)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -640,6 +642,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_unknown_receiver_answer(error)
    end subroutine w_resolve_unknown_receiver_answer
+
+   subroutine w_call_bootstrap_answer_transform(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_call_bootstrap_answer_transform(error)
+   end subroutine w_call_bootstrap_answer_transform
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8394,5 +8401,90 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_unknown_receiver_answer
+
+   !> Raw Call from the peer socket of `sconn` on promisedAnswer `qid`
+   !> walking `fields` (negative is noop). Returns the Return's outcome.
+   subroutine pa_call(cconn, sconn, cq, qid, fields, is_exception, reason)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: cq, qid
+      integer, intent(in) :: fields(:)
+      logical, intent(out) :: is_exception
+      character(len=:), allocatable, intent(out) :: reason
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      type(payload_t) :: params
+      type(return_t) :: r
+      type(exception_t) :: ex
+      integer :: i, e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, cq, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qid, e)
+      ops = promised_answer_transform_init(pa, int(size(fields), int64), e)
+      do i = 1, size(fields)
+         op%p = capnp_list_get_struct(ops, i - 1, e)
+         if (fields(i) < 0) then
+            call promised_answer_op_noop_set(op, e)
+         else
+            call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+         end if
+      end do
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      is_exception = .false.
+      reason = ''
+      call rpc_recv_message(sconn%fd, reply, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(reply, e)
+      if (e == CAPNP_OK .and. message_which(msg) == MESSAGE_RETURN_TAG) then
+         r = message_return_get(msg, e)
+         if (return_which(r) == RETURN_EXCEPTION_TAG) then
+            is_exception = .true.
+            ex = return_exception_get(r, e)
+            call exception_reason_get(ex, reason, e)
+         end if
+      end if
+      call capnp_message_free(reply)
+   end subroutine pa_call
+
+   !> A Bootstrap answer's pipeline is its one capability, so a call
+   !> through any transform on it, noop included, fails with "Invalid
+   !> pipeline transform." (rpc.c++ 2915-2921, 3108-3125).
+   subroutine t_call_bootstrap_answer_transform(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      integer(int64) :: qboot, qadder, eid
+      logical :: is_exception
+      character(len=:), allocatable :: reason
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_call(cconn, sconn, 30_int64, qboot, [integer ::], is_exception, reason)
+      call check_(error, .not. is_exception, 'bootstrap answer: empty transform is called')
+      call pa_call(cconn, sconn, 31_int64, qboot, [-1], is_exception, reason)
+      call check_(error, is_exception .and. reason == 'Invalid pipeline transform.', &
+                  'bootstrap answer: noop transform fails')
+      call pa_call(cconn, sconn, 32_int64, qboot, [0], is_exception, reason)
+      call check_(error, is_exception .and. reason == 'Invalid pipeline transform.', &
+                  'bootstrap answer: field transform fails')
+      call check_(error, rpc_conn_alive(cconn), 'bootstrap answer: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_call_bootstrap_answer_transform
 
 end module test_rpc

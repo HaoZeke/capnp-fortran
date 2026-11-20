@@ -4279,6 +4279,7 @@ contains
       integer(int64) :: qid
       integer :: derr, eid
       logical :: dispatched, elsewhere
+      character(len=:), allocatable :: reason
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
@@ -4308,7 +4309,8 @@ contains
          return
       end if
 
-      call resolve_target(conn, c, eid, err)
+      reason = 'no such capability'
+      call resolve_target(conn, c, eid, err, reason)
       if (conn%dead) then
          call capnp_message_free(rm)
          return
@@ -4329,7 +4331,7 @@ contains
       end block
       if (err /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
-         call fill_exception(r, 'no such capability', err)
+         call fill_exception(r, reason, err)
          call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
          return
       end if
@@ -4372,26 +4374,29 @@ contains
    !> Find the export id a Call's target names: a direct export, or a
    !> promised answer resolved through a stored answer's capTable.
    !> eid = -1 when the target does not resolve.
-   subroutine resolve_target(conn, c, out_eid, err)
+   subroutine resolve_target(conn, c, out_eid, err, reason)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
+      character(len=:), allocatable, intent(inout) :: reason
       type(message_target_t) :: tgt
       out_eid = -1
       tgt = call_target_get(c, err)
       if (err /= CAPNP_OK) return
-      call resolve_message_target(conn, tgt, out_eid, err)
+      call resolve_message_target(conn, tgt, out_eid, err, reason)
    end subroutine resolve_target
 
    !> Resolve a MessageTarget to a local export index, or -1 when it names
    !> nothing this vat hosts. Shared by Call and Join, which address
-   !> capabilities the same way.
-   subroutine resolve_message_target(conn, tgt, out_eid, err)
+   !> capabilities the same way. `reason` is set when the target is a
+   !> broken capability with a known text.
+   subroutine resolve_message_target(conn, tgt, out_eid, err, reason)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_target_t), intent(in) :: tgt
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
+      character(len=:), allocatable, intent(inout), optional :: reason
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops, p, ctab
@@ -4421,6 +4426,24 @@ contains
          call answer_find(conn, aqid, aslot, afound)
          if (.not. afound) return
          if (.not. aslot%has_results) return
+         if (aslot%bootstrap) then
+            ops = promised_answer_transform_get(pa, err)
+            if (err /= CAPNP_OK) return
+            if (capnp_list_len(ops) > 0_int64) then
+               do i = 0, int(capnp_list_len(ops)) - 1
+                  op%p = capnp_list_get_struct(ops, i, err)
+                  if (err /= CAPNP_OK) return
+                  select case (promised_answer_op_which(op))
+                  case (PROMISED_ANSWER_OP_NOOP_TAG, PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+                  case default
+                     call abort_conn(conn, 'Unsupported pipeline op.', err)
+                     return
+                  end select
+               end do
+               if (present(reason)) reason = 'Invalid pipeline transform.'
+               return
+            end if
+         end if
          amsg = message_read_root(aslot%retmsg, err)
          ar = message_return_get(amsg, err)
          apl = return_results_get(ar, err)
