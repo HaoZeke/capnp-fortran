@@ -252,6 +252,8 @@ module capnp_rpc
       !> Import handles bound to retmsg's cap table when Return arrived.
       integer :: nresult_handles = 0
       integer(int64) :: result_handles(0:MAXCAPS - 1) = -1_int64
+      !> Result caps whose reference an introduction pickup has released.
+      logical :: result_released(0:MAXCAPS - 1) = .false.
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -388,6 +390,12 @@ module capnp_rpc
       integer(int64) :: vine_id = -1_int64
       integer(int64) :: vine_handle = -1_int64
       logical :: has_handle = .false.
+      !> The vine of a Return result is that result's reference. `qid` and
+      !> `capidx` name the result until Finish settles who owns it.
+      integer(int64) :: qid = -1_int64
+      integer :: capidx = -1
+      !> False once Finish(releaseResultCaps) has released the vine.
+      logical :: holds_vine = .true.
       integer :: port = 0
       character(len=MAXHOST) :: host = ''
       integer :: host_len = 0
@@ -2300,6 +2308,7 @@ contains
           .not. conn%questions(q)%local_results) then
          call scan_result_imports(conn, q, explicit_release, .false., err)
          if (err /= CAPNP_OK) return
+         if (any(conn%questions(q)%result_released)) explicit_release = .true.
       end if
       release_flag = .not. retain_caps
       if (explicit_release) release_flag = .false.
@@ -2326,6 +2335,7 @@ contains
             call drop_finished_caps(conn, q)
          end if
       end if
+      call settle_result_introductions(conn, qid, retain_caps)
       if (conn%questions(q)%used) then
          call capnp_message_free(conn%questions(q)%retmsg)
          call question_slot_clear(conn%questions(q))
@@ -2356,6 +2366,26 @@ contains
       if (ierr /= CAPNP_OK) return
       has = capnp_list_len(ctab) > 0
    end function result_has_caps
+
+   !> After Finish a retained result vine belongs to the application
+   !> until the pickup. A released one is gone, so the pickup must not
+   !> release it again.
+   subroutine settle_result_introductions(conn, qid, retain_caps)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      logical, intent(in) :: retain_caps
+      integer :: i
+      do i = 0, MAXINTRO - 1
+         if (.not. conn%introductions(i)%used) cycle
+         if (conn%introductions(i)%qid /= qid) cycle
+         conn%introductions(i)%qid = -1_int64
+         conn%introductions(i)%capidx = -1
+         if (.not. retain_caps) then
+            conn%introductions(i)%holds_vine = .false.
+            conn%introductions(i)%has_handle = .false.
+         end if
+      end do
+   end subroutine settle_result_introductions
 
    !> Finish(releaseResultCaps) is the release. A later rpc_release_send
    !> must not send a second Release for the same result caps.
@@ -2405,6 +2435,8 @@ contains
          if (local) then
             if (id >= 0_int64 .and. id < int(MAXE, int64)) &
                call drop_export(conn, int(id), 1)
+         else if (result_was_released(conn%questions(q), i)) then
+            cycle
          else
             if (i < conn%questions(q)%nresult_handles .and. &
                 conn%questions(q)%result_handles(i) /= -1_int64) then
@@ -2438,6 +2470,14 @@ contains
       node%refs = node%refs - 1
       if (node%refs == 0) node%released = .true.
    end subroutine forget_import_ref
+
+   pure logical function result_was_released(slot, i)
+      type(rpc_question_slot_t), intent(in) :: slot
+      integer, intent(in) :: i
+      result_was_released = .false.
+      if (i >= 0 .and. i < size(slot%result_released)) &
+         result_was_released = slot%result_released(i)
+   end function result_was_released
 
    !> Walk result imports recorded for question `q`. `any_released` is
    !> true when one of them has already sent Release. With `do_release`,
@@ -2492,6 +2532,7 @@ contains
             end block
          end select
          if (id < 0_int64) cycle
+         if (result_was_released(conn%questions(q), i)) cycle
          found = .false.
          node => null()
          if (i < conn%questions(q)%nresult_handles .and. &
@@ -2532,6 +2573,12 @@ contains
       q = int(qid)
       if (.not. conn%questions(q)%used) then
          err = CAPNP_ERR_ARG
+         return
+      end if
+      ! Once Return has arrived this is an ordinary releasing Finish, which
+      ! knows about result references a pickup has already released.
+      if (conn%questions(q)%returned .and. .not. conn%questions(q)%local_call) then
+         call rpc_finish_send(conn, qid, .false., err)
          return
       end if
       if (conn%questions(q)%local_call) then
@@ -2585,6 +2632,7 @@ contains
       slot%import_handle = -1_int64
       slot%nresult_handles = 0
       slot%result_handles = -1_int64
+      slot%result_released = .false.
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -4096,12 +4144,13 @@ contains
    !> outlive the pickup. Dialling the third vat belongs to the network
    !> layer, so the arrangement is recorded and handed over rather than
    !> acted on here.
-   subroutine note_introductions(conn, pl, err, handles, nhandles)
+   subroutine note_introductions(conn, pl, err, handles, nhandles, qid)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: handles(0:)
       integer, intent(in), optional :: nhandles
+      integer(int64), intent(in), optional :: qid
       type(capnp_ptr_t) :: ctab, idp
       type(cap_descriptor_t) :: cd
       type(third_party_cap_descriptor_t) :: tp
@@ -4149,6 +4198,10 @@ contains
                      conn%introductions(j)%has_handle = .true.
                   end if
                end if
+            end if
+            if (present(qid)) then
+               conn%introductions(j)%qid = qid
+               conn%introductions(j)%capidx = i
             end if
             conn%introductions(j)%port = int(vat_id_port_get(vat))
             conn%introductions(j)%host = host
@@ -4223,7 +4276,10 @@ contains
       do i = 0, MAXINTRO - 1
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
-         if (conn%introductions(i)%has_handle) then
+         call note_result_released(conn, conn%introductions(i))
+         if (.not. conn%introductions(i)%holds_vine) then
+            err = CAPNP_OK
+         else if (conn%introductions(i)%has_handle) then
             vine%kind = RPC_CAP_IMPORT
             vine%id = conn%introductions(i)%vine_handle
             call rpc_release_send(conn, vine, err)
@@ -4234,6 +4290,19 @@ contains
          return
       end do
    end subroutine rpc_introduction_done
+
+   !> A pickup before Finish releases the result's own reference; a
+   !> releasing Finish must then leave that cap out.
+   subroutine note_result_released(conn, intro)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_introduction_t), intent(in) :: intro
+      integer :: q
+      if (intro%qid < 0_int64 .or. intro%qid >= int(MAXQ, int64)) return
+      q = int(intro%qid)
+      if (.not. conn%questions(q)%used .or. .not. conn%questions(q)%returned) return
+      if (intro%capidx < 0 .or. intro%capidx >= size(conn%questions(q)%result_released)) return
+      conn%questions(q)%result_released(intro%capidx) = .true.
+   end subroutine note_result_released
 
    !> Write a `thirdPartyHosted` descriptor into `cd`: where the
    !> recipient should go, which pending Provide to claim once there, and
@@ -5148,7 +5217,8 @@ contains
                conn%questions(q)%result_handles, conn%questions(q)%nresult_handles)
             if (ierr == CAPNP_OK) call note_introductions( &
                conn, rpl, ierr, &
-               conn%questions(q)%result_handles, conn%questions(q)%nresult_handles)
+               conn%questions(q)%result_handles, conn%questions(q)%nresult_handles, &
+               int(q, int64))
             if (ierr /= CAPNP_OK) then
                call capnp_message_free(m)
                err = ierr

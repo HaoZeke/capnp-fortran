@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(98))
+      allocate (testsuite(100))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -302,18 +302,22 @@ contains
       testsuite(91)%test => w_shutdown
       testsuite(92)%name = "rpc-finish-after-resolve"
       testsuite(92)%test => w_finish_after_resolve
-      testsuite(93)%name = "posix-recv-eintr-retried"
-      testsuite(93)%test => t_recv_all_retries_eintr
-      testsuite(94)%name = "rpc-framing-511-accepted"
-      testsuite(94)%test => t_framing_511_accepted
-      testsuite(95)%name = "rpc-framing-512-rejected"
-      testsuite(95)%test => t_framing_512_rejected
-      testsuite(96)%name = "rpc-framing-oversized-rejected"
-      testsuite(96)%test => t_framing_oversized_rejected
-      testsuite(97)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(97)%test => t_framing_negative_traversal_rejected
-      testsuite(98)%name = "rpc-framing-short-and-padded"
-      testsuite(98)%test => t_framing_short_and_padded
+      testsuite(93)%name = "rpc-vine-finish-shared-id"
+      testsuite(93)%test => w_vine_finish_shared_id
+      testsuite(94)%name = "rpc-vine-done-shared-id-finish"
+      testsuite(94)%test => w_vine_done_shared_id_finish
+      testsuite(95)%name = "posix-recv-eintr-retried"
+      testsuite(95)%test => t_recv_all_retries_eintr
+      testsuite(96)%name = "rpc-framing-511-accepted"
+      testsuite(96)%test => t_framing_511_accepted
+      testsuite(97)%name = "rpc-framing-512-rejected"
+      testsuite(97)%test => t_framing_512_rejected
+      testsuite(98)%name = "rpc-framing-oversized-rejected"
+      testsuite(98)%test => t_framing_oversized_rejected
+      testsuite(99)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(99)%test => t_framing_negative_traversal_rejected
+      testsuite(100)%name = "rpc-framing-short-and-padded"
+      testsuite(100)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -546,6 +550,16 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_after_resolve(error)
    end subroutine w_finish_after_resolve
+
+   subroutine w_vine_finish_shared_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_vine_finish_shared_id(error)
+   end subroutine w_vine_finish_shared_id
+
+   subroutine w_vine_done_shared_id_finish(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_vine_done_shared_id_finish(error)
+   end subroutine w_vine_done_shared_id_finish
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7461,5 +7475,201 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_finish_after_resolve
+
+   !> A client on `cconn` holding the scripted peer's bootstrap as `cap`.
+   subroutine scripted_pair(cconn, sconn, srv, cap)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      class(rpc_server_t), pointer, intent(in) :: srv
+      type(rpc_cap_t), intent(out) :: cap
+      class(rpc_server_t), pointer :: none
+      integer :: fa, fb, e
+      integer(int64) :: qboot
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(sconn, fb, srv)
+      none => null()
+      call rpc_conn_init(cconn, fa, none)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+   end subroutine scripted_pair
+
+   !> Return `ncaps` results for `qid`, pointer field i holding cap i.
+   !> Cap i is senderHosted `id0 + i`, except index `vine_at`, which is
+   !> thirdPartyHosted with that id as its vine and `nonce`.
+   subroutine scripted_caps_return(cconn, sconn, qid, ncaps, vine_at, id0, nonce)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: qid, id0, nonce
+      integer, intent(in) :: ncaps, vine_at
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: results
+      type(capnp_ptr_t) :: s, ctab
+      type(cap_descriptor_t) :: cd
+      integer :: i, e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qid, e)
+      results = return_results_init(r, e)
+      s = capnp_new_struct(m, 0, ncaps, e)
+      do i = 0, ncaps - 1
+         call capnp_setp(s, i, rpc_make_cap_ptr(m, i), e)
+      end do
+      call payload_content_set(results, s, e)
+      ctab = payload_cap_table_init(results, int(ncaps, int64), e)
+      do i = 0, ncaps - 1
+         cd%p = capnp_list_get_struct(ctab, i, e)
+         if (i == vine_at) then
+            call rpc_write_third_party_cap(cd, '10.1.0.4', 5004, nonce, id0 + i, e)
+         else
+            call cap_descriptor_sender_hosted_set(cd, id0 + i, e)
+         end if
+      end do
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+   end subroutine scripted_caps_return
+
+   !> Next frame the client sent, if any arrives within `ms`. For Finish
+   !> `a` is the question and `b` is 1 when releaseResultCaps is set; for
+   !> Release they are the id and the count.
+   subroutine scripted_frame(sconn, ms, got, tag, a, b)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer, intent(in) :: ms
+      logical, intent(out) :: got
+      integer, intent(out) :: tag
+      integer(int64), intent(out) :: a, b
+      type(capnp_message_t), target :: reply
+      type(message_t) :: rmsg
+      type(finish_t) :: fin
+      type(release_t) :: rel
+      integer :: e
+      got = .false.
+      tag = -1
+      a = -1_int64
+      b = -1_int64
+      call px_poll_in(sconn%fd, ms, got, e)
+      if (e /= CAPNP_OK .or. .not. got) then
+         got = .false.
+         return
+      end if
+      call rpc_recv_message(sconn%fd, reply, e)
+      if (e /= CAPNP_OK) then
+         got = .false.
+         return
+      end if
+      rmsg = message_read_root(reply, e)
+      tag = message_which(rmsg)
+      if (tag == MESSAGE_FINISH_TAG) then
+         fin = message_finish_get(rmsg, e)
+         a = finish_question_id_get(fin)
+         b = merge(1_int64, 0_int64, finish_release_result_caps_get(fin))
+      else if (tag == MESSAGE_RELEASE_TAG) then
+         rel = message_release_get(rmsg, e)
+         a = release_id_get(rel)
+         b = release_reference_count_get(rel)
+      end if
+      call capnp_message_free(reply)
+   end subroutine scripted_frame
+
+   !> Two concurrent Returns name the same export: q1 as a thirdPartyHosted
+   !> vine, q2 as senderHosted. Finish(q1) releasing its caps already
+   !> returns q1's reference, so the pickup must not release q2's.
+   subroutine t_vine_finish_shared_id(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: cap, cap2
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: q1, q2, a, b
+      integer :: e, tag
+      logical :: got
+      srv => local_echo
+      call scripted_pair(cconn, sconn, srv, cap)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q1, e)
+      call capnp_message_free(m)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q2, e)
+      call capnp_message_free(m)
+      call scripted_caps_return(cconn, sconn, q1, 1, 0, 81_int64, 911_int64)
+      call scripted_caps_return(cconn, sconn, q2, 1, -1, 81_int64, 0_int64)
+      call rpc_result_cap(cconn, q2, [0], cap2, e)
+      call check_(error, e == CAPNP_OK .and. cap2%kind == RPC_CAP_IMPORT, &
+                  'shared vine: second result cap')
+      call rpc_finish_send(cconn, q1, .false., e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_FINISH_TAG .and. a == q1 .and. &
+                  b == 1_int64, 'shared vine: Finish releases q1 results')
+      call rpc_introduction_done(cconn, 911_int64, e)
+      call check_(error, e == CAPNP_OK, 'shared vine: pickup after Finish succeeds')
+      call scripted_frame(sconn, 50, got, tag, a, b)
+      call check_(error, .not. got, 'shared vine: pickup after Finish sends no Release')
+      call rpc_finish_send(cconn, q2, .true., e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call rpc_release_send(cconn, cap2, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_RELEASE_TAG .and. a == 81_int64 .and. &
+                  b == 1_int64, 'shared vine: q2 releases its reference once')
+      call check_(error, rpc_conn_alive(cconn), 'shared vine: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_vine_finish_shared_id
+
+   !> The pickup comes first and releases q1's reference. A releasing
+   !> Finish or cancellation of q1 must then leave that cap out.
+   subroutine t_vine_done_shared_id_finish(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: q1, q2, q3, q4, a, b
+      integer :: e, tag
+      logical :: got
+      srv => local_echo
+      call scripted_pair(cconn, sconn, srv, cap)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q1, e)
+      call capnp_message_free(m)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q2, e)
+      call capnp_message_free(m)
+      call scripted_caps_return(cconn, sconn, q1, 1, 0, 81_int64, 911_int64)
+      call scripted_caps_return(cconn, sconn, q2, 1, -1, 81_int64, 0_int64)
+      call rpc_introduction_done(cconn, 911_int64, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, e == CAPNP_OK .and. got .and. tag == MESSAGE_RELEASE_TAG .and. &
+                  a == 81_int64 .and. b == 1_int64, 'done first: pickup releases the vine')
+      call rpc_finish_send(cconn, q1, .false., e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_FINISH_TAG .and. a == q1 .and. &
+                  b == 0_int64, 'done first: Finish keeps q2 reference')
+      call scripted_frame(sconn, 50, got, tag, a, b)
+      call check_(error, .not. got, 'done first: Finish sends no second Release')
+      call rpc_finish_send(cconn, q2, .false., e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_FINISH_TAG .and. a == q2 .and. &
+                  b == 1_int64, 'done first: q2 Finish releases its result')
+
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q3, e)
+      call capnp_message_free(m)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q4, e)
+      call capnp_message_free(m)
+      call scripted_caps_return(cconn, sconn, q3, 1, 0, 82_int64, 912_int64)
+      call scripted_caps_return(cconn, sconn, q4, 1, -1, 82_int64, 0_int64)
+      call rpc_introduction_done(cconn, 912_int64, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call rpc_request_cancellation(cconn, q3, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, e == CAPNP_OK .and. got .and. tag == MESSAGE_FINISH_TAG .and. &
+                  a == q3 .and. b == 0_int64, 'done first: cancel keeps q4 reference')
+      call check_(error, rpc_conn_alive(cconn), 'done first: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_vine_done_shared_id_finish
 
 end module test_rpc
