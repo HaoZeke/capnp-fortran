@@ -28,7 +28,13 @@ contains
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One ordered suite: cases share a socketpair connection (setup once).
-      testsuite = [new_unittest("rpc", run_rpc)]
+      testsuite = [ &
+         new_unittest("rpc", run_rpc), &
+         new_unittest("rpc-framing-511-accepted", t_framing_511_accepted), &
+         new_unittest("rpc-framing-512-rejected", t_framing_512_rejected), &
+         new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected), &
+         new_unittest("rpc-framing-short-and-padded", t_framing_short_and_padded) &
+      ]
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1420,5 +1426,281 @@ contains
       call rpc_wait(cli, bootcap%id, err)
       call check_(error, err == CAPNP_OK, 'poll: answer arrived')
    end subroutine t_pump_poll
+
+   !> Send bytes and close the write side, so a reader that wrongly asks
+   !> for more sees EOF (CAPNP_ERR_IO) and fails its check instead of
+   !> blocking the suite.
+   subroutine send_closed(fd, bytes, e)
+      integer, intent(in) :: fd
+      integer(int8), intent(in) :: bytes(:)
+      integer, intent(out) :: e
+      call px_send_all(fd, bytes, e)
+      call px_shutdown_wr(fd)
+   end subroutine send_closed
+
+   !> Cap'n Proto C++ AsyncMessageReader accepts firstWord[0] == 510
+   !> (511 segments).
+   subroutine t_framing_511_accepted(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: src, dst
+      type(capnp_ptr_t) :: s
+      integer(int8), allocatable :: single(:), frame(:)
+      integer(int64) :: header_bytes, seg0_bytes, seg0_words, extra_bytes
+      integer :: fa, fb, e, i
+      call capnp_message_init_builder(src, e)
+      call check_(error, e == CAPNP_OK, 'framing 511: init builder')
+      s = capnp_new_struct(src, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 424242_int64, e)
+      call capnp_set_root(src, s, e)
+      call capnp_serialize_bytes(src, single, e)
+      call check_(error, e == CAPNP_OK, 'framing 511: serialize base')
+      if (allocated(error)) then
+         call capnp_message_free(src)
+         return
+      end if
+
+      header_bytes = 2048_int64
+      seg0_bytes = size(single, kind=int64) - 8_int64
+      seg0_words = seg0_bytes/CAPNP_WORD_BYTES
+      extra_bytes = 510_int64*CAPNP_WORD_BYTES
+      allocate (frame(0:header_bytes + seg0_bytes + extra_bytes - 1_int64))
+      frame = 0_int8
+      call cp_put_i32(frame, 0_int64, 510_int32)
+      call cp_put_i32(frame, 4_int64, int(seg0_words, int32))
+      do i = 2, 511
+         call cp_put_i32(frame, int(i, int64)*4_int64, 1_int32)
+      end do
+      frame(header_bytes:header_bytes + seg0_bytes - 1_int64) = &
+         single(8:8 + seg0_bytes - 1_int64)
+
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'framing 511: socketpair')
+      if (.not. allocated(error)) then
+         call send_closed(fa, frame, e)
+         call check_(error, e == CAPNP_OK, 'framing 511: send frame')
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_OK, 'framing 511: recv accepted')
+         call check_(error, dst%nsegs == 511, 'framing 511: segment count')
+         if (.not. allocated(error)) then
+            s = capnp_root(dst, e)
+            call check_(error, e == CAPNP_OK, 'framing 511: read root')
+            call check_(error, capnp_get_i64(s, 0_int64) == 424242_int64, &
+                        'framing 511: payload intact')
+         end if
+      end if
+      call capnp_message_free(src)
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_framing_511_accepted
+
+   !> Cap'n Proto C++ AsyncMessageReader rejects firstWord[0] >= 511
+   !> (512 segments and u32 overflow) before reading moreSizes or allocating.
+   subroutine t_framing_512_rejected(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t) :: dst
+      integer(int8) :: head(0:7)
+      integer :: fa, fb, e
+
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'framing 512: socketpair')
+      if (.not. allocated(error)) then
+         head = 0_int8
+         call cp_put_i32(head, 0_int64, 511_int32)
+         call cp_put_i32(head, 4_int64, 1_int32)
+         call send_closed(fa, head, e)
+         call check_(error, e == CAPNP_OK, 'framing 512: send header word')
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_ERR_FRAMING, 'framing 512: rejected')
+         call check_(error, dst%nsegs == 0, 'framing 512: message empty')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+
+      if (allocated(error)) return
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'framing u32max: socketpair')
+      if (.not. allocated(error)) then
+         head = 0_int8
+         call cp_put_i32(head, 0_int64, -1_int32)
+         call cp_put_i32(head, 4_int64, 0_int32)
+         call send_closed(fa, head, e)
+         call check_(error, e == CAPNP_OK, 'framing u32max: send header word')
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_ERR_FRAMING, 'framing u32max: rejected')
+         call check_(error, dst%nsegs == 0, 'framing u32max: message empty')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_framing_512_rejected
+
+   !> Cap'n Proto C++ AsyncMessageReader rejects totalWords above
+   !> traversalLimitInWords before allocating or reading the body.
+   subroutine t_framing_oversized_rejected(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: src, dst
+      type(capnp_ptr_t) :: s
+      integer(int8) :: head(0:7), hdr2(0:15)
+      integer(int8), allocatable :: wire(:)
+      integer :: fa, fb, e
+
+      ! Single segment one word past the 64 MiB default traversal limit.
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'oversized default+1: socketpair')
+      if (.not. allocated(error)) then
+         head = 0_int8
+         call cp_put_i32(head, 0_int64, 0_int32)
+         call cp_put_i32(head, 4_int64, int(CAPNP_DEFAULT_TRAVERSAL_WORDS + 1_int64, int32))
+         call send_closed(fa, head, e)
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_ERR_TRAVERSAL, 'oversized default+1: rejected')
+         call check_(error, dst%nsegs == 0, 'oversized default+1: message empty')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+      if (allocated(error)) return
+
+      ! Single segment claiming 2^32 - 1 words (32 GiB): must fail before allocation.
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'oversized u32max: socketpair')
+      if (.not. allocated(error)) then
+         head = 0_int8
+         call cp_put_i32(head, 0_int64, 0_int32)
+         call cp_put_i32(head, 4_int64, -1_int32)
+         call send_closed(fa, head, e)
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_ERR_TRAVERSAL, 'oversized u32max: rejected')
+         call check_(error, dst%nsegs == 0, 'oversized u32max: message empty')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+      if (allocated(error)) return
+
+      ! Two segments each under the limit whose sum exceeds it.
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'oversized sum: socketpair')
+      if (.not. allocated(error)) then
+         hdr2 = 0_int8
+         call cp_put_i32(hdr2, 0_int64, 1_int32)
+         call cp_put_i32(hdr2, 4_int64, 4194305_int32)
+         call cp_put_i32(hdr2, 8_int64, 4194305_int32)
+         call send_closed(fa, hdr2, e)
+         call rpc_recv_message(fb, dst, e)
+         call check_(error, e == CAPNP_ERR_TRAVERSAL, 'oversized sum: rejected')
+         call check_(error, dst%nsegs == 0, 'oversized sum: message empty')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+      if (allocated(error)) return
+
+      ! Exact boundary: the frame check is totalWords <= limit, so a 3-word
+      ! body is rejected at limit 2 and framed at limit 3. Reading the root
+      ! then charges the root word twice plus the 2-word struct, so limit 3
+      ! fails there and limit 4 reads.
+      call capnp_message_init_builder(src, e)
+      s = capnp_new_struct(src, 2, 0, e)
+      call capnp_set_i64(s, 0_int64, 11_int64, e)
+      call capnp_set_i64(s, 8_int64, 22_int64, e)
+      call capnp_set_root(src, s, e)
+      call capnp_serialize_bytes(src, wire, e)
+      call check_(error, e == CAPNP_OK .and. size(wire, kind=int64) == 32_int64, &
+                  'oversized boundary: 3-word message serialized')
+      if (.not. allocated(error)) then
+         call px_socketpair(fa, fb, e)
+         call send_closed(fa, wire(0:7), e)
+         call rpc_recv_message(fb, dst, e, traversal_words=2_int64)
+         call check_(error, e == CAPNP_ERR_TRAVERSAL, 'oversized boundary: limit 2 rejects 3 words')
+         call px_close(fa)
+         call px_close(fb)
+
+         call px_socketpair(fa, fb, e)
+         call send_closed(fa, wire, e)
+         call rpc_recv_message(fb, dst, e, traversal_words=3_int64)
+         call check_(error, e == CAPNP_OK, 'oversized boundary: limit 3 frames 3 words')
+         if (.not. allocated(error)) then
+            s = capnp_root(dst, e)
+            call check_(error, e == CAPNP_ERR_TRAVERSAL, &
+                        'oversized boundary: limit 3 fails at root read')
+         end if
+         call px_close(fa)
+         call px_close(fb)
+
+         call px_socketpair(fa, fb, e)
+         call send_closed(fa, wire, e)
+         call rpc_recv_message(fb, dst, e, traversal_words=4_int64)
+         call check_(error, e == CAPNP_OK, 'oversized boundary: limit 4 frames 3 words')
+         if (.not. allocated(error)) then
+            s = capnp_root(dst, e)
+            call check_(error, e == CAPNP_OK .and. capnp_get_i64(s, 8_int64) == 22_int64, &
+                        'oversized boundary: limit 4 payload intact')
+         end if
+         call px_close(fa)
+         call px_close(fb)
+      end if
+      call capnp_message_free(src)
+      call capnp_message_free(dst)
+   end subroutine t_framing_oversized_rejected
+
+   !> Feed raw bytes to rpc_recv_message over a socketpair, closing the
+   !> sender afterwards so a short frame reads as EOF.
+   subroutine recv_raw(bytes, dst, e)
+      integer(int8), intent(in) :: bytes(:)
+      type(capnp_message_t), intent(inout) :: dst
+      integer, intent(out) :: e
+      integer :: fa, fb, se
+      call px_socketpair(fa, fb, se)
+      if (se /= CAPNP_OK) then
+         e = se
+         return
+      end if
+      if (size(bytes) > 0) call px_send_all(fa, bytes, se)
+      call px_close(fa)
+      call rpc_recv_message(fb, dst, e)
+      call px_close(fb)
+   end subroutine recv_raw
+
+   !> AsyncMessageReader reads the odd-count padding word without looking
+   !> at it, and any EOF inside the header or body is a disconnect.
+   subroutine t_framing_short_and_padded(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t) :: dst
+      integer(int8) :: buf(0:39)
+      integer :: e
+
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 1_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 1_int32)
+      call cp_put_i32(buf, 12_int64, -559038737_int32)
+      call recv_raw(buf, dst, e)
+      call check_(error, e == CAPNP_OK, 'short/padded: nonzero pad word accepted')
+      call check_(error, dst%nsegs == 2, 'short/padded: two segments read')
+
+      call recv_raw(buf(0:0), dst, e)
+      call check_(error, e == CAPNP_ERR_IO, 'short/padded: EOF in first word')
+      call check_(error, dst%nsegs == 0, 'short/padded: EOF in first word leaves msg empty')
+
+      call recv_raw(buf(0:-1), dst, e)
+      call check_(error, e == CAPNP_ERR_IO, 'short/padded: EOF before any byte')
+
+      call recv_raw(buf(0:11), dst, e)
+      call check_(error, e == CAPNP_ERR_IO, 'short/padded: EOF inside the size table')
+      call check_(error, dst%nsegs == 0, 'short/padded: EOF inside the size table leaves msg empty')
+
+      call recv_raw(buf(0:23), dst, e)
+      call check_(error, e == CAPNP_ERR_IO, 'short/padded: EOF inside the body')
+      call check_(error, dst%nsegs == 0, 'short/padded: EOF inside the body leaves msg empty')
+
+      buf = 0_int8
+      call recv_raw(buf(0:7), dst, e)
+      call check_(error, e == CAPNP_OK, 'short/padded: empty one-segment frame is framed')
+      call check_(error, dst%nsegs == 1, 'short/padded: empty frame segment count')
+      call capnp_message_free(dst)
+   end subroutine t_framing_short_and_padded
 
 end module test_rpc
