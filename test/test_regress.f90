@@ -89,7 +89,8 @@ contains
          new_unittest("json-schema-chain", run_json_schema_chain), &
          new_unittest("group-clear-depth", run_group_clear_depth), &
          new_unittest("packed-zero-cap", run_packed_zero_cap), &
-         new_unittest("json-trailing-spaces", run_json_trailing_spaces) &
+         new_unittest("json-trailing-spaces", run_json_trailing_spaces), &
+         new_unittest("json-union-clear", run_json_union_clear) &
          ]
    end subroutine collect_regress
 
@@ -2163,5 +2164,110 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_trailing_spaces
+
+   !> Named unions and group-contained unions drop earlier arms when a later
+   !> key selects another arm, matching Cap'n Proto C++ orphan/adopt.
+   !> Anonymous unions on a struct and root-level flattened unions keep them.
+   subroutine run_json_union_clear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      character(len=:), allocatable :: src
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x9a1b2c3d4e5f6072;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+            'struct Sub { a @0 :Int32; b @1 :Int32; }'//achar(10)// &
+            'struct Anon {'//achar(10)// &
+            '  union { none @0 :Void; num @1 :Int32; sub @2 :Sub; }'//achar(10)// &
+            '}'//achar(10)// &
+            'struct Root {'//achar(10)// &
+            '  u :union {'//achar(10)// &
+            '    none @0 :Void;'//achar(10)// &
+            '    num @1 :Int32;'//achar(10)// &
+            '    sub @2 :Sub;'//achar(10)// &
+            '    grp :group {'//achar(10)// &
+            '      x @3 :Int32;'//achar(10)// &
+            '      iu :union { inone @4 :Void; isub @5 :Sub; }'//achar(10)// &
+            '    }'//achar(10)// &
+            '  }'//achar(10)// &
+            '  d :union $Json.discriminator(name = "kind") {'//achar(10)// &
+            '    dnone @6 :Void; dnum @7 :Int32; dsub @8 :Sub;'//achar(10)// &
+            '  }'//achar(10)// &
+            '  g :group {'//achar(10)// &
+            '    s @9 :Anon;'//achar(10)// &
+            '    fu :union $Json.flatten() {'//achar(10)// &
+            '      fnone @10 :Void; fnum @11 :Int32; fsub @12 :Sub;'//achar(10)// &
+            '    }'//achar(10)// &
+            '  }'//achar(10)// &
+            '  rfu :union $Json.flatten() {'//achar(10)// &
+            '    rnone @13 :Void; rnum @14 :Int32; rsub @15 :Sub;'//achar(10)// &
+            '  }'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/uc.capnp', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/uc.capnp > '//tmp//'/uc.cgr')) then
+         call test_failed(error, 'union-clear: compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/uc.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK, 'union-clear: load')
+      call check_case('Root', '{"u":{"sub":{"a":3},"none":null}}')
+      call check_case('Root', '{"u":{"sub":{"a":3},"num":42}}')
+      call check_case('Root', '{"u":{"num":42,"sub":{"a":3}}}')
+      call check_case('Root', '{"u":{"grp":{"x":1,"iu":{"isub":{"a":2}}},"none":null}}')
+      call check_case('Root', '{"d":{"dsub":{"a":3},"kind":"dnone"}}')
+      call check_case('Root', '{"d":{"dnum":42,"kind":"dnone"}}')
+      call check_case('Root', '{"g":{"fsub":{"a":3},"fnone":null}}')
+      call check_case('Root', '{"g":{"s":{"sub":{"a":3},"none":null}}}')
+      call check_case('Root', '{"rsub":{"a":3},"rnone":null}')
+      call check_case('Anon', '{"sub":{"a":3},"none":null}')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine check_case(tname, js)
+         character(len=*), intent(in) :: tname, js
+         type(capnp_message_t) :: decoded
+         integer(int8), allocatable :: ours(:), ref(:)
+         integer :: idx, e2
+         logical :: cpp_ok, ours_ok
+         if (allocated(error)) return
+         idx = capnp_dyn_find(schema, tname, e2)
+         if (e2 /= CAPNP_OK .or. idx == 0) then
+            call test_failed(error, 'union-clear: missing '//tname)
+            return
+         end if
+         call spit(tmp//'/uc.json', js, e2)
+         cpp_ok = sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" json:canonical '//tmp//'/uc.capnp '//tname &
+            //' < '//tmp//'/uc.json > '//tmp//'/uc.can 2>'//tmp//'/uc.err')
+         call capnp_json_decode(schema, idx, js, decoded, e2)
+         ours_ok = e2 == CAPNP_OK
+         if (cpp_ok .neqv. ours_ok) then
+            call test_failed(error, 'union-clear: status '//tname//' '//js)
+            call capnp_message_free(decoded)
+            return
+         end if
+         if (.not. ours_ok) then
+            call capnp_message_free(decoded)
+            return
+         end if
+         call capnp_canonicalize(decoded, ours, e2)
+         call capnp_read_file(tmp//'/uc.can', ref, e2)
+         if (e2 /= CAPNP_OK .or. .not. allocated(ours) .or. .not. allocated(ref)) then
+            call test_failed(error, 'union-clear: bytes '//tname//' '//js)
+         else if (.not. same_i8(ours, ref)) then
+            call test_failed(error, 'union-clear: bytes '//tname//' '//js)
+         end if
+         call capnp_message_free(decoded)
+      end subroutine check_case
+   end subroutine run_json_union_clear
 
 end module test_regress

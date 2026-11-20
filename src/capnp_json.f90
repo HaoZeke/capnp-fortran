@@ -203,7 +203,7 @@ contains
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
       call union_seen_reset()
-      call fill_struct(schema, idx, obj, env, no_disc, root, 0, err)
+      call fill_struct(schema, idx, obj, env, no_disc, root, 0, .false., err)
    end subroutine capnp_json_decode
 
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
@@ -933,13 +933,14 @@ contains
       union_seen_disc(union_seen_n) = disc
    end subroutine union_note
 
-   recursive subroutine fill_struct(schema, idx, p, env, parent_disc, jv, depth, err)
+   recursive subroutine fill_struct(schema, idx, p, env, parent_disc, jv, depth, clear_prev, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
       type(capnp_brand_env_t), intent(in) :: env
       type(disc_opts_t), intent(in) :: parent_disc
       type(jval), intent(in) :: jv
+      logical, intent(in) :: clear_prev
       integer, intent(out) :: err
       integer :: mark
       err = CAPNP_OK
@@ -948,14 +949,14 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      call fill_struct_pfx(schema, idx, p, env, '', parent_disc, '', jv, depth, err)
+      call fill_struct_pfx(schema, idx, p, env, '', parent_disc, '', jv, depth, clear_prev, err)
       ! Drop notes made for this object. Nested objects save their own
       ! mark, so a long list does not fill the 64-slot record.
       union_seen_n = mark
    end subroutine fill_struct
 
    recursive subroutine fill_struct_pfx(schema, idx, p, env, pfx, parent_disc, union_decl, jv, &
-                                        depth, err, unresolved)
+                                        depth, clear_prev, err, unresolved)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -963,6 +964,7 @@ contains
       character(len=*), intent(in) :: pfx, union_decl
       type(disc_opts_t), intent(in) :: parent_disc
       type(jval), intent(in) :: jv
+      logical, intent(in) :: clear_prev
       integer, intent(out) :: err
       logical, intent(out), optional :: unresolved
       type(capnp_ptr_t) :: fl, f, al, raw_t, t, q
@@ -1001,7 +1003,8 @@ contains
                if (err /= CAPNP_OK) return
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
-               call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, depth + 1, err)
+               call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, &
+                                    depth + 1, clear_prev, err)
                if (err /= CAPNP_OK) return
             else
                raw_t = field_slot_type(f, err)
@@ -1031,7 +1034,8 @@ contains
                   call capnp_setp(p, int(field_slot_offset(f)), q, err)
                   if (err /= CAPNP_OK) return
                end if
-               call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, depth + 1, err)
+               call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, &
+                                    depth + 1, .false., err)
                if (err /= CAPNP_OK) return
             end if
          else
@@ -1062,7 +1066,8 @@ contains
          end if
       end if
 
-      call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, err, unresolved)
+      call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, clear_prev, err, &
+                             unresolved)
    end subroutine fill_struct_pfx
 
    !> Zero the storage of one field. A known union tag does this after
@@ -1087,9 +1092,13 @@ contains
          fl = node_struct_fields(schema%nodes(gidx), err)
          if (err /= CAPNP_OK) return
          nf = int(capnp_list_len(fl))
-         ! A group union ends on its first member, the same as capnp's
-         ! clear of the field whose discriminant is zero.
+         ! Clear the active arm first so switching away from a group drops
+         ! any non-zero inner arm before resetting the discriminant to 0.
          if (node_struct_discriminant_count(schema%nodes(gidx)) > 0) then
+            if (active_union_field(schema, gidx, p, child)) then
+               call clear_field(schema, child, p, env, err)
+               if (err /= CAPNP_OK) return
+            end if
             do i = 0, nf - 1
                child = capnp_list_get_struct(fl, i, err)
                if (err /= CAPNP_OK) return
@@ -1156,7 +1165,7 @@ contains
    !> still decode. valueName and flattened-union keys that appear before
    !> the tag are retried after it.
    recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, &
-                                          depth, err, unresolved)
+                                          depth, clear_prev, err, unresolved)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -1164,6 +1173,7 @@ contains
       character(len=*), intent(in) :: pfx, dkey
       type(disc_opts_t), intent(in) :: opts
       type(jval), intent(in) :: jv
+      logical, intent(in) :: clear_prev
       integer, intent(out) :: err
       logical, intent(out), optional :: unresolved
       type(capnp_ptr_t) :: child
@@ -1216,7 +1226,7 @@ contains
       recursive subroutine apply_key(ki, defer)
          integer, intent(in) :: ki
          logical, intent(out) :: defer
-         type(capnp_ptr_t) :: f, al, raw_t, t, q
+         type(capnp_ptr_t) :: f, old_f, al, raw_t, t, q
          type(disc_opts_t) :: gdisc, no_disc
          type(jval) :: one
          character(len=:), allocatable :: key, local, raw_nm, fpfx, vkey
@@ -1235,6 +1245,14 @@ contains
             if (tag_set) then
                err = CAPNP_ERR_ARG
                return
+            end if
+            if (clear_prev) then
+               if (active_union_field(schema, idx, p, old_f)) then
+                  if (field_discriminant(old_f) /= field_discriminant(f)) then
+                     call clear_field(schema, old_f, p, env, err)
+                     if (err /= CAPNP_OK) return
+                  end if
+               end if
             end if
             call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
                                   field_discriminant(f), err)
@@ -1269,6 +1287,14 @@ contains
                   call flatten_opts(f, is_flat, fpfx, err)
                   if (err /= CAPNP_OK) return
                   if (.not. is_flat) then
+                     if (clear_prev) then
+                        if (active_union_field(schema, idx, p, old_f)) then
+                           if (field_discriminant(old_f) /= field_discriminant(f)) then
+                              call clear_field(schema, old_f, p, env, err)
+                              if (err /= CAPNP_OK) return
+                           end if
+                        end if
+                     end if
                      call capnp_set_which(p, &
                         int(node_struct_discriminant_offset(schema%nodes(idx))), &
                         field_discriminant(f), err)
@@ -1317,7 +1343,7 @@ contains
             call read_disc_opts(al, gdisc, err)
             if (err /= CAPNP_OK) return
             call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, one, &
-                                 depth + 1, err, nested_deferred)
+                                 depth + 1, clear_prev, err, nested_deferred)
             if (err == CAPNP_OK .and. nested_deferred) defer = .true.
             return
          end if
@@ -1349,7 +1375,7 @@ contains
             have_child = .true.
          end if
          call fill_struct_pfx(schema, sidx, child, cenv, pfx//fpfx, no_disc, '', one, &
-                              depth + 1, err, nested_deferred)
+                              depth + 1, .false., err, nested_deferred)
          if (err == CAPNP_OK .and. nested_deferred) defer = .true.
       end subroutine apply_key
    end subroutine decode_union_keys
@@ -1490,7 +1516,7 @@ contains
          if (err /= CAPNP_OK) return
          call clear_field(schema, f, p, env, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, p, env, gdisc, jv, depth, err)
+         call fill_struct(schema, idx, p, env, gdisc, jv, depth, .true., err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -1525,7 +1551,7 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, q, cenv, no_disc, jv, depth, err)
+         call fill_struct(schema, idx, q, cenv, no_disc, jv, depth, .false., err)
       case (TYPE_DATA)
          call fill_data(p, int(off), jv, mode, .false., 0_int64, err)
       case default
@@ -1580,7 +1606,7 @@ contains
             end if
             call capnp_brand_enter(env, et, cenv, err)
             if (err /= CAPNP_OK) return
-            call fill_struct(schema, idx, el, cenv, no_disc, jv%kids(i), depth + 1, err)
+            call fill_struct(schema, idx, el, cenv, no_disc, jv%kids(i), depth + 1, .false., err)
          case (TYPE_DATA)
             call fill_data(lst, i - 1, jv%kids(i), 0, .true., int(i - 1, int64), err)
          case default
