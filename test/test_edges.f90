@@ -31,6 +31,7 @@ contains
          new_unittest("cpp-match", run_cpp_match), &
          new_unittest("text-layout", run_text_layout), &
          new_unittest("nest-depth", run_nest_depth), &
+         new_unittest("canonical-depth", run_canonical_depth), &
          new_unittest("text-depth", run_text_depth), &
          new_unittest("segment-sweep", run_segment_sweep), &
          new_unittest("far-landing-pad", run_far_pad), &
@@ -232,6 +233,26 @@ contains
       call json_depth(error, 64, .true.)
       call json_depth(error, 65, .false.)
    end subroutine run_nest_depth
+
+   !> Canonical conversion in capnp 1.4.0 traverses a long pointer chain.
+   subroutine run_canonical_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sch = &
+         '@0x8e7d6c5b4a392817;'//achar(10)// &
+         'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/node.capnp', sch, err)
+      call check_(error, err == 0, 'canonical-depth: schema')
+      call one_depth(error, 1000, 'canonical')
+   end subroutine run_canonical_depth
 
    subroutine one_depth(error, depth, fmt)
       type(error_type), allocatable, intent(inout) :: error
