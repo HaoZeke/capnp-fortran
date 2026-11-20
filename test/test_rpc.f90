@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(131))
+      allocate (testsuite(132))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -415,18 +415,20 @@ contains
       testsuite(124)%test => w_forward_opp_keeps_param_caps
       testsuite(125)%name = "rpc-pipeline-on-none-entry"
       testsuite(125)%test => w_pipeline_on_none_entry
-      testsuite(126)%name = "posix-recv-eintr-retried"
-      testsuite(126)%test => t_recv_all_retries_eintr
-      testsuite(127)%name = "rpc-framing-511-accepted"
-      testsuite(127)%test => t_framing_511_accepted
-      testsuite(128)%name = "rpc-framing-512-rejected"
-      testsuite(128)%test => t_framing_512_rejected
-      testsuite(129)%name = "rpc-framing-oversized-rejected"
-      testsuite(129)%test => t_framing_oversized_rejected
-      testsuite(130)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(130)%test => t_framing_negative_traversal_rejected
-      testsuite(131)%name = "rpc-framing-short-and-padded"
-      testsuite(131)%test => t_framing_short_and_padded
+      testsuite(126)%name = "rpc-resolve-unknown-descriptor-aborts"
+      testsuite(126)%test => w_resolve_unknown_descriptor_aborts
+      testsuite(127)%name = "posix-recv-eintr-retried"
+      testsuite(127)%test => t_recv_all_retries_eintr
+      testsuite(128)%name = "rpc-framing-511-accepted"
+      testsuite(128)%test => t_framing_511_accepted
+      testsuite(129)%name = "rpc-framing-512-rejected"
+      testsuite(129)%test => t_framing_512_rejected
+      testsuite(130)%name = "rpc-framing-oversized-rejected"
+      testsuite(130)%test => t_framing_oversized_rejected
+      testsuite(131)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(131)%test => t_framing_negative_traversal_rejected
+      testsuite(132)%name = "rpc-framing-short-and-padded"
+      testsuite(132)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -955,6 +957,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_pipeline_on_none_entry(error)
    end subroutine w_pipeline_on_none_entry
+
+   subroutine w_resolve_unknown_descriptor_aborts(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_unknown_descriptor_aborts(error)
+   end subroutine w_resolve_unknown_descriptor_aborts
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10539,5 +10546,47 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_pipeline_on_none_entry
+
+   !> A Resolve whose CapDescriptor type is unknown aborts with "unknown
+   !> CapDescriptor type", for a promise that is gone and for a live
+   !> one. C++ 1.4.0 handleResolve runs receiveCap before the lookup.
+   subroutine t_resolve_unknown_descriptor_aborts(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qboot, qadder, eid, pid
+      integer :: e, k
+
+      do k = 1, 2
+         srv => local_echo
+         call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+         pid = 99_int64
+         if (k == 2) then
+            call ra_called_promise(cconn, sconn, 4_int64, promised)
+            pid = 4_int64
+         end if
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, pid, e)
+         cd = resolve_cap_init(rv, e)
+         call capnp_set_u16(cd%p, 0_int64, 9_int32, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call check_(error, .not. rpc_conn_alive(cconn) .and. &
+                     rpc_conn_reason(cconn) == 'unknown CapDescriptor type', &
+                     'unknown descriptor: the Resolve aborts')
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         if (allocated(error)) return
+      end do
+   end subroutine t_resolve_unknown_descriptor_aborts
 
 end module test_rpc

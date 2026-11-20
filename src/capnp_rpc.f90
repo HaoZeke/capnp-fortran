@@ -3566,6 +3566,12 @@ contains
          call abort_conn(conn, "'Resolve' contained 'CapDescriptor.none'.", err)
          return
       end if
+      ! receiveCap reads the descriptor before the promise is looked up,
+      ! so an unknown type aborts even for a promise that is gone.
+      if (cap_descriptor_which(cd) > CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG) then
+         call abort_conn(conn, 'unknown CapDescriptor type', err)
+         return
+      end if
       call import_find_wire(conn, pid, node, found)
       ! C++ reads the descriptor before it looks the promise up, so a
       ! receiverAnswer that fails to read aborts even when the promise
@@ -3607,8 +3613,6 @@ contains
          end block
       case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
          call resolve_receiver_answer(conn, node, cd, err)
-      case default
-         call abort_conn(conn, "Unknown 'Resolve' type.", err)
       end select
    end subroutine handle_resolve
 
