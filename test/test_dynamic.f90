@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(22))
+      allocate (testsuite(23))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -75,6 +75,8 @@ contains
       testsuite(21)%test => run_load_cleanup
       testsuite(22)%name = "dynamic-wire-count"
       testsuite(22)%test => run_wire_count
+      testsuite(23)%name = "dynamic-int-range"
+      testsuite(23)%test => run_int_range
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1354,5 +1356,77 @@ contains
       call check_(error, err == CAPNP_ERR_ALLOC, 'nodes: zero-size list is not allocated')
       call capnp_dyn_free(schema)
    end subroutine run_node_bomb
+
+   !> Values that do not fit the field width are rejected and leave the
+   !> previous bits alone.
+   subroutine run_int_range(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, choice
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, idx, cidx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 3_int64, err)
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 128_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == 3_int64, &
+                  'range: int8 overflow keeps 3')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', -129_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int8 underflow')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', -128_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == -128_int64, &
+                  'range: int8 minimum')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 127_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == 127_int64, &
+                  'range: int8 maximum')
+      call capnp_dyn_set_int(schema, idx, root, 'u8', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint8 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'u8', 256_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint8 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'i16', 32768_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int16 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u16', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint16 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'i32', 2147483648_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int32 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u32', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint32 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'u32', 4294967296_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint32 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u64', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint64 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: enum rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 65536_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: enum above uint16')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 9_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'hue', err) == 9_int64, &
+                  'range: unknown enumerant still fits')
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 2147483648_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: union int32 overflow')
+      tag = capnp_dyn_which(schema, cidx, choice, err)
+      call capnp_dyn_get_text(schema, cidx, choice, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1 .and. s == 'keep', &
+                  'range: rejected union write preserves prior arm')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_int_range
 
 end module test_dynamic
