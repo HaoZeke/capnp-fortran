@@ -23,6 +23,7 @@ module capnp_posix
    integer(c_int), parameter :: SOL_SOCKET = 1
    integer(c_int), parameter :: SO_REUSEADDR = 2
    integer(c_short), parameter :: POLLIN = 1_c_short
+   integer(c_int), parameter :: EINTR = 4_c_int
 
    type, bind(c) :: c_pollfd
       integer(c_int) :: fd
@@ -79,6 +80,11 @@ module capnp_posix
          integer(c_size_t), value :: n
          integer(c_long) :: got
       end function c_recv
+
+      function c_errno_location() bind(c, name='__errno_location') result(location)
+         import :: c_ptr
+         type(c_ptr) :: location
+      end function c_errno_location
 
       function c_bind(fd, addr, addrlen) bind(c, name='bind') result(rc)
          import :: c_int, c_ptr
@@ -186,12 +192,17 @@ contains
       integer, intent(out) :: err
       integer(int64) :: off, n
       integer(c_long) :: got
+      integer(c_int), pointer :: errno
       err = CAPNP_OK
       n = size(bytes, kind=int64)
       off = 0_int64
       do while (off < n)
          got = c_recv(int(fd, c_int), c_loc(bytes(lbound(bytes, 1) + off)), &
                       int(n - off, c_size_t), 0_c_int)
+         if (got < 0_c_long) then
+            call c_f_pointer(c_errno_location(), errno)
+            if (errno == EINTR) cycle
+         end if
          if (got <= 0_c_long) then
             err = CAPNP_ERR_IO
             return

@@ -3,6 +3,7 @@
 !> exceptions, finish/release bookkeeping, and the unimplemented reply.
 module test_rpc
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use iso_c_binding, only: c_int, c_funptr, c_funloc
    use capnp
    use rpc_capnp
    ! The vat speaks the three-party network layer, which names a third
@@ -22,6 +23,52 @@ module test_rpc
    class(rpc_server_t), pointer :: boot
    integer :: fda, fdb, err
 
+   integer(c_int), parameter :: SIGALRM = 14_c_int
+
+   interface
+      function c_fork() bind(c, name='fork') result(pid)
+         import :: c_int
+         integer(c_int) :: pid
+      end function c_fork
+
+      function c_alarm(seconds) bind(c, name='alarm') result(previous)
+         import :: c_int
+         integer(c_int), value :: seconds
+         integer(c_int) :: previous
+      end function c_alarm
+
+      function c_sleep(seconds) bind(c, name='sleep') result(remaining)
+         import :: c_int
+         integer(c_int), value :: seconds
+         integer(c_int) :: remaining
+      end function c_sleep
+
+      function c_signal(signum, handler) bind(c, name='signal') result(previous)
+         import :: c_int, c_funptr
+         integer(c_int), value :: signum
+         type(c_funptr), value :: handler
+         type(c_funptr) :: previous
+      end function c_signal
+
+      function c_siginterrupt(signum, flag) bind(c, name='siginterrupt') result(rc)
+         import :: c_int
+         integer(c_int), value :: signum, flag
+         integer(c_int) :: rc
+      end function c_siginterrupt
+
+      function c_waitpid(pid, status, options) bind(c, name='waitpid') result(waited)
+         import :: c_int
+         integer(c_int), value :: pid, options
+         integer(c_int), intent(out) :: status
+         integer(c_int) :: waited
+      end function c_waitpid
+
+      subroutine c_exit(status) bind(c, name='_exit')
+         import :: c_int
+         integer(c_int), value :: status
+      end subroutine c_exit
+   end interface
+
 
 contains
 
@@ -30,6 +77,7 @@ contains
       ! One ordered suite: cases share a socketpair connection (setup once).
       testsuite = [ &
          new_unittest("rpc", run_rpc), &
+         new_unittest("posix-recv-eintr-retried", t_recv_all_retries_eintr), &
          new_unittest("rpc-framing-511-accepted", t_framing_511_accepted), &
          new_unittest("rpc-framing-512-rejected", t_framing_512_rejected), &
          new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected), &
@@ -44,6 +92,55 @@ contains
       if (allocated(error)) return
       call check(error, cond, name)
    end subroutine check_
+
+   subroutine alarm_handler(signum) bind(c)
+      integer(c_int), value :: signum
+   end subroutine alarm_handler
+
+   !> A signal that interrupts recv() must not turn a live socket into I/O
+   !> failure. The child sends after SIGALRM has interrupted the parent.
+   subroutine t_recv_all_retries_eintr(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int8) :: sent(0:3), received(0:3)
+      integer :: fa, fb, e
+      integer(c_int) :: pid, status, ignored, waited
+      type(c_funptr) :: previous
+
+      sent = [11_int8, 22_int8, 33_int8, 44_int8]
+      received = -1_int8
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'posix EINTR: socketpair')
+      if (allocated(error)) return
+
+      pid = c_fork()
+      call check_(error, pid >= 0_c_int, 'posix EINTR: fork')
+      if (pid == 0_c_int) then
+         ignored = c_sleep(2_c_int)
+         call px_send_all(fa, sent, e)
+         call px_close(fa)
+         call px_close(fb)
+         if (e == CAPNP_OK) then
+            call c_exit(0_c_int)
+         else
+            call c_exit(1_c_int)
+         end if
+      end if
+      if (.not. allocated(error)) then
+         previous = c_signal(SIGALRM, c_funloc(alarm_handler))
+         ignored = c_siginterrupt(SIGALRM, 1_c_int)
+         ignored = c_alarm(1_c_int)
+         call px_recv_all(fb, received, e)
+         ignored = c_alarm(0_c_int)
+         previous = c_signal(SIGALRM, previous)
+         ignored = c_siginterrupt(SIGALRM, 0_c_int)
+         call check_(error, e == CAPNP_OK, 'posix EINTR: recv retried')
+         call check_(error, all(received == sent), 'posix EINTR: payload intact')
+      end if
+      waited = c_waitpid(pid, status, 0_c_int)
+      call check_(error, waited == pid .and. status == 0_c_int, 'posix EINTR: child exits cleanly')
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_recv_all_retries_eintr
 
    subroutine run_rpc(error)
       type(error_type), allocatable, intent(out) :: error
