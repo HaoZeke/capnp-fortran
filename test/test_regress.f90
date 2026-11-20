@@ -19,7 +19,8 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
-         new_unittest("text-leniency", run_text_leniency) &
+         new_unittest("text-leniency", run_text_leniency), &
+         new_unittest("unloaded-guard", run_unloaded) &
          ]
    end subroutine collect_regress
 
@@ -115,6 +116,26 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_text_leniency
 
+   subroutine run_unloaded(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: p
+      character(len=:), allocatable :: text
+      integer :: err
+      p = capnp_ptr_t()
+      call check_text_bounds(error)
+      if (allocated(error)) return
+      call capnp_text_encode(schema, 1, p, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text encode unloaded schema')
+      call capnp_text_decode(schema, 1, '()', msg, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text decode unloaded schema')
+      call capnp_json_encode(schema, 1, p, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: json encode unloaded schema')
+      call capnp_json_decode(schema, 1, '{}', msg, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: json decode unloaded schema')
+   end subroutine run_unloaded
+
    subroutine spit(path, s, err, err_ignored)
       character(len=*), intent(in) :: path, s
       integer, intent(out), optional :: err
@@ -196,4 +217,39 @@ contains
           '}'//achar(10)
    end function clash_schema
 
+   !> Recompile the text encoder with bounds checks. The parent evaluates
+   !> size() on an unallocated node array and aborts. The fix returns
+   !> an argument error before that call.
+   subroutine check_text_bounds(error)
+      type(error_type), allocatable, intent(inout) :: error
+      if (allocated(error)) return
+      if (.not. sh('mkdir -p '//tmp//'/mods' &
+         //' && mod=$(find build -name capnp_text.mod | xargs ls -t | head -1)' &
+         //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
+         //' && test -n "$mod" && test -n "$lib"' &
+         //' && dir=$(dirname "$mod")' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_text.f90 -o ' &
+         //tmp//'/text_check.o' &
+         //' && cat > '//tmp//'/ubounds.f90 <<''EOF'' &&'//achar(10)// &
+         'program u'//achar(10)// &
+         '   use capnp_text, only: capnp_text_encode'//achar(10)// &
+         '   use capnp_dynamic, only: capnp_dyn_schema_t'//achar(10)// &
+         '   use capnp_message, only: capnp_ptr_t'//achar(10)// &
+         '   use capnp_kinds, only: capnp_err_arg'//achar(10)// &
+         '   implicit none'//achar(10)// &
+         '   type(capnp_dyn_schema_t) :: schema'//achar(10)// &
+         '   type(capnp_ptr_t) :: p'//achar(10)// &
+         '   character(len=:), allocatable :: text'//achar(10)// &
+         '   integer :: err'//achar(10)// &
+         '   call capnp_text_encode(schema, 1, p, text, err)'//achar(10)// &
+         '   if (err /= capnp_err_arg) stop 1'//achar(10)// &
+         'end program'//achar(10)// &
+         'EOF'//achar(10)// &
+         'gfortran $san -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/ubounds.f90 ' &
+         //tmp//'/text_check.o "$lib" -o '//tmp//'/ubounds' &
+         //' && ASAN_OPTIONS=detect_leaks=0 '//tmp//'/ubounds')) then
+         call test_failed(error, 'guard: bounds-checked text encode')
+      end if
+   end subroutine check_text_bounds
 end module test_regress
