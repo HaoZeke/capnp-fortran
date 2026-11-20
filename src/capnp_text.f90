@@ -16,6 +16,7 @@ module capnp_text
    integer, parameter :: MODE_BARE = 1
    integer, parameter :: MODE_PREF = 2
    integer, parameter :: MAX_DEPTH = 64
+   logical, save :: ptr_kind_bad = .false.
 
    type :: piece_t
       character(len=:), allocatable :: s
@@ -49,6 +50,7 @@ contains
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
+      ptr_kind_bad = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -71,6 +73,7 @@ contains
       end if
       if (present(brand_env)) env = brand_env
       call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, 0, text, err)
+      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_text_encode
 
    subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty, &
@@ -86,6 +89,7 @@ contains
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
+      ptr_kind_bad = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -99,6 +103,7 @@ contains
       call guard_traversal(lst, limit, err)
       if (err /= CAPNP_OK) return
       call enc_list(schema, et, lst, env, ind, MODE_BARE, 0, text, err)
+      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_text_encode_list
 
    subroutine capnp_text_encode_enum(schema, tid, ord, text, err)
@@ -171,6 +176,7 @@ contains
       character(len=:), allocatable :: body, esc
       err = CAPNP_OK
       text = ''
+      ptr_kind_bad = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -263,6 +269,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_text_encode_value
 
    !> Locate one top-level text value. beg = 0 and err = 0 means no more input.
@@ -486,6 +493,10 @@ contains
             q = value_pointer(dv, err)
             if (err /= CAPNP_OK) return
          end if
+         if (q%kind /= CAPNP_PK_NULL .and. q%kind /= CAPNP_PK_STRUCT) then
+            ptr_kind_bad = .true.
+            q = capnp_ptr_t()
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
@@ -522,6 +533,7 @@ contains
          return
       end if
       if (lst%kind /= CAPNP_PK_LIST) then
+         if (lst%kind /= CAPNP_PK_NULL) ptr_kind_bad = .true.
          out = '[]'
          return
       end if

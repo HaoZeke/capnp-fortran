@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(40))
+      allocate (testsuite(41))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -102,7 +102,8 @@ contains
       testsuite(37) = new_unittest("json-dup-bad", run_json_dup_bad)
       testsuite(38) = new_unittest("canonical-null-root", run_canonical_null_root)
       testsuite(39) = new_unittest("json-ptr-kind", run_json_ptr_kind)
-      testsuite(40) = new_unittest("text-inactive-arm", run_text_inactive_arm)
+      testsuite(40) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
+      testsuite(41) = new_unittest("text-inactive-arm", run_text_inactive_arm)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -2761,5 +2762,68 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_inactive_arm
+
+   !> A pointer of the wrong kind still prints the recovered value and fails.
+   subroutine run_bin_ptr_kind(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer :: err
+      character(len=*), parameter :: nest = &
+         '0000000005000000000000000100010000000000000000000300000001000100' &
+         //'07000000000000000000000000000000'
+      character(len=*), parameter :: people = &
+         '000000000f0000000000000000000100030000002f0000000400000001000400' &
+         //'01000000020000000d000000120000000d000000220000000d00000017000000' &
+         //'1900000012000000410000000000000061406200000000000400000001000100' &
+         //'0000000000000000010000002200000031323300000000005800000000008000'
+      character(len=*), parameter :: wrong = &
+         '0000000005000000000000000000030001000000000000000400000001000000' &
+         //'00000000010000000000000000000000'
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call cmp_bin('schema/codec.capnp', 'NestedFlatStructDisc', 'text', nest, 'struct cap text')
+      call cmp_bin('schema/addressbook.capnp', 'AddressBook', 'json', people, 'list cap json')
+      call cmp_bin('schema/addressbook.capnp', 'AddressBook', 'text', people, 'list cap text')
+      call spit(tmp//'/wrong.capnp', &
+                '@0xabcdeffedcba0011;'//achar(10)// &
+                'struct Child { n @0 :Int32; }'//achar(10)// &
+                'struct MixedKinds { s @0 :Child; li @1 :List(Int32); ls @2 :List(Child); }' &
+                //achar(10), err)
+      if (err /= 0) then
+         call test_failed(error, 'wrong ptr schema')
+         return
+      end if
+      call cmp_bin(tmp//'/wrong.capnp', 'MixedKinds', 'text', wrong, 'list in struct text')
+      call cmp_bin(tmp//'/wrong.capnp', 'MixedKinds', 'json', wrong, 'struct in list json')
+   contains
+      subroutine cmp_bin(schema, typ, fmt, hex, label)
+         character(len=*), intent(in) :: schema, typ, fmt, hex, label
+         integer :: e2
+         if (allocated(error)) return
+         call spit(tmp//'/pk.hex', hex, e2)
+         if (e2 /= CAPNP_OK) then
+            call test_failed(error, 'ptr kind write '//label)
+            return
+         end if
+         if (.not. sh(cap_setup() &
+            //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && python3 -c "open('''//tmp//'/pk.bin'',''wb'').write(bytes.fromhex(open(''' &
+            //tmp//'/pk.hex'').read()))"' &
+            //' && capnp convert -I"$INC" binary:'//fmt//' --short '//schema//' '//typ &
+            //' < '//tmp//'/pk.bin > '//tmp//'/pk.ref 2>/dev/null; echo $? > '//tmp//'/pk.ref.rc' &
+            //' && "$CAP" convert -I"$INC" binary:'//fmt//' --short '//schema//' '//typ &
+            //' < '//tmp//'/pk.bin > '//tmp//'/pk.ours 2>/dev/null; echo $? > '//tmp//'/pk.ours.rc' &
+            //' && cmp -s '//tmp//'/pk.ref '//tmp//'/pk.ours' &
+            //' && cmp -s '//tmp//'/pk.ref.rc '//tmp//'/pk.ours.rc' &
+            //' && grep -qx 1 '//tmp//'/pk.ours.rc')) then
+            call test_failed(error, 'ptr kind '//label)
+         end if
+      end subroutine cmp_bin
+   end subroutine run_bin_ptr_kind
 
 end module test_regress

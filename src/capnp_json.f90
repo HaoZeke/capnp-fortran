@@ -656,7 +656,10 @@ contains
          err = CAPNP_ERR_DEPTH
          return
       end if
-      if (lst%kind /= CAPNP_PK_LIST) return
+      if (lst%kind /= CAPNP_PK_LIST) then
+         if (lst%kind /= CAPNP_PK_NULL) ptr_kind_bad = .true.
+         return
+      end if
       et = capnp_brand_resolve(env, raw_et)
       nlen = capnp_list_len(lst)
       n = 0
