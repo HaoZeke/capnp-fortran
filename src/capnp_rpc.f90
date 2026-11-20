@@ -3393,9 +3393,10 @@ contains
    !> answer that is still active and has results can supply one; any
    !> other answer, and a walk that reaches a null pointer, gives a broken
    !> capability. A Bootstrap answer takes only an empty transform; any
-   !> op, noop included, gives a broken capability. An unknown op or a
-   !> walk through a pointer that is not a struct makes C++ 1.4.0 abort
-   !> the connection, so it does here too.
+   !> op, noop included, gives a broken capability. An unknown op, a
+   !> walk through a pointer that is not a struct, or a walk ending on a
+   !> cap index outside the cap table makes C++ 1.4.0 abort the
+   !> connection, so it does here too.
    subroutine resolve_receiver_answer(conn, node, cd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(inout), target :: node
@@ -3497,8 +3498,12 @@ contains
             return
          else
             ctab = payload_cap_table_get(apl, err)
-            if (err == CAPNP_OK .and. p%capidx >= 0_int64 .and. &
-                p%capidx < capnp_list_len(ctab)) then
+            if (err == CAPNP_OK .and. (p%capidx < 0_int64 .or. &
+                                       p%capidx >= capnp_list_len(ctab))) then
+               call abort_conn(conn, 'Message contains invalid capability pointer.', err)
+               return
+            end if
+            if (err == CAPNP_OK) then
                acd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
                if (err == CAPNP_OK) then
                   select case (cap_descriptor_which(acd))

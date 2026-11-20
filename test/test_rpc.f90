@@ -125,7 +125,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(106))
+      allocate (testsuite(107))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -326,18 +326,20 @@ contains
       testsuite(99)%test => w_resolve_receiver_answer_reflected_caps
       testsuite(100)%name = "rpc-resolve-receiver-answer-exception"
       testsuite(100)%test => w_resolve_receiver_answer_exception
-      testsuite(101)%name = "posix-recv-eintr-retried"
-      testsuite(101)%test => t_recv_all_retries_eintr
-      testsuite(102)%name = "rpc-framing-511-accepted"
-      testsuite(102)%test => t_framing_511_accepted
-      testsuite(103)%name = "rpc-framing-512-rejected"
-      testsuite(103)%test => t_framing_512_rejected
-      testsuite(104)%name = "rpc-framing-oversized-rejected"
-      testsuite(104)%test => t_framing_oversized_rejected
-      testsuite(105)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(105)%test => t_framing_negative_traversal_rejected
-      testsuite(106)%name = "rpc-framing-short-and-padded"
-      testsuite(106)%test => t_framing_short_and_padded
+      testsuite(101)%name = "rpc-resolve-receiver-answer-bad-cap-index"
+      testsuite(101)%test => w_resolve_receiver_answer_bad_cap_index
+      testsuite(102)%name = "posix-recv-eintr-retried"
+      testsuite(102)%test => t_recv_all_retries_eintr
+      testsuite(103)%name = "rpc-framing-511-accepted"
+      testsuite(103)%test => t_framing_511_accepted
+      testsuite(104)%name = "rpc-framing-512-rejected"
+      testsuite(104)%test => t_framing_512_rejected
+      testsuite(105)%name = "rpc-framing-oversized-rejected"
+      testsuite(105)%test => t_framing_oversized_rejected
+      testsuite(106)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(106)%test => t_framing_negative_traversal_rejected
+      testsuite(107)%name = "rpc-framing-short-and-padded"
+      testsuite(107)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -619,6 +621,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_receiver_answer_exception(error)
    end subroutine w_resolve_receiver_answer_exception
+
+   subroutine w_resolve_receiver_answer_bad_cap_index(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_receiver_answer_bad_cap_index(error)
+   end subroutine w_resolve_receiver_answer_bad_cap_index
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8244,5 +8251,46 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_exception
+
+   !> A returned answer is read as it stands (rpc.c++ PostReturnRpcPipeline),
+   !> so a walk that ends on a cap pointer past the end of the cap table
+   !> aborts the way layout.c++ 2243 does.
+   subroutine t_resolve_receiver_answer_bad_cap_index(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(message_t) :: msg
+      type(return_t) :: ret
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: content, cap
+      integer(int64) :: qboot, qadder, eid, slot
+      integer :: e
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      msg = message_read_root(cconn%answers(int(qadder))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      if (e == CAPNP_OK) pl = return_results_get(ret, e)
+      if (e == CAPNP_OK) content = payload_content_get(pl, e)
+      if (e == CAPNP_OK) then
+         slot = content%off + int(content%dwords, int64)*8_int64
+         cconn%answers(int(qadder))%retmsg%segs(content%seg)%bytes(slot:slot + 7) = &
+            transfer(3_int64 + shiftl(5_int64, 32), [0_int8])
+         cap = capnp_getp(content, 0, e)
+      end if
+      call check_(error, e == CAPNP_OK .and. cap%kind == CAPNP_PK_CAP .and. &
+                  cap%capidx == 5_int64, 'receiverAnswer: cap index moved past the table')
+      if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 4_int64, promised)
+         call ra_resolve(cconn, sconn, 4_int64, qadder, [0])
+         call check_(error, .not. rpc_conn_alive(cconn) .and. &
+                     rpc_conn_reason(cconn) == 'Message contains invalid capability pointer.', &
+                     'receiverAnswer: invalid cap index aborts')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_receiver_answer_bad_cap_index
 
 end module test_rpc
