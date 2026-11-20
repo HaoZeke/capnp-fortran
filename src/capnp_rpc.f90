@@ -3461,7 +3461,14 @@ contains
          amsg = message_read_root(slot%retmsg, err)
          if (err == CAPNP_OK) ar = message_return_get(amsg, err)
          active = err == CAPNP_OK
-         if (active) active = return_which(ar) == RETURN_RESULTS_TAG
+         if (active) then
+            if (return_which(ar) == RETURN_EXCEPTION_TAG) then
+               call return_exception_reason(ar, reason)
+               active = .false.
+            else
+               active = return_which(ar) == RETURN_RESULTS_TAG
+            end if
+         end if
          err = CAPNP_OK
       end if
       if (active) then
@@ -3522,6 +3529,19 @@ contains
       node%reason = reason
    end subroutine resolve_receiver_answer
 
+   !> The reason of an exception Return. A pipelined capability on that
+   !> answer breaks with it (rpc.c++ sendErrorReturn keeps the pipeline).
+   subroutine return_exception_reason(ret, reason)
+      type(return_t), intent(in) :: ret
+      character(len=:), allocatable, intent(inout) :: reason
+      type(exception_t) :: ex
+      character(len=:), allocatable :: txt
+      integer :: e
+      ex = return_exception_get(ret, e)
+      if (e == CAPNP_OK) call exception_reason_get(ex, txt, e)
+      if (e == CAPNP_OK .and. allocated(txt)) reason = txt
+   end subroutine return_exception_reason
+
    subroutine settle_answer_promises(conn, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
@@ -3535,6 +3555,7 @@ contains
       type(cap_descriptor_t) :: cd
       integer :: i
       logical :: found
+      character(len=:), allocatable :: reason
 
       err = CAPNP_OK
       call answer_find(conn, qid, slot, found)
@@ -3543,7 +3564,25 @@ contains
       if (.not. slot%has_results) return
       msg = message_read_root(slot%retmsg, err)
       if (err == CAPNP_OK) ret = message_return_get(msg, err)
-      if (err == CAPNP_OK) pl = return_results_get(ret, err)
+      if (err /= CAPNP_OK) return
+      if (return_which(ret) == RETURN_EXCEPTION_TAG) then
+         reason = "invalid 'receiverAnswer'"
+         call return_exception_reason(ret, reason)
+         node => conn%imports
+         do while (associated(node))
+            if (node%state == IMP_ANSWER .and. node%answer_qid == qid) then
+               call release_all_import(conn, node, err)
+               if (err /= CAPNP_OK) return
+               node%state = IMP_BROKEN
+               node%reason = reason
+               call drain_answer_pipeline(conn, node%id, err)
+               if (err /= CAPNP_OK) return
+            end if
+            node => node%next
+         end do
+         return
+      end if
+      pl = return_results_get(ret, err)
       if (err == CAPNP_OK) content = payload_content_get(pl, err)
       if (err /= CAPNP_OK) return
 

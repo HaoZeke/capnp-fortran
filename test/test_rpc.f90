@@ -49,6 +49,14 @@ module test_rpc
       procedure :: dispatch => reflect_dispatch
    end type reflect_srv_t
 
+   !> Pumps `conn` once while answering, so a message sent after the
+   !> call arrives while the answer is pending, and then fails the call.
+   type, extends(rpc_server_t) :: pump_fail_srv_t
+      type(rpc_conn_t), pointer :: conn => null()
+   contains
+      procedure :: dispatch => pump_fail_dispatch
+   end type pump_fail_srv_t
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -117,7 +125,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(105))
+      allocate (testsuite(106))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -316,18 +324,20 @@ contains
       testsuite(98)%test => w_resolve_pending_receiver_answer
       testsuite(99)%name = "rpc-resolve-receiver-answer-reflected-caps"
       testsuite(99)%test => w_resolve_receiver_answer_reflected_caps
-      testsuite(100)%name = "posix-recv-eintr-retried"
-      testsuite(100)%test => t_recv_all_retries_eintr
-      testsuite(101)%name = "rpc-framing-511-accepted"
-      testsuite(101)%test => t_framing_511_accepted
-      testsuite(102)%name = "rpc-framing-512-rejected"
-      testsuite(102)%test => t_framing_512_rejected
-      testsuite(103)%name = "rpc-framing-oversized-rejected"
-      testsuite(103)%test => t_framing_oversized_rejected
-      testsuite(104)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(104)%test => t_framing_negative_traversal_rejected
-      testsuite(105)%name = "rpc-framing-short-and-padded"
-      testsuite(105)%test => t_framing_short_and_padded
+      testsuite(100)%name = "rpc-resolve-receiver-answer-exception"
+      testsuite(100)%test => w_resolve_receiver_answer_exception
+      testsuite(101)%name = "posix-recv-eintr-retried"
+      testsuite(101)%test => t_recv_all_retries_eintr
+      testsuite(102)%name = "rpc-framing-511-accepted"
+      testsuite(102)%test => t_framing_511_accepted
+      testsuite(103)%name = "rpc-framing-512-rejected"
+      testsuite(103)%test => t_framing_512_rejected
+      testsuite(104)%name = "rpc-framing-oversized-rejected"
+      testsuite(104)%test => t_framing_oversized_rejected
+      testsuite(105)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(105)%test => t_framing_negative_traversal_rejected
+      testsuite(106)%name = "rpc-framing-short-and-padded"
+      testsuite(106)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -515,6 +525,15 @@ contains
       call payload_content_set(ctx%results, rpc_make_cap_ptr(ctx%rmsg, 0), err)
    end subroutine reflect_dispatch
 
+   recursive subroutine pump_fail_dispatch(self, ctx, err)
+      class(pump_fail_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      integer :: e
+      if (associated(self%conn) .and. ctx%method_id >= 0) call rpc_pump_once(self%conn, e)
+      err = CAPNP_ERR_ARG
+   end subroutine pump_fail_dispatch
+
    subroutine w_sender_loopback_echo(error)
       type(error_type), allocatable, intent(out) :: error
       call t_sender_loopback_echo(error)
@@ -595,6 +614,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_receiver_answer_reflected_caps(error)
    end subroutine w_resolve_receiver_answer_reflected_caps
+
+   subroutine w_resolve_receiver_answer_exception(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_receiver_answer_exception(error)
+   end subroutine w_resolve_receiver_answer_exception
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8132,5 +8156,93 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_reflected_caps
+
+   !> A Call answer that returned an exception keeps its pipeline in
+   !> C++ 1.4.0 (rpc.c++ 2533-2535), so a receiverAnswer to it, with
+   !> or without a transform, breaks with that exception. The same holds
+   !> when the exception arrives after the answer was pipelined.
+   subroutine t_resolve_receiver_answer_exception(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_fail_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv, none
+      type(rpc_cap_t) :: promised, peer_boot
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(message_t) :: msg
+      type(return_t) :: ret
+      integer(int64) :: qboot, qadder, eid, qbad, qc
+      integer :: e, fa, fb
+      logical :: released, disembargo
+      character(len=*), parameter :: raised = 'method raised error'
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      peer_boot = rpc_cap_t()
+      peer_boot%kind = RPC_CAP_IMPORT
+      peer_boot%id = eid
+      call rpc_call_begin(sconn, peer_boot, ECHO_IFACE, 7, m, params, qbad, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qbad, e)
+      msg = message_read_root(cconn%answers(int(qbad))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      call check_(error, e == CAPNP_OK .and. cconn%answers(int(qbad))%has_results, &
+                  'receiverAnswer: the call answer is recorded')
+      if (.not. allocated(error)) &
+         call check_(error, return_which(ret) == RETURN_EXCEPTION_TAG, &
+                     'receiverAnswer: the call answer returned an exception')
+      if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 4_int64, promised)
+         call ra_resolve(cconn, sconn, 4_int64, qbad, [integer ::])
+         call ra_drain(sconn, 4_int64, released, disembargo)
+         call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                     'receiverAnswer: exception answer releases the promise')
+         call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+         call check_(error, e == RPC_ERR_EXCEPTION .and. rpc_conn_reason(cconn) == raised, &
+                     'receiverAnswer: exception answer breaks with its reason')
+      end if
+      if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 5_int64, promised)
+         call ra_resolve(cconn, sconn, 5_int64, qbad, [0])
+         call ra_drain(sconn, 5_int64, released, disembargo)
+         call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                     'receiverAnswer: exception answer walk releases the promise')
+         call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+         call check_(error, e == RPC_ERR_EXCEPTION .and. rpc_conn_reason(cconn) == raised, &
+                     'receiverAnswer: exception answer walk breaks with its reason')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call px_socketpair(fa, fb, e)
+      pumper%conn => cconn
+      srv => pumper
+      call rpc_conn_init(cconn, fa, srv)
+      none => null()
+      call rpc_conn_init(sconn, fb, none)
+      call rpc_bootstrap_send(sconn, peer_boot, e)
+      qboot = peer_boot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qboot, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], peer_boot, e)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call rpc_call_begin(sconn, peer_boot, ECHO_IFACE, 0, m, params, qbad, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call ra_resolve(cconn, sconn, 4_int64, qbad, [integer ::])
+      call ra_drain(sconn, 4_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                  'receiverAnswer: pending exception releases the promise')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. rpc_conn_reason(cconn) == raised, &
+                  'receiverAnswer: pending exception breaks with its reason')
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_receiver_answer_exception
 
 end module test_rpc
