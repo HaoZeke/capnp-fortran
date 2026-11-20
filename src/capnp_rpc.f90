@@ -2738,6 +2738,86 @@ contains
       call capnp_message_free(m)
    end subroutine send_sender_loopback
 
+   !> Echo of senderLoopback: receiverLoopback, target importedCap.
+   !> writeTarget on an ImportClient (rpc.c++ 896-899, 3508).
+   subroutine send_receiver_loopback_import(conn, embargo_id, import_id, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: embargo_id, import_id
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      d = message_disembargo_init(msg, err)
+      if (err == CAPNP_OK) call disembargo_context_receiver_loopback_set(d, embargo_id, err)
+      if (err == CAPNP_OK) tgt = disembargo_target_init(d, err)
+      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, import_id, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_receiver_loopback_import
+
+   !> Echo of senderLoopback aimed at a pipeline client. writeTarget
+   !> copies the promisedAnswer (rpc.c++ PipelineClient, 948-953).
+   subroutine send_receiver_loopback_answer(conn, embargo_id, src, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: embargo_id
+      type(promised_answer_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op, src_op
+      type(capnp_ptr_t) :: ops, new_ops
+      integer(int64) :: qid
+      integer :: i, n
+      qid = promised_answer_question_id_get(src)
+      ops = promised_answer_transform_get(src, err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(ops))
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(m)
+         return
+      end if
+      d = message_disembargo_init(msg, err)
+      if (err == CAPNP_OK) call disembargo_context_receiver_loopback_set(d, embargo_id, err)
+      if (err == CAPNP_OK) tgt = disembargo_target_init(d, err)
+      if (err == CAPNP_OK) pa = message_target_promised_answer_init(tgt, err)
+      if (err == CAPNP_OK) call promised_answer_question_id_set(pa, qid, err)
+      if (err == CAPNP_OK) new_ops = promised_answer_transform_init(pa, int(n, int64), err)
+      if (err == CAPNP_OK) then
+         do i = 0, n - 1
+            src_op%p = capnp_list_get_struct(ops, i, err)
+            if (err /= CAPNP_OK) exit
+            op%p = capnp_list_get_struct(new_ops, i, err)
+            if (err /= CAPNP_OK) exit
+            select case (promised_answer_op_which(src_op))
+            case (PROMISED_ANSWER_OP_NOOP_TAG)
+               call promised_answer_op_noop_set(op, err)
+            case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+               call promised_answer_op_get_pointer_field_set(op, &
+                  promised_answer_op_get_pointer_field_get(src_op), err)
+            case default
+               err = CAPNP_ERR_KIND
+            end select
+            if (err /= CAPNP_OK) exit
+         end do
+      end if
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_receiver_loopback_answer
+
    subroutine resolve_remote(conn, node, new_id, as_promise, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(inout) :: node
@@ -4611,10 +4691,28 @@ contains
                heldr = message_return_get(heldmsg, herr)
                ! Cap-less results need no Finish (rpc.c++ sendReturn,
                ! noFinishNeeded when the response has no capabilities).
+               ! A cap table entry is a capability even when it is
+               ! receiverHosted and adds no export.
                if (herr == CAPNP_OK) then
                   if (return_which(heldr) == RETURN_RESULTS_TAG .and. ctx%nexp == 0) then
-                     call return_no_finish_needed_set(heldr, .true., err)
-                     if (err == CAPNP_OK) capless = .true.
+                     block
+                        type(payload_t) :: cpl
+                        type(capnp_ptr_t) :: ctab
+                        integer :: cerr
+                        logical :: has_caps
+                        has_caps = .false.
+                        cpl = return_results_get(heldr, cerr)
+                        if (cerr == CAPNP_OK) then
+                           ctab = payload_cap_table_get(cpl, cerr)
+                           if (cerr == CAPNP_OK) then
+                              if (capnp_list_len(ctab) > 0_int64) has_caps = .true.
+                           end if
+                        end if
+                        if (.not. has_caps) then
+                           call return_no_finish_needed_set(heldr, .true., err)
+                           if (err == CAPNP_OK) capless = .true.
+                        end if
+                     end block
                   end if
                end if
             end if
@@ -5143,8 +5241,9 @@ contains
    end subroutine drop_export
 
    !> receiverLoopback is accepted only for an embargo id this vat issued.
-   !> senderLoopback aborts. A locally hosted target does not point back
-   !> at the sender, and an unknown export id is rejected on its own.
+   !> senderLoopback is echoed when the target resolves to an import on
+   !> this connection, and aborts when the target is a local server.
+   !> An unknown export id is rejected on its own.
    subroutine handle_disembargo(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
@@ -5192,28 +5291,137 @@ contains
          call abort_conn(conn, 'Unimplemented Disembargo type.', err)
          return
       end if
-      ! senderLoopback names one of our exports. C++ echoes it only when
-      ! that export is an import pointing back at the sender. A locally
-      ! hosted capability does not, and an id we never exported is a
-      ! different error from getMessageTarget.
+      ! senderLoopback. getMessageTarget on an importedCap that is not a
+      ! live export aborts with the export-id text (rpc.c++ 3098-3103).
+      ! A resolved target whose brand is this connection is echoed as
+      ! receiverLoopback (rpc.c++ 3477-3510). A local server does not
+      ! point back at the sender.
       tgt = disembargo_target_get(d, err)
       if (err /= CAPNP_OK) return
+      embargo_id = disembargo_context_sender_loopback_get(d)
       if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
-         embargo_id = message_target_imported_cap_get(tgt)
-         if (embargo_id < 0_int64 .or. embargo_id >= int(MAXE, int64)) then
-            call abort_conn(conn, 'Message target is not a current export ID.', err)
-            return
-         end if
-         if (.not. conn%exports(int(embargo_id))%used .or. &
-             conn%exports(int(embargo_id))%refcount <= 0) then
-            call abort_conn(conn, 'Message target is not a current export ID.', err)
-            return
-         end if
+         block
+            integer(int64) :: eid
+            eid = message_target_imported_cap_get(tgt)
+            if (eid < 0_int64 .or. eid >= int(MAXE, int64)) then
+               call abort_conn(conn, 'Message target is not a current export ID.', err)
+               return
+            end if
+            if (.not. conn%exports(int(eid))%used .or. &
+                conn%exports(int(eid))%refcount <= 0) then
+               call abort_conn(conn, 'Message target is not a current export ID.', err)
+               return
+            end if
+         end block
+         call abort_conn(conn, &
+                         "'Disembargo' of type 'senderLoopback' sent to an " // &
+                         "object that does not point back to the sender.", err)
+         return
+      end if
+      if (message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+         call echo_promised_loopback(conn, tgt, embargo_id, err)
+         return
       end if
       call abort_conn(conn, &
                       "'Disembargo' of type 'senderLoopback' sent to an " // &
                       "object that does not point back to the sender.", err)
    end subroutine handle_disembargo
+
+   !> Resolve a promisedAnswer the way getMessageTarget does, then echo
+   !> when the capability is an import or a pipeline on this connection.
+   subroutine echo_promised_loopback(conn, tgt, embargo_id, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(message_target_t), intent(in) :: tgt
+      integer(int64), intent(in) :: embargo_id
+      integer, intent(out) :: err
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops, p, ctab
+      type(message_t) :: amsg
+      type(return_t) :: ar
+      type(payload_t) :: apl
+      type(cap_descriptor_t) :: cd
+      type(rpc_answer_slot_t), pointer :: aslot
+      logical :: afound
+      integer(int64) :: aqid
+      integer :: i
+      character(len=*), parameter :: back = &
+         "'Disembargo' of type 'senderLoopback' sent to an " // &
+         "object that does not point back to the sender."
+      err = CAPNP_OK
+      pa = message_target_promised_answer_get(tgt, err)
+      if (err /= CAPNP_OK) return
+      aqid = promised_answer_question_id_get(pa)
+      call answer_find(conn, aqid, aslot, afound)
+      if (.not. afound) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      if (.not. aslot%has_results) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      amsg = message_read_root(aslot%retmsg, err)
+      if (err /= CAPNP_OK) return
+      ar = message_return_get(amsg, err)
+      if (err /= CAPNP_OK) return
+      if (return_which(ar) /= RETURN_RESULTS_TAG) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      apl = return_results_get(ar, err)
+      p = payload_content_get(apl, err)
+      if (err /= CAPNP_OK) return
+      ops = promised_answer_transform_get(pa, err)
+      if (err /= CAPNP_OK) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      do i = 0, int(capnp_list_len(ops)) - 1
+         op%p = capnp_list_get_struct(ops, i, err)
+         if (err /= CAPNP_OK) return
+         select case (promised_answer_op_which(op))
+         case (PROMISED_ANSWER_OP_NOOP_TAG)
+         case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+            p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
+            if (err /= CAPNP_OK) return
+         case default
+            call abort_conn(conn, 'Unsupported pipeline op.', err)
+            return
+         end select
+      end do
+      if (p%kind /= CAPNP_PK_CAP) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      ctab = payload_cap_table_get(apl, err)
+      if (err /= CAPNP_OK) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      if (p%capidx < 0_int64 .or. p%capidx >= capnp_list_len(ctab)) then
+         call abort_conn(conn, back, err)
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         call send_receiver_loopback_import(conn, embargo_id, &
+                                            cap_descriptor_receiver_hosted_get(cd), err)
+      case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+         block
+            type(promised_answer_t) :: src
+            src = cap_descriptor_receiver_answer_get(cd, err)
+            if (err /= CAPNP_OK) return
+            call send_receiver_loopback_answer(conn, embargo_id, src, err)
+         end block
+      case default
+         ! senderHosted and senderPromise are capabilities this vat
+         ! hosts. Their brand is not this connection.
+         call abort_conn(conn, back, err)
+      end select
+   end subroutine echo_promised_loopback
 
    !> Unimplemented(Resolve) releases the export the Resolve named.
    !> Any other unimplemented message aborts. Leaving a Call, Bootstrap,

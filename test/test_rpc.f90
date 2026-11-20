@@ -42,6 +42,13 @@ module test_rpc
       procedure :: dispatch => order_dispatch
    end type order_srv_t
 
+   !> Returns the caller's own import as `receiverHosted`, the descriptor
+   !> C++ writes when a result points back at the peer.
+   type, extends(rpc_server_t) :: reflect_srv_t
+   contains
+      procedure :: dispatch => reflect_dispatch
+   end type reflect_srv_t
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -110,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(89))
+      allocate (testsuite(90))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -275,20 +282,22 @@ contains
       testsuite(81)%test => w_reused_handle_provide_join
       testsuite(82)%name = "rpc-resolve-remote-reused-id"
       testsuite(82)%test => w_resolve_remote_reused_id
-      testsuite(83)%name = "rpc-shutdown"
-      testsuite(83)%test => w_shutdown
-      testsuite(84)%name = "posix-recv-eintr-retried"
-      testsuite(84)%test => t_recv_all_retries_eintr
-      testsuite(85)%name = "rpc-framing-511-accepted"
-      testsuite(85)%test => t_framing_511_accepted
-      testsuite(86)%name = "rpc-framing-512-rejected"
-      testsuite(86)%test => t_framing_512_rejected
-      testsuite(87)%name = "rpc-framing-oversized-rejected"
-      testsuite(87)%test => t_framing_oversized_rejected
-      testsuite(88)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(88)%test => t_framing_negative_traversal_rejected
-      testsuite(89)%name = "rpc-framing-short-and-padded"
-      testsuite(89)%test => t_framing_short_and_padded
+      testsuite(83)%name = "rpc-sender-loopback-echo"
+      testsuite(83)%test => w_sender_loopback_echo
+      testsuite(84)%name = "rpc-shutdown"
+      testsuite(84)%test => w_shutdown
+      testsuite(85)%name = "posix-recv-eintr-retried"
+      testsuite(85)%test => t_recv_all_retries_eintr
+      testsuite(86)%name = "rpc-framing-511-accepted"
+      testsuite(86)%test => t_framing_511_accepted
+      testsuite(87)%name = "rpc-framing-512-rejected"
+      testsuite(87)%test => t_framing_512_rejected
+      testsuite(88)%name = "rpc-framing-oversized-rejected"
+      testsuite(88)%test => t_framing_oversized_rejected
+      testsuite(89)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(89)%test => t_framing_negative_traversal_rejected
+      testsuite(90)%name = "rpc-framing-short-and-padded"
+      testsuite(90)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -455,6 +464,31 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_remote_reused_id(error)
    end subroutine w_resolve_remote_reused_id
+
+   subroutine reflect_dispatch(self, ctx, err)
+      class(reflect_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      err = CAPNP_OK
+      if (ctx%method_id < 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+      if (err /= CAPNP_OK) return
+      cd%p = capnp_list_get_struct(ctab, 0, err)
+      if (err /= CAPNP_OK) return
+      call cap_descriptor_receiver_hosted_set(cd, 4_int64, err)
+      if (err /= CAPNP_OK) return
+      call payload_content_set(ctx%results, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+   end subroutine reflect_dispatch
+
+   subroutine w_sender_loopback_echo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_sender_loopback_echo(error)
+   end subroutine w_sender_loopback_echo
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6452,5 +6486,75 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_remote_reused_id
+
+   !> A result that points back at the peer is `receiverHosted`. C++
+   !> echoes `senderLoopback` as `receiverLoopback` aimed at that import
+   !> (`rpc.c++` `handleDisembargo`, lines 3477-3510).
+   subroutine t_sender_loopback_echo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(reflect_srv_t), target :: reflector
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(disembargo_t) :: d, rd
+      type(message_target_t) :: tgt, rtgt
+      type(promised_answer_t) :: pa
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qcall
+      call px_socketpair(fa, fb, e)
+      boot => reflector
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'loopback echo: bootstrap')
+      if (allocated(error)) return
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      s = capnp_new_struct(m, 0, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qcall, e)
+      call check_(error, e == CAPNP_OK, 'loopback echo: reflected result')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(d, 41_int64, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qcall, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call recv_within(cconn%fd, reply, error, 'loopback echo: reply arrives')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                  'loopback echo: reply is Disembargo')
+      rd = message_disembargo_get(rmsg, e)
+      call check_(error, disembargo_context_which(rd) == &
+                  DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG .and. &
+                  disembargo_context_receiver_loopback_get(rd) == 41_int64, &
+                  'loopback echo: receiverLoopback carries the embargo id')
+      rtgt = disembargo_target_get(rd, e)
+      call check_(error, message_target_which(rtgt) == &
+                  MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
+                  message_target_imported_cap_get(rtgt) == 4_int64, &
+                  'loopback echo: target is the reflected import')
+      call check_(error, rpc_conn_alive(sconn), 'loopback echo: vat stays up')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_sender_loopback_echo
 
 end module test_rpc
