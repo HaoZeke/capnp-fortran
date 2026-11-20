@@ -1318,6 +1318,11 @@ contains
                      call deliver_local_promise(conn, node, m, qid, err)
                      call capnp_message_free(m)
                      return
+                  else if (node%state == IMP_BROKEN .and. node%released) then
+                     call release_unsent_call_caps(conn, m)
+                     call fail_local_call(conn, qid, node%reason, err)
+                     call capnp_message_free(m)
+                     return
                   end if
                end if
             end if
@@ -1481,6 +1486,35 @@ contains
       if (err == CAPNP_OK .and. conn%questions(int(qid))%returned) &
          call drain_pipe_waits(conn, qid, err)
    end subroutine fulfill_local_call
+
+   !> Store a local exception Return for a question that never reached
+   !> the wire.
+   recursive subroutine fail_local_call(conn, qid, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      integer(int8), allocatable :: bytes(:)
+      err = CAPNP_OK
+      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      if (err == CAPNP_OK) r = message_return_init(rmsg, err)
+      if (err == CAPNP_OK) call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call fill_exception(r, reason, err)
+      if (err == CAPNP_OK) call capnp_serialize_bytes(rm, bytes, err)
+      call capnp_message_free(rm)
+      if (err /= CAPNP_OK) return
+      call capnp_deserialize_bytes(bytes, conn%questions(int(qid))%retmsg, err)
+      if (err /= CAPNP_OK) return
+      conn%questions(int(qid))%returned = .true.
+      conn%questions(int(qid))%local_call = .true.
+      call drain_pipe_waits(conn, qid, err)
+   end subroutine fail_local_call
 
    !> Run pipeline calls that were waiting on a local question.
    recursive subroutine drain_pipe_waits(conn, target_qid, err)
@@ -3410,7 +3444,8 @@ contains
       type(payload_t) :: apl
       type(cap_descriptor_t) :: acd
       type(rpc_answer_slot_t), pointer :: slot
-      logical :: active, pending
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: active, pending, held
       integer(int64) :: aqid
       integer :: i, n
       integer, allocatable :: fields(:)
@@ -3453,6 +3488,27 @@ contains
       pending = .false.
       if (active) pending = .not. slot%has_results
       if (pending) then
+         ! The pipelined capability is local, so C++ resolves the promise
+         ! as reflected now (rpc.c++ 1170-1245): a Disembargo when the
+         ! promise was called, and the import is released. Calls then
+         ! wait for both the embargo and the answer.
+         held = node%refs > 0 .and. .not. node%released
+         node%local_refs = merge(node%refs, 0, held)
+         node%embargo_id = -1_int64
+         if (held .and. node%received_call) then
+            allocate (emb)
+            emb%id = conn%next_embargo
+            conn%next_embargo = emb%id + 1_int64
+            emb%promise_id = node%id
+            emb%open = .true.
+            emb%next => conn%embargoes
+            conn%embargoes => emb
+            node%embargo_id = emb%id
+            call send_sender_loopback(conn, node%wire_id, emb%id, err)
+            if (err /= CAPNP_OK) return
+         end if
+         call release_all_import(conn, node, err)
+         if (err /= CAPNP_OK) return
          node%state = IMP_ANSWER
          node%answer_qid = aqid
          if (allocated(node%answer_ops)) deallocate (node%answer_ops)
@@ -3549,101 +3605,83 @@ contains
       if (e == CAPNP_OK .and. allocated(txt)) reason = txt
    end subroutine return_exception_reason
 
-   subroutine settle_answer_promises(conn, qid, err)
+   !> Settle promises that resolved to a pipelined capability of the
+   !> local answer qid, using its Return rm. The Disembargo and Release
+   !> went out at Resolve, so only the local state changes here.
+   recursive subroutine settle_answer_promises(conn, qid, rm, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
+      type(capnp_message_t), intent(inout) :: rm
       integer, intent(out) :: err
       type(rpc_import_node_t), pointer :: node
-      type(rpc_answer_slot_t), pointer :: slot
       type(message_t) :: msg
       type(return_t) :: ret
       type(payload_t) :: pl
-      type(capnp_ptr_t) :: content, ctab
+      type(capnp_ptr_t) :: root, content, ctab
       type(cap_descriptor_t) :: cd
       integer :: i
-      logical :: found
+      logical :: broken_answer, any_pending
       character(len=:), allocatable :: reason
 
       err = CAPNP_OK
-      call answer_find(conn, qid, slot, found)
-      if (.not. found) return
-      if (.not. associated(slot)) return
-      if (.not. slot%has_results) return
-      msg = message_read_root(slot%retmsg, err)
+      any_pending = .false.
+      node => conn%imports
+      do while (associated(node))
+         if (node%state == IMP_ANSWER .and. node%answer_qid == qid) any_pending = .true.
+         node => node%next
+      end do
+      if (.not. any_pending) return
+      msg = message_read_root(rm, err)
       if (err == CAPNP_OK) ret = message_return_get(msg, err)
       if (err /= CAPNP_OK) return
-      if (return_which(ret) == RETURN_EXCEPTION_TAG) then
+      broken_answer = return_which(ret) /= RETURN_RESULTS_TAG
+      if (broken_answer) then
          reason = "invalid 'receiverAnswer'"
-         call return_exception_reason(ret, reason)
-         node => conn%imports
-         do while (associated(node))
-            if (node%state == IMP_ANSWER .and. node%answer_qid == qid) then
-               call release_all_import(conn, node, err)
-               if (err /= CAPNP_OK) return
-               node%state = IMP_BROKEN
-               node%reason = reason
-               call drain_answer_pipeline(conn, node%id, err)
-               if (err /= CAPNP_OK) return
-            end if
-            node => node%next
-         end do
-         return
+         if (return_which(ret) == RETURN_EXCEPTION_TAG) call return_exception_reason(ret, reason)
+      else
+         pl = return_results_get(ret, err)
+         if (err == CAPNP_OK) root = payload_content_get(pl, err)
+         if (err == CAPNP_OK) ctab = payload_cap_table_get(pl, err)
+         if (err /= CAPNP_OK) return
       end if
-      pl = return_results_get(ret, err)
-      if (err == CAPNP_OK) content = payload_content_get(pl, err)
-      if (err /= CAPNP_OK) return
 
       node => conn%imports
       do while (associated(node))
          if (node%state == IMP_ANSWER .and. node%answer_qid == qid) then
-            do i = 1, size(node%answer_ops)
-               if (node%answer_ops(i) < 0) cycle
-               if (content%kind == CAPNP_PK_NULL) cycle
-               if (content%kind /= CAPNP_PK_STRUCT) then
-                  call abort_conn(conn, 'Schema mismatch: Message contains non-struct pointer ' // &
-                                  'where struct pointer was expected.', err)
-                  return
-               end if
-               content = capnp_getp(content, node%answer_ops(i), err)
-               if (err /= CAPNP_OK) return
-            end do
-            if (content%kind /= CAPNP_PK_CAP) then
-               call release_all_import(conn, node, err)
-               if (err /= CAPNP_OK) return
-               node%state = IMP_BROKEN
-               node%reason = 'Called null capability.'
+            if (broken_answer) then
+               call break_answer_promise(node, reason)
             else
-               ctab = payload_cap_table_get(pl, err)
-               if (err /= CAPNP_OK) return
-               if (content%capidx < 0_int64 .or. content%capidx >= capnp_list_len(ctab)) then
-                  call release_all_import(conn, node, err)
+               content = root
+               do i = 1, size(node%answer_ops)
+                  if (node%answer_ops(i) < 0) cycle
+                  if (content%kind == CAPNP_PK_NULL) cycle
+                  if (content%kind /= CAPNP_PK_STRUCT) then
+                     call abort_conn(conn, 'Schema mismatch: Message contains non-struct pointer ' // &
+                                     'where struct pointer was expected.', err)
+                     return
+                  end if
+                  content = capnp_getp(content, node%answer_ops(i), err)
                   if (err /= CAPNP_OK) return
-                  node%state = IMP_BROKEN
-                  node%reason = "invalid 'receiverAnswer'"
+               end do
+               if (content%kind /= CAPNP_PK_CAP) then
+                  call break_answer_promise(node, 'Called null capability.')
+               else if (content%capidx < 0_int64 .or. content%capidx >= capnp_list_len(ctab)) then
+                  call break_answer_promise(node, "invalid 'receiverAnswer'")
                else
                   cd%p = capnp_list_get_struct(ctab, int(content%capidx), err)
                   if (err /= CAPNP_OK) return
                   select case (cap_descriptor_which(cd))
                   case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
-                     call resolve_reflected(conn, node, &
-                                            cap_descriptor_sender_hosted_get(cd), err, &
-                                            pipelined=.true.)
-                     if (err /= CAPNP_OK) return
+                     call settle_reflected(conn, node, cap_descriptor_sender_hosted_get(cd))
                   case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
-                     call resolve_reflected(conn, node, &
-                                            cap_descriptor_sender_promise_get(cd), err, &
-                                            pipelined=.true.)
-                     if (err /= CAPNP_OK) return
+                     call settle_reflected(conn, node, cap_descriptor_sender_promise_get(cd))
                   case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
                      call resolve_reflected(conn, node, &
                                             cap_descriptor_receiver_hosted_get(cd), err, &
                                             pipelined=.true.)
                      if (err /= CAPNP_OK) return
                   case default
-                     call release_all_import(conn, node, err)
-                     if (err /= CAPNP_OK) return
-                     node%state = IMP_BROKEN
-                     node%reason = "invalid 'receiverAnswer'"
+                     call break_answer_promise(node, "invalid 'receiverAnswer'")
                   end select
                end if
             end if
@@ -3653,6 +3691,46 @@ contains
          node => node%next
       end do
    end subroutine settle_answer_promises
+
+   subroutine break_answer_promise(node, reason)
+      type(rpc_import_node_t), intent(inout) :: node
+      character(len=*), intent(in) :: reason
+      node%resolved_id = -1_int64
+      node%state = IMP_BROKEN
+      node%reason = reason
+   end subroutine break_answer_promise
+
+   !> A pending answer's result capability is local: the promise becomes
+   !> that export, behind the embargo sent at Resolve if it is still open.
+   subroutine settle_reflected(conn, node, local_id)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout) :: node
+      integer(int64), intent(in) :: local_id
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: valid
+      valid = .false.
+      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) &
+         valid = conn%exports(int(local_id))%used
+      if (.not. valid) then
+         call break_answer_promise(node, "invalid 'receiverHosted' export ID")
+         return
+      end if
+      node%resolved_id = local_id
+      if (node%local_refs > 0) then
+         call pin_export(conn, int(local_id))
+         node%pinned = .true.
+      end if
+      node%state = IMP_LOCAL
+      if (node%embargo_id < 0_int64) return
+      emb => conn%embargoes
+      do while (associated(emb))
+         if (emb%id == node%embargo_id) then
+            if (emb%open) node%state = IMP_EMBARGO
+            return
+         end if
+         emb => emb%next
+      end do
+   end subroutine settle_reflected
 
    pure function hi_bucket(qid) result(b)
       integer(int64), intent(in) :: qid
@@ -3811,7 +3889,8 @@ contains
          if (.not. found) return
          node => nxt
       end do
-      if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
+      if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO .or. &
+          node%state == IMP_ANSWER) then
          if (node%local_refs <= 0) return
          node%local_refs = node%local_refs - 1
          if (node%local_refs > 0) return
@@ -5344,6 +5423,7 @@ contains
       call answer_find(conn, qid, slot, found)
       if (.not. found) call answer_add_hi(conn, qid, slot)
       if (slot%finished) then
+         call settle_answer_promises(conn, qid, rm, err)
          do i = 0, ctx%nexp - 1
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
          end do
@@ -5421,6 +5501,7 @@ contains
          return
       end if
       if (capless) then
+         call settle_answer_promises(conn, qid, rm, err)
          call capnp_message_free(rm)
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
@@ -5440,7 +5521,7 @@ contains
          ! (rpc.c++ PostReturnRpcPipeline / answer.pipeline). A Release of
          ! the export id does not remove that reference.
          call pin_answer_exports(conn, slot)
-         if (err == CAPNP_OK) call settle_answer_promises(conn, qid, err)
+         if (err == CAPNP_OK) call settle_answer_promises(conn, qid, rm, err)
       end if
       call capnp_message_free(rm)
    end subroutine finish_answer

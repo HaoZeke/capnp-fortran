@@ -50,12 +50,18 @@ module test_rpc
    end type reflect_srv_t
 
    !> Pumps `conn` once while answering, so a message sent after the
-   !> call arrives while the answer is pending, and then fails the call.
-   type, extends(rpc_server_t) :: pump_fail_srv_t
+   !> call arrives while the answer is pending. It then calls `probe`
+   !> once if set, and fails the call (mode 0), returns a cap to `inner`
+   !> in pointer 0 (mode 1), or returns a struct with no caps (mode 2).
+   type, extends(rpc_server_t) :: pump_srv_t
       type(rpc_conn_t), pointer :: conn => null()
+      integer :: mode = 0
+      class(rpc_server_t), pointer :: inner => null()
+      type(rpc_cap_t) :: probe
+      integer(int64) :: probe_q = -1_int64
    contains
-      procedure :: dispatch => pump_fail_dispatch
-   end type pump_fail_srv_t
+      procedure :: dispatch => pump_dispatch
+   end type pump_srv_t
 
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
@@ -533,14 +539,40 @@ contains
       call payload_content_set(ctx%results, rpc_make_cap_ptr(ctx%rmsg, 0), err)
    end subroutine reflect_dispatch
 
-   recursive subroutine pump_fail_dispatch(self, ctx, err)
-      class(pump_fail_srv_t), intent(inout) :: self
+   recursive subroutine pump_dispatch(self, ctx, err)
+      class(pump_srv_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
-      integer :: e
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e, idx
       if (associated(self%conn) .and. ctx%method_id >= 0) call rpc_pump_once(self%conn, e)
-      err = CAPNP_ERR_ARG
-   end subroutine pump_fail_dispatch
+      if (associated(self%conn) .and. self%probe%kind == RPC_CAP_IMPORT) then
+         call rpc_call_begin(self%conn, self%probe, ECHO_IFACE, 0, m, params, self%probe_q, e)
+         self%probe = rpc_cap_t()
+         if (e == CAPNP_OK) then
+            s = capnp_new_struct(m, 1, 1, e)
+            call capnp_set_i64(s, 0_int64, 21_int64, e)
+            call capnp_set_text(s, 0, 'probe', e)
+            call payload_content_set(params, s, e)
+            call rpc_call_send(self%conn, m, e)
+         end if
+      end if
+      select case (self%mode)
+      case (1)
+         idx = rpc_ctx_export_cap(ctx, self%inner, err)
+         if (err /= CAPNP_OK) return
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      case (2)
+         s = capnp_new_struct(ctx%rmsg, 1, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      case default
+         err = CAPNP_ERR_ARG
+      end select
+   end subroutine pump_dispatch
 
    subroutine w_sender_loopback_echo(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8112,26 +8144,193 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_walk
 
+   !> A promise resolved to a pipelined cap of a pending local answer is
+   !> reflected at Resolve time in C++ 1.4.0 (rpc.c++ 1170-1245): the
+   !> Disembargo and Release go out before the answer returns. When the
+   !> answer returns a local cap, calls wait for the embargo and then
+   !> reach that cap. When it returns no caps, the promise breaks with
+   !> "Called null capability.", including calls made while pending.
    subroutine t_resolve_pending_receiver_answer(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
       type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
       class(rpc_server_t), pointer :: srv
       type(rpc_cap_t) :: promised
-      integer(int64) :: qboot, qadder, eid
-      logical :: released, disembargo
+      integer(int64) :: qp, qc, emb
+      integer :: e, mode, dis_at, rel_at, ret_at
+      character(len=*), parameter :: null_cap = 'Called null capability.'
 
-      srv => local_echo
-      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
-      cconn%answers(int(qboot))%has_results = .false.
-      call ra_called_promise(cconn, sconn, 8_int64, promised)
-      call ra_resolve(cconn, sconn, 8_int64, qboot, [integer ::])
-      call ra_drain(sconn, 8_int64, released, disembargo)
-      call check_(error, rpc_conn_alive(cconn) .and. .not. released .and. &
-                  .not. disembargo, 'receiverAnswer: pending answer remains pipelined')
+      do mode = 1, 2
+         pumper = pump_srv_t()
+         pumper%mode = mode
+         srv => local_echo
+         pumper%inner => srv
+         call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+         pumper%probe = promised
+         call ra_resolve(cconn, sconn, 4_int64, qp, [0])
+         call ra_order(sconn, 4_int64, dis_at, rel_at, ret_at)
+         call check_(error, rpc_conn_alive(cconn) .and. dis_at > 0 .and. &
+                     rel_at > dis_at .and. ret_at > rel_at, &
+                     'pending receiverAnswer: Disembargo and Release precede the Return')
+         if (allocated(error)) exit
+         call check_(error, pumper%probe_q >= 0_int64, &
+                     'pending receiverAnswer: call while pending is accepted')
+         if (allocated(error)) exit
+         if (mode == 1) then
+            call check_(error, .not. cconn%questions(int(pumper%probe_q))%returned, &
+                        'pending receiverAnswer: call waits for the embargo')
+            if (allocated(error)) exit
+            emb = cconn%embargoes%id
+            call ra_loopback(cconn, sconn, 4_int64, emb)
+            call check_(error, rpc_conn_alive(cconn) .and. &
+                        pa_i64(cconn, pumper%probe_q) == 42_int64, &
+                        'pending receiverAnswer: call reaches the returned cap')
+            if (allocated(error)) exit
+            call pa_echo(cconn, promised, qc, e)
+            call check_(error, e == CAPNP_OK .and. pa_i64(cconn, qc) == 42_int64, &
+                        'pending receiverAnswer: later call reaches the returned cap')
+         else
+            call check_(error, cconn%questions(int(pumper%probe_q))%returned .and. &
+                        pa_reason(cconn, pumper%probe_q) == null_cap, &
+                        'pending receiverAnswer: capless answer fails the waiting call')
+            if (allocated(error)) exit
+            call pa_echo(cconn, promised, qc, e)
+            call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                        rpc_conn_reason(cconn) == null_cap, &
+                        'pending receiverAnswer: capless answer breaks the promise')
+         end if
+         if (allocated(error)) exit
+         pumper%conn => null()
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+      end do
+      pumper%conn => null()
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_pending_receiver_answer
+
+   !> `cconn` serves `pumper` to the raw peer `sconn`, holds promise 4
+   !> with one call through it, and has the peer's call `qp` pending
+   !> until the next message is pumped.
+   subroutine pa_pending_pair(cconn, sconn, pumper, promised, qp)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      type(pump_srv_t), intent(inout), target :: pumper
+      type(rpc_cap_t), intent(out) :: promised
+      integer(int64), intent(out) :: qp
+      class(rpc_server_t), pointer :: srv, none
+      type(rpc_cap_t) :: peer_boot
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qboot
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      pumper%conn => cconn
+      srv => pumper
+      call rpc_conn_init(cconn, fa, srv)
+      none => null()
+      call rpc_conn_init(sconn, fb, none)
+      call rpc_bootstrap_send(sconn, peer_boot, e)
+      qboot = peer_boot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qboot, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], peer_boot, e)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call rpc_call_begin(sconn, peer_boot, ECHO_IFACE, 0, m, params, qp, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+   end subroutine pa_pending_pair
+
+   !> Positions, among frames `cconn` sent to the raw peer, of the first
+   !> Disembargo, the Release of promise `pid`, and the first Return.
+   subroutine ra_order(sconn, pid, dis_at, rel_at, ret_at)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: pid
+      integer, intent(out) :: dis_at, rel_at, ret_at
+      integer(int64) :: a, b
+      integer :: n, tag
+      logical :: got
+      dis_at = 0
+      rel_at = 0
+      ret_at = 0
+      do n = 1, 20
+         call scripted_frame(sconn, 100, got, tag, a, b)
+         if (.not. got) exit
+         if (tag == MESSAGE_DISEMBARGO_TAG .and. dis_at == 0) dis_at = n
+         if (tag == MESSAGE_RELEASE_TAG .and. a == pid .and. rel_at == 0) rel_at = n
+         if (tag == MESSAGE_RETURN_TAG .and. ret_at == 0) ret_at = n
+      end do
+   end subroutine ra_order
+
+   !> Reflect embargo `emb` on promise `pid` back to `cconn`.
+   subroutine ra_loopback(cconn, sconn, pid, emb)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: pid, emb
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_receiver_loopback_set(d, emb, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, pid, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+   end subroutine ra_loopback
+
+   subroutine pa_echo(conn, cap, q, e)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_cap_t), intent(in) :: cap
+      integer(int64), intent(out) :: q
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      call rpc_call_begin(conn, cap, ECHO_IFACE, 0, m, params, q, e)
+      if (e /= CAPNP_OK) return
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 21_int64, e)
+      call capnp_set_text(s, 0, 'later', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(conn, m, e)
+   end subroutine pa_echo
+
+   !> results.i64 of the returned question q, or -1.
+   function pa_i64(conn, q) result(v)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: q
+      integer(int64) :: v
+      type(capnp_ptr_t) :: content
+      integer :: e
+      v = -1_int64
+      if (q < 0_int64) return
+      if (.not. conn%questions(int(q))%returned) return
+      call rpc_result_content(conn, q, content, e)
+      if (e == CAPNP_OK) v = capnp_get_i64(content, 0_int64)
+   end function pa_i64
+
+   !> Exception reason stored for the returned question q.
+   function pa_reason(conn, q) result(txt)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: q
+      character(len=:), allocatable :: txt
+      type(message_t) :: msg
+      type(return_t) :: ret
+      type(exception_t) :: ex
+      integer :: e
+      txt = ''
+      msg = message_read_root(conn%questions(int(q))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      if (e /= CAPNP_OK) return
+      if (return_which(ret) /= RETURN_EXCEPTION_TAG) return
+      ex = return_exception_get(ret, e)
+      if (e == CAPNP_OK) call exception_reason_get(ex, txt, e)
+      if (.not. allocated(txt)) txt = ''
+   end function pa_reason
 
    subroutine t_resolve_receiver_answer_reflected_caps(error)
       type(error_type), allocatable, intent(inout) :: error
@@ -8193,7 +8392,7 @@ contains
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
       type(echo_srv_t), target :: local_echo
-      type(pump_fail_srv_t), target :: pumper
+      type(pump_srv_t), target :: pumper
       class(rpc_server_t), pointer :: srv, none
       type(rpc_cap_t) :: promised, peer_boot
       type(capnp_message_t), target :: m
@@ -8263,8 +8462,8 @@ contains
       call rpc_call_send(sconn, m, e)
       call ra_resolve(cconn, sconn, 4_int64, qbad, [integer ::])
       call ra_drain(sconn, 4_int64, released, disembargo)
-      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
-                  'receiverAnswer: pending exception releases the promise')
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. disembargo, &
+                  'receiverAnswer: pending exception embargoes and releases the promise')
       call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
       call check_(error, e == RPC_ERR_EXCEPTION .and. rpc_conn_reason(cconn) == raised, &
                   'receiverAnswer: pending exception breaks with its reason')
