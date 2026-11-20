@@ -936,6 +936,7 @@ contains
       if (.not. associated(q%msg, msg)) then
          ! Cross-message reference: deep-copy the object into this message
          ! (capnp C++ set() semantics), then link locally.
+         call cp_put_i64(msg%segs(sseg)%bytes, slot, 0_int64)
          block
             type(capnp_ptr_t) :: c
             c = capnp_copy(msg, q, err)

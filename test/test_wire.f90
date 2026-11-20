@@ -32,6 +32,7 @@ contains
            new_unittest("double-far-e2e", test_double_far_e2e), &
            new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
            new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
+           new_unittest("cross-message-copy-clears-slot", test_cross_message_copy_clears_slot), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -750,6 +751,45 @@ contains
                  'far-pad-zero: valid single-far at max depth zeroes target')
       call capnp_message_free(msg)
    end subroutine test_far_landing_pad_zero
+
+   subroutine test_cross_message_copy_clears_slot(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: dst, src, rsrc
+      type(capnp_ptr_t) :: old_root, sroot, schild, rroot
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(dst, err)
+      old_root = capnp_new_struct(dst, 1, 0, err)
+      call capnp_set_i64(old_root, 0_int64, 42_int64, err)
+      call capnp_set_root(dst, old_root, err)
+
+      call capnp_message_init_builder(src, err)
+      sroot = capnp_new_struct(src, 0, 1, err)
+      schild = capnp_new_struct(src, 1, 0, err)
+      call capnp_set_i64(schild, 0_int64, 99_int64, err)
+      call capnp_setp(sroot, 0, schild, err)
+      call capnp_set_root(src, sroot, err)
+      call capnp_serialize_bytes(src, bytes, err)
+      call capnp_deserialize_bytes(bytes, rsrc, err, depth_limit=1)
+      rroot = capnp_root(rsrc, err)
+      call check(error, err == CAPNP_OK, 'cross-copy-clear: foreign root resolves at limit 1')
+      if (allocated(error)) then
+         call capnp_message_free(dst)
+         call capnp_message_free(src)
+         call capnp_message_free(rsrc)
+         return
+      end if
+
+      call capnp_set_root(dst, rroot, err)
+      call check(error, err == CAPNP_ERR_DEPTH .and. &
+                 cp_get_i64(dst%segs(old_root%seg)%bytes, old_root%off) == 0_int64 .and. &
+                 cp_get_i64(dst%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'cross-copy-clear: failed cross-message copy leaves slot zeroed')
+      call capnp_message_free(dst)
+      call capnp_message_free(src)
+      call capnp_message_free(rsrc)
+   end subroutine test_cross_message_copy_clears_slot
    !> A single far whose landing pad is another far is not a struct.
    !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
    subroutine test_far_chain_rejected(error)
