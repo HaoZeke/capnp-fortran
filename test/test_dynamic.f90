@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(16))
+      allocate (testsuite(17))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -63,6 +63,8 @@ contains
       testsuite(15)%test => run_schema_inout
       testsuite(16)%name = "dynamic-null-reader"
       testsuite(16)%test => run_null_reader
+      testsuite(17)%name = "dynamic-wire-count"
+      testsuite(17)%test => run_wire_count
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1101,6 +1103,43 @@ contains
                   'null reader: builder flag is not read through or')
       call capnp_dyn_free(schema)
    end subroutine run_null_reader
+
+   !> A zero-sized list can name more elements than the message holds.
+   !> Loading it must fail before the node array is allocated.
+   subroutine run_wire_count(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t) :: schema
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, nodes, typed, raw, scopes
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 4, err)
+      call capnp_set_root(msg, root, err)
+      nodes = capnp_new_composite_list(msg, 4096_int64, 0, 0, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check_(error, err == CAPNP_OK, 'wire-count: framed')
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. .not. schema%loaded, &
+                  'wire-count: node count past the message')
+      call capnp_dyn_free(schema)
+      call capnp_message_free(msg)
+
+      call capnp_message_init_builder(msg, err)
+      typed = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(typed, 0_int64, 16_int32, err)
+      raw = capnp_new_struct(msg, 0, 1, err)
+      scopes = capnp_new_list(msg, CAPNP_SZ_VOID, 4096_int64, err)
+      call capnp_setp(raw, 0, scopes, err)
+      call capnp_setp(typed, 0, raw, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, &
+                  'wire-count: brand scope count past the message')
+      call capnp_message_free(msg)
+   end subroutine run_wire_count
 
    function file_has(path, needle) result(found)
       character(len=*), intent(in) :: path, needle

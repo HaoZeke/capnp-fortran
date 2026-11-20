@@ -79,6 +79,36 @@ module capnp_dynamic
 
 contains
 
+   !> A list element count is safe to allocate when it does not exceed the
+   !> words stored in the message. Cap'n Proto 1.4.0 rejects a zero-sized
+   !> list that claims more elements than the read limit allows
+   !> (`layout.c++` amplified-list checks). The schema loader raises that
+   !> limit to 2^30 words, so the bytes actually present are the cap.
+   subroutine dyn_guard_count(host, n, err)
+      type(capnp_ptr_t), intent(in) :: host
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      integer(int64) :: words
+      integer :: i
+      err = CAPNP_OK
+      if (n == 0_int64) return
+      if (n < 0_int64 .or. n > int(huge(0), int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (.not. associated(host%msg)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      words = 0_int64
+      if (allocated(host%msg%segs)) then
+         do i = 1, host%msg%nsegs
+            words = words + host%msg%segs(i)%len/CAPNP_WORD_BYTES
+         end do
+      end if
+      if (n > words) err = CAPNP_ERR_BOUNDS
+   end subroutine dyn_guard_count
+
    !> Load a framed CodeGeneratorRequest (the bytes `capnp compile -o-`
    !> writes).
    subroutine capnp_dyn_load(schema, bytes, err)
@@ -87,6 +117,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: root, l
       integer(int64) :: n, i
+      integer :: stat
       call capnp_dyn_free(schema)
       ! Schema graphs are deep; match the plugin's generous reader guards.
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
@@ -97,7 +128,13 @@ contains
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
-      allocate (schema%nodes(n))
+      call dyn_guard_count(l, n, err)
+      if (err /= CAPNP_OK) return
+      allocate (schema%nodes(int(n)), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1_int64, n
          schema%nodes(i) = capnp_list_get_struct(l, int(i - 1), err)
          if (err /= CAPNP_OK) return
@@ -264,7 +301,8 @@ contains
       type(capnp_dyn_brand_t), intent(out) :: brand
       integer, intent(out) :: err
       type(capnp_ptr_t) :: raw, scopes, scope, bindings, binding
-      integer(int64) :: i, j
+      integer(int64) :: i, j, n, nb
+      integer :: stat
       err = CAPNP_OK
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
@@ -289,8 +327,15 @@ contains
       end if
       scopes = brand_scopes(raw, err)
       if (err /= CAPNP_OK) return
-      allocate (brand%scopes(capnp_list_len(scopes)))
-      do i = 0_int64, capnp_list_len(scopes) - 1_int64
+      n = capnp_list_len(scopes)
+      call dyn_guard_count(scopes, n, err)
+      if (err /= CAPNP_OK) return
+      allocate (brand%scopes(int(n)), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, n - 1_int64
          scope = capnp_list_get_struct(scopes, int(i), err)
          if (err /= CAPNP_OK) return
          brand%scopes(i + 1)%id = scope_scope_id(scope)
@@ -307,8 +352,15 @@ contains
          end select
          bindings = scope_bindings(scope, err)
          if (err /= CAPNP_OK) return
-         allocate (brand%scopes(i + 1)%bindings(capnp_list_len(bindings)))
-         do j = 0_int64, capnp_list_len(bindings) - 1_int64
+         nb = capnp_list_len(bindings)
+         call dyn_guard_count(bindings, nb, err)
+         if (err /= CAPNP_OK) return
+         allocate (brand%scopes(i + 1)%bindings(int(nb)), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         do j = 0_int64, nb - 1_int64
             binding = capnp_list_get_struct(bindings, int(j), err)
             if (err /= CAPNP_OK) return
             select case (binding_which(binding))
@@ -600,9 +652,16 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: a
       integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
       n = capnp_list_len(list)
-      allocate (annotations(n))
+      call dyn_guard_count(list, n, err)
+      if (err /= CAPNP_OK) return
+      allocate (annotations(int(n)), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 0_int64, n - 1_int64
          a = capnp_list_get_struct(list, int(i), err)
          if (err /= CAPNP_OK) return
