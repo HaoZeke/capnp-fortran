@@ -5281,7 +5281,11 @@ contains
       type(return_t) :: r
       integer :: derr
       integer(int64), allocatable :: pids(:)
-      logical :: dispatched
+      logical :: dispatched, quiet
+      ! The caller asked for the pipeline only. C++ never sends this
+      ! call a Return unless its results are redirected (rpc.c++
+      ! handleCall), and the call context lives until Finish.
+      quiet = call_only_promise_pipeline_get(c) .and. .not. elsewhere
       call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
@@ -5295,7 +5299,8 @@ contains
       if (terr /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
          call fill_exception(r, reason, err)
-         call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids)
+         call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
+                            quiet=quiet)
          return
       end if
       params = call_params_get(c, err)
@@ -5332,7 +5337,8 @@ contains
       end if
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
       call drop_export_pin(conn, eid)
-      call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids)
+      call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
+                         quiet=quiet)
    end subroutine run_call
 
    !> Keep a Call made on the pipeline of answer `aqid`, which is still
@@ -6660,7 +6666,8 @@ contains
    !> That hold is the only answer a later takeFromOtherQuestion may take.
    !> `pids` are the param holds of the call. They go with the Return
    !> unless results with caps keep the call context until Finish.
-   recursive subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere, pids)
+   !> `quiet` keeps the answer for pipelined calls and sends nothing.
+   recursive subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere, pids, quiet)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       type(capnp_message_t), intent(inout) :: rm
@@ -6668,9 +6675,10 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: elsewhere
       integer(int64), allocatable, intent(inout), optional :: pids(:)
+      logical, intent(in), optional :: quiet
       integer(int8), allocatable :: bytes(:)
       integer :: i, perr
-      logical :: hold, found, failed
+      logical :: hold, found, failed, silent
       type(rpc_answer_slot_t), pointer :: slot
       type(message_t) :: heldmsg
       type(return_t) :: heldr
@@ -6682,6 +6690,8 @@ contains
       err = CAPNP_OK
       perr = CAPNP_OK
       if (present(elsewhere)) hold = elsewhere
+      silent = .false.
+      if (present(quiet)) silent = quiet
       if (qid < 0_int64) then
          do i = 0, ctx%nexp - 1
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
@@ -6699,7 +6709,7 @@ contains
          ! that would send results or an exception (rpc.c++ 3289-3361), so
          ! the call ends with canceled, or resultsSentElsewhere for a
          ! redirect (rpc.c++ 2404-2431).
-         if (.not. conn%dead .and. associated(conn%transport)) then
+         if (.not. conn%dead .and. associated(conn%transport) .and. .not. silent) then
             if (hold) then
                call send_results_elsewhere(conn, qid, herr)
             else
@@ -6733,6 +6743,8 @@ contains
       ! peer to receive either ordinary or redirected results in that case.
       if (conn%dead .or. .not. associated(conn%transport)) then
          err = CAPNP_ERR_IO
+      else if (silent) then
+         continue
       ! yourself results stay here until takeFromOtherQuestion. C++ sends
       ! resultsSentElsewhere from sendRedirectReturn, not from the call.
       else if (.not. hold) then
@@ -7300,12 +7312,16 @@ contains
       else
          conn%incoming_wait => node%next
       end if
-      if (.not. conn%dead .and. associated(conn%transport)) then
-         call send_canceled_return(conn, qid, e)
-         if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
-      end if
       msg = message_read_root(node%msg, e)
       if (e == CAPNP_OK) c = message_call_get(msg, e)
+      if (.not. conn%dead .and. associated(conn%transport) .and. e == CAPNP_OK) then
+         if (.not. call_only_promise_pipeline_get(c) .or. &
+             call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) then
+            call send_canceled_return(conn, qid, e)
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end if
+         e = CAPNP_OK
+      end if
       if (e == CAPNP_OK) then
          call hold_call_params(conn, c, ids)
          call drop_param_holds(conn, ids, err)

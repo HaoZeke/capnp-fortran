@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(137))
+      allocate (testsuite(138))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -427,18 +427,20 @@ contains
       testsuite(130)%test => w_param_caps_released_at_finish
       testsuite(131)%name = "rpc-param-promise-resolve-releases"
       testsuite(131)%test => w_param_promise_resolve_releases
-      testsuite(132)%name = "posix-recv-eintr-retried"
-      testsuite(132)%test => t_recv_all_retries_eintr
-      testsuite(133)%name = "rpc-framing-511-accepted"
-      testsuite(133)%test => t_framing_511_accepted
-      testsuite(134)%name = "rpc-framing-512-rejected"
-      testsuite(134)%test => t_framing_512_rejected
-      testsuite(135)%name = "rpc-framing-oversized-rejected"
-      testsuite(135)%test => t_framing_oversized_rejected
-      testsuite(136)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(136)%test => t_framing_negative_traversal_rejected
-      testsuite(137)%name = "rpc-framing-short-and-padded"
-      testsuite(137)%test => t_framing_short_and_padded
+      testsuite(132)%name = "rpc-only-pipeline-call-sends-no-return"
+      testsuite(132)%test => w_only_pipeline_call_sends_no_return
+      testsuite(133)%name = "posix-recv-eintr-retried"
+      testsuite(133)%test => t_recv_all_retries_eintr
+      testsuite(134)%name = "rpc-framing-511-accepted"
+      testsuite(134)%test => t_framing_511_accepted
+      testsuite(135)%name = "rpc-framing-512-rejected"
+      testsuite(135)%test => t_framing_512_rejected
+      testsuite(136)%name = "rpc-framing-oversized-rejected"
+      testsuite(136)%test => t_framing_oversized_rejected
+      testsuite(137)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(137)%test => t_framing_negative_traversal_rejected
+      testsuite(138)%name = "rpc-framing-short-and-padded"
+      testsuite(138)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -997,6 +999,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_param_promise_resolve_releases(error)
    end subroutine w_param_promise_resolve_releases
+
+   subroutine w_only_pipeline_call_sends_no_return(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_only_pipeline_call_sends_no_return(error)
+   end subroutine w_only_pipeline_call_sends_no_return
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10989,5 +10996,57 @@ contains
       call px_close(fb)
       call free_minted_adders()
    end subroutine t_param_promise_resolve_releases
+
+   !> A call with onlyPromisePipeline gets no Return, as from C++. A
+   !> call pipelined on it is still answered, and its Finish sends
+   !> nothing either.
+   subroutine t_only_pipeline_call_sends_no_return(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn, raw
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: params
+      character(len=:), allocatable :: a, b, d
+      integer :: fa, fb, e
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      raw%fd = fb
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, 1_int64, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 1_int32, e)
+      call call_only_promise_pipeline_set(c, .true., e)
+      tgt = call_target_init(c, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call pa_send(raw, 2_int64, 1_int64, [0])
+      call rpc_pump_once(conn, e)
+      b = raw_frame_text(fb)
+      call raw_finish_fd(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      d = raw_frame_text(fb)
+      call check_(error, a == '' .and. b == 'RET 2 F' .and. d == '', &
+                  'only pipeline: got '//a//' | '//b//' | '//d)
+      raw%fd = PX_BAD_FD
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_only_pipeline_call_sends_no_return
 
 end module test_rpc
