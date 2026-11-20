@@ -241,6 +241,32 @@ contains
       end do
    end function fquote
 
+   !> Kind-suffixed integer token. The most negative value of a kind has
+   !> no literal: Fortran parses the sign apart from the digits, so
+   !> -128_int8 is rejected. Spell the Fortran form with huge().
+   pure function signed_lit(v, suffix) result(o)
+      integer(int64), intent(in) :: v
+      character(len=*), intent(in) :: suffix
+      character(len=:), allocatable :: o
+      logical :: minv
+      minv = .false.
+      select case (suffix)
+      case ('_int8')
+         minv = v == int(-huge(0_int8) - 1_int8, int64)
+      case ('_int16')
+         minv = v == int(-huge(0_int16) - 1_int16, int64)
+      case ('_int32')
+         minv = v == int(-huge(0_int32) - 1_int32, int64)
+      case ('_int64')
+         minv = v == -huge(0_int64) - 1_int64
+      end select
+      if (minv) then
+         o = '-huge(0'//suffix//')-1'//suffix
+      else
+         o = itoa(v)//suffix
+      end if
+   end function signed_lit
+
    pure function itoa(v) result(o)
       integer(int64), intent(in) :: v
       character(len=:), allocatable :: o
@@ -559,13 +585,14 @@ contains
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, TYPE_ENUM, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call w('   integer(int64), parameter :: '//upcase(cn)//' = '// &
-                itoa(const_int_value(v))//'_int64')
+                signed_lit(const_int_value(v), '_int64'))
       case (TYPE_FLOAT32)
          call w('   real(real32), parameter :: '//upcase(cn)//' = transfer('// &
-                itoa(int(cp_f32_bits(value_f32(v)), int64))//'_int32, 1.0_real32)')
+                signed_lit(int(cp_f32_bits(value_f32(v)), int64), '_int32')// &
+                ', 1.0_real32)')
       case (TYPE_FLOAT64)
          call w('   real(real64), parameter :: '//upcase(cn)//' = transfer('// &
-                itoa(cp_f64_bits(value_f64(v)))//'_int64, 1.0_real64)')
+                signed_lit(cp_f64_bits(value_f64(v)), '_int64')//', 1.0_real64)')
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
@@ -1037,7 +1064,7 @@ contains
       end select
       d = const_int_value(dv)
       defarg = ''
-      if (d /= 0_int64) defarg = ', default='//itoa(d)//kind_suffix(vt)
+      if (d /= 0_int64) defarg = ', default='//signed_lit(d, kind_suffix(vt))
       call w('   function '//an//'_get(h) result(v)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      '//vt//' :: v')
