@@ -16,7 +16,10 @@ contains
 
    subroutine collect_rpc_typed(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("rpc-typed", run_rpc_typed)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(1))
+      testsuite(1) = new_unittest("rpc-typed", run_rpc_typed)
    end subroutine collect_rpc_typed
 
    subroutine check_(error, cond, name)

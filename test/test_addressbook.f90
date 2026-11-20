@@ -15,7 +15,10 @@ contains
 
    subroutine collect_addressbook(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("addressbook", run_addressbook)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(1))
+      testsuite(1) = new_unittest("addressbook", run_addressbook)
    end subroutine collect_addressbook
 
    subroutine check_(error, cond, name)

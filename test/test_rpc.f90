@@ -76,16 +76,17 @@ contains
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One ordered suite: cases share a socketpair connection (setup once).
-      testsuite = [ &
-         new_unittest("rpc", run_rpc), &
-         new_unittest("posix-recv-eintr-retried", t_recv_all_retries_eintr), &
-         new_unittest("rpc-framing-511-accepted", t_framing_511_accepted), &
-         new_unittest("rpc-framing-512-rejected", t_framing_512_rejected), &
-         new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected), &
-         new_unittest("rpc-framing-negative-traversal-rejected", &
-                      t_framing_negative_traversal_rejected), &
-         new_unittest("rpc-framing-short-and-padded", t_framing_short_and_padded) &
-      ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(7))
+      testsuite(1) = new_unittest("rpc", run_rpc)
+      testsuite(2) = new_unittest("posix-recv-eintr-retried", t_recv_all_retries_eintr)
+      testsuite(3) = new_unittest("rpc-framing-511-accepted", t_framing_511_accepted)
+      testsuite(4) = new_unittest("rpc-framing-512-rejected", t_framing_512_rejected)
+      testsuite(5) = new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected)
+      testsuite(6) = new_unittest("rpc-framing-negative-traversal-rejected", &
+                                  t_framing_negative_traversal_rejected)
+      testsuite(7) = new_unittest("rpc-framing-short-and-padded", t_framing_short_and_padded)
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)

@@ -12,7 +12,10 @@ contains
 
    subroutine collect_idents(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("idents-generic-default", run_idents)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(1))
+      testsuite(1) = new_unittest("idents-generic-default", run_idents)
    end subroutine collect_idents
 
    subroutine run_idents(error)

@@ -60,48 +60,49 @@ contains
    subroutine collect_regress(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       call init_tmp()
-      testsuite = [ &
-         new_unittest("comment-eof", run_comment_eof), &
-         new_unittest("segment-bomb", run_segment_bomb), &
-         new_unittest("binary-stdout", run_binary_stdout), &
-         new_unittest("list-linear", run_list_linear), &
-         new_unittest("canonical-release", run_canonical_release), &
-         new_unittest("json-collisions", run_json_collisions), &
-         new_unittest("json-void-and-missing", run_json_void_missing), &
-         new_unittest("json-surrogate", run_json_surrogate), &
-         new_unittest("json-exact-int", run_json_exact_int), &
-         new_unittest("json-null-disc", run_json_null_disc), &
-         new_unittest("json-union-diff", run_json_union_diff), &
-         new_unittest("text-leniency", run_text_leniency), &
-         new_unittest("unloaded-guard", run_unloaded), &
-         new_unittest("json-unloaded-guard", run_json_unloaded), &
-         new_unittest("long-argument", run_long_arg), &
-         new_unittest("schema-pipe", run_schema_pipe), &
-         new_unittest("plugin-release", run_plugin_release), &
-         new_unittest("cli-locate", run_cli_locate), &
-         new_unittest("string-linear", run_string_linear), &
-         new_unittest("write-error", run_write_error), &
-         new_unittest("f32-text", run_f32_text), &
-         new_unittest("regress-tmp", run_regress_tmp), &
-         new_unittest("cli-sources", run_cli_sources), &
-         new_unittest("json-union-many", run_json_union_many), &
-         new_unittest("json-union-nested", run_json_union_nested), &
-         new_unittest("json-schema-chain", run_json_schema_chain), &
-         new_unittest("group-clear-depth", run_group_clear_depth), &
-         new_unittest("packed-zero-cap", run_packed_zero_cap), &
-         new_unittest("json-trailing-spaces", run_json_trailing_spaces), &
-         new_unittest("json-union-clear", run_json_union_clear), &
-         new_unittest("json-nul-eof", run_json_nul_eof), &
-         new_unittest("json-nest-limit", run_json_nest_limit), &
-         new_unittest("cli-json-stream", run_cli_json_stream), &
-         new_unittest("text-shorthand", run_text_shorthand), &
-         new_unittest("text-group-replace", run_text_group_replace), &
-         new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
-         new_unittest("json-dup-bad", run_json_dup_bad), &
-         new_unittest("canonical-null-root", run_canonical_null_root), &
-         new_unittest("json-ptr-kind", run_json_ptr_kind), &
-         new_unittest("text-inactive-arm", run_text_inactive_arm) &
-         ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(40))
+      testsuite(1) = new_unittest("comment-eof", run_comment_eof)
+      testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
+      testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
+      testsuite(4) = new_unittest("list-linear", run_list_linear)
+      testsuite(5) = new_unittest("canonical-release", run_canonical_release)
+      testsuite(6) = new_unittest("json-collisions", run_json_collisions)
+      testsuite(7) = new_unittest("json-void-and-missing", run_json_void_missing)
+      testsuite(8) = new_unittest("json-surrogate", run_json_surrogate)
+      testsuite(9) = new_unittest("json-exact-int", run_json_exact_int)
+      testsuite(10) = new_unittest("json-null-disc", run_json_null_disc)
+      testsuite(11) = new_unittest("json-union-diff", run_json_union_diff)
+      testsuite(12) = new_unittest("text-leniency", run_text_leniency)
+      testsuite(13) = new_unittest("unloaded-guard", run_unloaded)
+      testsuite(14) = new_unittest("json-unloaded-guard", run_json_unloaded)
+      testsuite(15) = new_unittest("long-argument", run_long_arg)
+      testsuite(16) = new_unittest("schema-pipe", run_schema_pipe)
+      testsuite(17) = new_unittest("plugin-release", run_plugin_release)
+      testsuite(18) = new_unittest("cli-locate", run_cli_locate)
+      testsuite(19) = new_unittest("string-linear", run_string_linear)
+      testsuite(20) = new_unittest("write-error", run_write_error)
+      testsuite(21) = new_unittest("f32-text", run_f32_text)
+      testsuite(22) = new_unittest("regress-tmp", run_regress_tmp)
+      testsuite(23) = new_unittest("cli-sources", run_cli_sources)
+      testsuite(24) = new_unittest("json-union-many", run_json_union_many)
+      testsuite(25) = new_unittest("json-union-nested", run_json_union_nested)
+      testsuite(26) = new_unittest("json-schema-chain", run_json_schema_chain)
+      testsuite(27) = new_unittest("group-clear-depth", run_group_clear_depth)
+      testsuite(28) = new_unittest("packed-zero-cap", run_packed_zero_cap)
+      testsuite(29) = new_unittest("json-trailing-spaces", run_json_trailing_spaces)
+      testsuite(30) = new_unittest("json-union-clear", run_json_union_clear)
+      testsuite(31) = new_unittest("json-nul-eof", run_json_nul_eof)
+      testsuite(32) = new_unittest("json-nest-limit", run_json_nest_limit)
+      testsuite(33) = new_unittest("cli-json-stream", run_cli_json_stream)
+      testsuite(34) = new_unittest("text-shorthand", run_text_shorthand)
+      testsuite(35) = new_unittest("text-group-replace", run_text_group_replace)
+      testsuite(36) = new_unittest("text-ws-vt-ff", run_text_ws_vt_ff)
+      testsuite(37) = new_unittest("json-dup-bad", run_json_dup_bad)
+      testsuite(38) = new_unittest("canonical-null-root", run_canonical_null_root)
+      testsuite(39) = new_unittest("json-ptr-kind", run_json_ptr_kind)
+      testsuite(40) = new_unittest("text-inactive-arm", run_text_inactive_arm)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)

@@ -15,8 +15,11 @@ contains
 
    subroutine collect_generic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("generic", run_generic), &
-                   new_unittest("generic-five-bindings", run_five_bindings)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(2))
+      testsuite(1) = new_unittest("generic", run_generic)
+      testsuite(2) = new_unittest("generic-five-bindings", run_five_bindings)
    end subroutine collect_generic
 
    subroutine check_(error, cond, name)

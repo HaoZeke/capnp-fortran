@@ -16,12 +16,13 @@ contains
 
    subroutine collect_limits(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-         new_unittest("json-audit-depth", run_json_audit_depth), &
-         new_unittest("group-encode-depth", run_group_encode_depth), &
-         new_unittest("json-flat-depth", run_json_flat_depth), &
-         new_unittest("json-nul-stream", run_json_nul_stream) &
-         ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(4))
+      testsuite(1) = new_unittest("json-audit-depth", run_json_audit_depth)
+      testsuite(2) = new_unittest("group-encode-depth", run_group_encode_depth)
+      testsuite(3) = new_unittest("json-flat-depth", run_json_flat_depth)
+      testsuite(4) = new_unittest("json-nul-stream", run_json_nul_stream)
    end subroutine collect_limits
 
    subroutine check_(error, cond, name)

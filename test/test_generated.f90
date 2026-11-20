@@ -16,8 +16,11 @@ contains
 
    subroutine collect_generated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("generated", run_generated), &
-                   new_unittest("union-setter-error", run_union_setter_error)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(2))
+      testsuite(1) = new_unittest("generated", run_generated)
+      testsuite(2) = new_unittest("union-setter-error", run_union_setter_error)
    end subroutine collect_generated
 
    !> A union setter must report a failed discriminant write. A struct

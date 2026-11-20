@@ -33,7 +33,10 @@ contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("handoff", run_handoff)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(1))
+      testsuite(1) = new_unittest("handoff", run_handoff)
    end subroutine collect_rpc_handoff
 
    subroutine check_(error, cond, name)

@@ -27,18 +27,19 @@ contains
       character(len=16) :: buf
       write (buf, '(i0)') int(c_getpid())
       tmp = '/tmp/capnpf-edges-'//trim(buf)
-      testsuite = [ &
-         new_unittest("cpp-match", run_cpp_match), &
-         new_unittest("text-layout", run_text_layout), &
-         new_unittest("nest-depth", run_nest_depth), &
-         new_unittest("canonical-depth", run_canonical_depth), &
-         new_unittest("text-depth", run_text_depth), &
-         new_unittest("corrupt-input", run_corrupt_input), &
-         new_unittest("segment-sweep", run_segment_sweep), &
-         new_unittest("far-landing-pad", run_far_pad), &
-         new_unittest("huge-list", run_huge_list), &
-         new_unittest("oversize-flat", run_oversize_flat) &
-         ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(10))
+      testsuite(1) = new_unittest("cpp-match", run_cpp_match)
+      testsuite(2) = new_unittest("text-layout", run_text_layout)
+      testsuite(3) = new_unittest("nest-depth", run_nest_depth)
+      testsuite(4) = new_unittest("canonical-depth", run_canonical_depth)
+      testsuite(5) = new_unittest("text-depth", run_text_depth)
+      testsuite(6) = new_unittest("corrupt-input", run_corrupt_input)
+      testsuite(7) = new_unittest("segment-sweep", run_segment_sweep)
+      testsuite(8) = new_unittest("far-landing-pad", run_far_pad)
+      testsuite(9) = new_unittest("huge-list", run_huge_list)
+      testsuite(10) = new_unittest("oversize-flat", run_oversize_flat)
    end subroutine collect_edges
 
    subroutine release_edges_tmp()

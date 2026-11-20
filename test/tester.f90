@@ -33,29 +33,7 @@ program tester
 
    call publish_cli_paths()
    stat = 0
-   testsuites = [ &
-        new_testsuite("wire", collect_wire), &
-        new_testsuite("addressbook", collect_addressbook), &
-        new_testsuite("canonical", collect_canonical), &
-        new_testsuite("codecs", collect_codecs), &
-        new_testsuite("dynamic", collect_dynamic), &
-        new_testsuite("annotated", collect_annotated), &
-        new_testsuite("generated", collect_generated), &
-        new_testsuite("generic", collect_generic), &
-        new_testsuite("holder", collect_holder), &
-        new_testsuite("interop", collect_interop), &
-        new_testsuite("kitchen", collect_kitchen), &
-        new_testsuite("parity", collect_parity), &
-        new_testsuite("rpc", collect_rpc), &
-        new_testsuite("rpc_handoff", collect_rpc_handoff), &
-        new_testsuite("rpc_typed", collect_rpc_typed), &
-        new_testsuite("stream", collect_stream), &
-        new_testsuite("codegen_parity", collect_codegen_parity), &
-        new_testsuite("idents", collect_idents), &
-        new_testsuite("regress", collect_regress), &
-        new_testsuite("edges", collect_edges), &
-        new_testsuite("limits", collect_limits) &
-        ]
+   call build_suites(testsuites)
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)
@@ -96,6 +74,33 @@ program tester
    end if
 
 contains
+
+   subroutine build_suites(testsuites)
+      type(testsuite_type), allocatable, intent(out) :: testsuites(:)
+      testsuites = [ &
+           new_testsuite("wire", collect_wire), &
+           new_testsuite("addressbook", collect_addressbook), &
+           new_testsuite("canonical", collect_canonical), &
+           new_testsuite("codecs", collect_codecs), &
+           new_testsuite("dynamic", collect_dynamic), &
+           new_testsuite("annotated", collect_annotated), &
+           new_testsuite("generated", collect_generated), &
+           new_testsuite("generic", collect_generic), &
+           new_testsuite("holder", collect_holder), &
+           new_testsuite("interop", collect_interop), &
+           new_testsuite("kitchen", collect_kitchen), &
+           new_testsuite("parity", collect_parity), &
+           new_testsuite("rpc", collect_rpc), &
+           new_testsuite("rpc_handoff", collect_rpc_handoff), &
+           new_testsuite("rpc_typed", collect_rpc_typed), &
+           new_testsuite("stream", collect_stream), &
+           new_testsuite("codegen_parity", collect_codegen_parity), &
+           new_testsuite("idents", collect_idents), &
+           new_testsuite("regress", collect_regress), &
+           new_testsuite("edges", collect_edges), &
+           new_testsuite("limits", collect_limits) &
+           ]
+   end subroutine build_suites
 
    subroutine release_temps()
       call release_codecs_tmp()

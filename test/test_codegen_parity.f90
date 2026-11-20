@@ -11,59 +11,60 @@ contains
 
    subroutine collect_codegen_parity(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-         new_unittest("g1_min_signed", test_g1), &
-         new_unittest("g2_text_escape", test_g2), &
-         new_unittest("g3_default_list_copy", test_g3), &
-         new_unittest("g4_get_elem_default", test_g4), &
-         new_unittest("g5_extends", test_g5), &
-         new_unittest("g6_generics", test_g6), &
-         new_unittest("g7_basename", test_g7), &
-         new_unittest("g8_server_ctx", test_g8), &
-         new_unittest("g9_surface", test_g9), &
-         new_unittest("g10_data_annotation", test_g10), &
-         new_unittest("g11_super_dispatch", test_g11), &
-         new_unittest("g12_import_shared_types", test_g12), &
-         new_unittest("g13_same_name_annotations", test_g13), &
-         new_unittest("g14_long_text_literals", test_g14), &
-         new_unittest("g15_generic_extends_base", test_g15), &
-         new_unittest("g16_import_line_wrap", test_g16), &
-         new_unittest("g17_long_ifc_and_float_lines", test_g17), &
-         new_unittest("g18_stream_name_fit", test_g18), &
-         new_unittest("g19_override_vs_own_method", test_g19), &
-         new_unittest("g20_override_chain_binding", test_g20), &
-         new_unittest("g21_same_named_imports", test_g21), &
-         new_unittest("g22_generic_in_two_files", test_g22), &
-         new_unittest("g23_rpc_names_vs_structs", test_g23), &
-         new_unittest("g24_annotation_name_clashes", test_g24), &
-         new_unittest("g25_import_alias_uses", test_g25), &
-         new_unittest("g26_capability_helper_names", test_g26), &
-         new_unittest("g27_diamond_imports", test_g27), &
-         new_unittest("g28_same_basename_modules", test_g28), &
-         new_unittest("g29_nested_brand_arguments", test_g29), &
-         new_unittest("g30_imported_name_clashes", test_g30), &
-         new_unittest("g31_renamed_imports_through_an_importer", test_g31), &
-         new_unittest("g32_rpc_symbols_meet_imports", test_g32), &
-         new_unittest("g33_transitive_reexports", test_g33), &
-         new_unittest("g34_private_names_stay_private", test_g34), &
-         new_unittest("g35_colliding_generic_arguments", test_g35), &
-         new_unittest("g36_nested_generic_arguments", test_g36), &
-         new_unittest("g37_module_names_per_file", test_g37), &
-         new_unittest("g38_import_for_binding_per_file", test_g38), &
-         new_unittest("g39_instance_names_per_file", test_g39), &
-         new_unittest("g40_annotation_ids_per_file", test_g40), &
-         new_unittest("g41_cap_descriptor_reexport", test_g41), &
-         new_unittest("g42_rpc_symbols_stay_private", test_g42), &
-         new_unittest("g43_annotation_values_per_file", test_g43), &
-         new_unittest("g44_any_type_struct_names", test_g44), &
-         new_unittest("g45_accessor_names_beside_consts", test_g45), &
-         new_unittest("g46_instance_names_beside_interfaces", test_g46), &
-         new_unittest("g47_main_instance_names_kept", test_g47), &
-         new_unittest("g48_struct_consts_beside_accessors", test_g48), &
-         new_unittest("g49_text_consts_keep_their_value", test_g49), &
-         new_unittest("g50_many_renamed_accessors", test_g50), &
-         new_unittest("g51_group_beside_instance_name", test_g51) &
-         ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(51))
+      testsuite(1) = new_unittest("g1_min_signed", test_g1)
+      testsuite(2) = new_unittest("g2_text_escape", test_g2)
+      testsuite(3) = new_unittest("g3_default_list_copy", test_g3)
+      testsuite(4) = new_unittest("g4_get_elem_default", test_g4)
+      testsuite(5) = new_unittest("g5_extends", test_g5)
+      testsuite(6) = new_unittest("g6_generics", test_g6)
+      testsuite(7) = new_unittest("g7_basename", test_g7)
+      testsuite(8) = new_unittest("g8_server_ctx", test_g8)
+      testsuite(9) = new_unittest("g9_surface", test_g9)
+      testsuite(10) = new_unittest("g10_data_annotation", test_g10)
+      testsuite(11) = new_unittest("g11_super_dispatch", test_g11)
+      testsuite(12) = new_unittest("g12_import_shared_types", test_g12)
+      testsuite(13) = new_unittest("g13_same_name_annotations", test_g13)
+      testsuite(14) = new_unittest("g14_long_text_literals", test_g14)
+      testsuite(15) = new_unittest("g15_generic_extends_base", test_g15)
+      testsuite(16) = new_unittest("g16_import_line_wrap", test_g16)
+      testsuite(17) = new_unittest("g17_long_ifc_and_float_lines", test_g17)
+      testsuite(18) = new_unittest("g18_stream_name_fit", test_g18)
+      testsuite(19) = new_unittest("g19_override_vs_own_method", test_g19)
+      testsuite(20) = new_unittest("g20_override_chain_binding", test_g20)
+      testsuite(21) = new_unittest("g21_same_named_imports", test_g21)
+      testsuite(22) = new_unittest("g22_generic_in_two_files", test_g22)
+      testsuite(23) = new_unittest("g23_rpc_names_vs_structs", test_g23)
+      testsuite(24) = new_unittest("g24_annotation_name_clashes", test_g24)
+      testsuite(25) = new_unittest("g25_import_alias_uses", test_g25)
+      testsuite(26) = new_unittest("g26_capability_helper_names", test_g26)
+      testsuite(27) = new_unittest("g27_diamond_imports", test_g27)
+      testsuite(28) = new_unittest("g28_same_basename_modules", test_g28)
+      testsuite(29) = new_unittest("g29_nested_brand_arguments", test_g29)
+      testsuite(30) = new_unittest("g30_imported_name_clashes", test_g30)
+      testsuite(31) = new_unittest("g31_renamed_imports_through_an_importer", test_g31)
+      testsuite(32) = new_unittest("g32_rpc_symbols_meet_imports", test_g32)
+      testsuite(33) = new_unittest("g33_transitive_reexports", test_g33)
+      testsuite(34) = new_unittest("g34_private_names_stay_private", test_g34)
+      testsuite(35) = new_unittest("g35_colliding_generic_arguments", test_g35)
+      testsuite(36) = new_unittest("g36_nested_generic_arguments", test_g36)
+      testsuite(37) = new_unittest("g37_module_names_per_file", test_g37)
+      testsuite(38) = new_unittest("g38_import_for_binding_per_file", test_g38)
+      testsuite(39) = new_unittest("g39_instance_names_per_file", test_g39)
+      testsuite(40) = new_unittest("g40_annotation_ids_per_file", test_g40)
+      testsuite(41) = new_unittest("g41_cap_descriptor_reexport", test_g41)
+      testsuite(42) = new_unittest("g42_rpc_symbols_stay_private", test_g42)
+      testsuite(43) = new_unittest("g43_annotation_values_per_file", test_g43)
+      testsuite(44) = new_unittest("g44_any_type_struct_names", test_g44)
+      testsuite(45) = new_unittest("g45_accessor_names_beside_consts", test_g45)
+      testsuite(46) = new_unittest("g46_instance_names_beside_interfaces", test_g46)
+      testsuite(47) = new_unittest("g47_main_instance_names_kept", test_g47)
+      testsuite(48) = new_unittest("g48_struct_consts_beside_accessors", test_g48)
+      testsuite(49) = new_unittest("g49_text_consts_keep_their_value", test_g49)
+      testsuite(50) = new_unittest("g50_many_renamed_accessors", test_g50)
+      testsuite(51) = new_unittest("g51_group_beside_instance_name", test_g51)
    end subroutine collect_codegen_parity
 
 

@@ -11,62 +11,65 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("endian", test_endian), &
-           new_unittest("pointer-words", test_pointer_words), &
-           new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset), &
-           new_unittest("golden-single-struct", test_golden_single_struct), &
-           new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
-           new_unittest("text-data", test_text_data), &
-           new_unittest("overwrite-text-zero", test_overwrite_text_zero), &
-           new_unittest("lists", test_lists), &
-           new_unittest("list-count-limit", test_list_count_limit), &
-           new_unittest("void-list-struct", test_void_list_struct), &
-           new_unittest("list-struct-depth", test_list_struct_depth), &
-           new_unittest("void-list-amplify", test_void_list_amplify), &
-           new_unittest("empty-list-amplify", test_empty_list_amplify), &
-           new_unittest("composite-list", test_composite_list), &
-           new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
-           new_unittest("composite-list-adversarial", test_bad_composite), &
-           new_unittest("nested-struct", test_nested_struct), &
-           new_unittest("far-pointer", test_far_pointer), &
-           new_unittest("far-chain-rejected", test_far_chain_rejected), &
-           new_unittest("double-far-e2e", test_double_far_e2e), &
-           new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
-           new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
-           new_unittest("cross-message-copy-clears-slot", test_cross_message_copy_clears_slot), &
-           new_unittest("overwrite-zeroing", test_overwrite_zeroing), &
-           new_unittest("wire-capability", test_wire_capability), &
-           new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
-           new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
-           new_unittest("packed-roundtrip", test_packed_roundtrip), &
-           new_unittest("packed-incremental", test_packed_incremental), &
-           new_unittest("packed-unpack-finish", test_packed_unpack_finish), &
-           new_unittest("packed-size-limit", test_packed_size_limit), &
-           new_unittest("packed-segment-boundary", test_packed_segment_boundary), &
-           new_unittest("packed-header-boundary", test_packed_header_boundary), &
-           new_unittest("framing-errors", test_framing_errors), &
-           new_unittest("framing-many-segments", test_framing_many_segments), &
-           new_unittest("framing-file-limits", test_framing_file_limits), &
-           new_unittest("read-empty-file", test_read_empty_file), &
-           new_unittest("stream-reader-options", test_stream_reader_options), &
-           new_unittest("amplified-lists", test_amplified_lists), &
-           new_unittest("zero-size-target-clamp", test_zero_size_target_clamp), &
-           new_unittest("far-pointer-parity", test_far_pointer_parity), &
-           new_unittest("traversal-limit", test_traversal_limit), &
-           new_unittest("traversal-root-words", test_traversal_root_words), &
-           new_unittest("traversal-single-far", test_traversal_single_far), &
-           new_unittest("traversal-double-far", test_traversal_double_far), &
-           new_unittest("void-list-words", test_void_list_words), &
-           new_unittest("void-list-get-all", test_void_list_get_all), &
-           new_unittest("depth-limit", test_depth_limit), &
-           new_unittest("depth-limit-nested", test_depth_limit_nested), &
-           new_unittest("nest-limit-64", test_nest_limit_64), &
-           new_unittest("far-depth-one", test_far_depth_one), &
-           new_unittest("reader-options", test_reader_options), &
-           new_unittest("builder-options", test_builder_options), &
-           new_unittest("alloc-in-bounds", test_alloc_in_bounds), &
-           new_unittest("root-uninit", test_root_uninit)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(55))
+      testsuite(1) = new_unittest("endian", test_endian)
+      testsuite(2) = new_unittest("pointer-words", test_pointer_words)
+      testsuite(3) = new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset)
+      testsuite(4) = new_unittest("golden-single-struct", test_golden_single_struct)
+      testsuite(5) = new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip)
+      testsuite(6) = new_unittest("text-data", test_text_data)
+      testsuite(7) = new_unittest("overwrite-text-zero", test_overwrite_text_zero)
+      testsuite(8) = new_unittest("lists", test_lists)
+      testsuite(9) = new_unittest("list-count-limit", test_list_count_limit)
+      testsuite(10) = new_unittest("void-list-struct", test_void_list_struct)
+      testsuite(11) = new_unittest("list-struct-depth", test_list_struct_depth)
+      testsuite(12) = new_unittest("void-list-amplify", test_void_list_amplify)
+      testsuite(13) = new_unittest("empty-list-amplify", test_empty_list_amplify)
+      testsuite(14) = new_unittest("composite-list", test_composite_list)
+      testsuite(15) = new_unittest("composite-count-unsigned", test_composite_count_unsigned)
+      testsuite(16) = new_unittest("composite-list-adversarial", test_bad_composite)
+      testsuite(17) = new_unittest("nested-struct", test_nested_struct)
+      testsuite(18) = new_unittest("far-pointer", test_far_pointer)
+      testsuite(19) = new_unittest("far-chain-rejected", test_far_chain_rejected)
+      testsuite(20) = new_unittest("double-far-e2e", test_double_far_e2e)
+      testsuite(21) = new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero)
+      testsuite(22) = new_unittest("far-landing-pad-zero", test_far_landing_pad_zero)
+      testsuite(23) = new_unittest("cross-message-copy-clears-slot", &
+                                   test_cross_message_copy_clears_slot)
+      testsuite(24) = new_unittest("overwrite-zeroing", test_overwrite_zeroing)
+      testsuite(25) = new_unittest("wire-capability", test_wire_capability)
+      testsuite(26) = new_unittest("cap-reserved-bits", test_cap_reserved_bits)
+      testsuite(27) = new_unittest("packed-spec-vectors", test_packed_spec_vectors)
+      testsuite(28) = new_unittest("packed-roundtrip", test_packed_roundtrip)
+      testsuite(29) = new_unittest("packed-incremental", test_packed_incremental)
+      testsuite(30) = new_unittest("packed-unpack-finish", test_packed_unpack_finish)
+      testsuite(31) = new_unittest("packed-size-limit", test_packed_size_limit)
+      testsuite(32) = new_unittest("packed-segment-boundary", test_packed_segment_boundary)
+      testsuite(33) = new_unittest("packed-header-boundary", test_packed_header_boundary)
+      testsuite(34) = new_unittest("framing-errors", test_framing_errors)
+      testsuite(35) = new_unittest("framing-many-segments", test_framing_many_segments)
+      testsuite(36) = new_unittest("framing-file-limits", test_framing_file_limits)
+      testsuite(37) = new_unittest("read-empty-file", test_read_empty_file)
+      testsuite(38) = new_unittest("stream-reader-options", test_stream_reader_options)
+      testsuite(39) = new_unittest("amplified-lists", test_amplified_lists)
+      testsuite(40) = new_unittest("zero-size-target-clamp", test_zero_size_target_clamp)
+      testsuite(41) = new_unittest("far-pointer-parity", test_far_pointer_parity)
+      testsuite(42) = new_unittest("traversal-limit", test_traversal_limit)
+      testsuite(43) = new_unittest("traversal-root-words", test_traversal_root_words)
+      testsuite(44) = new_unittest("traversal-single-far", test_traversal_single_far)
+      testsuite(45) = new_unittest("traversal-double-far", test_traversal_double_far)
+      testsuite(46) = new_unittest("void-list-words", test_void_list_words)
+      testsuite(47) = new_unittest("void-list-get-all", test_void_list_get_all)
+      testsuite(48) = new_unittest("depth-limit", test_depth_limit)
+      testsuite(49) = new_unittest("depth-limit-nested", test_depth_limit_nested)
+      testsuite(50) = new_unittest("nest-limit-64", test_nest_limit_64)
+      testsuite(51) = new_unittest("far-depth-one", test_far_depth_one)
+      testsuite(52) = new_unittest("reader-options", test_reader_options)
+      testsuite(53) = new_unittest("builder-options", test_builder_options)
+      testsuite(54) = new_unittest("alloc-in-bounds", test_alloc_in_bounds)
+      testsuite(55) = new_unittest("root-uninit", test_root_uninit)
    end subroutine collect_wire
 
    subroutine test_endian(error)

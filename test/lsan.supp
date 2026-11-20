@@ -1,0 +1,3 @@
+# Suite names stay allocated until the process exits.
+leak:__testdrive_MOD_new_testsuite
+leak:build_suites

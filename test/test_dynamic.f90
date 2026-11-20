@@ -26,16 +26,19 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("dynamic", run_dynamic), &
-                   new_unittest("dynamic-default-isolation", run_default_isolation), &
-                   new_unittest("dynamic-malformed-text", run_malformed_text), &
-                   new_unittest("dynamic-unloaded-schema", run_unloaded_schema), &
-                   new_unittest("dynamic-init-null", run_init_null), &
-                   new_unittest("dynamic-assign-types", run_assign_types), &
-                   new_unittest("dynamic-group-union", run_group_union), &
-                   new_unittest("dynamic-union-clear", run_union_clear), &
-                   new_unittest("dynamic-scalars", run_scalars), &
-                   new_unittest("dynamic-node-bomb", run_node_bomb)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(10))
+      testsuite(1) = new_unittest("dynamic", run_dynamic)
+      testsuite(2) = new_unittest("dynamic-default-isolation", run_default_isolation)
+      testsuite(3) = new_unittest("dynamic-malformed-text", run_malformed_text)
+      testsuite(4) = new_unittest("dynamic-unloaded-schema", run_unloaded_schema)
+      testsuite(5) = new_unittest("dynamic-init-null", run_init_null)
+      testsuite(6) = new_unittest("dynamic-assign-types", run_assign_types)
+      testsuite(7) = new_unittest("dynamic-group-union", run_group_union)
+      testsuite(8) = new_unittest("dynamic-union-clear", run_union_clear)
+      testsuite(9) = new_unittest("dynamic-scalars", run_scalars)
+      testsuite(10) = new_unittest("dynamic-node-bomb", run_node_bomb)
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)

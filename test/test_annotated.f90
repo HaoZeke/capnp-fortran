@@ -18,8 +18,11 @@ contains
 
    subroutine collect_annotated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("annotated-interface", run_annotated), &
-                   new_unittest("union-disc-bounds", run_union_disc_bounds)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(2))
+      testsuite(1) = new_unittest("annotated-interface", run_annotated)
+      testsuite(2) = new_unittest("union-disc-bounds", run_union_disc_bounds)
    end subroutine collect_annotated
 
    subroutine ping_srv(self, ctx, params, results, err)

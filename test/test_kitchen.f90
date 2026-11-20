@@ -16,10 +16,12 @@ contains
 
    subroutine collect_kitchen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("consts", t_consts), &
-           new_unittest("defaults-on-fresh-struct", t_defaults_on_fresh_struct), &
-           new_unittest("values-roundtrip", t_values_roundtrip)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(3))
+      testsuite(1) = new_unittest("consts", t_consts)
+      testsuite(2) = new_unittest("defaults-on-fresh-struct", t_defaults_on_fresh_struct)
+      testsuite(3) = new_unittest("values-roundtrip", t_values_roundtrip)
    end subroutine collect_kitchen
 
    subroutine check_(error, cond, name)

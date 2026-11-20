@@ -13,22 +13,24 @@ contains
 
    subroutine collect_parity(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("deep-copy", t_deep_copy), &
-           new_unittest("cross-message-setp", t_cross_message_setp), &
-           new_unittest("list-upgrade-views", t_list_upgrade_views), &
-           new_unittest("list-downgrade-views", t_list_downgrade_views), &
-           new_unittest("u64", t_u64), &
-           new_unittest("list-of-text", t_list_of_text), &
-           new_unittest("bulk-accessors", t_bulk_accessors), &
-           new_unittest("incremental-unpack", t_incremental_unpack), &
-           new_unittest("zero-copy-view", t_zero_copy_view), &
-           new_unittest("disown-adopt", t_disown_adopt), &
-           new_unittest("incremental-pack", t_incremental_pack), &
-           new_unittest("views-and-lengths", t_views_and_lengths), &
-           new_unittest("stream-unit", t_stream_unit), &
-           new_unittest("packed-stream-unit", t_packed_stream_unit), &
-           new_unittest("total-size", t_total_size)]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(15))
+      testsuite(1) = new_unittest("deep-copy", t_deep_copy)
+      testsuite(2) = new_unittest("cross-message-setp", t_cross_message_setp)
+      testsuite(3) = new_unittest("list-upgrade-views", t_list_upgrade_views)
+      testsuite(4) = new_unittest("list-downgrade-views", t_list_downgrade_views)
+      testsuite(5) = new_unittest("u64", t_u64)
+      testsuite(6) = new_unittest("list-of-text", t_list_of_text)
+      testsuite(7) = new_unittest("bulk-accessors", t_bulk_accessors)
+      testsuite(8) = new_unittest("incremental-unpack", t_incremental_unpack)
+      testsuite(9) = new_unittest("zero-copy-view", t_zero_copy_view)
+      testsuite(10) = new_unittest("disown-adopt", t_disown_adopt)
+      testsuite(11) = new_unittest("incremental-pack", t_incremental_pack)
+      testsuite(12) = new_unittest("views-and-lengths", t_views_and_lengths)
+      testsuite(13) = new_unittest("stream-unit", t_stream_unit)
+      testsuite(14) = new_unittest("packed-stream-unit", t_packed_stream_unit)
+      testsuite(15) = new_unittest("total-size", t_total_size)
    end subroutine collect_parity
 
    subroutine check_(error, cond, name)

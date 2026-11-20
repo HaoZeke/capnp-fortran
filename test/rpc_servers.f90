@@ -11,6 +11,15 @@ module rpc_servers
 
    integer(int64), parameter :: ECHO_IFACE = 81985529216486895_int64 ! 0x0123456789abcdef
 
+   !> Exported adders stay reachable for the process. The connection
+   !> stores a non-owning pointer.
+   type :: held_adder
+      type(adder_srv_t), pointer :: item => null()
+   end type held_adder
+
+   type(held_adder), allocatable, save :: held_adders(:)
+   integer, save :: nheld = 0
+
    !> method 0: results = { i64 = params.i64 * 2, text = 'echo: '//params.text }
    !> method 1: results = { cap ptr0 = new adder with base = params.i64 }
    type, extends(rpc_server_t) :: echo_srv_t
@@ -66,6 +75,7 @@ contains
          if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
       case (1)
          allocate (ad)
+         call keep_adder(ad)
          ad%base = capnp_get_i64(ctx%params, 0_int64)
          sp => ad
          idx = rpc_ctx_export_cap(ctx, sp, err)
@@ -78,6 +88,23 @@ contains
          err = CAPNP_ERR_ARG
       end select
    end subroutine echo_dispatch
+
+   subroutine keep_adder(ad)
+      type(adder_srv_t), pointer, intent(in) :: ad
+      type(held_adder), allocatable :: grown(:)
+      integer :: i, n
+      if (.not. allocated(held_adders)) allocate (held_adders(4))
+      if (nheld >= size(held_adders)) then
+         n = size(held_adders)*2
+         allocate (grown(n))
+         do i = 1, nheld
+            grown(i)%item => held_adders(i)%item
+         end do
+         call move_alloc(grown, held_adders)
+      end if
+      nheld = nheld + 1
+      held_adders(nheld)%item => ad
+   end subroutine keep_adder
 
    subroutine adder_dispatch(self, ctx, err)
       class(adder_srv_t), intent(inout) :: self

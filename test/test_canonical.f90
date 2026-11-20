@@ -13,15 +13,16 @@ contains
 
    subroutine collect_canonical(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [ &
-           new_unittest("canonical", run_canonical), &
-           new_unittest("canonical-bool-padding", test_bool_padding), &
-           new_unittest("canonical-depth-limit", test_depth_limit), &
-           new_unittest("canonical-traversal-limit", test_traversal_limit), &
-           new_unittest("canonical-is-canonical-cases", test_is_canonical_cases), &
-           new_unittest("canonical-depth-boundary", test_depth_boundary), &
-           new_unittest("canonical-far-pointers", test_far_pointers) &
-           ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(7))
+      testsuite(1) = new_unittest("canonical", run_canonical)
+      testsuite(2) = new_unittest("canonical-bool-padding", test_bool_padding)
+      testsuite(3) = new_unittest("canonical-depth-limit", test_depth_limit)
+      testsuite(4) = new_unittest("canonical-traversal-limit", test_traversal_limit)
+      testsuite(5) = new_unittest("canonical-is-canonical-cases", test_is_canonical_cases)
+      testsuite(6) = new_unittest("canonical-depth-boundary", test_depth_boundary)
+      testsuite(7) = new_unittest("canonical-far-pointers", test_far_pointers)
    end subroutine collect_canonical
 
    subroutine check_(error, cond, name)

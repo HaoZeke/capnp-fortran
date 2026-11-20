@@ -42,20 +42,21 @@ contains
    subroutine collect_codecs(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       call init_codec_tmp()
-      testsuite = [ &
-         new_unittest("text-addressbook", run_addressbook), &
-         new_unittest("text-kitchen", run_kitchen), &
-         new_unittest("text-edge-cases", run_text_edges), &
-         new_unittest("text-generics", run_text_generics), &
-         new_unittest("json-addressbook", run_json_addressbook), &
-         new_unittest("json-kitchen", run_json_kitchen), &
-         new_unittest("json-sample", run_json_sample), &
-         new_unittest("json-edge-cases", run_json_edges), &
-         new_unittest("json-flatten-discriminator", run_json_flatten_disc), &
-         new_unittest("cli", run_cli), &
-         new_unittest("cli-extended", run_cli_extended), &
-         new_unittest("codec-tmp", run_codec_tmp) &
-         ]
+      ! One assignment per case. An array constructor of these values
+      ! leaves the case-name temporaries allocated on gfortran.
+      allocate (testsuite(12))
+      testsuite(1) = new_unittest("text-addressbook", run_addressbook)
+      testsuite(2) = new_unittest("text-kitchen", run_kitchen)
+      testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
+      testsuite(4) = new_unittest("text-generics", run_text_generics)
+      testsuite(5) = new_unittest("json-addressbook", run_json_addressbook)
+      testsuite(6) = new_unittest("json-kitchen", run_json_kitchen)
+      testsuite(7) = new_unittest("json-sample", run_json_sample)
+      testsuite(8) = new_unittest("json-edge-cases", run_json_edges)
+      testsuite(9) = new_unittest("json-flatten-discriminator", run_json_flatten_disc)
+      testsuite(10) = new_unittest("cli", run_cli)
+      testsuite(11) = new_unittest("cli-extended", run_cli_extended)
+      testsuite(12) = new_unittest("codec-tmp", run_codec_tmp)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
