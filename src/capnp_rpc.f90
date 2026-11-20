@@ -2217,6 +2217,28 @@ contains
             call import_find_wire(conn, cap%id, inode, found)
             if (found) cap%id = inode%id
          end if
+      case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+         ! C++ receiveCap imports the vine and returns that client
+         ! (rpc.c++ 1628-1630). A local result never carries this
+         ! descriptor.
+         if (conn%questions(int(qid))%local_call .or. &
+             conn%questions(int(qid))%local_results) then
+            err = CAPNP_ERR_KIND
+         else
+            block
+               type(third_party_cap_descriptor_t) :: tp
+               integer(int64) :: vine
+               tp = cap_descriptor_third_party_hosted_get(cd, err)
+               if (err == CAPNP_OK) then
+                  vine = third_party_cap_descriptor_vine_id_get(tp)
+                  cap%kind = RPC_CAP_IMPORT
+                  cap%id = vine
+                  call import_find_live(conn, vine, inode, found)
+                  if (.not. found) call import_find_wire(conn, vine, inode, found)
+                  if (found) cap%id = inode%id
+               end if
+            end block
+         end if
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -2637,6 +2659,22 @@ contains
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
          case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
          case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            ! C++ imports the vine for a result the same way it imports
+            ! senderHosted (rpc.c++ receiveCap, 1628-1630). Call params
+            ! stay on the introduction record: `record` is false there,
+            ! and `rpc_introduction_done` releases that vine itself.
+            if (record) then
+               block
+                  type(third_party_cap_descriptor_t) :: tp
+                  integer(int64) :: vine
+                  integer :: verr
+                  tp = cap_descriptor_third_party_hosted_get(cd, verr)
+                  if (verr == CAPNP_OK .and. tp%p%kind == CAPNP_PK_STRUCT) then
+                     vine = third_party_cap_descriptor_vine_id_get(tp)
+                     if (vine >= 0_int64) call import_receive(conn, vine, .false.)
+                  end if
+               end block
+            end if
          case default
             call abort_conn(conn, 'unknown CapDescriptor type', err)
             return

@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(90))
+      allocate (testsuite(91))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -284,20 +284,22 @@ contains
       testsuite(82)%test => w_resolve_remote_reused_id
       testsuite(83)%name = "rpc-sender-loopback-echo"
       testsuite(83)%test => w_sender_loopback_echo
-      testsuite(84)%name = "rpc-shutdown"
-      testsuite(84)%test => w_shutdown
-      testsuite(85)%name = "posix-recv-eintr-retried"
-      testsuite(85)%test => t_recv_all_retries_eintr
-      testsuite(86)%name = "rpc-framing-511-accepted"
-      testsuite(86)%test => t_framing_511_accepted
-      testsuite(87)%name = "rpc-framing-512-rejected"
-      testsuite(87)%test => t_framing_512_rejected
-      testsuite(88)%name = "rpc-framing-oversized-rejected"
-      testsuite(88)%test => t_framing_oversized_rejected
-      testsuite(89)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(89)%test => t_framing_negative_traversal_rejected
-      testsuite(90)%name = "rpc-framing-short-and-padded"
-      testsuite(90)%test => t_framing_short_and_padded
+      testsuite(84)%name = "rpc-result-third-party-vine"
+      testsuite(84)%test => w_result_third_party_vine
+      testsuite(85)%name = "rpc-shutdown"
+      testsuite(85)%test => w_shutdown
+      testsuite(86)%name = "posix-recv-eintr-retried"
+      testsuite(86)%test => t_recv_all_retries_eintr
+      testsuite(87)%name = "rpc-framing-511-accepted"
+      testsuite(87)%test => t_framing_511_accepted
+      testsuite(88)%name = "rpc-framing-512-rejected"
+      testsuite(88)%test => t_framing_512_rejected
+      testsuite(89)%name = "rpc-framing-oversized-rejected"
+      testsuite(89)%test => t_framing_oversized_rejected
+      testsuite(90)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(90)%test => t_framing_negative_traversal_rejected
+      testsuite(91)%name = "rpc-framing-short-and-padded"
+      testsuite(91)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -489,6 +491,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_sender_loopback_echo(error)
    end subroutine w_sender_loopback_echo
+
+   subroutine w_result_third_party_vine(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_result_third_party_vine(error)
+   end subroutine w_result_third_party_vine
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6556,5 +6563,82 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_sender_loopback_echo
+
+   !> C++ `receiveCap` imports the vine of a `thirdPartyHosted` result
+   !> (`rpc.c++` lines 1628-1630). `rpc_result_cap` must return that
+   !> import, and the level-3 pickup must share its one reference.
+   subroutine t_result_third_party_vine(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, vine
+      type(rpc_introduction_t) :: got(4)
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(return_t) :: r
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      type(release_t) :: rel
+      integer :: fa, fb, e, n
+      integer(int64) :: qboot, qcall
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'vine result: bootstrap')
+      if (allocated(error)) return
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qcall, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call rpc_write_third_party_cap(cd, '10.1.0.3', 5003, 909_int64, 80_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, qcall, [integer ::], vine, e)
+      call check_(error, e == CAPNP_OK .and. vine%kind == RPC_CAP_IMPORT .and. &
+                  vine%id == 80_int64, 'vine result: the vine is the result cap')
+      if (allocated(error)) return
+      n = rpc_pending_introductions(cconn, got)
+      call check_(error, n == 1 .and. got(1)%vine_id == 80_int64 .and. &
+                  got(1)%nonce == 909_int64, 'vine result: introduction recorded')
+      if (allocated(error)) return
+      call rpc_release_send(cconn, vine, e)
+      call px_poll_in(sconn%fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, 'vine result: release arrives')
+      if (allocated(error)) return
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 80_int64 .and. &
+                  release_reference_count_get(rel) == 1_int64, &
+                  'vine result: one reference of the vine')
+      call capnp_message_free(reply)
+      call rpc_introduction_done(cconn, 909_int64, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'vine result: pickup shares that reference')
+      call check_(error, rpc_pending_introductions(cconn) == 0, &
+                  'vine result: introduction cleared')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_result_third_party_vine
 
 end module test_rpc
