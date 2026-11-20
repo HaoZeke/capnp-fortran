@@ -663,7 +663,6 @@ module capnp_rpc
       !> Broken promise exports written this turn. Each gets its Resolve
       !> once the message is handled, as C++ resolveExportedPromise does.
       integer, allocatable :: broken_resolves(:)
-      integer(int64) :: next_embargo = 0_int64
       integer(int64) :: next_import_handle = -2_int64
       !> Shared with this vat's other connections when one is attached;
       !> otherwise `own_vat` below.
@@ -719,7 +718,6 @@ contains
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
-      conn%next_embargo = 0_int64
       conn%next_import_handle = -2_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
@@ -750,7 +748,6 @@ contains
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
-      conn%next_embargo = 0_int64
       conn%next_import_handle = -2_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
@@ -3229,7 +3226,6 @@ contains
          emb => emb_next
       end do
       conn%embargoes => null()
-      conn%next_embargo = 0_int64
    end subroutine free_imports
 
    subroutine import_find(conn, id, node, found)
@@ -3683,8 +3679,7 @@ contains
          call release_resolved_import(conn, node, err)
          return
       end if
-      eid = conn%next_embargo
-      conn%next_embargo = eid + 1_int64
+      eid = new_embargo_id(conn)
       allocate (emb)
       emb%id = eid
       emb%promise_id = node%id
@@ -3941,8 +3936,7 @@ contains
          node%embargo_id = -1_int64
          if (held .and. node%received_call) then
             allocate (emb)
-            emb%id = conn%next_embargo
-            conn%next_embargo = emb%id + 1_int64
+            emb%id = new_embargo_id(conn)
             emb%promise_id = node%id
             emb%open = .true.
             emb%next => conn%embargoes
@@ -4276,8 +4270,7 @@ contains
       node%state = IMP_REMOTE
       if (held .and. node%received_call) then
          allocate (emb)
-         emb%id = conn%next_embargo
-         conn%next_embargo = emb%id + 1_int64
+         emb%id = new_embargo_id(conn)
          emb%promise_id = node%id
          emb%open = .true.
          emb%next => conn%embargoes
@@ -4348,8 +4341,7 @@ contains
       call point_at_pipeline(node, q, ops)
       if (held .and. node%received_call) then
          allocate (emb)
-         emb%id = conn%next_embargo
-         conn%next_embargo = emb%id + 1_int64
+         emb%id = new_embargo_id(conn)
          emb%promise_id = node%id
          emb%open = .true.
          emb%next => conn%embargoes
@@ -4592,6 +4584,28 @@ contains
       node%released = .true.
       call send_release(conn, node%wire_id, int(n, int64), err)
    end subroutine release_all_import
+
+   !> The lowest id no open embargo uses. C++ keeps embargoes in an
+   !> ExportTable, which hands out the lowest freed id first.
+   integer(int64) function new_embargo_id(conn) result(id)
+      type(rpc_conn_t), intent(in), target :: conn
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: taken
+      id = 0_int64
+      do
+         taken = .false.
+         emb => conn%embargoes
+         do while (associated(emb))
+            if (emb%open .and. emb%id == id) then
+               taken = .true.
+               exit
+            end if
+            emb => emb%next
+         end do
+         if (.not. taken) return
+         id = id + 1_int64
+      end do
+   end function new_embargo_id
 
    !> A promise import resolved, so its ImportClient goes unless an
    !> answer's Return still keeps it.
@@ -9054,8 +9068,7 @@ contains
             block
                type(rpc_embargo_node_t), pointer :: emb
                allocate (emb)
-               emb%id = conn%next_embargo
-               conn%next_embargo = emb%id + 1_int64
+               emb%id = new_embargo_id(conn)
                emb%open = .true.
                emb%next => conn%embargoes
                conn%embargoes => emb

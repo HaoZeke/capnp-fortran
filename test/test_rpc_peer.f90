@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(33))
+      allocate (testsuite(34))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -98,6 +98,8 @@ contains
       testsuite(32)%test => t_fwd_sp_ra_import
       testsuite(33)%name = "fwd-sp-resolve-to-ra-pending-npp"
       testsuite(33)%test => t_fwd_sp_ra_npp
+      testsuite(34)%name = "embargo-id-reused"
+      testsuite(34)%test => t_embargo_reuse
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1521,6 +1523,55 @@ contains
                  'resolve to pending npp: got '//b//' / '//d//' / '//c)
       call close_peer(conn, fd)
    end subroutine t_fwd_sp_ra_npp
+
+   !> Two embargoes, one after the other. C++ keeps embargoes in an
+   !> ExportTable, so the second takes the id the first freed.
+   subroutine t_embargo_reuse(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer :: fd
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 4_int64, 0, 2_int64, ['sp'], [6_int64])
+      a = step(conn, fd, 1)
+      call wres(fd, 6_int64, 'ra', 1_int64)
+      b = step(conn, fd, 1)
+      call wdisrl(fd, 1_int64, 0_int64)
+      c = step(conn, fd, 1)
+      call wcall(fd, 5_int64, 0, 2_int64, ['sp'], [7_int64])
+      a = step(conn, fd, 1)
+      call wres(fd, 7_int64, 'ra', 1_int64)
+      d = step(conn, fd, 1)
+      call check(error, b == 'DIS I6 sl 0 | REL 6 1' .and. c == '' .and. &
+                 d == 'DIS I7 sl 0 | REL 7 1', 'embargo reuse: got '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_embargo_reuse
+
+   !> Disembargo receiverLoopback `id` on importedCap `tid`.
+   subroutine wdisrl(fd, tid, id)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: tid, id
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, tid, e)
+      call disembargo_context_receiver_loopback_set(d, id, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine wdisrl
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
