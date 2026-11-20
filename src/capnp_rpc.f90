@@ -6541,9 +6541,6 @@ contains
       if (.not. found) call answer_add_hi(conn, qid, slot)
       if (slot%finished) then
          call settle_answer_promises(conn, qid, rm, err)
-         do i = 0, ctx%nexp - 1
-            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
-         end do
          ! The caller still waits for a Return. Finish drops the C++ task
          ! that would send results or an exception (rpc.c++ 3289-3361), so
          ! the call ends with canceled, or resultsSentElsewhere for a
@@ -6557,7 +6554,12 @@ contains
          end if
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+         ! Calls queued on this answer took its pipeline before the
+         ! Finish, so they still reach its caps (rpc.c++ QueuedPipeline).
          call drain_incoming_pipeline(conn, qid, rm, err)
+         do i = 0, ctx%nexp - 1
+            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+         end do
          call capnp_message_free(rm)
          return
       end if

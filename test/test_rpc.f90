@@ -163,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(125))
+      allocate (testsuite(126))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -402,18 +402,20 @@ contains
       testsuite(118)%test => w_take_answer_keeps_promise_transform
       testsuite(119)%name = "rpc-finish-cancels-queued-call"
       testsuite(119)%test => w_finish_cancels_queued_call
-      testsuite(120)%name = "posix-recv-eintr-retried"
-      testsuite(120)%test => t_recv_all_retries_eintr
-      testsuite(121)%name = "rpc-framing-511-accepted"
-      testsuite(121)%test => t_framing_511_accepted
-      testsuite(122)%name = "rpc-framing-512-rejected"
-      testsuite(122)%test => t_framing_512_rejected
-      testsuite(123)%name = "rpc-framing-oversized-rejected"
-      testsuite(123)%test => t_framing_oversized_rejected
-      testsuite(124)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(124)%test => t_framing_negative_traversal_rejected
-      testsuite(125)%name = "rpc-framing-short-and-padded"
-      testsuite(125)%test => t_framing_short_and_padded
+      testsuite(120)%name = "rpc-early-finish-keeps-queued-call"
+      testsuite(120)%test => w_early_finish_keeps_queued_call
+      testsuite(121)%name = "posix-recv-eintr-retried"
+      testsuite(121)%test => t_recv_all_retries_eintr
+      testsuite(122)%name = "rpc-framing-511-accepted"
+      testsuite(122)%test => t_framing_511_accepted
+      testsuite(123)%name = "rpc-framing-512-rejected"
+      testsuite(123)%test => t_framing_512_rejected
+      testsuite(124)%name = "rpc-framing-oversized-rejected"
+      testsuite(124)%test => t_framing_oversized_rejected
+      testsuite(125)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(125)%test => t_framing_negative_traversal_rejected
+      testsuite(126)%name = "rpc-framing-short-and-padded"
+      testsuite(126)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -906,6 +908,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_cancels_queued_call(error)
    end subroutine w_finish_cancels_queued_call
+
+   subroutine w_early_finish_keeps_queued_call(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_early_finish_keeps_queued_call(error)
+   end subroutine w_early_finish_keeps_queued_call
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10075,5 +10082,54 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_finish_cancels_queued_call
+
+   !> Finish for a running answer with a call queued on its pipeline: the
+   !> answer ends canceled, and the queued call still reaches the cap the
+   !> answer returned. C++ 1.4.0 hands the queued call the pipeline
+   !> before the Finish drops the answer.
+   subroutine t_early_finish_keeps_queued_call(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(order_srv_t), target :: inner
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      integer(int64) :: qp
+      integer :: e, n, w30, wqp
+      logical :: ok
+
+      pumper = pump_srv_t()
+      pumper%mode = 1
+      pumper%npump = 2
+      srv => inner
+      pumper%inner => srv
+      call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+      call pa_send(sconn, 30_int64, qp, [0])
+      call raw_finish_only(sconn, qp, .false.)
+      call rpc_pump_once(cconn, e)
+      w30 = -1
+      wqp = -1
+      do n = 1, 30
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_RETURN_TAG) then
+            r = message_return_get(msg, e)
+            if (return_answer_id_get(r) == 30_int64) w30 = return_which(r)
+            if (return_answer_id_get(r) == qp) wqp = return_which(r)
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, rpc_conn_alive(cconn) .and. wqp == RETURN_CANCELED_TAG, &
+                  'early finish: the finished answer is canceled')
+      if (.not. allocated(error)) &
+         call check_(error, w30 == RETURN_RESULTS_TAG .and. inner%n == 1, &
+                     'early finish: the queued call reaches the returned cap')
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_early_finish_keeps_queued_call
 
 end module test_rpc
