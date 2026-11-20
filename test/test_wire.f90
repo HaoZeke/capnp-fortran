@@ -18,6 +18,7 @@ contains
            new_unittest("golden-single-struct", test_golden_single_struct), &
            new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
            new_unittest("text-data", test_text_data), &
+           new_unittest("overwrite-text-zero", test_overwrite_text_zero), &
            new_unittest("lists", test_lists), &
            new_unittest("list-count-limit", test_list_count_limit), &
            new_unittest("void-list-struct", test_void_list_struct), &
@@ -239,6 +240,54 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_text_data
+   !> Overwriting Text must erase the previous bytes. Compared with the
+   !> flat array from C++ 1.4.0 MallocMessageBuilder for Holder.text.
+   subroutine test_overwrite_text_zero(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      integer(int8) :: expect(0:79)
+      character(len=*), parameter :: hex = &
+         '00000000090000000000000000000400' // &
+         '00000000000000000000000000000000' // &
+         '00000000000000000d0000001a000000' // &
+         '00000000000000000000000000000000' // &
+         '00000000000000006f6b000000000000'
+      integer :: err, i
+      do i = 0, 79
+         expect(i) = int(hexdig(hex(2*i + 1:2*i + 1))*16 + &
+                         hexdig(hex(2*i + 2:2*i + 2)), int8)
+      end do
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 4, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_set_text(root, 3, 'SECRET_PASSWORD_12345', err)
+      call check(error, err == CAPNP_OK, 'overwrite: first text')
+      if (allocated(error)) return
+      call capnp_set_text(root, 3, 'ok', err)
+      call check(error, err == CAPNP_OK, 'overwrite: second text')
+      if (allocated(error)) return
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, err == CAPNP_OK .and. size(bytes) == 80, 'overwrite: 80 bytes')
+      if (allocated(error)) return
+      call check(error, all(bytes == expect), 'overwrite: matches C++ 1.4.0 bytes')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   contains
+      pure function hexdig(ch) result(n)
+         character(len=1), intent(in) :: ch
+         integer :: n
+         select case (ch)
+         case ('0':'9')
+            n = iachar(ch) - iachar('0')
+         case ('a':'f')
+            n = iachar(ch) - iachar('a') + 10
+         case default
+            n = 0
+         end select
+      end function hexdig
+   end subroutine test_overwrite_text_zero
    subroutine test_lists(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
