@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(140))
+      allocate (testsuite(141))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -433,18 +433,20 @@ contains
       testsuite(133)%test => w_return_after_finish_is_legal
       testsuite(134)%name = "rpc-elsewhere-keeps-param-caps"
       testsuite(134)%test => w_elsewhere_keeps_param_caps
-      testsuite(135)%name = "posix-recv-eintr-retried"
-      testsuite(135)%test => t_recv_all_retries_eintr
-      testsuite(136)%name = "rpc-framing-511-accepted"
-      testsuite(136)%test => t_framing_511_accepted
-      testsuite(137)%name = "rpc-framing-512-rejected"
-      testsuite(137)%test => t_framing_512_rejected
-      testsuite(138)%name = "rpc-framing-oversized-rejected"
-      testsuite(138)%test => t_framing_oversized_rejected
-      testsuite(139)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(139)%test => t_framing_negative_traversal_rejected
-      testsuite(140)%name = "rpc-framing-short-and-padded"
-      testsuite(140)%test => t_framing_short_and_padded
+      testsuite(135)%name = "rpc-no-pipelining-answer-refuses-pipeline"
+      testsuite(135)%test => w_no_pipelining_answer_refuses_pipeline
+      testsuite(136)%name = "posix-recv-eintr-retried"
+      testsuite(136)%test => t_recv_all_retries_eintr
+      testsuite(137)%name = "rpc-framing-511-accepted"
+      testsuite(137)%test => t_framing_511_accepted
+      testsuite(138)%name = "rpc-framing-512-rejected"
+      testsuite(138)%test => t_framing_512_rejected
+      testsuite(139)%name = "rpc-framing-oversized-rejected"
+      testsuite(139)%test => t_framing_oversized_rejected
+      testsuite(140)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(140)%test => t_framing_negative_traversal_rejected
+      testsuite(141)%name = "rpc-framing-short-and-padded"
+      testsuite(141)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1018,6 +1020,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_elsewhere_keeps_param_caps(error)
    end subroutine w_elsewhere_keeps_param_caps
+
+   subroutine w_no_pipelining_answer_refuses_pipeline(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_no_pipelining_answer_refuses_pipeline(error)
+   end subroutine w_no_pipelining_answer_refuses_pipeline
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11153,5 +11160,58 @@ contains
       call px_close(fb)
       call free_minted_adders()
    end subroutine t_elsewhere_keeps_param_caps
+
+   !> A call that set noPromisePipelining has no pipeline, as in C++. A
+   !> call made on a cap of its answer fails at once, before and after
+   !> the Return, and the server never sees it.
+   subroutine t_no_pipelining_answer_refuses_pipeline(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn, raw
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: params
+      character(len=:), allocatable :: a, reason
+      integer :: fa, fb, e
+      logical :: got, is_exc
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      raw%fd = fb
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, 1_int64, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 1_int32, e)
+      call call_no_promise_pipelining_set(c, .true., e)
+      tgt = call_target_init(c, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call pa_send(raw, 2_int64, 1_int64, [0])
+      call rpc_pump_once(conn, e)
+      call pa_await(raw, 2_int64, got, is_exc, reason)
+      call check_(error, a == 'RET 1 F' .and. got .and. is_exc, &
+                  'no pipelining: the pipelined call fails')
+      if (allocated(error)) return
+      call check_(error, reason == 'caller specified noPromisePipelining hint, ' // &
+                  'but then tried to pipeline', 'no pipelining: C++ text, got '//reason)
+      raw%fd = PX_BAD_FD
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_no_pipelining_answer_refuses_pipeline
 
 end module test_rpc

@@ -306,6 +306,9 @@ module capnp_rpc
       logical :: exports_pinned = .false.
       !> Peer export ids this call's params hold until Finish.
       integer(int64), allocatable :: held_params(:)
+      !> The call set noPromisePipelining. C++ gives it a disabled
+      !> pipeline, so a call on any of its caps fails at once.
+      logical :: no_pipeline = .false.
    end type rpc_answer_slot_t
 
    !> One inbound answer whose question id does not fit in `answers`.
@@ -3012,6 +3015,7 @@ contains
       if (allocated(slot%exports)) deallocate (slot%exports)
       slot%exports_pinned = .false.
       if (allocated(slot%held_params)) deallocate (slot%held_params)
+      slot%no_pipeline = .false.
    end subroutine answer_slot_clear
 
    !> Drop every overflow answer. Export refcounts are the export
@@ -4919,6 +4923,7 @@ contains
       slot%forward_qid = -1_int64
       slot%nexp = 0
       if (allocated(slot%exports)) deallocate (slot%exports)
+      slot%no_pipeline = .false.
       ok = .true.
       err = CAPNP_OK
    end function claim_question
@@ -4982,6 +4987,14 @@ contains
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
       if (.not. claim_question(conn, qid, err)) return
+      if (call_no_promise_pipelining_get(c)) then
+         block
+            type(rpc_answer_slot_t), pointer :: own
+            logical :: have
+            call answer_find(conn, qid, own, have)
+            if (have) own%no_pipeline = .true.
+         end block
+      end if
       elsewhere = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
       if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_THIRD_PARTY_TAG .or. &
           (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
@@ -5605,6 +5618,11 @@ contains
          if (.not. afound) then
             if (present(reason)) reason = 'Pipeline call on a request that returned ' // &
                                           'no capabilities or was already closed.'
+            return
+         end if
+         if (aslot%no_pipeline) then
+            if (present(reason)) reason = 'caller specified noPromisePipelining hint, ' // &
+                                          'but then tried to pipeline'
             return
          end if
          if (.not. aslot%has_results) then
