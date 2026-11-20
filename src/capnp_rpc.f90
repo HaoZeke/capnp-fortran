@@ -3652,7 +3652,7 @@ contains
       type(capnp_ptr_t) :: root, content, ctab
       type(cap_descriptor_t) :: cd
       integer :: i
-      logical :: broken_answer, any_pending
+      logical :: broken_answer, any_pending, walk_ok
       character(len=:), allocatable :: reason
 
       err = CAPNP_OK
@@ -3683,22 +3683,31 @@ contains
             if (broken_answer) then
                call break_answer_promise(node, reason)
             else
+               ! C++ reads a pending answer in a continuation, so a read
+               ! error breaks the promise instead of the connection.
                content = root
+               walk_ok = .true.
                do i = 1, size(node%answer_ops)
                   if (node%answer_ops(i) < 0) cycle
                   if (content%kind == CAPNP_PK_NULL) cycle
                   if (content%kind /= CAPNP_PK_STRUCT) then
-                     call abort_conn(conn, 'Schema mismatch: Message contains non-struct pointer ' // &
-                                     'where struct pointer was expected.', err)
-                     return
+                     walk_ok = .false.
+                     exit
                   end if
                   content = capnp_getp(content, node%answer_ops(i), err)
                   if (err /= CAPNP_OK) return
                end do
-               if (content%kind /= CAPNP_PK_CAP) then
+               if (.not. walk_ok) then
+                  call break_answer_promise(node, 'Schema mismatch: Message contains ' // &
+                                            'non-struct pointer where struct pointer was expected.')
+               else if (content%kind == CAPNP_PK_NULL) then
                   call break_answer_promise(node, 'Called null capability.')
+               else if (content%kind /= CAPNP_PK_CAP) then
+                  call break_answer_promise(node, 'Schema mismatch: Message contains ' // &
+                                            'non-capability pointer where capability ' // &
+                                            'pointer was expected.')
                else if (content%capidx < 0_int64 .or. content%capidx >= capnp_list_len(ctab)) then
-                  call break_answer_promise(node, "invalid 'receiverAnswer'")
+                  call break_answer_promise(node, 'Message contains invalid capability pointer.')
                else
                   cd%p = capnp_list_get_struct(ctab, int(content%capidx), err)
                   if (err /= CAPNP_OK) return
