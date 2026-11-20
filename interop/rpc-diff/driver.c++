@@ -105,8 +105,10 @@ struct Incoming {  // a call the peer made on a driver capability
   uint32_t wire;
   bool yourself;
   int64_t n;
+  uint64_t serial;  // order of arrival; wire ids are reused
 };
 std::vector<Incoming> pending;
+uint64_t incomingCount = 0;
 
 uint32_t bootImportWire = 0;
 bool haveBoot = false;
@@ -481,7 +483,7 @@ void onCall(rpc::Call::Reader c) {
        std::to_string(c.getMethodId()) + " to=" + to +
        (c.getNoPromisePipelining() ? " npp" : "") + (c.getOnlyPromisePipeline() ? " opp" : "") +
        " " + payloadPeer(c.getParams(), nullptr));
-  pending.push_back({wire, yourself, n});
+  pending.push_back({wire, yourself, n, ++incomingCount});
 }
 
 void onReturn(rpc::Return::Reader r) {
@@ -1194,7 +1196,7 @@ Cap promiseCap() {
 // import wire -2 - aq below that, else pa(aq, ops). Params point at the
 // first cap, if any.
 uint32_t probeCall(int64_t aq, std::vector<int> ops, int method, int64_t n, bool yourself,
-                   bool npp, std::vector<Cap> caps) {
+                   bool npp, std::vector<Cap> caps, bool opp = false) {
   uint32_t q = newQuestion(kMethods[method]);
   capnp::MallocMessageBuilder mb;
   auto c = mb.initRoot<rpc::Message>().initCall();
@@ -1220,6 +1222,10 @@ uint32_t probeCall(int64_t aq, std::vector<int> ops, int method, int64_t n, bool
   if (npp) {
     c.setNoPromisePipelining(true);
     flags += " npp";
+  }
+  if (opp) {
+    c.setOnlyPromisePipeline(true);
+    flags += " opp";
   }
   auto params = c.initParams();
   capnp::BuilderCapabilityTable table;
@@ -1316,6 +1322,247 @@ void probeAnswer(size_t before, bool withCap) {
   if (in.yourself) sendReturnElsewhere(in.wire);
   else sendReturnResults(in.wire, in.n + 1000, withCap);
   markAnswered(in.wire);
+}
+
+// ---------------------------------------------------------------- forced classes
+//
+// Shapes from review that the random steps above never build. They run
+// only with "force=<CLASS>" or "mix" on the command line, so the plain
+// seed scripts stay as they were.
+
+const char* kForced[] = {"NPP_OPP_FWD",   "RA_RUNNING",   "RESOLVE_REFLECTED_RA",
+                         "RELEASED_EXPORT_REUSE", "RA_REWRITE", "HINTS_FWD_RA",
+                         "PLAIN_FWD_PROMISE_RESULT"};
+const int kNumForced = 7;
+int forceClass = -1;
+bool mixForced = false;
+
+// The newest call the peer made since `before`, by arrival serial.
+int64_t newIncoming(size_t before) {
+  return pending.size() > before ? int64_t(pending.back().serial) : -1;
+}
+
+// Answer the call with arrival serial `serial`, if it is still pending.
+// Returns the driver export a promise result names, or 0.
+uint32_t answerPending(int64_t serial, bool withCap, bool promise = false) {
+  for (size_t i = 0; i < pending.size(); ++i) {
+    if (int64_t(pending[i].serial) != serial) continue;
+    Incoming in = pending[i];
+    pending.erase(pending.begin() + i);
+    uint32_t pid = 0;
+    if (in.yourself) {
+      sendReturnElsewhere(in.wire);
+    } else if (chance(15)) {
+      sendReturnException(in.wire, "PINGEXC");
+    } else {
+      sendReturnResults(in.wire, in.n + 1000, withCap || promise, promise);
+      if (promise) pid = nextExportId - 1;
+    }
+    markAnswered(in.wire);
+    return pid;
+  }
+  return 0;
+}
+
+void forcedScenario(int k, int which) {
+  std::string cls = kForced[which];
+  scenarioStep = std::to_string(k);
+  scenarioPart = 0;
+  window.clear();
+  if (!haveBoot) return;
+  int64_t n = pick(100);
+  switch (which) {
+    case 0: {
+      // A forwarded call with noPromisePipelining and onlyPromisePipeline,
+      // then a Disembargo, a pipelined call, the answer and a Finish in a
+      // random order.
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      size_t before = pending.size();
+      bool npp = chance(80), opp = chance(80);
+      uint32_t q = probeCall(qr, {0}, chance(70) ? 0 : 2, n + 1, false, npp, {}, opp);
+      part(cls);
+      int64_t fwd = newIncoming(before);
+      std::vector<int> acts = {0, 1, 2, 3};
+      for (size_t i = acts.size(); i > 1; --i) std::swap(acts[i - 1], acts[pick(int(i))]);
+      for (int a : acts) {
+        if (a == 0 && chance(80)) {
+          probeDisembargo(q, chance(70) ? std::vector<int>{0} : std::vector<int>{}, 700 + k);
+        } else if (a == 1 && chance(50)) {
+          callOnPipeline(q, chance(50) ? 0 : 2, n + 2, -1);
+        } else if (a == 2 && chance(80)) {
+          answerPending(fwd, chance(50));
+        } else if (a == 3 && chance(60)) {
+          sendFinish(q, chance(50), true);
+        } else {
+          continue;
+        }
+        part(cls);
+      }
+      break;
+    }
+    case 1: {
+      // A receiverAnswer param names an answer that is still running.
+      size_t before = pending.size();
+      uint32_t q1 = callOnBoot(chance(50) ? 7 : 3, n);
+      part(cls);
+      int64_t ping = newIncoming(before);
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      size_t before2 = pending.size();
+      std::vector<int> ops = chance(80) ? std::vector<int>{0} : std::vector<int>{};
+      uint32_t q3 = probeCall(qr, {0}, 0, n + 2, chance(30), chance(30), {{'a', q1, ops}});
+      part(cls);
+      int64_t fwd = newIncoming(before2);
+      std::vector<int> acts = {0, 1, 2, 3};
+      for (size_t i = acts.size(); i > 1; --i) std::swap(acts[i - 1], acts[pick(int(i))]);
+      for (int a : acts) {
+        if (a == 0) answerPending(ping, false);
+        else if (a == 1 && chance(70)) answerPending(fwd, chance(30));
+        else if (a == 2 && chance(40)) sendFinish(q3, chance(50), true);
+        else if (a == 3 && chance(40)) sendFinish(q1, chance(50), true);
+        else continue;
+        part(cls);
+      }
+      break;
+    }
+    case 2: {
+      // A promise param resolves to receiverAnswer on an answer that
+      // reflects the driver's own cap back.
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      Cap p = promiseCap();
+      size_t before = pending.size();
+      bool fwdCall = chance(75);
+      uint32_t q3;
+      if (fwdCall) q3 = probeCall(qr, {0}, 0, n + 1, chance(40), chance(30), {p});
+      else q3 = probeCall(-1, {}, 4, n + 1, false, false, {p});
+      part(cls);
+      int64_t fwd = newIncoming(before);
+      if (chance(30)) {
+        answerPending(fwd, false);
+        part(cls);
+      }
+      uint32_t to = chance(80) ? qr : q3;
+      probeResolve(p.id, {'a', to, chance(85) ? std::vector<int>{0} : std::vector<int>{}});
+      part(cls);
+      answerPending(fwd, false);
+      part(cls);
+      if (chance(50)) {
+        sendFinish(q3, chance(50), true);
+        part(cls);
+      }
+      break;
+    }
+    case 3: {
+      // A result cap is released while a call on it still runs, and a
+      // new export takes its id. A Finish then releases result caps.
+      uint32_t q2 = callOnBoot(2, n);
+      part(cls);
+      size_t before = pending.size();
+      callOnPipeline(q2, chance(50) ? 7 : 3, n + 1, -1);
+      part(cls);
+      int64_t ping = newIncoming(before);
+      if (!questions[q2].resultImports.empty()) {
+        uint32_t w = questions[q2].resultImports[0];
+        if (imports.count(w)) sendRelease(w, chance(70) ? 1 : imports[w].refs, true);
+      }
+      part(cls);
+      if (chance(60)) callOnPipeline(q2, 2, n + 2, -1);
+      else callOnBoot(2, n + 2);
+      part(cls);
+      sendFinish(q2, chance(80), true);
+      part(cls);
+      answerPending(ping, false);
+      part(cls);
+      break;
+    }
+    case 4: {
+      // The same receiverAnswer param written twice, on an answer under
+      // noPromisePipelining or one that failed.
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      size_t before = pending.size();
+      uint32_t qn;
+      int kind = pick(3);
+      if (kind == 0) qn = probeCall(qr, {0}, 2, n, false, true, {});
+      else if (kind == 1) qn = probeCall(-1, {}, 2, n, false, true, {});
+      else qn = callOnBoot(1, n);
+      part(cls);
+      int64_t fwd = newIncoming(before);
+      if (kind == 0 && chance(40)) {
+        answerPending(fwd, chance(60));
+        part(cls);
+      }
+      for (int i = 0; i < 2; ++i) {
+        if (chance(70)) probeCall(qr, {0}, 0, n + 1 + i, false, false, {{'a', qn, {0}}});
+        else probeCall(-1, {}, 4, n + 1 + i, false, false, {{'a', qn, {0}}});
+        part(cls);
+      }
+      answerPending(fwd, chance(60));
+      part(cls);
+      break;
+    }
+    case 5: {
+      // A forwarded receiverAnswer param with random hints on both calls.
+      uint32_t qm = probeCall(-1, {}, chance(70) ? 2 : 7, n, false, chance(40), {}, chance(30));
+      part(cls);
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      size_t before = pending.size();
+      uint32_t q3 = probeCall(qr, {0}, 0, n + 2, chance(20), chance(50), {{'a', qm, {0}}},
+                              chance(50));
+      part(cls);
+      int64_t fwd = newIncoming(before);
+      if (chance(60)) {
+        answerPending(fwd, chance(40));
+        part(cls);
+      }
+      if (chance(50)) {
+        sendFinish(q3, chance(50), true);
+        part(cls);
+      }
+      break;
+    }
+    case 6: {
+      // A plain forward under noPromisePipelining returns a promise the
+      // driver later resolves; the answer's Finish and Releases follow
+      // in a random order.
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      uint32_t qb = callOnBoot(2, n);
+      part(cls);
+      size_t before = pending.size();
+      uint32_t q5 = probeCall(qr, {0}, chance(70) ? 0 : 2, n + 1, chance(20), true, {});
+      part(cls);
+      int64_t fwd = newIncoming(before);
+      uint32_t pid = answerPending(fwd, false, true);
+      part(cls);
+      std::vector<int> acts = {0, 1, 2, 3};
+      for (size_t i = acts.size(); i > 1; --i) std::swap(acts[i - 1], acts[pick(int(i))]);
+      for (int a : acts) {
+        if (a == 0 && pid != 0) {
+          int how = pick(4);
+          if (how == 0) probeResolve(pid, hostedCap());
+          else if (how == 1) probeResolve(pid, {'a', qr, {0}});
+          else if (how == 2 && !questions[qb].resultImports.empty())
+            probeResolve(pid, {'r', questions[qb].resultImports[0], {}});
+          else probeResolve(pid, promiseCap());
+        } else if (a == 1 && chance(70)) {
+          sendFinish(q5, chance(50), true);
+        } else if (a == 2 && chance(50) && !questions[q5].resultImports.empty()) {
+          uint32_t w = questions[q5].resultImports[0];
+          if (imports.count(w)) sendRelease(w, imports[w].refs, true);
+        } else if (a == 3 && chance(40)) {
+          callOnPipeline(q5, 0, n + 2, -1);
+        } else {
+          continue;
+        }
+        part(cls);
+      }
+      break;
+    }
+  }
 }
 
 const char* kProbes[] = {"PARAM_PROMISE_MERGE_HOSTED", "PARAM_PROMISE_MERGE_PROMISE",
@@ -1710,6 +1957,14 @@ bool probe(const std::string& name) {
 
 void step(int k) {
   std::string label;
+  if (forceClass >= 0 && chance(40)) {
+    forcedScenario(k, forceClass);
+    return;
+  }
+  if (mixForced && chance(12)) {
+    forcedScenario(k, pick(kNumForced));
+    return;
+  }
   // call, finish, release, answer, poke70, resolve, disembargo, bootstrap,
   // then one weight per scenario
   int w[13] = {35, 12, 8, pending.empty() ? 0 : 22, 2, 6, 1, 2, 2, 2, 2, 2, 2};
@@ -1783,7 +2038,7 @@ void endPhase() {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s <port> <seed> [steps] | <port> probe:<NAME>\n", argv[0]);
+    fprintf(stderr, "usage: %s <port> <seed> [steps [force=<CLASS>|mix]] | <port> probe:<NAME>\n", argv[0]);
     return 2;
   }
   int port = atoi(argv[1]);
@@ -1791,7 +2046,19 @@ int main(int argc, char** argv) {
   if (strncmp(argv[2], "probe:", 6) == 0) probeName = argv[2] + 6;
   uint64_t seed = probeName.empty() ? strtoull(argv[2], nullptr, 10) : 0;
   rng.seed(seed * 0x9E3779B97F4A7C15ull + 1);
-  int steps = argc > 3 ? atoi(argv[3]) : 20 + int(rng() % 41);
+  int steps = argc > 3 ? atoi(argv[3]) : 0;
+  if (steps <= 0) steps = 20 + int(rng() % 41);
+  for (int i = 4; i < argc; ++i) {
+    if (strcmp(argv[i], "mix") == 0) mixForced = true;
+    if (strncmp(argv[i], "force=", 6) == 0) {
+      for (int j = 0; j < kNumForced; ++j)
+        if (strcmp(argv[i] + 6, kForced[j]) == 0) forceClass = j;
+      if (forceClass < 0) {
+        fprintf(stderr, "driver: unknown class %s\n", argv[i] + 6);
+        return 2;
+      }
+    }
+  }
 
   kj::EventLoop loop;
   kj::WaitScope ws(loop);

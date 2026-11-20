@@ -6,10 +6,15 @@ RpcSystem peer and against the Fortran peer. The two logs are
 normalised and compared; a seed is SAME when they match.
 
 Usage:
-  run.py [--bin DIR] [--out DIR] [--jobs N] [--steps N] [--probes] [FIRST [LAST]]
+  run.py [--bin DIR] [--out DIR] [--jobs N] [--steps N] [--probes]
+         [--force CLASS | --mix] [--port-base N] [FIRST [LAST]]
   run.py --show SEED|probe:NAME [--out DIR]
 
 A probe is a fixed script the driver plays as "probe:NAME" (PROBES).
+With --force CLASS about two steps in five of each seed play the forced
+class CLASS (FORCED); with --mix any forced class may replace a step.
+Without either the seed scripts are the plain ones. Each seed uses two
+ports from --port-base on; runs that overlap in time need distinct bases.
 
 Normalisation, applied to both logs before comparing:
   1. Lines inside one window (from a "== " step marker to the next) are
@@ -69,19 +74,21 @@ def windows(text):
     return [(head, sorted(body)) for head, body in out]
 
 
-def run_one(binary, driver, port, seed, steps, log_path):
+def run_one(binary, driver, port, seed, steps, extra, log_path):
     peer = subprocess.Popen([binary, str(port)], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
     ready = peer.stdout.readline().strip()
     if ready != "READY":
         peer.kill()
         err = peer.stderr.read()
+        peer.wait()
         with open(log_path, "w") as f:
             f.write("PEER not ready: %s %s\n" % (ready, err))
-        return
+        return False
     args = [driver, str(port), str(seed)]
-    if steps:
+    if steps or extra:
         args.append(str(steps))
+    args += extra
     try:
         res = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, timeout=300)
@@ -104,6 +111,23 @@ def run_one(binary, driver, port, seed, steps, log_path):
     if err.strip():
         with open(log_path + ".stderr", "w") as f:
             f.write(err)
+    return True
+
+
+def run_peer(opts, name, port, seed, log_path):
+    extra = []
+    if opts.force:
+        extra.append("force=" + opts.force)
+    elif opts.mix:
+        extra.append("mix")
+    for attempt in range(4):
+        p = port + attempt * 7919
+        while p > 65000:
+            p -= 40000
+        if run_one(os.path.join(opts.bin, name), os.path.join(opts.bin, "driver"),
+                   p, seed, opts.steps, extra, log_path):
+            return
+        time.sleep(0.5)
 
 
 def first_diff(a, b):
@@ -128,6 +152,10 @@ PROBES = ("PARAM_PROMISE_MERGE_HOSTED", "PARAM_PROMISE_MERGE_PROMISE",
           "FWD_RA_PENDING_NPP", "FWD_RA_RETURNED_NPP",
           "DISEMBARGO_PLAIN_FWD_PROMISE_CAP", "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT")
 
+FORCED = ("NPP_OPP_FWD", "RA_RUNNING", "RESOLVE_REFLECTED_RA",
+          "RELEASED_EXPORT_REUSE", "RA_REWRITE", "HINTS_FWD_RA",
+          "PLAIN_FWD_PROMISE_RESULT")
+
 # Seeds that once differed from C++, run with the probes.
 FIXED_SEEDS = (1067, 1859, 1931, 1984, 2008)
 
@@ -135,16 +163,14 @@ FIXED_SEEDS = (1067, 1859, 1931, 1984, 2008)
 def seed_job(opts, seed):
     out = opts.out
     if isinstance(seed, str):
-        port = 61000 + 2 * PROBES.index(seed)
+        port = opts.port_base + 41000 + 2 * PROBES.index(seed)
         seed = "probe:" + seed
     else:
-        port = 20000 + (seed * 2) % 40000
+        port = opts.port_base + (seed * 2) % 40000
     c_log = os.path.join(out, "%s.c.log" % seed)
     f_log = os.path.join(out, "%s.f.log" % seed)
-    run_one(os.path.join(opts.bin, "peer_cpp"), os.path.join(opts.bin, "driver"),
-            port, seed, opts.steps, c_log)
-    run_one(os.path.join(opts.bin, "peer_f"), os.path.join(opts.bin, "driver"),
-            port + 1, seed, opts.steps, f_log)
+    run_peer(opts, "peer_cpp", port, seed, c_log)
+    run_peer(opts, "peer_f", port + 1, seed, f_log)
     a = open(c_log).read()
     b = open(f_log).read()
     classes = sorted(set(CLASS_RE.findall(a)) | set(CLASS_RE.findall(b)))
@@ -183,6 +209,9 @@ def main():
     ap.add_argument("--show")
     ap.add_argument("--probes", action="store_true",
                     help="also run the fixed review probes (all of them when no seeds are given)")
+    ap.add_argument("--force", choices=FORCED)
+    ap.add_argument("--mix", action="store_true")
+    ap.add_argument("--port-base", type=int, default=20000)
     opts = ap.parse_args()
     os.makedirs(opts.out, exist_ok=True)
     if opts.show is not None:

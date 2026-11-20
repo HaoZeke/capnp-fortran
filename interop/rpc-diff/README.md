@@ -11,6 +11,8 @@ $ pixi run -e interop rpc-diff          # build, then seeds 1-300 and the probes
 $ pixi run -e interop rpc-diff 40 60    # seeds 40-60 and the probes
 $ python3 interop/rpc-diff/run.py --probes --bin build-rpc-diff --out /tmp/p
 $ python3 interop/rpc-diff/run.py --show 42 --out build-rpc-diff/logs
+$ python3 interop/rpc-diff/run.py --force RA_RUNNING --port-base 30000 \
+    --bin build-rpc-diff --out /tmp/f 1 300
 $ python3 interop/rpc-diff/run.py --show probe:FWD_RA_PLAIN_PENDING --out /tmp/p
 ```
 
@@ -65,6 +67,33 @@ are counted per class in `summary.tsv`:
 
 After the last step the driver answers every pending call, finishes
 every question and releases every import.
+
+## Forced classes
+
+`run.py --force <CLASS>` makes about two steps in five of each seed play
+one shape the random steps never build, and `run.py --mix` lets any of
+them replace a step now and then. Without either flag the seed scripts
+are the plain ones. Each forced class is counted in `summary.tsv`:
+
+- `NPP_OPP_FWD`: a forwarded call with `noPromisePipelining` and
+  `onlyPromisePipeline`, then a Disembargo, a pipelined call, the
+  answer and a Finish in a random order.
+- `RA_RUNNING`: a `receiverAnswer` param names an answer that is still
+  running.
+- `RESOLVE_REFLECTED_RA`: a promise param resolves to `receiverAnswer`
+  on an answer that reflects the driver's own cap back.
+- `RELEASED_EXPORT_REUSE`: a result cap is released while a call on it
+  still runs, and a new export takes its id.
+- `RA_REWRITE`: the same `receiverAnswer` param written twice, on an
+  answer under `noPromisePipelining` or one that failed.
+- `HINTS_FWD_RA`: a forwarded `receiverAnswer` param with random hints
+  on both calls.
+- `PLAIN_FWD_PROMISE_RESULT`: a plain forward under
+  `noPromisePipelining` returns a promise the driver later resolves.
+  The answer's Finish and Releases follow in a random order.
+
+Each seed uses two ports from `--port-base` (default 20000) on, so runs
+that overlap in time need distinct bases.
 
 ## Probes
 
