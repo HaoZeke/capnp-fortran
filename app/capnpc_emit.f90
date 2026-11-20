@@ -229,17 +229,39 @@ contains
       end do
    end function upcase
 
-   !> Fortran character-literal body: single quotes doubled.
-   pure function fquote(s) result(o)
+   !> Fortran character expression for an arbitrary string.
+   pure function ftext(s) result(o)
       character(len=*), intent(in) :: s
       character(len=:), allocatable :: o
-      integer :: i
+      integer :: i, a
+      logical :: in_lit
+      if (len(s) == 0) then
+         o = "''"
+         return
+      end if
       o = ''
+      in_lit = .false.
       do i = 1, len(s)
-         o = o//s(i:i)
-         if (s(i:i) == "'") o = o//"'"
+         a = iachar(s(i:i))
+         if (a < 32 .or. a >= 127) then
+            if (in_lit) then
+               o = o//"'"
+               in_lit = .false.
+            end if
+            if (len(o) > 0) o = o//'//'
+            o = o//'achar('//itoa(int(a, int64))//')'
+         else
+            if (.not. in_lit) then
+               if (len(o) > 0) o = o//'//'
+               o = o//"'"
+               in_lit = .true.
+            end if
+            o = o//s(i:i)
+            if (s(i:i) == "'") o = o//"'"
+         end if
       end do
-   end function fquote
+      if (in_lit) o = o//"'"
+   end function ftext
 
    !> Kind-suffixed integer token. The most negative value of a kind has
    !> no literal: Fortran parses the sign apart from the digits, so
@@ -596,7 +618,7 @@ contains
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
-         call w('   character(len=*), parameter :: '//upcase(cn)//" = '"//fquote(s)//"'")
+         call w('   character(len=*), parameter :: '//upcase(cn)//' = '//ftext(s))
       case (TYPE_DATA)
          call value_data(v, db, err)
          if (err /= CAPNP_OK) return
@@ -1100,7 +1122,7 @@ contains
          if (value_which(dv) == TYPE_FLOAT32) then
             if (cp_f32_bits(value_f32(dv)) /= 0_int32) &
                defarg = ', default=cp_bits_f32('// &
-                        itoa(int(cp_f32_bits(value_f32(dv)), int64))//'_int32)'
+                        signed_lit(int(cp_f32_bits(value_f32(dv)), int64), '_int32')//')'
          end if
       else
          acc = 'f64'; vt = 'real(real64)'; bytes = 8
@@ -1108,7 +1130,7 @@ contains
          if (value_which(dv) == TYPE_FLOAT64) then
             if (cp_f64_bits(value_f64(dv)) /= 0_int64) &
                defarg = ', default=cp_bits_f64('// &
-                        itoa(cp_f64_bits(value_f64(dv)))//'_int64)'
+                        signed_lit(cp_f64_bits(value_f64(dv)), '_int64')//')'
          end if
       end if
       call w('   function '//an//'_get(h) result(v)')
@@ -1172,7 +1194,7 @@ contains
          call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
-         call w("         s = '"//fquote(dtext)//"'")
+         call w('         s = '//ftext(dtext))
          call w('         return')
          call w('      end if')
       end if

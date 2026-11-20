@@ -7,14 +7,28 @@ module test_codegen_parity
 contains
    subroutine collect_codegen_parity(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("g1_min_signed", test_g1)]
+      testsuite = [ &
+         new_unittest("g1_min_signed", test_g1), &
+         new_unittest("g2_text_escape", test_g2) &
+         ]
    end subroutine collect_codegen_parity
+
+   subroutine run_gap(error, gap)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), intent(in) :: gap
+      integer :: stat, cs
+      call execute_command_line("bash test/codegen_parity.sh "//gap, &
+                                exitstat=stat, cmdstat=cs)
+      call check(error, cs == 0 .and. stat == 0, gap)
+   end subroutine run_gap
 
    subroutine test_g1(error)
       type(error_type), allocatable, intent(out) :: error
-      integer :: stat, cs
-      call execute_command_line("bash test/codegen_parity.sh g1", &
-                                exitstat=stat, cmdstat=cs)
-      call check(error, cs == 0 .and. stat == 0, "g1")
+      call run_gap(error, "g1")
    end subroutine test_g1
+
+   subroutine test_g2(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, "g2")
+   end subroutine test_g2
 end module test_codegen_parity

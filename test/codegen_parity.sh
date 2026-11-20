@@ -107,8 +107,46 @@ EOF
   echo "g1 ok"
 }
 
+g2() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > textesc.capnp << 'EOF'
+@0x8222222222222201;
+struct Tesc { s @0 :Text = "a\nb"; }
+const multi :Text = "line1\nline2";
+EOF
+  capnp compile -o"$BIN" textesc.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use textesc_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(tesc_t) :: h
+   character(len=:), allocatable :: s
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = tesc_new_root(m, err)
+   call tesc_s_get(h, s, err)
+   if (err /= 0) error stop 1
+   if (index(s, achar(10)) /= 2) error stop 2
+   if (s /= 'a'//achar(10)//'b') error stop 3
+   if (index(multi, achar(10)) /= 6) error stop 4
+   if (multi /= 'line1'//achar(10)//'line2') error stop 5
+   deallocate (s)
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc textesc_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g2 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
-  all) g1 ;;
+  g2) g2 ;;
+  all) g1; g2 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac
