@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(136))
+      allocate (testsuite(137))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -425,18 +425,20 @@ contains
       testsuite(129)%test => w_peer_eof_gets_abort
       testsuite(130)%name = "rpc-param-caps-released-at-finish"
       testsuite(130)%test => w_param_caps_released_at_finish
-      testsuite(131)%name = "posix-recv-eintr-retried"
-      testsuite(131)%test => t_recv_all_retries_eintr
-      testsuite(132)%name = "rpc-framing-511-accepted"
-      testsuite(132)%test => t_framing_511_accepted
-      testsuite(133)%name = "rpc-framing-512-rejected"
-      testsuite(133)%test => t_framing_512_rejected
-      testsuite(134)%name = "rpc-framing-oversized-rejected"
-      testsuite(134)%test => t_framing_oversized_rejected
-      testsuite(135)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(135)%test => t_framing_negative_traversal_rejected
-      testsuite(136)%name = "rpc-framing-short-and-padded"
-      testsuite(136)%test => t_framing_short_and_padded
+      testsuite(131)%name = "rpc-param-promise-resolve-releases"
+      testsuite(131)%test => w_param_promise_resolve_releases
+      testsuite(132)%name = "posix-recv-eintr-retried"
+      testsuite(132)%test => t_recv_all_retries_eintr
+      testsuite(133)%name = "rpc-framing-511-accepted"
+      testsuite(133)%test => t_framing_511_accepted
+      testsuite(134)%name = "rpc-framing-512-rejected"
+      testsuite(134)%test => t_framing_512_rejected
+      testsuite(135)%name = "rpc-framing-oversized-rejected"
+      testsuite(135)%test => t_framing_oversized_rejected
+      testsuite(136)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(136)%test => t_framing_negative_traversal_rejected
+      testsuite(137)%name = "rpc-framing-short-and-padded"
+      testsuite(137)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -990,6 +992,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_param_caps_released_at_finish(error)
    end subroutine w_param_caps_released_at_finish
+
+   subroutine w_param_promise_resolve_releases(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_param_promise_resolve_releases(error)
+   end subroutine w_param_promise_resolve_releases
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10950,5 +10957,37 @@ contains
       call px_close(fb)
       call free_minted_adders()
    end subroutine t_param_caps_released_at_finish
+
+   !> A senderPromise param resolved while the call context lives: the
+   !> promise is Released at the Resolve and its resolution at Finish.
+   subroutine t_param_promise_resolve_releases(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer :: fa, fb, e
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call raw_param_call(fb, 1_int64, 0_int64, 1, .true., 6_int64)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call send_resolve_hosted(fb, 6_int64, 7_int64, e)
+      call rpc_pump_once(conn, e)
+      b = raw_frame_text(fb)
+      call raw_finish_fd(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      c = raw_frame_text(fb)
+      call check_(error, a == 'RET 1 F' .and. b == 'REL 6 1' .and. c == 'REL 7 1', &
+                  'param promise: got '//a//' | '//b//' | '//c)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_param_promise_resolve_releases
 
 end module test_rpc

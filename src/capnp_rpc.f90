@@ -504,7 +504,8 @@ module capnp_rpc
       type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
    end type rpc_vat_t
 
-   !> `wire` is the id the hold Releases, `id` itself.
+   !> `wire` is what the hold Releases: `id` itself, the import a Resolve
+   !> of `id` named, or -1 when nothing is owed.
    type :: rpc_param_hold_t
       integer(int64) :: id = -1_int64
       integer(int64) :: wire = -1_int64
@@ -3556,7 +3557,10 @@ contains
       pid = resolve_promise_id_get(rv)
       if (resolve_which(rv) == RESOLVE_EXCEPTION_TAG) then
          call import_find_wire(conn, pid, node, found)
-         if (.not. found) return
+         if (.not. found) then
+            found = resolve_param_hold(conn, pid, err)
+            return
+         end if
          if (node%state /= IMP_PROMISE) then
             if (node%state == IMP_HOSTED .and. .not. node%released) then
                call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
@@ -3596,6 +3600,7 @@ contains
       if (.not. found) then
          call probe_receiver_answer(conn, cd, err)
          if (err /= CAPNP_OK .or. conn%dead) return
+         if (resolve_param_hold(conn, pid, err, cd)) return
          call release_resolve_cap(conn, cd, err)
          return
       end if
@@ -7223,6 +7228,50 @@ contains
       end do
       deallocate (ids)
    end subroutine drop_param_holds
+
+   !> Resolve of a senderPromise that only call params hold. C++ swaps
+   !> the promise import for its resolution and Releases the promise at
+   !> once. The resolution lives as long as the params do. `cd` is
+   !> absent for a rejected promise.
+   logical function resolve_param_hold(conn, pid, err, cd) result(held)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: pid
+      integer, intent(inout) :: err
+      type(cap_descriptor_t), intent(in), optional :: cd
+      type(rpc_import_node_t), pointer :: node
+      type(third_party_cap_descriptor_t) :: tp
+      integer(int64) :: next
+      integer :: k, e
+      logical :: found
+      held = .false.
+      k = hold_index(conn, pid)
+      if (k < 0) return
+      if (conn%param_holds(k)%wire /= pid) return
+      held = .true.
+      call send_release(conn, pid, conn%param_holds(k)%refs, e)
+      if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+      next = -1_int64
+      if (present(cd)) then
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            next = cap_descriptor_sender_hosted_get(cd)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            next = cap_descriptor_sender_promise_get(cd)
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            tp = cap_descriptor_third_party_hosted_get(cd, e)
+            if (e == CAPNP_OK) next = third_party_cap_descriptor_vine_id_get(tp)
+         end select
+      end if
+      if (next >= 0_int64) then
+         call import_find_live(conn, next, node, found)
+         if (found) then
+            node%refs = node%refs + 1
+            next = -1_int64
+         end if
+      end if
+      conn%param_holds(k)%wire = next
+      conn%param_holds(k)%refs = 1_int64
+   end function resolve_param_hold
 
    !> A Finish for a call still queued on a pending answer drops it, as
    !> C++ drops the call's task (rpc.c++ handleFinish). The caller gets a
