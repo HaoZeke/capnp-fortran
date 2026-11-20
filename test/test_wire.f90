@@ -364,6 +364,9 @@ contains
       lst = capnp_new_composite_list(msg, 536870912_int64, 1, 0, err)
       call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 composite rejected')
       if (allocated(error)) return
+      lst = capnp_new_composite_list(msg, 536870912_int64, 0, 0, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 empty composite rejected')
+      if (allocated(error)) return
       lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870911_int64, err)
       call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 536870911_int64, &
                   'list-count: 2^29-1 void accepted')
