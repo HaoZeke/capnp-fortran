@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Run the RPC differential checker over a range of seeds.
+"""Run the RPC differential checker over a range of seeds and probes.
 
 For each seed the raw driver plays the same script against the C++
 RpcSystem peer and against the Fortran peer. The two logs are
 normalised and compared; a seed is SAME when they match.
 
 Usage:
-  run.py [--bin DIR] [--out DIR] [--jobs N] [--steps N] FIRST [LAST]
-  run.py --show SEED [--out DIR]
+  run.py [--bin DIR] [--out DIR] [--jobs N] [--steps N] [--probes] [FIRST [LAST]]
+  run.py --show SEED|probe:NAME [--out DIR]
+
+A probe is a fixed script the driver plays as "probe:NAME" (PROBES).
 
 Normalisation, applied to both logs before comparing:
   1. Lines inside one window (from a "== " step marker to the next) are
@@ -114,11 +116,31 @@ def first_diff(a, b):
     return None
 
 
+PROBES = ("PARAM_PROMISE_MERGE_HOSTED", "PARAM_PROMISE_MERGE_PROMISE",
+          "FWD_RA_RELEASED_PARAM", "DISEMBARGO_PLAIN_FWD", "FINISH_PLAIN_FWD_NPP",
+          "FINISH_PLAIN_FWD_YOURSELF", "FWD_SP_RESOLVE_TO_RA", "FWD_RA_PLAIN_PENDING",
+          "DISEMBARGO_PLAIN_FWD_CAP", "FWD_RA_PLAIN_PENDING_CALL",
+          "DISEMBARGO_PLAIN_FWD_FINISH", "FINISH_PLAIN_FWD_NPP_CAP",
+          "FWD_RA_PLAIN_PENDING_RELEASE", "YOURSELF_NPP_PLAIN_FWD",
+          "YOURSELF_NPP_PLAIN_FWD_EXC", "YOURSELF_NPP_PLAIN_FWD_EARLY",
+          "PROXY_EARLY_FINISH", "DISEMBARGO_PLAIN_FWD_NPP",
+          "FWD_SP_RESOLVE_TO_RA_PENDING_NPP", "PARAM_PROMISE_WRITTEN_MERGE",
+          "FWD_RA_PENDING_NPP", "FWD_RA_RETURNED_NPP",
+          "DISEMBARGO_PLAIN_FWD_PROMISE_CAP", "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT")
+
+# Seeds that once differed from C++, run with the probes.
+FIXED_SEEDS = (1067, 1859, 1931, 1984, 2008)
+
+
 def seed_job(opts, seed):
     out = opts.out
-    port = 20000 + (seed * 2) % 40000
-    c_log = os.path.join(out, "%d.c.log" % seed)
-    f_log = os.path.join(out, "%d.f.log" % seed)
+    if isinstance(seed, str):
+        port = 61000 + 2 * PROBES.index(seed)
+        seed = "probe:" + seed
+    else:
+        port = 20000 + (seed * 2) % 40000
+    c_log = os.path.join(out, "%s.c.log" % seed)
+    f_log = os.path.join(out, "%s.f.log" % seed)
     run_one(os.path.join(opts.bin, "peer_cpp"), os.path.join(opts.bin, "driver"),
             port, seed, opts.steps, c_log)
     run_one(os.path.join(opts.bin, "peer_f"), os.path.join(opts.bin, "driver"),
@@ -130,7 +152,7 @@ def seed_job(opts, seed):
     if d is None:
         return seed, "SAME", "", classes
     i, x, y = d
-    with open(os.path.join(out, "%d.diff" % seed), "w") as f:
+    with open(os.path.join(out, "%s.diff" % seed), "w") as f:
         f.write(render(seed, i, x, y))
     return seed, "DIFF", "window %d %s" % (i, x[0]), classes
 
@@ -139,7 +161,7 @@ CLASS_RE = re.compile(r"^== \S+ ([A-Z][A-Z0-9_]+)$", re.M)
 
 
 def render(seed, i, x, y):
-    lines = ["seed %d: first differing window %d" % (seed, i),
+    lines = ["seed %s: first differing window %d" % (seed, i),
              "--- C++ peer: %s" % x[0]]
     lines += ["  " + s for s in x[1]]
     lines.append("--- Fortran peer: %s" % y[0])
@@ -158,30 +180,47 @@ def main():
     ap.add_argument("--out", default=os.path.join(ROOT, "build-rpc-diff", "logs"))
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--steps", type=int, default=0)
-    ap.add_argument("--show", type=int)
+    ap.add_argument("--show")
+    ap.add_argument("--probes", action="store_true",
+                    help="also run the fixed review probes (all of them when no seeds are given)")
     opts = ap.parse_args()
     os.makedirs(opts.out, exist_ok=True)
     if opts.show is not None:
-        p = os.path.join(opts.out, "%d.diff" % opts.show)
-        print(open(p).read() if os.path.exists(p) else "seed %d: SAME" % opts.show)
+        p = os.path.join(opts.out, "%s.diff" % opts.show)
+        print(open(p).read() if os.path.exists(p) else "seed %s: SAME" % opts.show)
         return 0
-    if opts.first is None:
-        ap.error("give FIRST [LAST] or --show SEED")
-    last = opts.last if opts.last is not None else opts.first
-    seeds = list(range(opts.first, last + 1))
+    if opts.first is None and not opts.probes:
+        ap.error("give FIRST [LAST], --probes or --show SEED")
+    seeds = []
+    if opts.first is not None:
+        last = opts.last if opts.last is not None else opts.first
+        seeds = list(range(opts.first, last + 1))
+    fixed = [s for s in FIXED_SEEDS if s not in seeds] if opts.probes else []
+    jobs = seeds + fixed + (list(PROBES) if opts.probes else [])
     t0 = time.time()
     results = []
     with cf.ThreadPoolExecutor(max_workers=opts.jobs) as ex:
-        for r in ex.map(lambda s: seed_job(opts, s), seeds):
+        for r in ex.map(lambda s: seed_job(opts, s), jobs):
             results.append(r)
-            print("%d %s %s" % r[:3], flush=True)
+            print("%s %s %s" % r[:3], flush=True)
     same = sum(1 for r in results if r[1] == "SAME")
     lines = []
     for r in results:
-        lines.append("%d\t%s\t%s\t%s" % (r[0], r[1], r[2], ",".join(r[3])))
+        lines.append("%s\t%s\t%s\t%s" % (r[0], r[1], r[2], ",".join(r[3])))
     lines.append("")
-    lines.append("seeds %d-%d: SAME %d DIFF %d" %
-                 (seeds[0], seeds[-1], same, len(results) - same))
+    sr = [r for r in results if r[0] in seeds]
+    fr = [r for r in results if r[0] in fixed]
+    pr = [r for r in results if str(r[0]).startswith("probe:")]
+    if sr:
+        ss = sum(1 for r in sr if r[1] == "SAME")
+        lines.append("seeds %d-%d: SAME %d DIFF %d" % (seeds[0], seeds[-1], ss, len(sr) - ss))
+    if fr:
+        fs = sum(1 for r in fr if r[1] == "SAME")
+        lines.append("fixed seeds %s: SAME %d DIFF %d" %
+                     (",".join(str(r[0]) for r in fr), fs, len(fr) - fs))
+    if pr:
+        ps = sum(1 for r in pr if r[1] == "SAME")
+        lines.append("probes: SAME %d DIFF %d" % (ps, len(pr) - ps))
     # Per scenario class: seeds that ran it, and of those how many differ
     # anywhere and how many first differ inside that class's windows.
     names = sorted({c for r in results for c in r[3]})

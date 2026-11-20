@@ -7,12 +7,14 @@ part of `fpm test` or `meson test`: one run takes a minute or more
 and opens loopback TCP ports.
 
 ```console
-$ pixi run -e interop rpc-diff          # build, then seeds 1-300
-$ pixi run -e interop rpc-diff 40 60    # seeds 40-60
+$ pixi run -e interop rpc-diff          # build, then seeds 1-300 and the probes
+$ pixi run -e interop rpc-diff 40 60    # seeds 40-60 and the probes
+$ python3 interop/rpc-diff/run.py --probes --bin build-rpc-diff --out /tmp/p
 $ python3 interop/rpc-diff/run.py --show 42 --out build-rpc-diff/logs
+$ python3 interop/rpc-diff/run.py --show probe:FWD_RA_PLAIN_PENDING --out /tmp/p
 ```
 
-The exit status is 0 only when every seed is SAME. `JOBS` sets the
+The exit status is 0 only when every seed and probe is SAME. `JOBS` sets the
 parallel runs (default 4) and `OUT` the log directory (default
 `build-rpc-diff/logs`). `SRC=<checkout>` makes `build.sh` build the
 Fortran peer from another worktree, to compare an older commit.
@@ -63,6 +65,52 @@ are counted per class in `summary.tsv`:
 
 After the last step the driver answers every pending call, finishes
 every question and releases every import.
+
+## Probes
+
+A probe is a fixed script, run with `driver <port> probe:<NAME>` and by
+`run.py --probes`. Each pins one exchange where the Fortran peer once
+differed from C++ 1.4.0, and is its own class in `summary.tsv`:
+
+- `PARAM_PROMISE_MERGE_HOSTED`, `PARAM_PROMISE_MERGE_PROMISE`: a param
+  promise resolves to an id another call's params name. One import
+  counts both, so the last Finish Releases every ref at once.
+- `FWD_RA_RELEASED_PARAM`: a forwarded `receiverAnswer` param names a
+  result cap the driver has released. C++ exports it again.
+- `DISEMBARGO_PLAIN_FWD`, `DISEMBARGO_PLAIN_FWD_CAP`,
+  `DISEMBARGO_PLAIN_FWD_FINISH`: `Disembargo(senderLoopback)` on a call
+  that went on as a plain call. C++ waits for its Return, then echoes
+  on the cap or aborts on a null result.
+- `FINISH_PLAIN_FWD_NPP`, `FINISH_PLAIN_FWD_NPP_CAP`,
+  `FINISH_PLAIN_FWD_YOURSELF`: Finish for such a call cancels it at
+  once.
+- `FWD_SP_RESOLVE_TO_RA`: a forwarded param promise resolves to
+  `receiverAnswer` on the peer's own export, so a Disembargo goes
+  first.
+- `FWD_RA_PLAIN_PENDING`, `FWD_RA_PLAIN_PENDING_CALL`,
+  `FWD_RA_PLAIN_PENDING_RELEASE`: a forwarded `receiverAnswer` param
+  names a plain call still pending. C++ exports a hosted cap that
+  forwards to that call's pipeline.
+- `YOURSELF_NPP_PLAIN_FWD`, `YOURSELF_NPP_PLAIN_FWD_EXC`,
+  `YOURSELF_NPP_PLAIN_FWD_EARLY`: a yourself call with
+  `noPromisePipelining` goes on as a plain call. Its question lives
+  until Finish, after a result or an exception.
+- `PROXY_EARLY_FINISH`: Finish for a plain call whose answer a
+  forwarded `receiverAnswer` param still uses. The question lives on.
+- `DISEMBARGO_PLAIN_FWD_NPP`: a Disembargo on a plain call that set
+  `noPromisePipelining`. C++ aborts.
+- `DISEMBARGO_PLAIN_FWD_PROMISE_CAP`: a Disembargo waits on a plain
+  call that returns a promise cap, and goes after its Resolve.
+- `FWD_SP_RESOLVE_TO_RA_PENDING_NPP`, `FWD_RA_PENDING_NPP`,
+  `FWD_RA_RETURNED_NPP`: a forwarded param names an answer under
+  `noPromisePipelining`. C++ writes a broken promise and resolves it
+  to an exception.
+- `PARAM_PROMISE_WRITTEN_MERGE`, `PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT`:
+  a param promise merges with another hold or a live import. The
+  Disembargo and the Release counts follow C++.
+
+`run.py --probes` also replays the seeds in `FIXED_SEEDS`, random
+scripts that once differed, on a line of their own in the summary.
 
 ## Log and normalisation
 

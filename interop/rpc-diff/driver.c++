@@ -1,5 +1,6 @@
 // Raw-message RPC driver for the differential checker.
 // Usage: driver <port> <seed> [steps]
+//        driver <port> probe:<NAME>
 //
 // Connects to a peer that serves diff.capnp Target as its bootstrap and
 // plays a script drawn from <seed>. Every choice depends only on the
@@ -372,7 +373,7 @@ void sendFinish(uint32_t q, bool releaseCaps, bool log) {
   if (log) emit("D> FIN q" + std::to_string(q) + " rrc=" + (releaseCaps ? "1" : "0"));
 }
 
-void sendReturnResults(uint32_t wire, int64_t n, bool withCap) {
+void sendReturnResults(uint32_t wire, int64_t n, bool withCap, bool promise = false) {
   capnp::MallocMessageBuilder mb;
   auto r = mb.initRoot<rpc::Message>().initReturn();
   r.setAnswerId(wire);
@@ -382,12 +383,14 @@ void sendReturnResults(uint32_t wire, int64_t n, bool withCap) {
   if (withCap) {
     uint32_t id = nextExportId++;
     exports[id].refs += 1;
+    exports[id].promise = promise;
     capnp::BuilderCapabilityTable table;
     auto content = table.imbue(res.getContent());
     auto st = content.initAs<CapResult>();
     st.setCap(capnp::Capability::Client(capnp::newBrokenCap("placeholder")).castAs<Target>());
-    res.initCapTable(1)[0].setSenderHosted(id);
-    capStr = "sh:D" + std::to_string(id);
+    if (promise) res.initCapTable(1)[0].setSenderPromise(id);
+    else res.initCapTable(1)[0].setSenderHosted(id);
+    capStr = (promise ? "sp:D" : "sh:D") + std::to_string(id);
     auto it = peerQs.find(wire);
     if (it != peerQs.end()) it->second.resultExports.push_back(id);
   } else {
@@ -1154,6 +1157,549 @@ void scenario(int k, int which) {
   }
 }
 
+// ---------------------------------------------------------------- probes
+//
+// Fixed scripts from review, one per name. Each part is a window marked
+// "== probe.<part> <NAME>".
+
+struct Cap {
+  char kind;  // 'h' senderHosted, 'p' senderPromise, 'a' receiverAnswer,
+              // 'r' receiverHosted (resolve only)
+  uint32_t id;
+  std::vector<int> ops;
+};
+
+Cap hostedCap() {
+  uint32_t id = nextExportId++;
+  exports[id].refs += 1;
+  return {'h', id, {}};
+}
+
+Cap promiseCap() {
+  uint32_t id = nextExportId++;
+  exports[id].refs += 1;
+  exports[id].promise = true;
+  return {'p', id, {}};
+}
+
+// A call with an explicit target: the bootstrap import when aq is -1,
+// import wire -2 - aq below that, else pa(aq, ops). Params point at the
+// first cap, if any.
+uint32_t probeCall(int64_t aq, std::vector<int> ops, int method, int64_t n, bool yourself,
+                   bool npp, std::vector<Cap> caps) {
+  uint32_t q = newQuestion(kMethods[method]);
+  capnp::MallocMessageBuilder mb;
+  auto c = mb.initRoot<rpc::Message>().initCall();
+  c.setQuestionId(q);
+  c.setInterfaceId(TARGET_ID);
+  c.setMethodId(method);
+  std::string tgt;
+  if (aq < 0) {
+    uint32_t w = aq == -1 ? bootImportWire : uint32_t(-2 - aq);
+    c.initTarget().setImportedCap(w);
+    tgt = importRef(w);
+  } else {
+    auto pa = c.initTarget().initPromisedAnswer();
+    pa.setQuestionId(uint32_t(aq));
+    setOps(pa, ops);
+    tgt = "pa(q" + std::to_string(aq) + opsName(ops) + ")";
+  }
+  std::string flags;
+  if (yourself) {
+    c.getSendResultsTo().setYourself();
+    flags += " yourself";
+  }
+  if (npp) {
+    c.setNoPromisePipelining(true);
+    flags += " npp";
+  }
+  auto params = c.initParams();
+  capnp::BuilderCapabilityTable table;
+  std::string cs;
+  if (caps.empty()) {
+    params.getContent().initAs<N>().setN(n);
+  } else {
+    auto st = table.imbue(params.getContent()).initAs<NCap>();
+    st.setN(n);
+    st.setCap(capnp::Capability::Client(capnp::newBrokenCap("placeholder")).castAs<Target>());
+    auto ct = params.initCapTable(caps.size());
+    for (size_t i = 0; i < caps.size(); ++i) {
+      if (i) cs += " ";
+      auto& k = caps[i];
+      if (k.kind == 'h') {
+        ct[i].setSenderHosted(k.id);
+        questions[q].paramExports.push_back(k.id);
+        cs += "sh:D" + std::to_string(k.id);
+      } else if (k.kind == 'p') {
+        ct[i].setSenderPromise(k.id);
+        questions[q].paramExports.push_back(k.id);
+        cs += "sp:D" + std::to_string(k.id);
+      } else {
+        auto ra = ct[i].initReceiverAnswer();
+        ra.setQuestionId(k.id);
+        setOps(ra, k.ops);
+        cs += "ra:(q" + std::to_string(k.id) + opsName(k.ops) + ")";
+      }
+    }
+  }
+  sendRaw(mb);
+  emit("D> CALL q" + std::to_string(q) + " " + tgt + " " + kMethods[method] + "(" +
+       std::to_string(n) + ")" + flags + " caps[" + cs + "]");
+  return q;
+}
+
+// Resolve driver promise pid to an existing export ('h'), an existing
+// promise ('p'), receiverAnswer(id, ops) ('a') or the peer's export
+// wire id ('r').
+void probeResolve(uint32_t pid, Cap to) {
+  capnp::MallocMessageBuilder mb;
+  auto r = mb.initRoot<rpc::Message>().initResolve();
+  r.setPromiseId(pid);
+  std::string what;
+  if (to.kind == 'h') {
+    exports[to.id].refs += 1;
+    r.initCap().setSenderHosted(to.id);
+    what = "sh:D" + std::to_string(to.id);
+  } else if (to.kind == 'p') {
+    exports[to.id].refs += 1;
+    exports[to.id].promise = true;
+    r.initCap().setSenderPromise(to.id);
+    what = "sp:D" + std::to_string(to.id);
+  } else if (to.kind == 'r') {
+    r.initCap().setReceiverHosted(to.id);
+    what = "rh:" + importRef(to.id);
+  } else {
+    auto pa = r.initCap().initReceiverAnswer();
+    pa.setQuestionId(to.id);
+    setOps(pa, to.ops);
+    what = "ra:(q" + std::to_string(to.id) + opsName(to.ops) + ")";
+  }
+  exports[pid].resolved = true;
+  sendRaw(mb);
+  emit("D> RES D" + std::to_string(pid) + " " + what);
+}
+
+void probeDisembargo(uint32_t aq, std::vector<int> ops, uint32_t id) {
+  capnp::MallocMessageBuilder mb;
+  auto d = mb.initRoot<rpc::Message>().initDisembargo();
+  auto pa = d.initTarget().initPromisedAnswer();
+  pa.setQuestionId(aq);
+  setOps(pa, ops);
+  d.getContext().setSenderLoopback(id);
+  sendRaw(mb);
+  emit("D> DIS pa(q" + std::to_string(aq) + opsName(ops) + ") sl " + std::to_string(id));
+}
+
+int64_t importWireBySym(int sym) {
+  for (auto& kv : imports)
+    if (kv.second.sym == sym) return kv.first;
+  return -1;
+}
+
+// Answer the newest pending call since `before`: with a cap, with a
+// plain N, or with resultsSentElsewhere for a yourself call.
+void probeAnswer(size_t before, bool withCap) {
+  if (pending.size() <= before) {
+    emit("D> (no pending call)");
+    return;
+  }
+  Incoming in = pending.back();
+  pending.pop_back();
+  if (in.yourself) sendReturnElsewhere(in.wire);
+  else sendReturnResults(in.wire, in.n + 1000, withCap);
+  markAnswered(in.wire);
+}
+
+const char* kProbes[] = {"PARAM_PROMISE_MERGE_HOSTED", "PARAM_PROMISE_MERGE_PROMISE",
+                         "FWD_RA_RELEASED_PARAM",      "DISEMBARGO_PLAIN_FWD",
+                         "FINISH_PLAIN_FWD_NPP",       "FINISH_PLAIN_FWD_YOURSELF",
+                         "FWD_SP_RESOLVE_TO_RA",       "FWD_RA_PLAIN_PENDING",
+                         "DISEMBARGO_PLAIN_FWD_CAP",   "FWD_RA_PLAIN_PENDING_CALL",
+                         "DISEMBARGO_PLAIN_FWD_FINISH", "FINISH_PLAIN_FWD_NPP_CAP",
+                         "FWD_RA_PLAIN_PENDING_RELEASE", "YOURSELF_NPP_PLAIN_FWD",
+                         "YOURSELF_NPP_PLAIN_FWD_EXC", "YOURSELF_NPP_PLAIN_FWD_EARLY",
+                         "PROXY_EARLY_FINISH", "DISEMBARGO_PLAIN_FWD_NPP",
+                         "FWD_SP_RESOLVE_TO_RA_PENDING_NPP", "PARAM_PROMISE_WRITTEN_MERGE",
+                         "FWD_RA_PENDING_NPP", "FWD_RA_RETURNED_NPP",
+                         "DISEMBARGO_PLAIN_FWD_PROMISE_CAP", "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT"};
+
+// Answer the oldest pending call since `before`, as probeAnswer answers
+// the newest.
+void probeAnswerFirst(size_t before, bool withCap, bool promise = false) {
+  if (pending.size() <= before) {
+    emit("D> (no pending call)");
+    return;
+  }
+  Incoming in = pending[before];
+  pending.erase(pending.begin() + before);
+  if (in.yourself) sendReturnElsewhere(in.wire);
+  else sendReturnResults(in.wire, in.n + 1000, withCap, promise);
+  markAnswered(in.wire);
+}
+
+bool probe(const std::string& name) {
+  scenarioStep = "probe";
+  scenarioPart = 0;
+  window.clear();
+  if (!haveBoot) return true;
+  const int kSelf = 4, kMake = 2, kReflect = 5, kEcho = 0;
+  if (name == "PARAM_PROMISE_MERGE_HOSTED") {
+    // Two calls keep params alive; the promise of one resolves to the
+    // hosted cap of the other. Both share one import until the last Finish.
+    Cap h = hostedCap(), p = promiseCap();
+    uint32_t q1 = probeCall(-1, {}, kSelf, 1, false, false, {h});
+    uint32_t q2 = probeCall(-1, {}, kSelf, 2, false, false, {p});
+    part(name);
+    probeResolve(p.id, h);
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+    sendFinish(q2, true, true);
+    part(name);
+  } else if (name == "PARAM_PROMISE_MERGE_PROMISE") {
+    Cap pa = promiseCap(), pb = promiseCap();
+    uint32_t q1 = probeCall(-1, {}, kSelf, 1, false, false, {pa});
+    uint32_t q2 = probeCall(-1, {}, kSelf, 2, false, false, {pb});
+    part(name);
+    probeResolve(pb.id, pa);
+    part(name);
+    Cap h = hostedCap();
+    exports[h.id].refs -= 1;
+    probeResolve(pa.id, h);
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+    sendFinish(q2, true, true);
+    part(name);
+  } else if (name == "FWD_RA_RELEASED_PARAM") {
+    // The export a returned answer names is released, then named again
+    // through receiverAnswer in a forwarded call.
+    uint32_t qm = probeCall(-1, {}, kMake, 5, false, false, {});
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    if (!questions[qm].resultImports.empty()) {
+      uint32_t w = questions[qm].resultImports[0];
+      sendRelease(w, 1, true);
+      questions[qm].resultImports.clear();
+    }
+    part(name);
+    size_t before = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qm, {0}}});
+    part(name);
+    probeAnswer(before, false);
+    sendFinish(qf, true, true);
+    part(name);
+  } else if (name == "DISEMBARGO_PLAIN_FWD" || name == "DISEMBARGO_PLAIN_FWD_CAP" ||
+             name == "DISEMBARGO_PLAIN_FWD_FINISH") {
+    // Disembargo on an answer whose call went on as a plain call and is
+    // still pending there. The FINISH variant ends the call before the
+    // plain call returns.
+    bool cap = name != "DISEMBARGO_PLAIN_FWD";
+    bool early = name == "DISEMBARGO_PLAIN_FWD_FINISH";
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kEcho, 8, true, false, {});
+    part(name);
+    probeDisembargo(qp, {0}, 556);
+    part(name);
+    if (early) {
+      sendFinish(qp, true, true);
+      part(name);
+    }
+    if (pending.size() > before) {
+      Incoming in = pending.back();
+      pending.pop_back();
+      sendReturnResults(in.wire, in.n + 1000, cap);
+      markAnswered(in.wire);
+    }
+    part(name);
+    if (!early) {
+      sendFinish(qp, true, true);
+      part(name);
+    }
+  } else if (name == "FINISH_PLAIN_FWD_NPP" || name == "FINISH_PLAIN_FWD_YOURSELF" ||
+             name == "FINISH_PLAIN_FWD_NPP_CAP") {
+    // Finish for a call that went on as a plain call, before its answer.
+    // The CAP variant answers the plain call with a cap.
+    bool npp = name != "FINISH_PLAIN_FWD_YOURSELF";
+    bool withCap = name == "FINISH_PLAIN_FWD_NPP_CAP";
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kEcho, 9, !npp, npp, {});
+    part(name);
+    sendFinish(qp, true, true);
+    part(name);
+    if (pending.size() > before) {
+      Incoming in = pending.back();
+      pending.pop_back();
+      sendReturnResults(in.wire, in.n + 1000, withCap);
+      markAnswered(in.wire);
+    }
+    part(name);
+  } else if (name == "FWD_SP_RESOLVE_TO_RA") {
+    // A forwarded param promise resolves to receiverAnswer naming the
+    // peer's own export.
+    uint32_t qm = probeCall(-1, {}, kMake, 5, false, false, {});
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    Cap p = promiseCap();
+    size_t before = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {p});
+    part(name);
+    probeResolve(p.id, {'a', qm, {0}});
+    part(name);
+    probeAnswer(before, false);
+    sendFinish(qf, true, true);
+    part(name);
+  } else if (name == "FWD_RA_PLAIN_PENDING") {
+    // A forwarded call names, through receiverAnswer, an answer whose
+    // call went on as a plain call and is still pending.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kMake, 8, true, false, {});
+    part(name);
+    size_t mid = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qp, {0}}});
+    part(name);
+    probeAnswer(mid, false);
+    if (pending.size() > before) {
+      Incoming in = pending[before];
+      pending.erase(pending.begin() + before);
+      sendReturnResults(in.wire, in.n + 1000, true);
+      markAnswered(in.wire);
+    }
+    sendFinish(qf, true, true);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "FWD_RA_PLAIN_PENDING_RELEASE") {
+    // As FWD_RA_PLAIN_PENDING, with the cap the forward wrote released
+    // before the plain call returns.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kMake, 8, true, false, {});
+    part(name);
+    size_t mid = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qp, {0}}});
+    part(name);
+    int64_t w = importWireBySym(1);
+    if (w >= 0 && imports.count(uint32_t(w))) sendRelease(uint32_t(w), imports[uint32_t(w)].refs, true);
+    part(name);
+    probeAnswer(mid, false);
+    if (pending.size() > before) {
+      Incoming in = pending[before];
+      pending.erase(pending.begin() + before);
+      sendReturnResults(in.wire, in.n + 1000, true);
+      markAnswered(in.wire);
+    }
+    part(name);
+    sendFinish(qf, true, true);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "FWD_RA_PLAIN_PENDING_CALL") {
+    // As above, and the cap the forward wrote is called while the plain
+    // call is pending, then released before the reflect answer goes.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kMake, 8, true, false, {});
+    part(name);
+    size_t mid = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qp, {0}}});
+    part(name);
+    int64_t w = importWireBySym(1);
+    int64_t qc = w >= 0 ? int64_t(probeCall(-2 - w, {}, kEcho, 11, false, false, {})) : -1;
+    part(name);
+    probeAnswer(mid, false);
+    if (pending.size() > before) {
+      Incoming in = pending[before];
+      pending.erase(pending.begin() + before);
+      sendReturnResults(in.wire, in.n + 1000, true);
+      markAnswered(in.wire);
+    }
+    part(name);
+    while (pending.size() > before) probeAnswer(before, false);
+    part(name);
+    sendFinish(qf, true, true);
+    sendFinish(qp, true, true);
+    if (qc >= 0) sendFinish(uint32_t(qc), true, true);
+    part(name);
+    if (w >= 0 && imports.count(uint32_t(w))) sendRelease(uint32_t(w), imports[uint32_t(w)].refs, true);
+    part(name);
+  } else if (name == "YOURSELF_NPP_PLAIN_FWD" || name == "YOURSELF_NPP_PLAIN_FWD_EXC" ||
+             name == "YOURSELF_NPP_PLAIN_FWD_EARLY") {
+    // A plain call for a call with both sendResultsTo.yourself and
+    // noPromisePipelining: its Return, or a Finish first.
+    bool early = name == "YOURSELF_NPP_PLAIN_FWD_EARLY";
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kEcho, 9, true, true, {});
+    part(name);
+    if (early) {
+      sendFinish(qp, true, true);
+      part(name);
+    }
+    if (pending.size() > before) {
+      Incoming in = pending.back();
+      pending.pop_back();
+      if (name == "YOURSELF_NPP_PLAIN_FWD_EXC") sendReturnException(in.wire, "SRVEXC");
+      else sendReturnResults(in.wire, in.n + 1000, false);
+      markAnswered(in.wire);
+    }
+    part(name);
+    if (!early) {
+      sendFinish(qp, true, true);
+      part(name);
+    }
+  } else if (name == "PROXY_EARLY_FINISH") {
+    // A forward writes a proxy for a pending plain call; the plain call's
+    // own answer is finished before it returns, then the proxy is called.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kMake, 8, true, false, {});
+    part(name);
+    size_t mid = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qp, {0}}});
+    part(name);
+    probeAnswer(mid, false);
+    part(name);
+    sendFinish(qp, true, true);
+    part(name);
+    probeAnswerFirst(before, true);
+    part(name);
+    int64_t w = importWireBySym(1);
+    int64_t qc = w >= 0 ? int64_t(probeCall(-2 - w, {}, kEcho, 11, false, false, {})) : -1;
+    part(name);
+    while (pending.size() > before) probeAnswer(before, false);
+    part(name);
+    sendFinish(qf, true, true);
+    if (qc >= 0) sendFinish(uint32_t(qc), true, true);
+    part(name);
+    if (w >= 0 && imports.count(uint32_t(w))) sendRelease(uint32_t(w), imports[uint32_t(w)].refs, true);
+    part(name);
+  } else if (name == "DISEMBARGO_PLAIN_FWD_NPP") {
+    // Disembargo on a pending plain call made for a noPromisePipelining
+    // call.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kEcho, 8, false, true, {});
+    part(name);
+    probeDisembargo(qp, {0}, 556);
+    part(name);
+    probeAnswerFirst(before, true);
+    part(name);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "FWD_SP_RESOLVE_TO_RA_PENDING_NPP") {
+    // A forwarded param promise resolves to receiverAnswer on a pending
+    // noPromisePipelining plain call.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kMake, 8, false, true, {});
+    part(name);
+    Cap p = promiseCap();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {p});
+    part(name);
+    probeResolve(p.id, {'a', qp, {0}});
+    part(name);
+    while (pending.size() > before) probeAnswer(before, false);
+    part(name);
+    sendFinish(qf, true, true);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "PARAM_PROMISE_WRITTEN_MERGE") {
+    // A forwarded (written) param promise resolves to a promise that a
+    // local call's params name, which then resolves to the peer's export.
+    uint32_t qm = probeCall(-1, {}, kMake, 5, false, false, {});
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    Cap pa = promiseCap(), pb = promiseCap();
+    uint32_t q1 = probeCall(-1, {}, kSelf, 1, false, false, {pa});
+    size_t before = pending.size();
+    uint32_t q2 = probeCall(qr, {0}, kEcho, 7, false, false, {pb});
+    part(name);
+    probeResolve(pb.id, {'p', pa.id, {}});
+    part(name);
+    if (!questions[qm].resultImports.empty())
+      probeResolve(pa.id, {'r', questions[qm].resultImports[0], {}});
+    part(name);
+    while (pending.size() > before) probeAnswer(before, false);
+    part(name);
+    sendFinish(q1, true, true);
+    sendFinish(q2, true, true);
+    part(name);
+  } else if (name == "FWD_RA_PENDING_NPP" || name == "FWD_RA_RETURNED_NPP") {
+    // A forwarded receiverAnswer param names a noPromisePipelining answer:
+    // a plain call still pending, or a local call that has returned.
+    bool returned = name == "FWD_RA_RETURNED_NPP";
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = returned ? probeCall(-1, {}, kMake, 5, false, true, {})
+                           : probeCall(qr, {0}, kMake, 8, false, true, {});
+    part(name);
+    size_t mid = pending.size();
+    uint32_t qf = probeCall(qr, {0}, kEcho, 7, false, false, {{'a', qp, {0}}});
+    part(name);
+    probeAnswer(mid, false);
+    part(name);
+    while (pending.size() > before) probeAnswer(before, true);
+    part(name);
+    sendFinish(qf, true, true);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "DISEMBARGO_PLAIN_FWD_PROMISE_CAP") {
+    // Disembargo on a pending plain call that returns a promise, which
+    // resolves later.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t qp = probeCall(qr, {0}, kEcho, 8, true, false, {});
+    part(name);
+    probeDisembargo(qp, {0}, 556);
+    part(name);
+    uint32_t pid = nextExportId;
+    probeAnswerFirst(before, true, true);
+    part(name);
+    Cap h = hostedCap();
+    exports[h.id].refs -= 1;
+    probeResolve(pid, h);
+    part(name);
+    sendFinish(qp, true, true);
+    part(name);
+  } else if (name == "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT") {
+    // A param promise resolves to a cap the peer already imports as the
+    // result of a noPromisePipelining plain call. One import counts both.
+    uint32_t qr = probeCall(-1, {}, kReflect, 6, false, false, {});
+    part(name);
+    size_t before = pending.size();
+    uint32_t q1 = probeCall(qr, {0}, kMake, 8, false, true, {});
+    part(name);
+    uint32_t hid = nextExportId;
+    probeAnswerFirst(before, true);
+    part(name);
+    Cap p = promiseCap();
+    uint32_t q2 = probeCall(-1, {}, kSelf, 2, false, false, {p});
+    part(name);
+    probeResolve(p.id, {'h', hid, {}});
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+    sendFinish(q2, true, true);
+    part(name);
+  } else {
+    return false;
+  }
+  return true;
+}
+
 void step(int k) {
   std::string label;
   // call, finish, release, answer, poke70, resolve, disembargo, bootstrap,
@@ -1229,11 +1775,13 @@ void endPhase() {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s <port> <seed> [steps]\n", argv[0]);
+    fprintf(stderr, "usage: %s <port> <seed> [steps] | <port> probe:<NAME>\n", argv[0]);
     return 2;
   }
   int port = atoi(argv[1]);
-  uint64_t seed = strtoull(argv[2], nullptr, 10);
+  std::string probeName;
+  if (strncmp(argv[2], "probe:", 6) == 0) probeName = argv[2] + 6;
+  uint64_t seed = probeName.empty() ? strtoull(argv[2], nullptr, 10) : 0;
   rng.seed(seed * 0x9E3779B97F4A7C15ull + 1);
   int steps = argc > 3 ? atoi(argv[3]) : 20 + int(rng() % 41);
 
@@ -1278,6 +1826,13 @@ int main(int argc, char** argv) {
     sendFinish(q, false, true);
     drainIdle(kIdleMs * 2);
     flushWindow();
+  }
+  if (!probeName.empty()) {
+    if (!probe(probeName)) {
+      fprintf(stderr, "driver: unknown probe %s\n", probeName.c_str());
+      return 2;
+    }
+    steps = 0;
   }
   for (int k = 1; k <= steps && !peerEof && !peerAborted && syncTimeouts < 3; ++k) step(k);
   if (!peerEof && !peerAborted && syncTimeouts < 3) endPhase();
