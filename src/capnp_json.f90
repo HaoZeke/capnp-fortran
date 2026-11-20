@@ -27,6 +27,8 @@ module capnp_json
    integer, parameter :: MAX_DEPTH = 64
    integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
    integer, parameter :: JK_ARR = 4, JK_OBJ = 5
+   integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
+   integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
    character(len=*), parameter :: B64 = &
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -34,6 +36,11 @@ module capnp_json
       character(len=:), allocatable :: s
       logical :: multi = .false.
    end type piece_t
+
+   type :: jname_t
+      character(len=:), allocatable :: key
+      integer :: kind = 0
+   end type jname_t
 
    type :: disc_opts_t
       logical :: active = .false.
@@ -78,6 +85,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      call audit_json(schema, idx, err)
+      if (err /= CAPNP_OK) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
@@ -107,6 +116,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      call audit_json(schema, idx, err)
+      if (err /= CAPNP_OK) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
@@ -2196,5 +2207,296 @@ contains
       logical :: y
       y = ieee_is_finite(x)
    end function ieee_finite
+
+   subroutine audit_json(schema, idx, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      integer, intent(out) :: err
+      logical, allocatable :: done(:)
+      integer :: stat
+      err = CAPNP_OK
+      allocate (done(size(schema%nodes)), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      done = .false.
+      call audit_visit(schema, idx, done, err)
+   end subroutine audit_json
+
+   recursive subroutine audit_visit(schema, idx, done, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      logical, intent(inout) :: done(:)
+      integer, intent(out) :: err
+      type(disc_opts_t) :: no_disc
+      type(jname_t), allocatable :: names(:)
+      type(capnp_ptr_t) :: fl, f, raw_t
+      integer :: stack(128), sp, nn, i, nf, sidx
+      err = CAPNP_OK
+      if (idx < 1 .or. idx > size(done)) return
+      if (done(idx)) return
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) return
+      done(idx) = .true.
+      sp = 0
+      nn = 0
+      call audit_build(schema, idx, no_disc, '', stack, sp, names, nn, err)
+      if (err /= CAPNP_OK) return
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      nf = int(capnp_list_len(fl))
+      do i = 0, nf - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) == FIELD_GROUP) then
+            sidx = capnp_codec_find_id(schema, field_group_type_id(f))
+            if (sidx /= 0) call audit_visit(schema, sidx, done, err)
+         else
+            raw_t = field_slot_type(f, err)
+            if (err /= CAPNP_OK) return
+            call audit_field_type(schema, raw_t, done, err)
+         end if
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine audit_visit
+
+   recursive subroutine audit_build(schema, idx, parent_disc, union_decl, stack, sp, &
+                                    names, nn, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(disc_opts_t), intent(in) :: parent_disc
+      character(len=*), intent(in) :: union_decl
+      integer, intent(inout) :: stack(:)
+      integer, intent(inout) :: sp
+      type(jname_t), allocatable, intent(out) :: names(:)
+      integer, intent(out) :: nn
+      integer, intent(out) :: err
+      type(disc_opts_t) :: opts, gdisc, no_disc
+      type(jname_t), allocatable :: child(:)
+      type(capnp_ptr_t) :: fl, f, al, raw_t, t
+      character(len=:), allocatable :: nm, raw_nm, fpfx, dkey, udecl
+      integer :: i, nf, gidx, sidx, cn, kind, k
+      logical :: is_flat, is_union
+      err = CAPNP_OK
+      nn = 0
+      if (idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (sp >= size(stack)) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      do i = 1, sp
+         if (stack(i) == idx) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+      end do
+      sp = sp + 1
+      stack(sp) = idx
+      if (parent_disc%active) then
+         opts = parent_disc
+      else
+         al = node_annotations(schema%nodes(idx), err)
+         if (err /= CAPNP_OK) then
+            sp = sp - 1
+            return
+         end if
+         call read_disc_opts(al, opts, err)
+         if (err /= CAPNP_OK) then
+            sp = sp - 1
+            return
+         end if
+      end if
+      if (opts%active) then
+         dkey = ''
+         if (opts%has_name) then
+            dkey = opts%name
+         else if (len(union_decl) > 0) then
+            dkey = union_decl
+         end if
+         if (len(dkey) > 0) then
+            call jname_add(names, nn, dkey, JN_TAG, err)
+            if (err /= CAPNP_OK) then
+               sp = sp - 1
+               return
+            end if
+         end if
+         if (opts%has_val) then
+            call jname_add(names, nn, opts%val_name, JN_VALUE, err)
+            if (err /= CAPNP_OK) then
+               sp = sp - 1
+               return
+            end if
+         end if
+      end if
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) then
+         sp = sp - 1
+         return
+      end if
+      nf = int(capnp_list_len(fl))
+      do i = 0, nf - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) exit
+         call json_field_name(f, nm, err)
+         if (err /= CAPNP_OK) exit
+         call flatten_opts(f, is_flat, fpfx, err)
+         if (err /= CAPNP_OK) exit
+         is_union = field_discriminant(f) /= NO_DISCRIMINANT
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = capnp_codec_find_id(schema, field_group_type_id(f))
+            if (gidx == 0) then
+               err = CAPNP_ERR_ARG
+               exit
+            end if
+            call field_name(f, raw_nm, err)
+            if (err /= CAPNP_OK) exit
+            al = field_annotations(f, err)
+            if (err /= CAPNP_OK) exit
+            call read_disc_opts(al, gdisc, err)
+            if (err /= CAPNP_OK) exit
+            udecl = ''
+            if (is_flat) udecl = raw_nm
+            call audit_build(schema, gidx, gdisc, udecl, stack, sp, child, cn, err)
+            if (err /= CAPNP_OK) exit
+            if (is_flat) then
+               kind = JN_FLAT
+               if (is_union) kind = JN_FLAT_U
+               do k = 1, cn
+                  call jname_add(names, nn, fpfx//child(k)%key, kind, err)
+                  if (err /= CAPNP_OK) exit
+               end do
+               if (err /= CAPNP_OK) exit
+            end if
+         else if (is_flat) then
+            raw_t = field_slot_type(f, err)
+            if (err /= CAPNP_OK) exit
+            t = raw_t
+            if (type_which(t) /= TYPE_STRUCT) then
+               err = CAPNP_ERR_KIND
+               exit
+            end if
+            sidx = capnp_codec_find_id(schema, type_type_id(t))
+            if (sidx == 0) then
+               err = CAPNP_ERR_ARG
+               exit
+            end if
+            call audit_build(schema, sidx, no_disc, '', stack, sp, child, cn, err)
+            if (err /= CAPNP_OK) exit
+            kind = JN_FLAT
+            if (is_union) kind = JN_FLAT_U
+            do k = 1, cn
+               call jname_add(names, nn, fpfx//child(k)%key, kind, err)
+               if (err /= CAPNP_OK) exit
+            end do
+            if (err /= CAPNP_OK) exit
+         end if
+         if (err /= CAPNP_OK) exit
+         if (.not. is_flat) then
+            if (.not. (is_union .and. opts%active .and. opts%has_val)) then
+               call jname_add(names, nn, nm, JN_NORMAL, err)
+               if (err /= CAPNP_OK) exit
+            end if
+         end if
+      end do
+      sp = sp - 1
+   end subroutine audit_build
+
+   recursive subroutine audit_field_type(schema, t, done, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: t
+      logical, intent(inout) :: done(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: et
+      integer :: sidx
+      err = CAPNP_OK
+      select case (type_which(t))
+      case (TYPE_LIST)
+         et = type_list_element(t, err)
+         if (err /= CAPNP_OK) return
+         call audit_field_type(schema, et, done, err)
+      case (TYPE_STRUCT)
+         sidx = capnp_codec_find_id(schema, type_type_id(t))
+         if (sidx /= 0) call audit_visit(schema, sidx, done, err)
+      case (TYPE_ENUM)
+         sidx = capnp_codec_find_id(schema, type_type_id(t))
+         if (sidx /= 0) call audit_enum(schema, sidx, done, err)
+      end select
+   end subroutine audit_field_type
+
+   subroutine audit_enum(schema, idx, done, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      logical, intent(inout) :: done(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: el, e, al
+      type(jname_t), allocatable :: names(:)
+      character(len=:), allocatable :: nm
+      integer :: i, n, nn
+      err = CAPNP_OK
+      if (idx < 1 .or. idx > size(done)) return
+      if (done(idx)) return
+      done(idx) = .true.
+      el = node_enumerants(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(el))
+      nn = 0
+      do i = 0, n - 1
+         e = capnp_list_get_struct(el, i, err)
+         if (err /= CAPNP_OK) return
+         call enumerant_name(e, nm, err)
+         if (err /= CAPNP_OK) return
+         al = enumerant_annotations(e, err)
+         if (err /= CAPNP_OK) return
+         call name_override(al, nm, err)
+         if (err /= CAPNP_OK) return
+         call jname_add(names, nn, nm, JN_NORMAL, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine audit_enum
+
+   subroutine jname_add(names, n, key, kind, err)
+      type(jname_t), allocatable, intent(inout) :: names(:)
+      integer, intent(inout) :: n
+      character(len=*), intent(in) :: key
+      integer, intent(in) :: kind
+      integer, intent(out) :: err
+      type(jname_t), allocatable :: tmp(:)
+      integer :: i, cap, stat
+      err = CAPNP_OK
+      if (allocated(names)) then
+         do i = 1, n
+            if (names(i)%key == key) then
+               if (kind == JN_FLAT_U .and. names(i)%kind == JN_FLAT_U) return
+               err = CAPNP_ERR_ARG
+               return
+            end if
+         end do
+      end if
+      if (.not. allocated(names)) then
+         allocate (names(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      else if (n >= size(names)) then
+         cap = size(names)*2
+         allocate (tmp(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         do i = 1, n
+            tmp(i)%key = names(i)%key
+            tmp(i)%kind = names(i)%kind
+         end do
+         call move_alloc(tmp, names)
+      end if
+      n = n + 1
+      names(n)%key = key
+      names(n)%kind = kind
+   end subroutine jname_add
 
 end module capnp_json

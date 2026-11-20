@@ -21,6 +21,7 @@ contains
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
          new_unittest("list-linear", run_list_linear), &
+         new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded) &
@@ -174,6 +175,70 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_list_linear
+
+   subroutine run_json_collisions(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: src, text
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = clash_schema()
+      call spit(tmp//'/clash.capnp', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/clash.capnp > '//tmp//'/clash.cgr' &
+         //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp NameClash > ' &
+         //tmp//'/name.bin' &
+         //' && ! capnp convert -I"$INC" binary:json '//tmp//'/clash.capnp NameClash < ' &
+         //tmp//'/name.bin >/dev/null 2>&1' &
+         //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp FlatClash > ' &
+         //tmp//'/flat.bin' &
+         //' && ! capnp convert -I"$INC" binary:json '//tmp//'/clash.capnp FlatClash < ' &
+         //tmp//'/flat.bin >/dev/null 2>&1' &
+         //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp DiscClash > ' &
+         //tmp//'/disc.bin' &
+         //' && ! capnp convert -I"$INC" binary:json '//tmp//'/clash.capnp DiscClash < ' &
+         //tmp//'/disc.bin >/dev/null 2>&1')) then
+         call test_failed(error, 'capnp did not reject a JSON name collision')
+         return
+      end if
+      call capnp_read_file(tmp//'/clash.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK, 'json: clash schema')
+      call capnp_read_file(tmp//'/name.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      idx = capnp_dyn_find(schema, 'NameClash', err)
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.false.)
+      call check_(error, err /= CAPNP_OK, 'json: $Json.name collision')
+      call capnp_message_free(msg)
+      call capnp_read_file(tmp//'/flat.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      idx = capnp_dyn_find(schema, 'FlatClash', err)
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.false.)
+      call check_(error, err /= CAPNP_OK, 'json: flatten collision')
+      call capnp_message_free(msg)
+      call capnp_read_file(tmp//'/disc.bin', bytes, err)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      root = capnp_root(msg, err)
+      idx = capnp_dyn_find(schema, 'DiscClash', err)
+      call capnp_json_encode(schema, idx, root, text, err, pretty=.false.)
+      call check_(error, err /= CAPNP_OK, 'json: discriminator collision')
+      call capnp_json_decode(schema, idx, '{}', msg, err)
+      call check_(error, err /= CAPNP_OK, 'json: collision rejected on decode')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_collisions
 
    subroutine run_json_void_missing(error)
       type(error_type), allocatable, intent(out) :: error
