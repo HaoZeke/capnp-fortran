@@ -31,6 +31,7 @@ contains
            new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
            new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
+           new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -628,6 +629,127 @@ contains
                  'far-segment: double-far out-of-range id zeroes landing pad')
       call capnp_message_free(msg)
    end subroutine test_far_segment_overflow_zero
+
+   subroutine test_far_landing_pad_zero(error)
+      use capnp_arena, only: capnp_arena_alloc_in
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, cur, nxt
+      integer :: err, i
+      integer(int64) :: pad_off
+
+      ! A chained landing pad is followed like C++ zeroObject: the body and
+      ! every pad word in the chain are cleared.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 5, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 24_int64, 99_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 24_int64) == 0_int64, &
+                 'far-pad-zero: far-to-far chain is cleared')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Every hop of a 65-pad chain reaches the body.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 70, 0, err)
+      call capnp_set_root(msg, root, err)
+      do i = 1, 65
+         call cp_put_i64(msg%segs(1)%bytes, int(i, int64)*8_int64, &
+                         wp_make_far(.false., int(i + 1, int64), 0_int64))
+      end do
+      call cp_put_i64(msg%segs(1)%bytes, 66_int64*8_int64, &
+                      wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 67_int64*8_int64, 99_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 66_int64*8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 67_int64*8_int64) == 0_int64, &
+                 'far-pad-zero: every far hop reaches and zeroes the body')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! A self-looping pad and a two-pad cycle both terminate.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 2, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64, &
+                 'far-pad-zero: self-looping far pad terminates cleanly')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 3, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.false., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64, &
+                 'far-pad-zero: two-pad far cycle terminates cleanly')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Pad word 0 of a double-far may carry the double-far bit, as in C++.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 5, 0, err)
+      call capnp_set_root(msg, root, err)
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, wp_make_far(.true., 3_int64, 0_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 24_int64, 55_int64)
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, wp_make_far(.true., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 24_int64) == 0_int64, &
+                 'far-pad-zero: double-far pad word 0 ignores the double-far bit')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Valid single-far hop at depth = CAPNP_DEFAULT_DEPTH_LIMIT - 1 preserves depth.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      cur = root
+      do i = 2, CAPNP_DEFAULT_DEPTH_LIMIT - 1
+         nxt = capnp_new_struct(msg, 0, 1, err)
+         call capnp_setp(cur, 0, nxt, err)
+         cur = nxt
+      end do
+      nxt = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(nxt, 0_int64, 77_int64, err)
+      ! Place a valid single-far landing pad pointing to the 64th struct.
+      call capnp_arena_alloc_in(msg, nxt%seg, 1_int64, pad_off, err)
+      call cp_put_i64(msg%segs(nxt%seg)%bytes, pad_off, &
+                      wp_make_struct(int((nxt%off - (pad_off + 8_int64))/8_int64, int32), &
+                                     1_int32, 0_int32))
+      call cp_put_i64(msg%segs(cur%seg)%bytes, cur%off, &
+                      wp_make_far(.false., pad_off/8_int64, int(nxt%seg - 1, int64)))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(nxt%seg)%bytes, nxt%off) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(nxt%seg)%bytes, pad_off) == 0_int64, &
+                 'far-pad-zero: valid single-far at max depth zeroes target')
+      call capnp_message_free(msg)
+   end subroutine test_far_landing_pad_zero
    !> A single far whose landing pad is another far is not a struct.
    !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
    subroutine test_far_chain_rejected(error)

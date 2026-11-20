@@ -745,42 +745,58 @@ contains
       integer, intent(in) :: seg, depth
       integer(int64), intent(in) :: slot, w
       integer :: tseg, oseg
-      integer(int64) :: base, padoff, w0, tag, tseg64, oseg64
+      integer(int64) :: base, padoff, pad, cw, w0, tag, tseg64, oseg64
       if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
       select case (wp_kind(w))
       case (CAPNP_WK_STRUCT, CAPNP_WK_LIST)
          base = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
          call zero_at(msg, seg, base, w, depth)
       case (CAPNP_WK_FAR)
-         tseg64 = wp_far_seg(w)
-         if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) return
-         tseg = int(tseg64) + 1
-         padoff = wp_far_off(w)*8_int64
-         if (.not. wp_far_two(w)) then
-            if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
-            call zero_pointer_word(msg, tseg, padoff, &
-                                    cp_get_i64(msg%segs(tseg)%bytes, padoff), depth + 1)
-            call zero_bytes(msg, tseg, padoff, 8_int64)
-         else
-            if (.not. span_ok(msg, tseg, padoff, 16_int64)) return
-            w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
-            tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
-            if (wp_kind(w0) == CAPNP_WK_FAR .and. .not. wp_far_two(w0)) then
-               oseg64 = wp_far_seg(w0)
-               if (oseg64 >= 0_int64 .and. oseg64 < int(msg%nsegs, int64)) then
-                  oseg = int(oseg64) + 1
-                  call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth + 1)
+         ! zeroObject follows a landing pad that is itself a far pointer and
+         ! a far hop costs no nesting level. Each chained pad is cleared once
+         ! read, so a cyclic chain ends at a word that is already zero.
+         cw = w
+         do
+            tseg64 = wp_far_seg(cw)
+            if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) return
+            tseg = int(tseg64) + 1
+            padoff = wp_far_off(cw)*8_int64
+            if (wp_far_two(cw)) then
+               if (.not. span_ok(msg, tseg, padoff, 16_int64)) return
+               w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
+               tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
+               if (wp_kind(w0) == CAPNP_WK_FAR) then
+                  oseg64 = wp_far_seg(w0)
+                  if (oseg64 >= 0_int64 .and. oseg64 < int(msg%nsegs, int64)) then
+                     oseg = int(oseg64) + 1
+                     call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth)
+                  end if
                end if
+               call zero_bytes(msg, tseg, padoff, 16_int64)
+               return
             end if
-            call zero_bytes(msg, tseg, padoff, 16_int64)
-         end if
+            if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
+            pad = cp_get_i64(msg%segs(tseg)%bytes, padoff)
+            if (wp_kind(pad) == CAPNP_WK_FAR) then
+               call zero_bytes(msg, tseg, padoff, 8_int64)
+               cw = pad
+               cycle
+            end if
+            if (pad /= 0_int64 .and. &
+                (wp_kind(pad) == CAPNP_WK_STRUCT .or. wp_kind(pad) == CAPNP_WK_LIST)) then
+               base = padoff + 8_int64 + int(wp_offset(pad), int64)*8_int64
+               call zero_at(msg, tseg, base, pad, depth)
+            end if
+            call zero_bytes(msg, tseg, padoff, 8_int64)
+            return
+         end do
       end select
    end subroutine zero_pointer_word
 
    !> Byte range of the object a pointer word addresses (far pads excluded).
-   recursive subroutine locate_body(msg, seg, slot, w, depth, oseg, obase, onbytes, ok)
+   subroutine locate_body(msg, seg, slot, w, oseg, obase, onbytes, ok)
       type(capnp_message_t), intent(in) :: msg
-      integer, intent(in) :: seg, depth
+      integer, intent(in) :: seg
       integer(int64), intent(in) :: slot, w
       integer, intent(out) :: oseg
       integer(int64), intent(out) :: obase, onbytes
@@ -791,7 +807,7 @@ contains
       oseg = 0
       obase = 0_int64
       onbytes = 0_int64
-      if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
+      if (w == 0_int64) return
       select case (wp_kind(w))
       case (CAPNP_WK_STRUCT)
          oseg = seg
@@ -810,14 +826,23 @@ contains
          padoff = wp_far_off(w)*8_int64
          if (.not. wp_far_two(w)) then
             if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
-            call locate_body(msg, tseg, padoff, &
-                             cp_get_i64(msg%segs(tseg)%bytes, padoff), depth + 1, &
-                             oseg, obase, onbytes, ok)
+            tag = cp_get_i64(msg%segs(tseg)%bytes, padoff)
+            if (tag == 0_int64 .or. wp_kind(tag) == CAPNP_WK_FAR) return
+            oseg = tseg
+            obase = padoff + 8_int64 + int(wp_offset(tag), int64)*8_int64
+            if (wp_kind(tag) == CAPNP_WK_STRUCT) then
+               onbytes = int(wp_struct_dwords(tag) + wp_struct_pwords(tag), int64)*8_int64
+            else if (wp_kind(tag) == CAPNP_WK_LIST) then
+               onbytes = list_payload_bytes(tag)
+            else
+               return
+            end if
+            ok = onbytes >= 0_int64
          else
             if (.not. span_ok(msg, tseg, padoff, 16_int64)) return
             w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
             tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
-            if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) return
+            if (wp_kind(w0) /= CAPNP_WK_FAR) return
             oseg64 = wp_far_seg(w0)
             if (oseg64 < 0_int64 .or. oseg64 >= int(msg%nsegs, int64)) return
             oseg = int(oseg64) + 1
@@ -879,7 +904,7 @@ contains
       if (.not. span_ok(msg, seg, slot, 8_int64)) return
       w = cp_get_i64(msg%segs(seg)%bytes, slot)
       if (w == 0_int64) return
-      call locate_body(msg, seg, slot, w, 0, oseg, obase, onbytes, ok)
+      call locate_body(msg, seg, slot, w, oseg, obase, onbytes, ok)
       if (ok .and. associated(q%msg, msg)) then
          call locate_handle(q, qseg, qbase, qnbytes, qok)
          if (qok .and. qseg == oseg .and. onbytes > 0_int64 .and. qnbytes > 0_int64) then
