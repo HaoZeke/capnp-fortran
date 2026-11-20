@@ -1295,6 +1295,13 @@ contains
          err = CAPNP_ERR_KIND
          return
       end select
+      ! dynamic.c++ checkRoundTrip (1737) and signedToUnsigned (1699):
+      ! as<int8_t>() and as<uint8_t>() reject a value that does not survive
+      ! the narrowing cast. Unsigned targets reject a negative.
+      if (.not. dyn_int_fits(type_which(t), v)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
@@ -1311,12 +1318,41 @@ contains
          call capnp_set_i32(p, off*4_int64, int(v, int32), err, default=value_i32(dv))
       case (TYPE_UINT32)
          call capnp_set_u32(p, off*4_int64, v, err, default=value_u32(dv))
-      case (TYPE_INT64, TYPE_UINT64)
+      case (TYPE_INT64)
+         call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
+      case (TYPE_UINT64)
          call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine capnp_dyn_set_int
+
+   !> True when v round-trips through the field width. Matches
+   !> DynamicValue::Reader::as in dynamic.c++.
+   pure function dyn_int_fits(tw, v) result(ok)
+      integer, intent(in) :: tw
+      integer(int64), intent(in) :: v
+      logical :: ok
+      ok = .false.
+      select case (tw)
+      case (TYPE_INT8)
+         ok = v >= -128_int64 .and. v <= 127_int64
+      case (TYPE_UINT8)
+         ok = v >= 0_int64 .and. v <= 255_int64
+      case (TYPE_INT16)
+         ok = v >= -32768_int64 .and. v <= 32767_int64
+      case (TYPE_UINT16, TYPE_ENUM)
+         ok = v >= 0_int64 .and. v <= 65535_int64
+      case (TYPE_INT32)
+         ok = v >= -2147483648_int64 .and. v <= 2147483647_int64
+      case (TYPE_UINT32)
+         ok = v >= 0_int64 .and. v <= 4294967295_int64
+      case (TYPE_INT64)
+         ok = .true.
+      case (TYPE_UINT64)
+         ok = v >= 0_int64
+      end select
+   end function dyn_int_fits
 
    subroutine capnp_dyn_set_bool(schema, idx, p, fname, v, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
