@@ -30,7 +30,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(10))
+      allocate (testsuite(14))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -51,6 +51,14 @@ contains
       testsuite(9)%test => t_fwd_ra_plain
       testsuite(10)%name = "proxy-early-finish"
       testsuite(10)%test => t_proxy_early_finish
+      testsuite(11)%name = "disembargo-plain-fwd"
+      testsuite(11)%test => t_dis_plain
+      testsuite(12)%name = "disembargo-plain-fwd-cap"
+      testsuite(12)%test => t_dis_plain_cap
+      testsuite(13)%name = "disembargo-plain-fwd-finish"
+      testsuite(13)%test => t_dis_plain_finish
+      testsuite(14)%name = "disembargo-plain-fwd-promise-cap"
+      testsuite(14)%test => t_dis_plain_promise
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -756,6 +764,103 @@ contains
                  ' / '//f//' / '//g)
       call close_peer(conn, fd)
    end subroutine t_proxy_early_finish
+
+   !> A plain forward still running, with a Disembargo on its answer, and
+   !> the first `kind` of three endings: a null result (1), a cap (2), or
+   !> a Finish before the cap (3). C++ waits for the answer, then echoes
+   !> on the cap or aborts on the null one.
+   subroutine dis_plain_case(error, kind, label)
+      type(error_type), allocatable, intent(out) :: error
+      integer, intent(in) :: kind
+      character(len=*), intent(in) :: label
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, yourself=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wdis(fd, 3_int64, 556_int64)
+      b = step(conn, fd, 1)
+      d = ''
+      select case (kind)
+      case (1)
+         call wret(fd, k, .false.)
+         c = step(conn, fd, 1)
+         call check(error, k >= 0_int64 .and. b == '' .and. c == 'ABORT', &
+                    label//': got '//b//' / '//c)
+      case (2)
+         call wret(fd, k, .false., 9_int64)
+         c = step(conn, fd, 1)
+         call wfin(fd, 3_int64, .true.)
+         d = step(conn, fd, 1)
+         call check(error, k >= 0_int64 .and. b == '' .and. c == 'DIS I9 rl 556' .and. &
+                    d == 'RET 3 else | FIN '//itoa(k)//' F | REL 9 1', &
+                    label//': got '//b//' / '//c//' / '//d)
+      case default
+         call wfin(fd, 3_int64, .true.)
+         c = step(conn, fd, 1)
+         call wret(fd, k, .false., 9_int64)
+         d = step(conn, fd, 1)
+         call check(error, k >= 0_int64 .and. b == '' .and. c == 'RET 3 else' .and. &
+                    d == 'FIN '//itoa(k)//' F | DIS I9 rl 556 | REL 9 1', &
+                    label//': got '//b//' / '//c//' / '//d)
+      end select
+      call close_peer(conn, fd)
+   end subroutine dis_plain_case
+
+   subroutine t_dis_plain(error)
+      type(error_type), allocatable, intent(out) :: error
+      call dis_plain_case(error, 1, 'disembargo plain')
+   end subroutine t_dis_plain
+
+   subroutine t_dis_plain_cap(error)
+      type(error_type), allocatable, intent(out) :: error
+      call dis_plain_case(error, 2, 'disembargo plain cap')
+   end subroutine t_dis_plain_cap
+
+   subroutine t_dis_plain_finish(error)
+      type(error_type), allocatable, intent(out) :: error
+      call dis_plain_case(error, 3, 'disembargo plain finish')
+   end subroutine t_dis_plain_finish
+
+   !> A Disembargo waits on a plain forward that returns a promise cap.
+   !> C++ echoes it once that promise resolves, after the Release.
+   subroutine t_dis_plain_promise(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, yourself=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wdis(fd, 3_int64, 556_int64)
+      a = step(conn, fd, 1)
+      call wret(fd, k, .false., 9_int64, promise=.true.)
+      b = step(conn, fd, 1)
+      call wres(fd, 9_int64, 'sh', 10_int64)
+      c = step(conn, fd, 1)
+      call wfin(fd, 3_int64, .true.)
+      d = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. a == '' .and. b == '' .and. &
+                 c == 'REL 9 1 | DIS I10 rl 556' .and. &
+                 d == 'RET 3 else | FIN '//itoa(k)//' F | REL 10 1', &
+                 'disembargo plain promise: got '//a//' / '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_dis_plain_promise
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

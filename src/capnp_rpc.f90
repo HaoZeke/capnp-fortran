@@ -443,6 +443,9 @@ module capnp_rpc
    type :: rpc_incoming_wait_t
       integer(int64) :: answer_qid = -1_int64
       integer(int64) :: call_qid = -1_int64
+      !> A Disembargo whose target is this promise import, waiting for
+      !> its Resolve (rpc.c++ handleDisembargo whenResolved).
+      integer(int64) :: import_wire = -1_int64
       type(capnp_message_t) :: msg
       !> Param holds taken when the call arrived, as C++ imports the
       !> param caps before the call waits (rpc.c++ handleCall).
@@ -612,6 +615,9 @@ module capnp_rpc
       type(rpc_pipe_wait_t), pointer :: pipe_wait => null()
       type(rpc_answer_wait_t), pointer :: answer_wait => null()
       type(rpc_incoming_wait_t), pointer :: incoming_wait => null()
+      !> senderLoopback Disembargoes on a plain forward still running.
+      !> C++ reads their target once the answer resolves.
+      type(rpc_incoming_wait_t), pointer :: loopback_wait => null()
       integer(int64) :: next_embargo = 0_int64
       integer(int64) :: next_import_handle = -2_int64
       !> Shared with this vat's other connections when one is attached;
@@ -740,6 +746,7 @@ contains
       call free_pipe_waits(conn)
       call free_answer_waits(conn)
       call free_incoming_waits(conn)
+      call drop_plain_loopbacks(conn, -1_int64)
       call clear_joins(conn)
       if (allocated(conn%introductions)) deallocate (conn%introductions)
       conn%intro_used = 0
@@ -4711,7 +4718,7 @@ contains
       if (found) then
          if (slot%used .and. slot%plain_qid == int(q, int64)) return
       end if
-      if (question_has_proxies(conn, q)) return
+      if (question_has_proxies(conn, q) .or. question_loopbacks_wait(conn, q)) return
       orphan = .true.
    end function plain_question_orphaned
 
@@ -5114,6 +5121,7 @@ contains
          call handle_join(conn, msg, err)
       case (MESSAGE_RESOLVE_TAG)
          call handle_resolve(conn, msg, err)
+         call replay_import_loopbacks(conn, err)
       case default
          ! The obsolete save/delete messages. Reply unimplemented,
          ! echoing the message, per the spec.
@@ -6084,6 +6092,266 @@ contains
       end do
       conn%incoming_wait => null()
    end subroutine free_incoming_waits
+
+   !> Drop the Disembargoes waiting on answer `aqid`, or all for -1.
+   subroutine drop_plain_loopbacks(conn, aqid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: aqid
+      type(rpc_incoming_wait_t), pointer :: node, nxt, prev
+      prev => null()
+      node => conn%loopback_wait
+      do while (associated(node))
+         nxt => node%next
+         if (aqid < 0_int64 .or. node%answer_qid == aqid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%loopback_wait => nxt
+            end if
+            call capnp_message_free(node%msg)
+            deallocate (node)
+         else
+            prev => node
+         end if
+         node => nxt
+      end do
+   end subroutine drop_plain_loopbacks
+
+   !> The answer `aqid` is finished while Disembargoes wait on it. They
+   !> now wait on its plain question `q`. True when there were any.
+   logical function rekey_plain_loopbacks(conn, aqid, q) result(any)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: aqid, q
+      type(rpc_incoming_wait_t), pointer :: node
+      any = .false.
+      node => conn%loopback_wait
+      do while (associated(node))
+         if (node%answer_qid == aqid) then
+            node%answer_qid = -1_int64
+            node%call_qid = q
+            any = .true.
+         end if
+         node => node%next
+      end do
+   end function rekey_plain_loopbacks
+
+   logical function question_loopbacks_wait(conn, q) result(any)
+      type(rpc_conn_t), intent(in) :: conn
+      integer, intent(in) :: q
+      type(rpc_incoming_wait_t), pointer :: node
+      any = .false.
+      node => conn%loopback_wait
+      do while (associated(node))
+         if (node%answer_qid < 0_int64 .and. node%call_qid == int(q, int64)) then
+            any = .true.
+            return
+         end if
+         node => node%next
+      end do
+   end function question_loopbacks_wait
+
+   !> Echo the Disembargoes that waited on plain question `q` on the cap
+   !> its Return names. Only the peer's own export points back.
+   subroutine replay_question_loopbacks(conn, q, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      integer, intent(inout) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer, allocatable :: fields(:)
+      character(len=:), allocatable :: why
+      integer(int64) :: id
+      integer :: e, i, kind
+      do
+         prev => null()
+         node => conn%loopback_wait
+         do while (associated(node))
+            if (node%answer_qid < 0_int64 .and. node%call_qid == int(q, int64)) exit
+            prev => node
+            node => node%next
+         end do
+         if (.not. associated(node)) return
+         if (associated(prev)) then
+            prev%next => node%next
+         else
+            conn%loopback_wait => node%next
+         end if
+         if (.not. conn%dead) then
+            msg = message_read_root(node%msg, e)
+            if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
+            if (e == CAPNP_OK) tgt = disembargo_target_get(d, e)
+            if (e == CAPNP_OK) pa = message_target_promised_answer_get(tgt, e)
+            if (e == CAPNP_OK) ops = promised_answer_transform_get(pa, e)
+            if (e == CAPNP_OK) then
+               if (allocated(fields)) deallocate (fields)
+               allocate (fields(int(capnp_list_len(ops))))
+               do i = 1, size(fields)
+                  op%p = capnp_list_get_struct(ops, i - 1, e)
+                  if (e /= CAPNP_OK) exit
+                  fields(i) = -1
+                  if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+                     fields(i) = int(promised_answer_op_get_pointer_field_get(op))
+               end do
+            end if
+            if (e == CAPNP_OK) then
+               call answer_pipeline_cap(conn, conn%questions(q)%retmsg, fields, kind, id, why, &
+                                        e, deferred=.true.)
+               if (kind == PIPE_EXPORT .and. import_promise_pending(conn, id)) then
+                  node%call_qid = -1_int64
+                  node%import_wire = id
+                  node%next => null()
+                  call append_loopback_wait(conn, node)
+                  cycle
+               else if (kind == PIPE_EXPORT) then
+                  call send_receiver_loopback_import(conn, &
+                                                     disembargo_context_sender_loopback_get(d), &
+                                                     id, e)
+               else
+                  call abort_conn(conn, "'Disembargo' of type 'senderLoopback' sent to an " // &
+                                  "object that does not point back to the sender.", e)
+               end if
+            end if
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end if
+         call capnp_message_free(node%msg)
+         deallocate (node)
+      end do
+   end subroutine replay_question_loopbacks
+
+   subroutine append_loopback_wait(conn, node)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_incoming_wait_t), pointer, intent(in) :: node
+      type(rpc_incoming_wait_t), pointer :: tail
+      if (.not. associated(conn%loopback_wait)) then
+         conn%loopback_wait => node
+         return
+      end if
+      tail => conn%loopback_wait
+      do while (associated(tail%next))
+         tail => tail%next
+      end do
+      tail%next => node
+   end subroutine append_loopback_wait
+
+   !> Our import `wire` is a promise the peer has not resolved.
+   logical function import_promise_pending(conn, wire) result(pending)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: wire
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      pending = .false.
+      call import_find_wire(conn, wire, node, found)
+      if (found) pending = node%state == IMP_PROMISE
+   end function import_promise_pending
+
+   !> After a Resolve, echo each Disembargo that waited on a promise
+   !> import now resolved: on the import it resolved to, or abort when
+   !> that is not the peer's cap. One still unresolved waits on.
+   subroutine replay_import_loopbacks(conn, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(inout) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev, nxt
+      type(rpc_import_node_t), pointer :: imp, to
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      logical :: found
+      integer :: e, step
+      prev => null()
+      node => conn%loopback_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%import_wire < 0_int64) then
+            prev => node
+            node => nxt
+            cycle
+         end if
+         call import_find_wire(conn, node%import_wire, imp, found)
+         if (found) then
+            do step = 1, 8
+               if (imp%state /= IMP_REMOTE .or. imp%borrowed) exit
+               call import_find(conn, imp%resolved_id, to, found)
+               if (.not. found) exit
+               imp => to
+            end do
+            found = .true.
+            if (imp%state == IMP_PROMISE) then
+               node%import_wire = imp%wire_id
+               prev => node
+               node => nxt
+               cycle
+            end if
+         end if
+         if (associated(prev)) then
+            prev%next => nxt
+         else
+            conn%loopback_wait => nxt
+         end if
+         e = CAPNP_OK
+         if (.not. conn%dead) then
+            msg = message_read_root(node%msg, e)
+            if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
+            if (e == CAPNP_OK) then
+               if (found .and. imp%state == IMP_HOSTED) then
+                  call send_receiver_loopback_import(conn, &
+                                                     disembargo_context_sender_loopback_get(d), &
+                                                     imp%wire_id, e)
+               else if (found .and. imp%state == IMP_BROKEN .and. allocated(imp%reason)) then
+                  call abort_conn(conn, imp%reason, e)
+               else
+                  call abort_conn(conn, "'Disembargo' of type 'senderLoopback' sent to an " // &
+                                  "object that does not point back to the sender.", e)
+               end if
+            end if
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end if
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
+   end subroutine replay_import_loopbacks
+
+   !> Echo, in arrival order, the Disembargoes that waited on answer
+   !> `aqid` now that it has results.
+   subroutine replay_plain_loopbacks(conn, aqid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: aqid
+      integer, intent(inout) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: e
+      do
+         prev => null()
+         node => conn%loopback_wait
+         do while (associated(node))
+            if (node%answer_qid == aqid) exit
+            prev => node
+            node => node%next
+         end do
+         if (.not. associated(node)) return
+         if (associated(prev)) then
+            prev%next => node%next
+         else
+            conn%loopback_wait => node%next
+         end if
+         if (.not. conn%dead) then
+            msg = message_read_root(node%msg, e)
+            if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
+            if (e == CAPNP_OK) tgt = disembargo_target_get(d, e)
+            if (e == CAPNP_OK) &
+               call echo_promised_loopback(conn, tgt, disembargo_context_sender_loopback_get(d), e)
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end if
+         call capnp_message_free(node%msg)
+         deallocate (node)
+      end do
+   end subroutine replay_plain_loopbacks
 
    !> Find the export id a Call's target names: a direct export, or a
    !> promised answer resolved through a stored answer's capTable.
@@ -7302,7 +7570,7 @@ contains
    !> `pids` are the param holds of the call. They go with the Return
    !> unless results with caps keep the call context until Finish.
    !> `quiet` keeps the answer for pipelined calls and sends nothing.
-   recursive subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere, pids, quiet)
+   recursive subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere, pids, quiet, replay_later)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       type(capnp_message_t), intent(inout) :: rm
@@ -7311,6 +7579,9 @@ contains
       logical, intent(in), optional :: elsewhere
       integer(int64), allocatable, intent(inout), optional :: pids(:)
       logical, intent(in), optional :: quiet
+      !> The caller replays the Disembargoes waiting on this answer once it
+      !> has set up the answer's pipeline.
+      logical, intent(in), optional :: replay_later
       integer(int8), allocatable :: bytes(:)
       integer :: i, perr
       logical :: hold, found, failed, silent
@@ -7318,10 +7589,11 @@ contains
       type(message_t) :: heldmsg
       type(return_t) :: heldr
       integer :: herr
-      logical :: capless
+      logical :: capless, replay_later_
       hold = .false.
       capless = .false.
       failed = .false.
+      replay_later_ = .false.
       err = CAPNP_OK
       perr = CAPNP_OK
       if (present(elsewhere)) hold = elsewhere
@@ -7338,6 +7610,7 @@ contains
       end if
       call answer_find(conn, qid, slot, found)
       if (.not. found) call answer_add_hi(conn, qid, slot)
+      if (present(replay_later)) replay_later_ = replay_later
       if (slot%finished) then
          call settle_answer_promises(conn, qid, rm, err)
          ! The caller still waits for a Return. Finish drops the C++ task
@@ -7361,6 +7634,7 @@ contains
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
          end do
          call capnp_message_free(rm)
+         if (.not. replay_later_) call replay_answer_loopbacks(conn, qid, err)
          return
       end if
       if (slot%has_results) then
@@ -7450,6 +7724,7 @@ contains
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
          if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
          call capnp_message_free(rm)
+         if (.not. replay_later_ .and. err == CAPNP_OK) call replay_answer_loopbacks(conn, qid, err)
          return
       end if
       call capnp_serialize_bytes(rm, bytes, err)
@@ -7472,7 +7747,20 @@ contains
          if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
       end if
       call capnp_message_free(rm)
+      if (.not. replay_later_ .and. err == CAPNP_OK) call replay_answer_loopbacks(conn, qid, err)
    end subroutine finish_answer
+
+   !> The answer `qid` ended outside a plain forward. Echo the Disembargoes
+   !> that waited for it.
+   recursive subroutine replay_answer_loopbacks(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(inout) :: err
+      integer :: e
+      e = CAPNP_OK
+      call replay_plain_loopbacks(conn, qid, e)
+      if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+   end subroutine replay_answer_loopbacks
 
    !> Copy a yourself answer into the question that asked to take it,
    !> then tell the peer the redirect is complete.
@@ -7701,7 +7989,13 @@ contains
       if (found) found = slot%used .and. slot%plain_qid == int(q, int64)
       if (.not. found) then
          conn%questions(q)%plain_answer = -1_int64
-         call end_plain_question(conn, q)
+         if (question_loopbacks_wait(conn, q)) then
+            call send_question_finish(conn, int(q, int64), .false., err)
+            call replay_question_loopbacks(conn, q, err)
+            call end_plain_question(conn, q, fin_sent=.true.)
+         else
+            call end_plain_question(conn, q)
+         end if
          return
       end if
       ! sendForPipeline drops the response; the question serves the
@@ -7757,9 +8051,13 @@ contains
          if (.not. finished) call end_plain_question(conn, q)
          return
       end if
-      call finish_answer(conn, aqid, rm, ctx, err, elsewhere=yourself, pids=pids)
+      call finish_answer(conn, aqid, rm, ctx, err, elsewhere=yourself, pids=pids, &
+                         replay_later=.true.)
       deallocate (rm)
-      if (finished) return
+      if (finished) then
+         call drop_plain_loopbacks(conn, aqid)
+         return
+      end if
       if (npp) then
          e = CAPNP_OK
          call answer_find(conn, aqid, slot, found)
@@ -7773,6 +8071,7 @@ contains
          end if
          call capnp_message_free(conn%questions(q)%retmsg)
          call question_slot_clear(conn%questions(q))
+         call replay_plain_loopbacks(conn, aqid, err)
          return
       end if
       call answer_find(conn, aqid, slot, found)
@@ -7791,17 +8090,22 @@ contains
       else
          call end_plain_question(conn, q)
       end if
+      call replay_plain_loopbacks(conn, aqid, err)
    end subroutine complete_plain_forward
 
    !> Finish a plain forward's question once nothing holds it, and
    !> release the caps its results gave this vat.
-   subroutine end_plain_question(conn, q)
+   subroutine end_plain_question(conn, q, fin_sent)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: q
-      logical :: ignored
+      logical, intent(in), optional :: fin_sent
+      logical :: ignored, sent
       integer :: e
       if (.not. conn%questions(q)%used) return
-      call send_question_finish(conn, int(q, int64), .not. conn%questions(q)%returned, e)
+      sent = .false.
+      if (present(fin_sent)) sent = fin_sent
+      if (.not. sent) &
+         call send_question_finish(conn, int(q, int64), .not. conn%questions(q)%returned, e)
       if (conn%questions(q)%returned) then
          call scan_result_imports(conn, q, ignored, .true., e)
          call capnp_message_free(conn%questions(q)%retmsg)
@@ -8167,7 +8471,8 @@ contains
       deallocate (node)
    end function cancel_queued_call
 
-   !> True when a call waits on the pipeline of the queued call `qid`.
+   !> True when a call or a Disembargo waits on the pipeline of the
+   !> queued call `qid`.
    logical function queued_answer_has_waiters(conn, qid) result(any)
       type(rpc_conn_t), intent(in) :: conn
       integer(int64), intent(in) :: qid
@@ -8181,7 +8486,15 @@ contains
          if (node%answer_qid == qid) any = .true.
          node => node%next
       end do
-      if (.not. queued) any = .false.
+      if (.not. queued) then
+         any = .false.
+         return
+      end if
+      node => conn%loopback_wait
+      do while (associated(node) .and. .not. any)
+         if (node%answer_qid == qid) any = .true.
+         node => node%next
+      end do
    end function queued_answer_has_waiters
 
    subroutine handle_finish(conn, msg, err)
@@ -8250,11 +8563,13 @@ contains
                call send_results_elsewhere(conn, qid, jerr)
                if (jerr /= CAPNP_OK) err = jerr
             end if
-            ! A proxy export on the pipeline keeps the question until it
-            ! returns, as C++ holds the pipelined cap it reaches.
+            ! A Disembargo still waiting, or a proxy export on the
+            ! pipeline, keeps the question until it returns, as C++
+            ! holds the pipelined cap each one reaches.
             if (qslot_ok(conn, jslot%plain_qid)) then
                if (conn%questions(int(jslot%plain_qid))%plain_answer == qid) then
-                  keep = question_has_proxies(conn, int(jslot%plain_qid))
+                  keep = rekey_plain_loopbacks(conn, qid, jslot%plain_qid)
+                  if (question_has_proxies(conn, int(jslot%plain_qid))) keep = .true.
                   if (.not. keep) call end_plain_question(conn, int(jslot%plain_qid))
                end if
             end if
@@ -8263,6 +8578,7 @@ contains
                call send_canceled_return(conn, qid, jerr)
                if (jerr /= CAPNP_OK) err = jerr
             end if
+            call drop_plain_loopbacks(conn, qid)
             call drop_param_holds(conn, jslot%plain_pids, err)
             call answer_slot_clear(jslot)
             if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
@@ -8784,6 +9100,33 @@ contains
          call abort_conn(conn, back, err)
          return
       end if
+      ! C++ waits for any pending answer to resolve before it reads the
+      ! target (rpc.c++ handleDisembargo).
+      if (aslot%used .and. .not. aslot%has_results .and. .not. aslot%finished) then
+         block
+            type(rpc_incoming_wait_t), pointer :: node, tail
+            integer(int8), allocatable :: bytes(:)
+            allocate (node)
+            node%answer_qid = aqid
+            call capnp_serialize_bytes(tgt%p%msg, bytes, err)
+            if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+            if (err /= CAPNP_OK) then
+               deallocate (node)
+               return
+            end if
+            if (.not. associated(conn%loopback_wait)) then
+               conn%loopback_wait => node
+            else
+               tail => conn%loopback_wait
+               do while (associated(tail%next))
+                  tail => tail%next
+               end do
+               tail%next => node
+            end if
+         end block
+         return
+      end if
+      ! Results copied from a plain forward name the caps it returned.
       if (.not. aslot%has_results) then
          call abort_conn(conn, back, err)
          return
@@ -8846,6 +9189,22 @@ contains
       if (err /= CAPNP_OK) return
       select case (cap_descriptor_which(cd))
       case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         if (import_promise_pending(conn, cap_descriptor_receiver_hosted_get(cd))) then
+            block
+               type(rpc_incoming_wait_t), pointer :: node
+               integer(int8), allocatable :: bytes(:)
+               allocate (node)
+               node%import_wire = cap_descriptor_receiver_hosted_get(cd)
+               call capnp_serialize_bytes(tgt%p%msg, bytes, err)
+               if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+               if (err /= CAPNP_OK) then
+                  deallocate (node)
+                  return
+               end if
+               call append_loopback_wait(conn, node)
+            end block
+            return
+         end if
          call send_receiver_loopback_import(conn, embargo_id, &
                                             cap_descriptor_receiver_hosted_get(cd), err)
       case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
