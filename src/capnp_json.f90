@@ -18,9 +18,10 @@
 !> discriminator is rejected. NaN and infinities are the strings
 !> "NaN", "Infinity", and "-Infinity". A high surrogate followed by
 !> a low surrogate is one scalar. capnp 1.4.0 stores the two surrogate
-!> bytes. An unquoted integer past 2^53 keeps every digit. capnp 1.4.0
-!> rounds through a double and rejects an integer that does not fit in
-!> one, including 9223372036854775807, which this decoder accepts.
+!> bytes. An unquoted integer is rounded through a double, as capnp
+!> 1.4.0 does. 9007199254740993 becomes 9007199254740992. A rounded
+!> value that is not an integer, or that does not fit the field, is
+!> an argument error. A quoted integer keeps every digit.
 module capnp_json
    use capnp
    use capnp_schema
@@ -1852,16 +1853,9 @@ contains
       if (jv%k == JK_STR) then
          call kj_parse_i64(jv%str, iv, err)
          call recover_i64(iv, err)
-      else if (jv%k == JK_NUM .and. allocated(jv%str)) then
-         if (json_int_token(jv%str)) then
-            call signed_int_token(jv%str, iv, err)
-            ! A token wider than Uint64 is the double capnp 1.4.0 reads.
-            ! -9223372036854775809 lands on Int64 min and is accepted.
-            if (err /= CAPNP_OK) call signed_from_f64(jv%num, iv, err)
-         else
-            call signed_from_f64(jv%num, iv, err)
-         end if
       else if (jv%k == JK_NUM) then
+         ! Unquoted JSON numbers are doubles. 2^53+1 rounds to 2^53.
+         ! 9223372036854775807 rounds to 2^63 and does not fit Int64.
          call signed_from_f64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
@@ -1877,84 +1871,80 @@ contains
       if (jv%k == JK_STR) then
          call kj_parse_u64(jv%str, iv, err)
          call recover_i64(iv, err)
-      else if (jv%k == JK_NUM .and. allocated(jv%str)) then
-         if (jv%str == '-0') then
-            iv = 0_int64
-         else if (json_int_token(jv%str)) then
-            call kj_parse_u64(jv%str, iv, err)
-            if (err /= CAPNP_OK) then
-               ! An integer token outside Uint64 becomes zero.
-               iv = 0_int64
-               err = CAPNP_OK
-               value_bad = .true.
-            end if
-         else
-            call unsigned_from_f64(jv%num, iv, err)
-         end if
       else if (jv%k == JK_NUM) then
+         ! Same double rounding as Int64. Uint64 max rounds to 2^64.
          call unsigned_from_f64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
    end subroutine j_unsigned
 
-   !> An integer token wider than Int64. A magnitude that fits in Uint64
-   !> keeps its bits. A larger magnitude is left for the double path.
-   subroutine signed_int_token(tok, iv, err)
-      character(len=*), intent(in) :: tok
-      integer(int64), intent(out) :: iv
-      integer, intent(out) :: err
-      call kj_parse_i64(tok, iv, err)
-      if (err == CAPNP_OK) return
-      call kj_parse_u64(tok, iv, err)
-      if (err == CAPNP_OK) then
-         ! 2^63 is the sign bit. The stored value is the minimum Int64.
-         value_bad = .true.
-         return
-      end if
-      ! Wider than Uint64. The caller reads the token as a double.
-      err = CAPNP_ERR_ARG
-   end subroutine signed_int_token
-
+   !> capnp 1.4.0 `checkRoundTripFromFloat` for Int64. `double(Int64 max)`
+   !> is 2^63, so that one value passes the range test and becomes Int64 min.
    subroutine signed_from_f64(x, iv, err)
       real(real64), intent(in) :: x
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
-      real(real64), parameter :: min_i64_f64 = -9223372036854775808.0_real64
-      real(real64), parameter :: max_i64_f64 = 9223372036854774784.0_real64
+      real(real64), parameter :: min_f = -9223372036854775808.0_real64
+      real(real64), parameter :: max_f = 9223372036854775808.0_real64
       integer(int64), parameter :: min_i64 = int(z'8000000000000000', int64)
       integer(int64), parameter :: max_i64 = 9223372036854775807_int64
-      call capnp_f64_to_i64(x, iv, err)
-      if (err == CAPNP_OK) return
-      value_bad = .true.
       err = CAPNP_OK
-      if ((.not. ieee_finite(x) .and. x < 0.0_real64) .or. x < min_i64_f64) then
+      iv = 0_int64
+      if (ieee_is_nan(x) .or. x < min_f) then
          iv = min_i64
-      else if (.not. ieee_finite(x) .or. x > max_i64_f64) then
-         iv = max_i64
-      else
-         iv = int(aint(x), int64)
+         value_bad = .true.
+         return
       end if
+      if (.not. ieee_is_finite(x) .or. x > max_f) then
+         iv = max_i64
+         value_bad = .true.
+         return
+      end if
+      if (x == max_f) then
+         iv = min_i64
+         value_bad = .true.
+         return
+      end if
+      if (x == min_f) then
+         iv = min_i64
+         return
+      end if
+      iv = int(x, int64)
+      if (real(iv, real64) /= x) value_bad = .true.
    end subroutine signed_from_f64
 
+   !> capnp 1.4.0 `checkRoundTripFromFloat` for UInt64. `double(UInt64 max)`
+   !> is 2^64, and converting that double yields zero.
    subroutine unsigned_from_f64(x, iv, err)
       real(real64), intent(in) :: x
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
-      real(real64), parameter :: max_u64_f64 = 18446744073709549568.0_real64
+      real(real64), parameter :: two64 = 18446744073709551616.0_real64
       integer(int64), parameter :: max_u64 = -1_int64
-      call capnp_f64_to_u64(x, iv, err)
-      if (err == CAPNP_OK) return
-      value_bad = .true.
       err = CAPNP_OK
-      if (x < 0.0_real64 .or. (.not. ieee_finite(x) .and. x < 0.0_real64)) then
-         iv = 0_int64
-      else if (.not. ieee_finite(x) .or. x > max_u64_f64) then
-         iv = max_u64
-      else
-         call capnp_f64_to_u64(aint(x), iv, err)
-         err = CAPNP_OK
+      iv = 0_int64
+      if (ieee_is_nan(x) .or. x < 0.0_real64) then
+         value_bad = .true.
+         return
       end if
+      if (.not. ieee_is_finite(x) .or. x > two64) then
+         iv = max_u64
+         value_bad = .true.
+         return
+      end if
+      if (x == two64) then
+         value_bad = .true.
+         return
+      end if
+      call capnp_f64_to_u64(aint(x), iv, err)
+      if (err /= CAPNP_OK) then
+         iv = 0_int64
+         err = CAPNP_OK
+         value_bad = .true.
+         return
+      end if
+      if (aint(x) /= x) value_bad = .true.
    end subroutine unsigned_from_f64
 
    function json_list_ok(et, lst) result(ok)
@@ -1976,25 +1966,6 @@ contains
          ok = capnp_list_fits(lst, expect)
       end if
    end function json_list_ok
-
-   function json_int_token(tok) result(y)
-      character(len=*), intent(in) :: tok
-      logical :: y
-      integer :: i, n
-      y = .false.
-      n = len(tok)
-      if (n == 0) return
-      i = 1
-      if (tok(1:1) == '-') then
-         if (n == 1) return
-         i = 2
-      end if
-      do while (i <= n)
-         if (tok(i:i) < '0' .or. tok(i:i) > '9') return
-         i = i + 1
-      end do
-      y = .true.
-   end function json_int_token
 
    function kj_hex_prefix(tok) result(y)
       character(len=*), intent(in) :: tok

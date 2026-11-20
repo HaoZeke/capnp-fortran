@@ -534,11 +534,9 @@ contains
       idx = capnp_dyn_find(schema, 'Sample', err)
       call check_(error, idx > 0, 'exact: Sample')
       call read_int(error, schema, idx, '{"big":9007199254740993}', 'big', &
-                    9007199254740993_int64, 'exact: 2^53+1')
+                    9007199254740992_int64, 'exact: 2^53+1 rounds')
       call read_int(error, schema, idx, '{"big":-9007199254740993}', 'big', &
-                    -9007199254740993_int64, 'exact: -(2^53+1)')
-      call read_int(error, schema, idx, '{"ubig":18446744073709551615}', 'ubig', &
-                    -1_int64, 'exact: uint64 max')
+                    -9007199254740992_int64, 'exact: -(2^53+1) rounds')
       call read_int(error, schema, idx, '{"ubig":"18446744073709551615"}', 'ubig', &
                     -1_int64, 'exact: quoted uint64 max value')
       call read_int(error, schema, idx, '{"ubig":9223372036854775808}', 'ubig', &
@@ -569,13 +567,17 @@ contains
       scores = capnp_dyn_getp(schema, idx, root, 'scores', err)
       v = 0_int64
       if (err == CAPNP_OK) v = capnp_list_get_i64(scores, 0_int64, err)
-      call check_(error, err == CAPNP_OK .and. v == 9007199254740993_int64, &
-                  'exact: list element')
+      call check_(error, err == CAPNP_OK .and. v == 9007199254740992_int64, &
+                  'exact: list element rounds')
       call capnp_message_free(decoded)
       call reject_json(error, schema, idx, '{"big":"+0x10"}', 'exact: reject +0x10')
       call reject_json(error, schema, idx, '{"ubig":"-0"}', 'exact: reject quoted -0')
       call reject_json(error, schema, idx, '{"big":1.5}', 'exact: reject 1.5')
       call reject_json(error, schema, idx, '{"where":{"zip":65536}}', 'exact: reject uint16')
+      call reject_json(error, schema, idx, '{"big":9223372036854775807}', &
+                       'exact: reject unquoted int64 max')
+      call reject_json(error, schema, idx, '{"ubig":18446744073709551615}', &
+                       'exact: reject unquoted uint64 max')
       call reject_json(error, schema, idx, '{"big":9223372036854775808}', &
                        'exact: reject int64 overflow')
       call reject_json(error, schema, idx, '{"big":"-9223372036854775809"}', &

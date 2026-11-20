@@ -193,12 +193,15 @@ do not split a message. The capnp 1.4.0 command-line splitter can reject those
 valid streams. A high UTF-16 surrogate followed by a low surrogate is one
 Unicode scalar and is emitted as valid UTF-8. capnp 1.4.0 instead keeps the
 two UTF-16 surrogate code units as six invalid WTF-8 bytes. An unquoted
-integer past 2^53 keeps every digit.
-capnp 1.4.0 rounds that token through a double and accepts the rounded value
-when it fits the destination field. It rejects an integer the double cannot
-hold. `{"i64":9223372036854775807}` and
-`{"u64":18446744073709551615}` are two such inputs: this decoder accepts
-them and capnp 1.4.0 does not.
+integer is rounded through a double, matching capnp 1.4.0.
+`9007199254740993` becomes `9007199254740992`. A rounded value that is not
+an integer, or that does not fit the field, is an error.
+`{"big":9223372036854775807}` and `{"ubig":18446744073709551615}` are
+rejected. The quoted forms of those values stay exact and are accepted.
+When an unquoted value is out of range, both tools still print a
+recovered message and exit 1. The recovered integer matches, including
+Int64 min for the double 2^63 and zero for the double 2^64. capnp 1.4.0
+reports `Value out-of-range`. This decoder reports `json decode failed`.
 
 ## capnpf
 
@@ -221,9 +224,11 @@ count for every segment. Flat, flat-packed, and canonical output
 write every message on the input, one after another. `eval` traverses
 constants, struct field defaults, groups, and arbitrarily deep `.field` and
 `[index]` paths, and emits struct targets in any supported format.
-Unlike capnp 1.4.0, `capnpf` does not reject plausible input based on a
-command-line format sniff before the selected decoder runs. Its `--quiet`
-option is therefore accepted as a compatibility no-op.
+An empty convert input exits 1 with `empty input` on stderr. capnp 1.4.0
+exits 1 for that stream and reports `Premature EOF`, unless `--quiet` is
+set, in which case capnp exits 0. `--quiet` on capnpf does not hide the
+empty-input error. capnpf also does not reject plausible input based on a
+command-line format sniff before the selected decoder runs.
 
 ## Canonical form (`capnp_canonical`)
 
