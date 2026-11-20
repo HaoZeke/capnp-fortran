@@ -343,6 +343,9 @@ module capnp_rpc
       !> task before Finish, so the plain forward's question lives until
       !> then and finishes ahead of resultsSentElsewhere.
       logical :: plain_lazy = .false.
+      !> The results never went on the wire (onlyPromisePipeline or
+      !> yourself), so their caps have no export ids, only pins.
+      logical :: local_results = .false.
       !> Imports the forwarded results named, released at Finish.
       integer(int64), allocatable :: plain_imports(:)
       !> Import nodes this answer's Return wrote, unpinned at Finish.
@@ -3136,6 +3139,7 @@ contains
       slot%plain_opp = .false.
       slot%plain_npp = .false.
       slot%plain_lazy = .false.
+      slot%local_results = .false.
       if (allocated(slot%plain_imports)) deallocate (slot%plain_imports)
       if (allocated(slot%import_pins)) deallocate (slot%import_pins)
       slot%nexp = 0
@@ -5284,6 +5288,7 @@ contains
       slot%plain_opp = .false.
       slot%plain_npp = .false.
       slot%plain_lazy = .false.
+      slot%local_results = .false.
       if (allocated(slot%plain_imports)) deallocate (slot%plain_imports)
       if (allocated(slot%import_pins)) deallocate (slot%import_pins)
       slot%nexp = 0
@@ -8095,6 +8100,14 @@ contains
          ! (rpc.c++ PostReturnRpcPipeline / answer.pipeline). A Release of
          ! the export id does not remove that reference.
          call pin_answer_exports(conn, slot)
+         ! C++ assigns export ids when it writes the Return, so results
+         ! kept here leave the ids free for the next export.
+         if (silent .or. hold) then
+            slot%local_results = .true.
+            do i = 0, ctx%nexp - 1
+               if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+            end do
+         end if
          if (err == CAPNP_OK) call settle_answer_promises(conn, qid, rm, err)
          if (err == CAPNP_OK) call settle_answer_proxies(conn, qid, rm, err)
          if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
@@ -8979,7 +8992,7 @@ contains
          return
       end if
       gone = .false.
-      if (finish_release_result_caps_get(f)) then
+      if (finish_release_result_caps_get(f) .and. .not. jslot%local_results) then
          do i = 0, jslot%nexp - 1
             eid = jslot%exports(i)
             if (.not. eslot_ok(conn, int(eid, int64))) cycle

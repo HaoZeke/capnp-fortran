@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(150))
+      allocate (testsuite(151))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -479,18 +479,20 @@ contains
       testsuite(143)%test => w_npp_call_forwards_plain
       testsuite(144)%name = "rpc-failed-plain-forward-finishes"
       testsuite(144)%test => w_failed_plain_forward_finishes
-      testsuite(145)%name = "posix-recv-eintr-retried"
-      testsuite(145)%test => t_recv_all_retries_eintr
-      testsuite(146)%name = "rpc-framing-511-accepted"
-      testsuite(146)%test => t_framing_511_accepted
-      testsuite(147)%name = "rpc-framing-512-rejected"
-      testsuite(147)%test => t_framing_512_rejected
-      testsuite(148)%name = "rpc-framing-oversized-rejected"
-      testsuite(148)%test => t_framing_oversized_rejected
-      testsuite(149)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(149)%test => t_framing_negative_traversal_rejected
-      testsuite(150)%name = "rpc-framing-short-and-padded"
-      testsuite(150)%test => t_framing_short_and_padded
+      testsuite(145)%name = "rpc-quiet-results-take-no-export-id"
+      testsuite(145)%test => w_quiet_results_take_no_export_id
+      testsuite(146)%name = "posix-recv-eintr-retried"
+      testsuite(146)%test => t_recv_all_retries_eintr
+      testsuite(147)%name = "rpc-framing-511-accepted"
+      testsuite(147)%test => t_framing_511_accepted
+      testsuite(148)%name = "rpc-framing-512-rejected"
+      testsuite(148)%test => t_framing_512_rejected
+      testsuite(149)%name = "rpc-framing-oversized-rejected"
+      testsuite(149)%test => t_framing_oversized_rejected
+      testsuite(150)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(150)%test => t_framing_negative_traversal_rejected
+      testsuite(151)%name = "rpc-framing-short-and-padded"
+      testsuite(151)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1166,6 +1168,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_released_result_export_id_reused(error)
       if (.not. allocated(error)) call t_pinned_export_reexported(error)
+      if (.not. allocated(error)) call t_kept_result_export_reexported(error)
    end subroutine w_released_result_export_id_reused
 
    subroutine w_npp_call_forwards_plain(error)
@@ -1177,6 +1180,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_failed_plain_forward_finishes(error)
    end subroutine w_failed_plain_forward_finishes
+
+   subroutine w_quiet_results_take_no_export_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_quiet_results_take_no_export_id(error)
+   end subroutine w_quiet_results_take_no_export_id
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -5887,10 +5895,12 @@ contains
       call rpc_conn_init(cconn, fa, boot)
    end subroutine open_echo_pair
 
-   subroutine send_raw_call(fd, qid, export_id, e)
+   subroutine send_raw_call(fd, qid, export_id, e, npp, opp)
       integer, intent(in) :: fd
       integer(int64), intent(in) :: qid, export_id
       integer, intent(out) :: e
+      !> The noPromisePipelining and onlyPromisePipeline hints.
+      logical, intent(in), optional :: npp, opp
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -5913,6 +5923,9 @@ contains
       call call_method_id_set(c, 0_int32, e)
       if (e /= CAPNP_OK) return
       call call_send_results_to_caller_set(c, e)
+      if (e /= CAPNP_OK) return
+      if (present(npp)) call call_no_promise_pipelining_set(c, npp, e)
+      if (present(opp)) call call_only_promise_pipeline_set(c, opp, e)
       if (e /= CAPNP_OK) return
       params = call_params_init(c, e)
       if (e /= CAPNP_OK) return
@@ -11834,6 +11847,71 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_forward_drops_unreferenced_caps
 
+   !> A result kept off the wire (onlyPromisePipeline) has an owned export
+   !> on the answer's pin alone. A call on that answer that returns the
+   !> server exports it under an id, and Finish frees the pin, not that
+   !> export.
+   subroutine t_kept_result_export_reexported(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(selfie_maker_t), target :: maker
+      class(rpc_server_t), pointer :: srv, none
+      type(rpc_cap_t) :: boot, pcap, ncap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: content
+      integer(int64) :: qboot, qmake, q2, q3
+      integer :: fa, fb, e
+
+      selfie_finals = 0
+      srv => maker
+      none => null()
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(cconn, fa, srv)
+      call rpc_conn_init(sconn, fb, none)
+      call rpc_bootstrap_send(sconn, boot, e)
+      qboot = boot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qboot, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], boot, e)
+      call rpc_call_begin(sconn, boot, ECHO_IFACE, 1, m, params, qmake, e)
+      msg = message_read_root(m, e)
+      c = message_call_get(msg, e)
+      call call_only_promise_pipeline_set(c, .true., e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      pcap = rpc_pipeline_cap(sconn, qmake, [0])
+      call rpc_call_begin(sconn, pcap, ECHO_IFACE, 0, m, params, q2, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, q2, e)
+      call rpc_result_cap(sconn, q2, [0], ncap, e)
+      call check_(error, e == CAPNP_OK .and. ncap%kind == RPC_CAP_IMPORT, &
+                  'kept result: the server is exported')
+      if (allocated(error)) return
+      call raw_finish(cconn, sconn, qmake, .false.)
+      call check_(error, selfie_finals == 0, &
+                  'kept result: the Finish keeps the server of a live export')
+      if (.not. allocated(error)) then
+         call rpc_call_begin(sconn, ncap, ECHO_IFACE, 1, m, params, q3, e)
+         call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+         call rpc_call_send(sconn, m, e)
+         call rpc_pump_once(cconn, e)
+         call rpc_wait(sconn, q3, e)
+         call rpc_result_content(sconn, q3, content, e)
+         call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 0_int64, &
+                     'kept result: the export answers')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (.not. allocated(error)) &
+         call check_(error, selfie_finals == 1, 'kept result: the server is freed once')
+   end subroutine t_kept_result_export_reexported
+
    !> An owned result export the peer released to zero lives on the
    !> answer's pin. A call on that answer that returns the server again
    !> exports it under a new id, and that export owns the server beside
@@ -12063,5 +12141,69 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_failed_plain_forward_finishes
+
+   !> C++ assigns export ids as it writes a Return. An
+   !> onlyPromisePipeline call sends none, so the caps in its results
+   !> leave the next id free.
+   subroutine t_quiet_results_take_no_export_id(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(many_caps_srv_t), target :: many
+      class(rpc_server_t), pointer :: srvp
+      character(len=:), allocatable :: a
+      integer(int64) :: id
+      integer :: fa, fb, e
+
+      many%ncaps = 1
+      srvp => many
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call send_raw_call(fb, 1_int64, 0_int64, e, opp=.true.)
+      call rpc_pump_once(conn, e)
+      call send_raw_call(fb, 2_int64, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      id = raw_return_hosted(fb, 2_int64)
+      call check_(error, id == 1_int64, 'quiet results: the next export takes id 1')
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_quiet_results_take_no_export_id
+
+   !> The first senderHosted id in the Return for `q`, or -1.
+   function raw_return_hosted(fd, q) result(id)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: q
+      integer(int64) :: id
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer :: n, e
+      logical :: ok
+      id = -1_int64
+      do n = 1, 4
+         call raw_next(fd, reply, msg, ok)
+         if (.not. ok) return
+         if (message_which(msg) == MESSAGE_RETURN_TAG) then
+            r = message_return_get(msg, e)
+            if (return_answer_id_get(r) == q .and. return_which(r) == RETURN_RESULTS_TAG) then
+               pl = return_results_get(r, e)
+               ctab = payload_cap_table_get(pl, e)
+               if (capnp_list_len(ctab) > 0_int64) then
+                  cd%p = capnp_list_get_struct(ctab, 0, e)
+                  if (cap_descriptor_which(cd) == CAP_DESCRIPTOR_SENDER_HOSTED_TAG) &
+                     id = cap_descriptor_sender_hosted_get(cd)
+               end if
+               call capnp_message_free(reply)
+               return
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+   end function raw_return_hosted
 
 end module test_rpc
