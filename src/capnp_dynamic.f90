@@ -647,6 +647,45 @@ contains
       call capnp_set_which(p, off, disc, err)
    end subroutine dyn_select_field
 
+   !> A field that sits past the data section reads as the default.
+   !> A field inside the claimed section needs a struct whose bytes are
+   !> in a segment. layout.h StructReader::getDataField (1098) returns
+   !> zero past dataSize, and layout.c++ (800) rejects a struct that does
+   !> not lie in its segment.
+   subroutine dyn_bits_readable(p, bit_off, bit_len, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: bit_off, bit_len
+      integer, intent(out) :: err
+      integer(int64) :: bits, byte_off, nbytes
+      err = CAPNP_OK
+      if (p%kind /= CAPNP_PK_NULL .and. p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (bit_off < 0_int64 .or. bit_len < 0_int64) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (p%dbits >= 0_int64) then
+         bits = p%dbits
+      else
+         bits = int(p%dwords, int64)*64_int64
+      end if
+      if (bit_len == 0_int64 .or. bit_off + bit_len > bits) return
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. allocated(p%msg%segs) .or. p%seg < 1 .or. p%seg > p%msg%nsegs) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      byte_off = p%off + bit_off/8_int64
+      nbytes = (bit_off + bit_len + 7_int64)/8_int64 - bit_off/8_int64
+      if (p%off < 0_int64 .or. byte_off < 0_int64 .or. &
+          byte_off + nbytes > p%msg%segs(p%seg)%len) err = CAPNP_ERR_BOUNDS
+   end subroutine dyn_bits_readable
+
    !> C++ DynamicStruct::get rejects a union arm that is not selected.
    subroutine dyn_require_active(schema, idx, p, f, err)
       use capnp_union, only: capnp_which
@@ -667,6 +706,8 @@ contains
          return
       end if
       off = int(node_struct_discriminant_offset(schema%nodes(idx)))
+      call dyn_bits_readable(p, int(off, int64)*16_int64, 16_int64, err)
+      if (err /= CAPNP_OK) return
       if (capnp_which(p, off) /= disc) err = CAPNP_ERR_KIND
    end subroutine dyn_require_active
 
@@ -922,18 +963,32 @@ contains
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i8(p, off, default=int(value_i8(dv), int8)), int64)
       case (TYPE_UINT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_u8(p, off, default=value_u8(dv)), int64)
       case (TYPE_INT16)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i16(p, off*2_int64, default=value_i16(dv)), int64)
       case (TYPE_UINT16, TYPE_ENUM)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_u16(p, off*2_int64, default=value_u16(dv)), int64)
       case (TYPE_INT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i32(p, off*4_int64, default=value_i32(dv)), int64)
       case (TYPE_UINT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_u32(p, off*4_int64, default=value_u32(dv))
       case (TYPE_INT64, TYPE_UINT64)
+         call dyn_bits_readable(p, off*64_int64, 64_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_i64(p, off*8_int64, default=value_i64(dv))
       case default
          err = CAPNP_ERR_KIND
@@ -961,8 +1016,12 @@ contains
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_FLOAT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = real(capnp_get_f32(p, off*4_int64, default=value_f32(dv)), real64)
       case (TYPE_FLOAT64)
+         call dyn_bits_readable(p, off*64_int64, 64_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_f64(p, off*8_int64, default=value_f64(dv))
       case default
          err = CAPNP_ERR_KIND
@@ -989,6 +1048,8 @@ contains
          return
       end if
       dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_bits_readable(p, field_slot_offset(f), 1_int64, err)
       if (err /= CAPNP_OK) return
       v = capnp_get_bool(p, field_slot_offset(f), default=value_bool(dv))
    end function capnp_dyn_get_bool
@@ -1284,6 +1345,11 @@ contains
       end if
       if (disc_off < 0_int64) then
          err = CAPNP_ERR_KIND
+         return
+      end if
+      call dyn_bits_readable(p, disc_off*16_int64, 16_int64, err)
+      if (err /= CAPNP_OK) then
+         tag = -1
          return
       end if
       tag = capnp_which(p, int(disc_off))
