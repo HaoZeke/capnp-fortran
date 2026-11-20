@@ -20,6 +20,7 @@ contains
            new_unittest("text-data", test_text_data), &
            new_unittest("lists", test_lists), &
            new_unittest("composite-list", test_composite_list), &
+           new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
            new_unittest("nested-struct", test_nested_struct), &
            new_unittest("far-pointer", test_far_pointer), &
            new_unittest("far-chain-rejected", test_far_chain_rejected), &
@@ -309,6 +310,39 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_composite_list
+   !> Tag word 0x0000000180000004 has bit 31 set and a 29-bit count of 1.
+   !> layout.c++ inlineCompositeListElementCount returns 1, then [0] is 42.
+   subroutine test_composite_count_unsigned(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, el
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: tag
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 4_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_COMPOSITE, 1_int64))
+      tag = int(z'0000000180000004', int64)
+      call cp_put_i64(buf, 24_int64, tag)
+      call cp_put_i64(buf, 32_int64, 42_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'composite-unsigned: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 1_int64, &
+                  'composite-unsigned: length is 1')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 0, err)
+      call check(error, err == CAPNP_OK, 'composite-unsigned: element')
+      if (allocated(error)) return
+      call check(error, capnp_get_i64(el, 0_int64) == 42_int64, 'composite-unsigned: value')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_composite_count_unsigned
    subroutine test_nested_struct(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg

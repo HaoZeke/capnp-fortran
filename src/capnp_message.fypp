@@ -253,7 +253,9 @@ contains
          p%seg = seg
          p%off = base + 8_int64
          p%esize = es
-         p%nelem = int(wp_offset(tag), int64)
+         ! layout.c++ inlineCompositeListElementCount: unsigned 29-bit
+         ! count in the tag offset field. Bit 31 is outside that mask.
+         p%nelem = ibits(tag, 2, 29)
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
          ! Element count must fit the declared content words.
