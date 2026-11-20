@@ -22,6 +22,8 @@ contains
            new_unittest("lists", test_lists), &
            new_unittest("list-count-limit", test_list_count_limit), &
            new_unittest("void-list-struct", test_void_list_struct), &
+           new_unittest("void-list-amplify", test_void_list_amplify), &
+           new_unittest("empty-list-amplify", test_empty_list_amplify), &
            new_unittest("composite-list", test_composite_list), &
            new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
            new_unittest("nested-struct", test_nested_struct), &
@@ -381,6 +383,63 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_void_list_struct
+   !> List(Void) of 10^7 elements has no payload bytes but costs one word
+   !> each (layout.c++ amplifiedRead). The default limit is 2^23 words.
+   subroutine test_void_list_amplify(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:23))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 2_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_VOID, 10000000_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'void-amplify: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, 'void-amplify: root')
+      if (allocated(error)) return
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'void-amplify: traversal')
+      if (allocated(error)) return
+      call check(error, lst%kind == CAPNP_PK_NULL, 'void-amplify: no list handle')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_void_list_amplify
+   !> Inline-composite list of 10^7 zero-word structs. The tag carries the
+   !> count; the body is one word. layout.c++:2323 charges one word each.
+   subroutine test_empty_list_amplify(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: tag
+      integer :: err
+      allocate (buf(0:31))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 3_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_COMPOSITE, 0_int64))
+      tag = shiftl(10000000_int64, 2)
+      call cp_put_i64(buf, 24_int64, tag)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'empty-amplify: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, 'empty-amplify: root')
+      if (allocated(error)) return
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'empty-amplify: traversal')
+      if (allocated(error)) return
+      call check(error, lst%kind == CAPNP_PK_NULL, 'empty-amplify: no list handle')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_empty_list_amplify
    subroutine test_composite_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg

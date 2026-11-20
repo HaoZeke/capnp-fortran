@@ -268,6 +268,11 @@ contains
          if (p%nelem*int(p%dwords + p%pwords, int64) > cnt) then
             err = CAPNP_ERR_BOUNDS
             p%kind = CAPNP_PK_NULL
+            return
+         end if
+         ! layout.c++:2323: a zero-word element still costs one word.
+         if (p%dwords + p%pwords == 0 .and. p%nelem > 0_int64) then
+            if (.not. charge(msg, p%nelem*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       else
          sb = capnp_list_step_bits(es)
@@ -282,6 +287,10 @@ contains
          p%off = base
          p%esize = es
          p%nelem = cnt
+         ! layout.c++:2396: List(Void) costs one word per element.
+         if (es == CAPNP_SZ_VOID .and. cnt > 0_int64) then
+            if (.not. charge(msg, cnt*8_int64, err)) p%kind = CAPNP_PK_NULL
+         end if
       end if
    end subroutine fill_list
 
