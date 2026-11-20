@@ -2556,11 +2556,12 @@ contains
       ! A released id can be handed out again. The old node would ignore
       ! the new Resolve and the new refs.
       if (node%released .or. node%refs <= 0) then
-         ! A receiverHosted resolution turned this id into a local client.
-         ! Its wire import was released, but application handles still name
-         ! this node and it owns an export pin. Never overwrite that local
-         ! identity when the peer reuses the released export id.
-         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
+         ! A resolved promise keeps naming its replacement, a reflected
+         ! local client, or a broken capability after its wire import is
+         ! released, and a handle for it may still be in use. Never
+         ! overwrite that identity when the peer reuses the export id.
+         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO .or. &
+             node%state == IMP_REMOTE .or. node%state == IMP_BROKEN) then
             allocate (node)
             node%id = conn%next_import_handle
             conn%next_import_handle = conn%next_import_handle - 1_int64

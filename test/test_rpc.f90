@@ -110,7 +110,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(88))
+      allocate (testsuite(89))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -273,20 +273,22 @@ contains
       testsuite(80)%test => w_resolve_released_no_embargo
       testsuite(81)%name = "rpc-reused-handle-provide-join"
       testsuite(81)%test => w_reused_handle_provide_join
-      testsuite(82)%name = "rpc-shutdown"
-      testsuite(82)%test => w_shutdown
-      testsuite(83)%name = "posix-recv-eintr-retried"
-      testsuite(83)%test => t_recv_all_retries_eintr
-      testsuite(84)%name = "rpc-framing-511-accepted"
-      testsuite(84)%test => t_framing_511_accepted
-      testsuite(85)%name = "rpc-framing-512-rejected"
-      testsuite(85)%test => t_framing_512_rejected
-      testsuite(86)%name = "rpc-framing-oversized-rejected"
-      testsuite(86)%test => t_framing_oversized_rejected
-      testsuite(87)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(87)%test => t_framing_negative_traversal_rejected
-      testsuite(88)%name = "rpc-framing-short-and-padded"
-      testsuite(88)%test => t_framing_short_and_padded
+      testsuite(82)%name = "rpc-resolve-remote-reused-id"
+      testsuite(82)%test => w_resolve_remote_reused_id
+      testsuite(83)%name = "rpc-shutdown"
+      testsuite(83)%test => w_shutdown
+      testsuite(84)%name = "posix-recv-eintr-retried"
+      testsuite(84)%test => t_recv_all_retries_eintr
+      testsuite(85)%name = "rpc-framing-511-accepted"
+      testsuite(85)%test => t_framing_511_accepted
+      testsuite(86)%name = "rpc-framing-512-rejected"
+      testsuite(86)%test => t_framing_512_rejected
+      testsuite(87)%name = "rpc-framing-oversized-rejected"
+      testsuite(87)%test => t_framing_oversized_rejected
+      testsuite(88)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(88)%test => t_framing_negative_traversal_rejected
+      testsuite(89)%name = "rpc-framing-short-and-padded"
+      testsuite(89)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -448,6 +450,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_reused_handle_provide_join(error)
    end subroutine w_reused_handle_provide_join
+
+   subroutine w_resolve_remote_reused_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_remote_reused_id(error)
+   end subroutine w_resolve_remote_reused_id
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6362,5 +6369,82 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_reused_handle_provide_join
+
+   !> A promise that resolved to a remote capability keeps naming that
+   !> capability when the peer hands the promise's export id out again.
+   subroutine t_resolve_remote_reused_id(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, old, fresh
+      type(capnp_message_t), target :: reply, drained
+      type(message_t) :: rmsg
+      type(release_t) :: rel
+      integer :: fa, fb, e, nmsg
+      integer(int64) :: qboot, qold, qfresh
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qold, e)
+      call rpc_wait(cconn, qold, e)
+      call rpc_result_cap(cconn, qold, [integer ::], old, e)
+      call send_resolve_hosted(sconn%fd, 4_int64, 5_int64, e)
+      call rpc_pump_once(cconn, e)
+      call recv_within(sconn%fd, reply, error, 'remote-reuse: promise release')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 4_int64, 'remote-reuse: promise 4 released')
+      call capnp_message_free(reply)
+      if (allocated(error)) return
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qfresh, e)
+      call rpc_wait(cconn, qfresh, e)
+      call rpc_result_cap(cconn, qfresh, [integer ::], fresh, e)
+      call check_(error, e == CAPNP_OK .and. fresh%id /= old%id, &
+                  'remote-reuse: reused id gets its own handle')
+      if (allocated(error)) return
+      call rpc_release_send(cconn, old, e)
+      call recv_within(sconn%fd, reply, error, 'remote-reuse: replacement release')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 5_int64 .and. &
+                  release_reference_count_get(rel) == 1_int64, &
+                  'remote-reuse: old handle releases its replacement')
+      call capnp_message_free(reply)
+      if (allocated(error)) return
+      call rpc_release_send(cconn, fresh, e)
+      call recv_within(sconn%fd, reply, error, 'remote-reuse: fresh release')
+      if (allocated(error)) return
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 4_int64, &
+                  'remote-reuse: fresh handle releases the reused id')
+      call capnp_message_free(reply)
+      nmsg = 0
+      do while (e == CAPNP_OK)
+         call px_poll_in(sconn%fd, 0, readable, e)
+         if (e /= CAPNP_OK .or. .not. readable) exit
+         call rpc_recv_message(sconn%fd, drained, e)
+         call capnp_message_free(drained)
+         nmsg = nmsg + 1
+      end do
+      call check_(error, e == CAPNP_OK .and. nmsg == 0, &
+                  'remote-reuse: nothing else is released')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_remote_reused_id
 
 end module test_rpc
