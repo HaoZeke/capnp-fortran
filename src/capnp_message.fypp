@@ -481,7 +481,8 @@ contains
       integer(int64) :: off, nwords
       p = capnp_ptr_t()
       sb = capnp_list_step_bits(esize)
-      if (sb < 0 .or. count < 0_int64) then
+      ! layout.c++ initListPointer rejects elementCount >= 1<<29.
+      if (sb < 0 .or. count < 0_int64 .or. count >= 536870912_int64) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -506,7 +507,8 @@ contains
       integer :: seg
       integer(int64) :: off, nwords
       p = capnp_ptr_t()
-      if (count < 0_int64 .or. dwords < 0 .or. pwords < 0) then
+      ! layout.c++ initStructListPointer uses the same 29-bit element cap.
+      if (count < 0_int64 .or. count >= 536870912_int64 .or. dwords < 0 .or. pwords < 0) then
          err = CAPNP_ERR_ARG
          return
       end if

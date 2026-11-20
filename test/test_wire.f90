@@ -19,6 +19,7 @@ contains
            new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
            new_unittest("text-data", test_text_data), &
            new_unittest("lists", test_lists), &
+           new_unittest("list-count-limit", test_list_count_limit), &
            new_unittest("composite-list", test_composite_list), &
            new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
            new_unittest("nested-struct", test_nested_struct), &
@@ -275,6 +276,28 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_lists
+   !> 2^29 elements is past LIST_ELEMENT_COUNT_BITS (common.h). C++ throws
+   !> in initListPointer; 2^29-1 of List(Void) still allocates.
+   subroutine test_list_count_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      call check(error, err == CAPNP_OK, 'list-count: builder')
+      if (allocated(error)) return
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870912_int64, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 void rejected')
+      if (allocated(error)) return
+      lst = capnp_new_composite_list(msg, 536870912_int64, 1, 0, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 composite rejected')
+      if (allocated(error)) return
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870911_int64, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 536870911_int64, &
+                  'list-count: 2^29-1 void accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_list_count_limit
    subroutine test_composite_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
