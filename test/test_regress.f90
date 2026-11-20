@@ -98,7 +98,8 @@ contains
          new_unittest("text-group-replace", run_text_group_replace), &
          new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
          new_unittest("text-inactive-arm", run_text_inactive_arm), &
-         new_unittest("json-dup-bad", run_json_dup_bad) &
+         new_unittest("json-dup-bad", run_json_dup_bad), &
+         new_unittest("json-ptr-kind", run_json_ptr_kind) &
          ]
    end subroutine collect_regress
 
@@ -2664,4 +2665,32 @@ contains
    end subroutine run_json_dup_bad
 
 
+   subroutine run_json_ptr_kind(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: out
+      integer(int8) :: raw(0:31)
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 32_int8, 0_int8, 0_int8, 4_int8, 0_int8, &
+             1_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8]
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'NestedFlatStructDisc', err)
+      call capnp_deserialize_bytes(raw, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_ERR_KIND, 'ptr kind status')
+      call check_(error, index(out, '"outerKind":"g"') > 0, 'ptr kind text')
+      call check_(error, index(out, '"innerVal":0') > 0, 'ptr kind default')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_ptr_kind
 end module test_regress

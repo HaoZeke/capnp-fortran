@@ -41,6 +41,7 @@ module capnp_json
    integer, parameter :: MAX_DEPTH = 64
    integer, parameter :: UNION_SEEN_START = 16
    integer, save :: union_seen_n = 0
+   logical, save :: ptr_kind_bad = .false.
    logical, save :: number_bad = .false.
    integer, allocatable, save :: union_seen_seg(:)
    integer(int64), allocatable, save :: union_seen_off(:)
@@ -132,6 +133,7 @@ contains
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
+      ptr_kind_bad = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -156,6 +158,7 @@ contains
       call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
       call emit_jval(root, 0, .false., do_pretty, text, multi, err)
+      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_json_encode
 
    subroutine capnp_json_decode(schema, idx, text, msg, err)
@@ -452,6 +455,7 @@ contains
                   q = capnp_getp(p, int(field_slot_offset(f)), err)
                   if (err /= CAPNP_OK) return
                end if
+               call expect_struct_ptr(q)
                if (q%kind == CAPNP_PK_NULL) then
                   dv = field_slot_default(f, err)
                   if (err /= CAPNP_OK) return
@@ -617,6 +621,7 @@ contains
             q = capnp_getp(p, int(off), err)
             if (err /= CAPNP_OK) return
          end if
+         call expect_struct_ptr(q)
          if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
             q = value_pointer(dv, err)
             if (err /= CAPNP_OK) return
@@ -2988,6 +2993,13 @@ contains
    !> A struct field whose pointer is a list or a far/other word is a
    !> schema mismatch. Encoding continues from a null struct so the
    !> recovered text matches capnp 1.4.0, and the encode reports the error.
+   subroutine expect_struct_ptr(q)
+      type(capnp_ptr_t), intent(inout) :: q
+      if (q%kind /= CAPNP_PK_NULL .and. q%kind /= CAPNP_PK_STRUCT) then
+         ptr_kind_bad = .true.
+         q = capnp_ptr_t()
+      end if
+   end subroutine expect_struct_ptr
 
    function find_jkey(jv, key, idx) result(y)
       type(jval), intent(in) :: jv

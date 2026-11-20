@@ -761,6 +761,15 @@ contains
       else if (to == 'json') then
          call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
                                 traversal_words=huge(0_int64))
+         if (err == CAPNP_ERR_KIND .and. len(text) > 0) then
+            call write_fd_line(1, text, err)
+            if (err /= CAPNP_OK) then
+               call fail('cannot write stdout', rc)
+               return
+            end if
+            call fail('json encode failed', rc)
+            return
+         end if
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
