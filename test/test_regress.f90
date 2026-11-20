@@ -87,7 +87,8 @@ contains
          new_unittest("json-union-many", run_json_union_many), &
          new_unittest("json-union-nested", run_json_union_nested), &
          new_unittest("json-schema-chain", run_json_schema_chain), &
-         new_unittest("group-clear-depth", run_group_clear_depth) &
+         new_unittest("group-clear-depth", run_group_clear_depth), &
+         new_unittest("packed-zero-cap", run_packed_zero_cap) &
          ]
    end subroutine collect_regress
 
@@ -2046,5 +2047,31 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_group_clear_depth
+
+   !> Streaming pack and unpack must grow an already-allocated empty
+   !> output buffer instead of looping forever in ensure.
+   subroutine run_packed_zero_cap(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_packer_t) :: pk
+      type(capnp_unpacker_t) :: uk
+      integer(int8), allocatable :: pbuf(:), ubuf(:)
+      integer(int8) :: word(0:7)
+      integer(int64) :: pn, un
+      integer :: err
+      word = [1_int8, 0_int8, 2_int8, 0_int8, 3_int8, 0_int8, 4_int8, 0_int8]
+      allocate (pbuf(0))
+      pn = 0_int64
+      call capnp_pack_push(pk, word, pbuf, pn, err)
+      call check_(error, err == CAPNP_OK, 'packed-zero-cap: pack push')
+      call capnp_pack_finish(pk, pbuf, pn, err)
+      call check_(error, err == CAPNP_OK .and. pn > 0_int64, 'packed-zero-cap: pack finish')
+      allocate (ubuf(0))
+      un = 0_int64
+      call capnp_unpack_push(uk, pbuf(0:pn - 1), ubuf, un, err)
+      call check_(error, err == CAPNP_OK .and. un == 8_int64, 'packed-zero-cap: unpack push')
+      if (un == 8_int64) then
+         call check_(error, all(ubuf(0:7) == word), 'packed-zero-cap: roundtrip')
+      end if
+   end subroutine run_packed_zero_cap
 
 end module test_regress

@@ -511,12 +511,16 @@ contains
       integer(int64), intent(in) :: need
       integer, intent(out) :: err
       integer(int8), allocatable :: tmp(:)
-      integer(int64) :: ncap
+      integer(int64) :: ncap, oldn
       integer :: stat
       err = CAPNP_OK
       if (need <= cap) return
-      ncap = cap
+      ncap = max(cap, 64_int64)
       do while (ncap < need)
+         if (ncap > shiftr(huge(0_int64), 1)) then
+            ncap = need
+            exit
+         end if
          ncap = ncap*2_int64
       end do
       allocate (tmp(0:ncap - 1), stat=stat)
@@ -525,7 +529,8 @@ contains
          return
       end if
       tmp = 0_int8
-      tmp(0:size(buf, kind=int64) - 1) = buf
+      oldn = size(buf, kind=int64)
+      if (oldn > 0_int64) tmp(0:oldn - 1) = buf
       call move_alloc(tmp, buf)
       cap = ncap
    end subroutine ensure
