@@ -24,6 +24,7 @@ program test_gate2
    call case_20()
    call case_21()
    call case_22()
+   call case_24()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -699,4 +700,23 @@ contains
          'done')
    end subroutine case_22
 
+   subroutine case_24()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"kind": "count", "count": 3}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-un.in; "$CAP" convert json:json schema/codec.capn' // &
+         'p TaggedEvent < /tmp/g2-un.in > /tmp/g2-un.o; echo $? > /tmp' // &
+         '/g2-un.e1; capnp convert json:json schema/codec.capnp Tagged' // &
+         'Event < /tmp/g2-un.in > /tmp/g2-un.r; echo $? > /tmp/g2-un.e' // &
+         '2; cmp -s /tmp/g2-un.o /tmp/g2-un.r && cmp -s /tmp/g2-un.e1 ' // &
+         '/tmp/g2-un.e2')
+   end subroutine case_24
 end program test_gate2

@@ -1203,12 +1203,12 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            call union_note(p, disc, err)
-            if (err /= CAPNP_OK) return
             call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
             call clear_field(schema, f, p, env, err)
+            if (err /= CAPNP_OK) return
+            call union_note(p, disc, err)
             if (err /= CAPNP_OK) return
             have_child = .false.
             tag_set = .true.
