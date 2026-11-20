@@ -665,6 +665,7 @@ contains
       call rpc_membrane_server_init(wrapped, inner, policy)
       boot => wrapped
       call rpc_conn_init(srv, fb, boot)
+      srv%max_exports = size(srv%exports)
       boot => null()
       call rpc_conn_init(cli, fa, boot)
       owned_inner_deaths = 0

@@ -490,7 +490,8 @@ module capnp_rpc
       logical :: dead = .false.
       character(len=:), allocatable :: abort_reason
       class(rpc_server_t), pointer :: bootstrap_srv => null()
-      type(rpc_export_slot_t) :: exports(0:MAXE - 1)
+      !> Grows when every slot is taken, as C++ 1.4.0 has no limit.
+      type(rpc_export_slot_t), allocatable :: exports(:)
       !> Grows when every id is taken, as C++ 1.4.0 has no limit.
       type(rpc_question_slot_t), allocatable :: questions(:)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
@@ -521,6 +522,10 @@ module capnp_rpc
       procedure(rpc_dial_allow_ifc), pointer, nopass :: dial_allow => null()
       !> Connect timeout for an introduction dial, in milliseconds.
       integer :: dial_timeout_ms = 10000
+      !> Bound on live exports. Zero leaves the table unbounded, as in
+      !> C++ 1.4.0; a positive bound makes the export that would pass it
+      !> fail the way a full table does.
+      integer :: max_exports = 0
    end type rpc_conn_t
 
 contains
@@ -542,6 +547,7 @@ contains
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
       if (.not. allocated(conn%questions)) allocate (conn%questions(0:MAXQ - 1))
+      if (.not. allocated(conn%exports)) allocate (conn%exports(0:MAXE - 1))
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -572,6 +578,7 @@ contains
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
       if (.not. allocated(conn%questions)) allocate (conn%questions(0:MAXQ - 1))
+      if (.not. allocated(conn%exports)) allocate (conn%exports(0:MAXE - 1))
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -596,7 +603,7 @@ contains
       ! The peer will not Release what it still imports. Internal pins keep
       ! a dispatch, reflected capability, or provision alive independently
       ! of the wire reference count.
-      do i = 0, MAXE - 1
+      do i = 0, nexports(conn) - 1
          if (.not. conn%exports(i)%used) cycle
          call drop_export(conn, i, conn%exports(i)%refcount)
       end do
@@ -918,7 +925,7 @@ contains
       logical :: was_owned, freed_owned
       do i = 0, ctx%nexp - 1
          eid = ctx%staged_eids(i)
-         if (eid >= 0 .and. eid < MAXE) then
+         if (eslot_ok(conn, int(eid, int64))) then
             p => conn%exports(eid)%srv
             was_owned = conn%exports(eid)%owned
             if (.not. was_owned .and. associated(p)) then
@@ -948,9 +955,9 @@ contains
    !> Drop the internal provision pin without changing wire references.
    subroutine release_provision_pin(slot)
       type(rpc_provision_slot_t), intent(inout) :: slot
-      if (associated(slot%host) .and. slot%source_eid >= 0 .and. &
-          slot%source_eid < MAXE) then
-         call drop_export_pin(slot%host, slot%source_eid)
+      if (associated(slot%host)) then
+         if (eslot_ok(slot%host, int(slot%source_eid, int64))) &
+            call drop_export_pin(slot%host, slot%source_eid)
       end if
       slot%srv => null()
       slot%host => null()
@@ -1013,6 +1020,20 @@ contains
       if (.not. allocated(conn%questions)) return
       qslot_ok = qid >= 0_int64 .and. qid < int(size(conn%questions), int64)
    end function qslot_ok
+
+   pure logical function eslot_ok(conn, eid)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: eid
+      eslot_ok = .false.
+      if (.not. allocated(conn%exports)) return
+      eslot_ok = eid >= 0_int64 .and. eid < int(size(conn%exports), int64)
+   end function eslot_ok
+
+   pure integer function nexports(conn)
+      type(rpc_conn_t), intent(in) :: conn
+      nexports = 0
+      if (allocated(conn%exports)) nexports = size(conn%exports)
+   end function nexports
 
    function alloc_qid(conn) result(qid)
       type(rpc_conn_t), intent(inout) :: conn
@@ -1492,7 +1513,7 @@ contains
       end if
       c = message_call_get(cmsg, err)
       params = call_params_get(c, err)
-      if (export_id < 0 .or. export_id >= MAXE) then
+      if (.not. eslot_ok(conn, int(export_id, int64))) then
          call fill_exception(r, 'no such capability', err)
       else if (.not. conn%exports(export_id)%used) then
          call fill_exception(r, 'no such capability', err)
@@ -2088,7 +2109,7 @@ contains
             tp = cap_descriptor_third_party_hosted_get(cd, rerr)
             if (rerr == CAPNP_OK) id = third_party_cap_descriptor_vine_id_get(tp)
          end select
-         if (id >= 0_int64 .and. id < int(MAXE, int64)) &
+         if (eslot_ok(conn, id)) &
             call drop_export(conn, int(id), 1)
       end do
    end subroutine release_unsent_call_caps
@@ -2682,7 +2703,7 @@ contains
          end select
          if (id < 0_int64) cycle
          if (local) then
-            if (id >= 0_int64 .and. id < int(MAXE, int64)) &
+            if (eslot_ok(conn, id)) &
                call drop_export(conn, int(id), 1)
          else if (result_was_released(conn%questions(q), i)) then
             cycle
@@ -2940,8 +2961,7 @@ contains
       node => conn%imports
       do while (associated(node))
          nxt => node%next
-         if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
-             node%resolved_id < int(MAXE, int64)) then
+         if (node%pinned .and. eslot_ok(conn, node%resolved_id)) then
             call drop_export_pin(conn, int(node%resolved_id))
          end if
          deallocate (node)
@@ -3389,7 +3409,7 @@ contains
       ! to 0, C++ has erased the id from its table. A missing export is a
       ! broken capability, so no Disembargo follows (rpc.c++ 1171-1181).
       valid = .false.
-      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
+      if (eslot_ok(conn, local_id)) then
          valid = conn%exports(int(local_id))%used .and. &
                  (via_answer .or. conn%exports(int(local_id))%refcount > 0)
       end if
@@ -3878,7 +3898,7 @@ contains
       type(rpc_embargo_node_t), pointer :: emb
       logical :: valid
       valid = .false.
-      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) &
+      if (eslot_ok(conn, local_id)) &
          valid = conn%exports(int(local_id))%used
       if (.not. valid) then
          call break_answer_promise(node, "invalid 'receiverHosted' export ID")
@@ -4140,7 +4160,7 @@ contains
       integer :: step
       err = CAPNP_OK
       if (cap%kind == RPC_CAP_LOCAL) then
-         if (cap%id >= 0_int64 .and. cap%id < int(MAXE, int64)) &
+         if (eslot_ok(conn, cap%id)) &
             call drop_export(conn, int(cap%id), 1)
          return
       end if
@@ -4165,8 +4185,7 @@ contains
          if (node%local_refs <= 0) return
          node%local_refs = node%local_refs - 1
          if (node%local_refs > 0) return
-         if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
-             node%resolved_id < int(MAXE, int64)) then
+         if (node%pinned .and. eslot_ok(conn, node%resolved_id)) then
             call drop_export_pin(conn, int(node%resolved_id))
             node%pinned = .false.
          end if
@@ -4368,12 +4387,13 @@ contains
       type(rpc_conn_t), intent(inout) :: conn
       class(*), pointer, intent(in) :: srv
       logical, intent(in), optional :: owned
-      integer :: eid, i
+      integer :: eid, i, n
+      type(rpc_export_slot_t), allocatable :: grown(:)
       logical :: own
       own = .false.
       if (present(owned)) own = owned
       ! Reuse an existing export of the same server.
-      do i = 0, MAXE - 1
+      do i = 0, nexports(conn) - 1
          if (conn%exports(i)%used) then
             if (associated(conn%exports(i)%srv, srv)) then
                conn%exports(i)%refcount = conn%exports(i)%refcount + 1
@@ -4383,7 +4403,20 @@ contains
             end if
          end if
       end do
-      do i = 0, MAXE - 1
+      if (.not. allocated(conn%exports)) allocate (conn%exports(0:MAXE - 1))
+      n = size(conn%exports)
+      if (conn%max_exports > 0) then
+         if (count(conn%exports%used) >= conn%max_exports) then
+            eid = -1
+            return
+         end if
+      end if
+      if (all(conn%exports%used)) then
+         allocate (grown(0:2 * n - 1))
+         grown(0:n - 1) = conn%exports
+         call move_alloc(grown, conn%exports)
+      end if
+      do i = 0, size(conn%exports) - 1
          if (.not. conn%exports(i)%used) then
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
@@ -4839,7 +4872,7 @@ contains
             end if
             if (e == CAPNP_OK) then
                eid = -1
-               if (kind == PIPE_EXPORT .and. id >= 0_int64 .and. id < int(MAXE, int64)) then
+               if (kind == PIPE_EXPORT .and. eslot_ok(conn, id)) then
                   if (conn%exports(int(id))%used) eid = int(id)
                end if
                call run_call(conn, c, node%call_qid, eid, CAPNP_OK, reason, &
@@ -4929,7 +4962,7 @@ contains
       select case (message_target_which(tgt))
       case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
          eid = message_target_imported_cap_get(tgt)
-         if (eid < 0_int64 .or. eid >= int(MAXE, int64)) then
+         if (.not. eslot_ok(conn, eid)) then
             err = CAPNP_ERR_BOUNDS
             return
          end if
@@ -4979,7 +5012,7 @@ contains
          case (PIPE_EXPORT)
             ! The answer's pipeline holds its result capabilities, not the
             ! export table, so a pin keeps a released export callable.
-            if (eid >= 0_int64 .and. eid < int(MAXE, int64)) then
+            if (eslot_ok(conn, eid)) then
                if (conn%exports(int(eid))%used) out_eid = int(eid)
             end if
          case (PIPE_BROKEN)
@@ -5472,8 +5505,8 @@ contains
             ! shares ownership when the source export owned the server.
             take_ownership = .false.
             if (associated(conn%vat%provisions(i)%host)) then
-               if (conn%vat%provisions(i)%source_eid >= 0 .and. &
-                   conn%vat%provisions(i)%source_eid < MAXE) then
+               if (eslot_ok(conn%vat%provisions(i)%host, &
+                            int(conn%vat%provisions(i)%source_eid, int64))) then
                   take_ownership = conn%vat%provisions(i)%host%exports( &
                       conn%vat%provisions(i)%source_eid)%owned
                end if
@@ -5900,7 +5933,7 @@ contains
          end select
          if (is_membrane) cycle
          exported = .false.
-         do j = 0, MAXE - 1
+         do j = 0, nexports(conn) - 1
             if (conn%exports(j)%used .and. associated(conn%exports(j)%srv, p)) then
                exported = .true.
                exit
@@ -6181,7 +6214,7 @@ contains
       if (.not. slot%redirected .or. .not. slot%has_results) return
       do i = 0, slot%nexp - 1
          eid = slot%exports(i)
-         if (eid >= 0 .and. eid < MAXE) call drop_export(conn, eid, 1)
+         if (eslot_ok(conn, int(eid, int64))) call drop_export(conn, eid, 1)
       end do
       slot%redirected = .false.
       call send_results_elsewhere(conn, other, err)
@@ -6393,7 +6426,7 @@ contains
       if (finish_release_result_caps_get(f)) then
          do i = 0, jslot%nexp - 1
             eid = jslot%exports(i)
-            if (eid < 0 .or. eid >= MAXE) cycle
+            if (.not. eslot_ok(conn, int(eid, int64))) cycle
             ! A peer Release that took the refcount to zero removed
             ! the export from the C++ table; only the pipeline pin is
             ! left here, and it is not a wire reference.
@@ -6427,7 +6460,7 @@ contains
       ! A Release of more refs than the export holds is a protocol
       ! error. Applying it would wrap the subtraction and free the
       ! object while a provision may still name it.
-      if (eid < 0_int64 .or. eid >= int(MAXE, int64) .or. nref < 0_int64) then
+      if (.not. eslot_ok(conn, eid) .or. nref < 0_int64) then
          call abort_conn(conn, 'Tried to release invalid export ID.', err)
          return
       end if
@@ -6448,7 +6481,7 @@ contains
    subroutine pin_export(conn, eid)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid
-      if (eid < 0 .or. eid >= MAXE) return
+      if (.not. eslot_ok(conn, int(eid, int64))) return
       if (.not. conn%exports(eid)%used) return
       conn%exports(eid)%pins = conn%exports(eid)%pins + 1
    end subroutine pin_export
@@ -6462,7 +6495,7 @@ contains
       n = 0
       do i = 0, slot%nexp - 1
          eid = slot%exports(i)
-         if (eid >= 0 .and. eid < MAXE) then
+         if (eslot_ok(conn, int(eid, int64))) then
             call pin_export(conn, eid)
             n = n + 1
          end if
@@ -6480,7 +6513,7 @@ contains
       slot%exports_pinned = .false.
       do i = 0, slot%nexp - 1
          eid = slot%exports(i)
-         if (eid >= 0 .and. eid < MAXE) call drop_export_pin(conn, eid)
+         if (eslot_ok(conn, int(eid, int64))) call drop_export_pin(conn, eid)
       end do
    end subroutine unpin_answer_exports
 
@@ -6587,7 +6620,7 @@ contains
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid
       class(*), pointer :: held
-      if (eid < 0 .or. eid >= MAXE) return
+      if (.not. eslot_ok(conn, int(eid, int64))) return
       if (.not. conn%exports(eid)%used) return
       if (conn%exports(eid)%pins <= 0) return
       conn%exports(eid)%pins = conn%exports(eid)%pins - 1
@@ -6614,7 +6647,7 @@ contains
       integer, intent(in) :: eid, count
       integer :: left
       class(*), pointer :: held
-      if (eid < 0 .or. eid >= MAXE) return
+      if (.not. eslot_ok(conn, int(eid, int64))) return
       if (.not. conn%exports(eid)%used) return
       if (count <= 0 .or. count > conn%exports(eid)%refcount) return
       left = conn%exports(eid)%refcount - count
@@ -6708,7 +6741,7 @@ contains
          block
             integer(int64) :: eid
             eid = message_target_imported_cap_get(tgt)
-            if (eid < 0_int64 .or. eid >= int(MAXE, int64)) then
+            if (.not. eslot_ok(conn, eid)) then
                call abort_conn(conn, 'Message target is not a current export ID.', err)
                return
             end if
@@ -6872,7 +6905,7 @@ contains
             call abort_conn(conn, 'unknown CapDescriptor type', err)
             return
          end select
-         if (id < 0_int64 .or. id >= int(MAXE, int64)) then
+         if (.not. eslot_ok(conn, id)) then
             call abort_conn(conn, 'Tried to release invalid export ID.', err)
             return
          end if

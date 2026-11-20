@@ -134,7 +134,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(118))
+      allocate (testsuite(119))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -359,18 +359,20 @@ contains
       testsuite(111)%test => w_close_forgets_introductions
       testsuite(112)%name = "rpc-seventy-concurrent-questions"
       testsuite(112)%test => w_seventy_concurrent_questions
-      testsuite(113)%name = "posix-recv-eintr-retried"
-      testsuite(113)%test => t_recv_all_retries_eintr
-      testsuite(114)%name = "rpc-framing-511-accepted"
-      testsuite(114)%test => t_framing_511_accepted
-      testsuite(115)%name = "rpc-framing-512-rejected"
-      testsuite(115)%test => t_framing_512_rejected
-      testsuite(116)%name = "rpc-framing-oversized-rejected"
-      testsuite(116)%test => t_framing_oversized_rejected
-      testsuite(117)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(117)%test => t_framing_negative_traversal_rejected
-      testsuite(118)%name = "rpc-framing-short-and-padded"
-      testsuite(118)%test => t_framing_short_and_padded
+      testsuite(113)%name = "rpc-seventy-live-exports"
+      testsuite(113)%test => w_seventy_live_exports
+      testsuite(114)%name = "posix-recv-eintr-retried"
+      testsuite(114)%test => t_recv_all_retries_eintr
+      testsuite(115)%name = "rpc-framing-511-accepted"
+      testsuite(115)%test => t_framing_511_accepted
+      testsuite(116)%name = "rpc-framing-512-rejected"
+      testsuite(116)%test => t_framing_512_rejected
+      testsuite(117)%name = "rpc-framing-oversized-rejected"
+      testsuite(117)%test => t_framing_oversized_rejected
+      testsuite(118)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(118)%test => t_framing_negative_traversal_rejected
+      testsuite(119)%name = "rpc-framing-short-and-padded"
+      testsuite(119)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -743,6 +745,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_seventy_concurrent_questions(error)
    end subroutine w_seventy_concurrent_questions
+
+   subroutine w_seventy_live_exports(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_seventy_live_exports(error)
+   end subroutine w_seventy_live_exports
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2470,6 +2477,7 @@ contains
       call rpc_membrane_server_init(wrapped_server, inner, policy)
       mboot => wrapped_server
       call rpc_conn_init(msrv, mb, mboot)
+      msrv%max_exports = size(msrv%exports)
       mboot => null()
       call rpc_conn_init(mcli, ma, mboot)
       call rpc_bootstrap_send(mcli, root, e)
@@ -7143,6 +7151,67 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_seventy_concurrent_questions
+
+   !> A server may hand out more capabilities than the export table
+   !> first holds; C++ 1.4.0 grows that table too.
+   subroutine t_seventy_live_exports(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer, parameter :: ncaps = 70
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap, adders(ncaps)
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qboot, q
+      integer :: fa, fb, e, i, nok
+      call px_socketpair(fa, fb, e)
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'exports: bootstrap')
+      if (allocated(error)) return
+      nok = 0
+      do i = 1, ncaps
+         call capnp_message_init_builder(m, e)
+         call rpc_call_begin(cconn, cap, ECHO_IFACE, 1, m, params, q, e)
+         s = capnp_new_struct(m, 1, 0, e)
+         call capnp_set_i64(s, 0_int64, int(1000 * i, int64), e)
+         call payload_content_set(params, s, e)
+         call rpc_call_send(cconn, m, e)
+         call rpc_pump_once(sconn, e)
+         call rpc_wait(cconn, q, e)
+         if (e /= CAPNP_OK) cycle
+         call rpc_result_cap(cconn, q, [0], adders(i), e)
+         if (e == CAPNP_OK) nok = nok + 1
+         call rpc_finish_send(cconn, q, .true., e)
+         call rpc_pump_once(sconn, e)
+      end do
+      call check_(error, nok == ncaps, 'exports: every adder is exported')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, adders(ncaps), 0_int64, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 5_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q, e)
+      call rpc_result_content(cconn, q, content, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  capnp_get_i64(content, 0_int64) == int(1000 * ncaps + 5, int64), &
+                  'exports: the last adder answers')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      call free_minted_adders()
+   end subroutine t_seventy_live_exports
 
    !> A Finish that released a thirdPartyHosted vine frees its export id.
    !> When the peer hands that id out again, a late `rpc_introduction_done`

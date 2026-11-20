@@ -345,6 +345,7 @@ contains
       if (allocated(error)) return
       boot => factory
       call rpc_conn_init(srv, fdb, boot)
+      srv%max_exports = size(srv%exports)
       boot => null()
       call rpc_conn_init(cli, fda, boot)
       opened = .true.
