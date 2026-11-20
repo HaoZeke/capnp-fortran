@@ -215,7 +215,13 @@ contains
       if (err /= CAPNP_OK) return
       call union_seen_reset()
       call fill_struct(schema, idx, obj, env, no_disc, root, 0, .false., err)
-      if (err == CAPNP_OK .and. number_bad) err = CAPNP_ERR_ARG
+      if (err /= CAPNP_OK) then
+         ! A later type error drops the recoverable number flag, so the
+         ! caller prints nothing for this message.
+         number_bad = .false.
+         return
+      end if
+      if (number_bad) err = CAPNP_ERR_ARG
    end subroutine capnp_json_decode
 
    !> True when the last decode stored zero for a string that was not a

@@ -560,9 +560,11 @@ contains
       type(capnp_brand_env_t) :: empty_env
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err
+      logical :: soft
       rc = 0
       from = 1
       count = 0
+      soft = .false.
       do
          call capnp_json_span(text, from, beg, topos, err)
          if (err /= CAPNP_OK) then
@@ -576,7 +578,16 @@ contains
                root = capnp_root(msg, err)
                if (err == CAPNP_OK .and. root_is_struct(root)) then
                   call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+                  if (rc /= 0) then
+                     call capnp_message_free(msg)
+                     return
+                  end if
                end if
+               call capnp_message_free(msg)
+               soft = .true.
+               count = count + 1
+               from = topos + 1
+               cycle
             end if
             call capnp_message_free(msg)
             call fail('json decode failed', rc)
@@ -594,6 +605,10 @@ contains
          count = count + 1
          from = topos + 1
       end do
+      if (soft) then
+         call fail('json decode failed', rc)
+         return
+      end if
       if (count == 0) call fail('empty input', rc)
    end subroutine json_to_out
 

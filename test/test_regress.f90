@@ -2656,6 +2656,9 @@ contains
       call check_dup('{"big":"bad"}', .true., '"big":"0"')
       call check_dup('{"big":"1","big":"2"}', .false., '"big":"2"')
       call check_dup('{"big":{}}', .true., '')
+      call check_dup('{"big":"bad","big":{}}', .true., '')
+      call check_quiet('{"big":"bad","big":{}}')
+      call check_stream('{"big":"bad"}{"big":"2"}')
       call capnp_dyn_free(schema)
    contains
       subroutine check_dup(text, bad, frag)
@@ -2685,6 +2688,40 @@ contains
          call check_(error, e2 == CAPNP_OK .and. index(out, frag) > 0, 'dup value '//text)
          call capnp_message_free(msg)
       end subroutine check_dup
+
+      subroutine check_quiet(text)
+         character(len=*), intent(in) :: text
+         type(capnp_message_t) :: msg
+         integer :: e2
+         if (allocated(error)) return
+         call capnp_json_decode(schema, idx, text, msg, e2)
+         call check_(error, e2 /= CAPNP_OK, 'hard error after a bad number')
+         call check_(error, .not. capnp_json_number_failed(), &
+                     'hard error clears the number flag')
+         call capnp_message_free(msg)
+      end subroutine check_quiet
+
+      subroutine check_stream(payload)
+         character(len=*), intent(in) :: payload
+         integer :: e2
+         if (allocated(error)) return
+         call spit(tmp//'/num.in', payload, e2)
+         if (e2 /= CAPNP_OK) then
+            call test_failed(error, 'number stream: write')
+            return
+         end if
+         if (.not. sh(cap_setup() &
+            //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" json:text --short schema/codec.capnp Sample' &
+            //' < '//tmp//'/num.in > '//tmp//'/num.ref 2>/dev/null; echo $? > '//tmp//'/num.ref.rc' &
+            //' && "$CAP" convert -I"$INC" json:text --short schema/codec.capnp Sample' &
+            //' < '//tmp//'/num.in > '//tmp//'/num.ours 2>/dev/null; echo $? > '//tmp//'/num.ours.rc' &
+            //' && cmp -s '//tmp//'/num.ref '//tmp//'/num.ours' &
+            //' && cmp -s '//tmp//'/num.ref.rc '//tmp//'/num.ours.rc' &
+            //' && grep -qx 1 '//tmp//'/num.ours.rc')) then
+            call test_failed(error, 'number stream does not match capnp')
+         end if
+      end subroutine check_stream
    end subroutine run_json_dup_bad
 
    subroutine run_canonical_null_root(error)
