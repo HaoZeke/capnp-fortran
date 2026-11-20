@@ -31,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(21))
+      allocate (testsuite(22))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -74,6 +74,8 @@ contains
       testsuite(20)%test => run_brand_depth
       testsuite(21)%name = "dynamic-union-disc"
       testsuite(21)%test => run_union_disc
+      testsuite(22)%name = "dynamic-bad-handle"
+      testsuite(22)%test => run_bad_handle
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1112,6 +1114,60 @@ contains
                   'null reader: builder flag is not read through or')
       call capnp_dyn_free(schema)
    end subroutine run_null_reader
+
+   !> A list, or a struct that claims data it does not have, is not a
+   !> successful default. A null handle still reads the default.
+   subroutine run_bad_handle(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, bare
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: n
+      integer :: err, idx, tag
+      logical :: flag
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_EIGHT, 1_int64, err)
+      n = capnp_dyn_get_int(schema, idx, lst, 'i8', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. n == 0_int64, &
+                  'bad-handle: int on a list')
+      flag = capnp_dyn_get_bool(schema, idx, lst, 'b', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. .not. flag, &
+                  'bad-handle: bool on a list')
+      x = capnp_dyn_get_f64(schema, idx, lst, 'f64', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. x == 0.0_real64, &
+                  'bad-handle: float on a list')
+      bare = capnp_ptr_t()
+      bare%kind = CAPNP_PK_STRUCT
+      bare%dwords = 1
+      n = capnp_dyn_get_int(schema, idx, bare, 'i8', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. n == 0_int64, &
+                  'bad-handle: int with no message')
+      bare = capnp_ptr_t()
+      n = capnp_dyn_get_int(schema, idx, bare, 'i8', err)
+      call check_(error, err == CAPNP_OK .and. n == 0_int64, &
+                  'bad-handle: null handle reads the default')
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      root%seg = 9
+      n = capnp_dyn_get_int(schema, idx, root, 'i8', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. n == 0_int64, &
+                  'bad-handle: segment is outside the message')
+      idx = capnp_dyn_find(schema, 'Shape', err)
+      tag = capnp_dyn_which(schema, idx, lst, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. tag == -1, &
+                  'bad-handle: which on a list')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_bad_handle
 
    !> A failed discriminant write is the error the caller sees, and the
    !> value is not stored afterwards.
