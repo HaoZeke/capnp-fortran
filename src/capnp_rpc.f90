@@ -608,6 +608,9 @@ contains
       call free_answer_waits(conn)
       call free_incoming_waits(conn)
       call clear_joins(conn)
+      if (allocated(conn%introductions)) deallocate (conn%introductions)
+      conn%intro_used = 0
+      conn%intro_free = -1
    end subroutine rpc_conn_close
 
    !> Inquiry getters over connection state, so callers need not touch
@@ -2591,6 +2594,7 @@ contains
       integer(int64), intent(in) :: qid
       logical, intent(in) :: retain_caps
       integer :: i
+      if (.not. allocated(conn%introductions)) return
       do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%qid /= qid) cycle

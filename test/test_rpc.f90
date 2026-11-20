@@ -134,7 +134,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(116))
+      allocate (testsuite(117))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -355,18 +355,20 @@ contains
       testsuite(109)%test => w_resolve_unknown_promise_reads_answer
       testsuite(110)%name = "rpc-cancel-call-on-pending-answer"
       testsuite(110)%test => w_cancel_call_on_pending_answer
-      testsuite(111)%name = "posix-recv-eintr-retried"
-      testsuite(111)%test => t_recv_all_retries_eintr
-      testsuite(112)%name = "rpc-framing-511-accepted"
-      testsuite(112)%test => t_framing_511_accepted
-      testsuite(113)%name = "rpc-framing-512-rejected"
-      testsuite(113)%test => t_framing_512_rejected
-      testsuite(114)%name = "rpc-framing-oversized-rejected"
-      testsuite(114)%test => t_framing_oversized_rejected
-      testsuite(115)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(115)%test => t_framing_negative_traversal_rejected
-      testsuite(116)%name = "rpc-framing-short-and-padded"
-      testsuite(116)%test => t_framing_short_and_padded
+      testsuite(111)%name = "rpc-close-forgets-introductions"
+      testsuite(111)%test => w_close_forgets_introductions
+      testsuite(112)%name = "posix-recv-eintr-retried"
+      testsuite(112)%test => t_recv_all_retries_eintr
+      testsuite(113)%name = "rpc-framing-511-accepted"
+      testsuite(113)%test => t_framing_511_accepted
+      testsuite(114)%name = "rpc-framing-512-rejected"
+      testsuite(114)%test => t_framing_512_rejected
+      testsuite(115)%name = "rpc-framing-oversized-rejected"
+      testsuite(115)%test => t_framing_oversized_rejected
+      testsuite(116)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(116)%test => t_framing_negative_traversal_rejected
+      testsuite(117)%name = "rpc-framing-short-and-padded"
+      testsuite(117)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -729,6 +731,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_cancel_call_on_pending_answer(error)
    end subroutine w_cancel_call_on_pending_answer
+
+   subroutine w_close_forgets_introductions(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_close_forgets_introductions(error)
+   end subroutine w_close_forgets_introductions
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7010,6 +7017,56 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_result_third_party_vine_finish
+
+   !> A closed connection has no peer left to pick an introduction up
+   !> from, so close forgets them, and a later pickup is refused.
+   subroutine t_close_forgets_introductions(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qcall
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qcall, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call rpc_write_third_party_cap(cd, '10.1.0.4', 5004, 921_int64, 82_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call check_(error, rpc_pending_introductions(cconn) == 1, &
+                  'close: the introduction is recorded')
+      call rpc_conn_close(cconn)
+      call check_(error, rpc_pending_introductions(cconn) == 0, &
+                  'close: introductions are forgotten')
+      call rpc_introduction_done(cconn, 921_int64, e)
+      call check_(error, e /= CAPNP_OK, 'close: a later pickup is refused')
+      call rpc_conn_close(sconn)
+   end subroutine t_close_forgets_introductions
 
    !> A Finish that released a thirdPartyHosted vine frees its export id.
    !> When the peer hands that id out again, a late `rpc_introduction_done`
