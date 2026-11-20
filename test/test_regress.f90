@@ -91,7 +91,8 @@ contains
          new_unittest("packed-zero-cap", run_packed_zero_cap), &
          new_unittest("json-trailing-spaces", run_json_trailing_spaces), &
          new_unittest("json-union-clear", run_json_union_clear), &
-         new_unittest("json-nul-eof", run_json_nul_eof) &
+         new_unittest("json-nul-eof", run_json_nul_eof), &
+         new_unittest("json-nest-limit", run_json_nest_limit) &
          ]
    end subroutine collect_regress
 
@@ -2316,5 +2317,44 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_nul_eof
+
+   !> Cap'n Proto C++ enforces nestingDepth <= 64 on JSON containers ({ and [)
+   !> only, allowing scalars inside container 64 and rejecting container 65.
+   subroutine run_json_nest_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      character(len=:), allocatable :: js
+      integer :: err, idx
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'nest-limit: find Sample')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      js = repeat('{"x":', 63)//'{}'//repeat('}', 63)
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_OK, 'nest-limit: 64 empty objects accepted')
+      call capnp_message_free(msg)
+      js = repeat('{"x":', 63)//'{"y":1}'//repeat('}', 63)
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_OK, 'nest-limit: scalar inside 64th object accepted')
+      call capnp_message_free(msg)
+      js = repeat('{"x":', 64)//'{}'//repeat('}', 64)
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_ERR_DEPTH, 'nest-limit: 65 empty objects rejected')
+      call capnp_message_free(msg)
+      js = '{"x":'//repeat('[', 63)//'1'//repeat(']', 63)//'}'
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_OK, 'nest-limit: 64 mixed containers with scalar accepted')
+      call capnp_message_free(msg)
+      js = '{"x":'//repeat('[', 64)//repeat(']', 64)//'}'
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_ERR_DEPTH, 'nest-limit: 65 mixed containers rejected')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_nest_limit
 
 end module test_regress

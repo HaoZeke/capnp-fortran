@@ -2080,10 +2080,6 @@ contains
       integer, intent(out) :: err
       character(len=1) :: c
       err = CAPNP_OK
-      if (depth > MAX_DEPTH) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
       call jskip(sc)
       c = jpeek(sc)
       if (c == '{') then
@@ -2110,6 +2106,10 @@ contains
       character(len=:), allocatable :: key
       integer :: n
       err = CAPNP_OK
+      if (depth >= MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       jv%k = JK_OBJ
       sc%i = sc%i + 1
       n = 0
@@ -2161,6 +2161,10 @@ contains
       type(jval) :: one
       integer :: n
       err = CAPNP_OK
+      if (depth >= MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       jv%k = JK_ARR
       sc%i = sc%i + 1
       n = 0
