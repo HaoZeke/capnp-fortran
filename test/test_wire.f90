@@ -22,6 +22,7 @@ contains
            new_unittest("composite-list", test_composite_list), &
            new_unittest("nested-struct", test_nested_struct), &
            new_unittest("far-pointer", test_far_pointer), &
+           new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -369,6 +370,36 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_far_pointer
+   !> A single far whose landing pad is another far is not a struct.
+   !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
+   subroutine test_far_chain_rejected(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: hdr
+      integer :: err
+      hdr = 16_int64
+      allocate (buf(0:hdr + 32_int64 - 1))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 2_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 1_int32)
+      call cp_put_i32(buf, 12_int64, 2_int32)
+      call cp_put_i64(buf, hdr, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, hdr + 8_int64, wp_make_far(.false., 0_int64, 2_int64))
+      call cp_put_i64(buf, hdr + 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, hdr + 24_int64, 99_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'far-chain: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_KIND, 'far-chain: landing pad far is rejected')
+      if (allocated(error)) return
+      call check(error, root%kind /= CAPNP_PK_STRUCT, 'far-chain: not read as struct')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_far_chain_rejected
    !> Multi-segment double-far: pointer on seg A, landing pad (single far +
    !> tag) on seg B, object on seg C. Serialize, deserialize, resolve through
    !> resolve_double_far and read the object's data word.

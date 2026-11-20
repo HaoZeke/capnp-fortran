@@ -141,7 +141,17 @@ contains
          tseg = int(tseg64) + 1
          pad_off = wp_far_off(w)*8_int64
          if (.not. wp_far_two(w)) then
-            ! Single far: the pad is an ordinary intra-segment pointer.
+            ! Single far: the landing pad is the final pointer. A second
+            ! far is not a struct (layout.c++ readStructPointer, the
+            ! kind == STRUCT check).
+            if (pad_off < 0_int64 .or. pad_off + 8_int64 > msg%segs(tseg)%len) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+            if (wp_kind(cp_get_i64(msg%segs(tseg)%bytes, pad_off)) == CAPNP_WK_FAR) then
+               err = CAPNP_ERR_KIND
+               return
+            end if
             call resolve_at(msg, tseg, pad_off, depth + 1, p, err)
          else
             call resolve_double_far(msg, tseg, pad_off, depth, p, err)
