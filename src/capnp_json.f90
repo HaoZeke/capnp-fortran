@@ -38,6 +38,10 @@ module capnp_json
    integer(int64), parameter :: ANN_B64 = int(z'D7D879450A253E4B', int64)
    integer(int64), parameter :: ANN_HEX = int(z'F061E22F0AE5C7B5', int64)
    integer, parameter :: MAX_DEPTH = 64
+   ! Schema graphs are not the message nesting limit. The compiler uses
+   ! an unbounded nesting limit and still accepts chains far past 64.
+   ! Stop before a recursion that would exhaust the stack.
+   integer, parameter :: SCHEMA_WALK_LIMIT = 4096
    integer, parameter :: UNION_SEEN_MAX = 64
    integer, save :: union_seen_n = 0
    integer, save :: union_seen_seg(UNION_SEEN_MAX)
@@ -3268,16 +3272,23 @@ contains
       call audit_visit(schema, idx, done, err)
    end subroutine audit_json
 
-   recursive subroutine audit_visit(schema, idx, done, err)
+   recursive subroutine audit_visit(schema, idx, done, err, depth)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       logical, intent(inout) :: done(:)
       integer, intent(out) :: err
+      integer, intent(in), optional :: depth
       type(disc_opts_t) :: no_disc
       type(jname_t), allocatable :: names(:)
       type(capnp_ptr_t) :: fl, f, raw_t
-      integer :: stack(128), sp, nn, i, nf, sidx
+      integer :: stack(128), sp, nn, i, nf, sidx, d
       err = CAPNP_OK
+      d = 0
+      if (present(depth)) d = depth
+      if (d > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (idx < 1 .or. idx > size(done)) return
       if (done(idx)) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) return
@@ -3294,11 +3305,11 @@ contains
          if (err /= CAPNP_OK) return
          if (field_which(f) == FIELD_GROUP) then
             sidx = capnp_codec_find_id(schema, field_group_type_id(f))
-            if (sidx /= 0) call audit_visit(schema, sidx, done, err)
+            if (sidx /= 0) call audit_visit(schema, sidx, done, err, d + 1)
          else
             raw_t = field_slot_type(f, err)
             if (err /= CAPNP_OK) return
-            call audit_field_type(schema, raw_t, done, err)
+            call audit_field_type(schema, raw_t, done, err, d + 1)
          end if
          if (err /= CAPNP_OK) return
       end do
@@ -3448,22 +3459,29 @@ contains
       sp = sp - 1
    end subroutine audit_build
 
-   recursive subroutine audit_field_type(schema, t, done, err)
+   recursive subroutine audit_field_type(schema, t, done, err, depth)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t
       logical, intent(inout) :: done(:)
       integer, intent(out) :: err
+      integer, intent(in), optional :: depth
       type(capnp_ptr_t) :: et
-      integer :: sidx
+      integer :: sidx, d
       err = CAPNP_OK
+      d = 0
+      if (present(depth)) d = depth
+      if (d > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       select case (type_which(t))
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call audit_field_type(schema, et, done, err)
+         call audit_field_type(schema, et, done, err, d + 1)
       case (TYPE_STRUCT)
          sidx = capnp_codec_find_id(schema, type_type_id(t))
-         if (sidx /= 0) call audit_visit(schema, sidx, done, err)
+         if (sidx /= 0) call audit_visit(schema, sidx, done, err, d + 1)
       case (TYPE_ENUM)
          sidx = capnp_codec_find_id(schema, type_type_id(t))
          if (sidx /= 0) call audit_enum(schema, sidx, done, err)

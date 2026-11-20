@@ -84,7 +84,8 @@ contains
          new_unittest("f32-text", run_f32_text), &
          new_unittest("regress-tmp", run_regress_tmp), &
          new_unittest("cli-sources", run_cli_sources), &
-         new_unittest("json-union-many", run_json_union_many) &
+         new_unittest("json-union-many", run_json_union_many), &
+         new_unittest("group-clear-depth", run_group_clear_depth) &
          ]
    end subroutine collect_regress
 
@@ -1820,5 +1821,59 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_union_many
+
+   !> Nested groups past the old cap of 8 still clear. The reader nesting
+   !> limit is 64, and this chain is well under it.
+   subroutine run_group_clear_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: src
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, i
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x8e9c0b1a2d3f4051;'//achar(10)// &
+            'struct Deep {'//achar(10)// &
+            '  union {'//achar(10)// &
+            '    nest :group {'//achar(10)
+      do i = 1, 9
+         src = src//'      g :group {'//achar(10)
+      end do
+      src = src//'        n @0 :Int32;'//achar(10)
+      do i = 1, 9
+         src = src//'      }'//achar(10)
+      end do
+      src = src//'    }'//achar(10)// &
+            '    other @1 :Void;'//achar(10)// &
+            '  }'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/deep.capnp', src, err)
+      if (.not. sh('capnp compile -o- '//tmp//'/deep.capnp > '//tmp//'/deep.cgr')) then
+         call test_failed(error, 'group-depth: compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/deep.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Deep', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'group-depth: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'other', err)
+      call check_(error, err == CAPNP_OK, 'group-depth: clear a deep group')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_group_clear_depth
 
 end module test_regress

@@ -390,7 +390,13 @@ contains
       which = -1
       id = 0_int64
       err = CAPNP_OK
-      if (depth > 8) return
+      ! Reader nesting is 64 (message.h). Past that, report depth instead
+      ! of a silent unresolved type. Chains the old cap of 8 rejected
+      ! still resolve.
+      if (depth > CAPNP_DEFAULT_DEPTH_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (t%kind == CAPNP_PK_NULL) return
       which = type_which(t)
       select case (which)
@@ -469,8 +475,8 @@ contains
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
       err = CAPNP_OK
-      if (depth > 8) then
-         err = CAPNP_ERR_ARG
+      if (depth > CAPNP_DEFAULT_DEPTH_LIMIT) then
+         err = CAPNP_ERR_DEPTH
          return
       end if
       if (idx < 1 .or. idx > size(schema%nodes)) then
