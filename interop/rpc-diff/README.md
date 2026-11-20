@@ -79,8 +79,8 @@ it implies.
 
 1. Lines inside one window are compared as a sorted list.
 2. In exception reasons a leading `remote exception: ` is dropped, and
-   `SRVEXC`, `PINGEXC` and the Fortran dispatch text
-   `method raised error` read `APPEXC`.
+   `SRVEXC` and the Fortran dispatch text `method raised error` read
+   `APPEXC`. The ping exception `PINGEXC` is compared as it is.
 3. A leading `expected <condition> [<values>]; ` is dropped, the
    `KJ_REQUIRE` prefix that carries addresses.
 

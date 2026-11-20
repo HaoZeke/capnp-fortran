@@ -200,7 +200,12 @@ contains
                call set_n(ctx, got, err)
             end if
          end if
-         call rpc_deferred_return(conn, w%answer, e, failed=err /= CAPNP_OK)
+         if (err == RPC_ERR_EXCEPTION) then
+            call rpc_deferred_return(conn, w%answer, e, failed=.true., &
+                                     reason='remote exception: '//rpc_conn_reason(conn))
+         else
+            call rpc_deferred_return(conn, w%answer, e, failed=err /= CAPNP_OK)
+         end if
       end do
    end subroutine settle_slow
 

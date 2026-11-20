@@ -15,10 +15,10 @@ Normalisation, applied to both logs before comparing:
      before the sync call returns, but they may emit independent
      messages of one step in a different order.
   2. In exception reasons a leading "remote exception: " is dropped,
-     and the application texts SRVEXC, PINGEXC and the Fortran
-     dispatch text "method raised error" all read APPEXC. A peer
-     method raising, or passing on the driver's ping exception, is
-     application behaviour.
+     and the application text SRVEXC and the Fortran dispatch text
+     "method raised error" both read APPEXC. A peer method raising is
+     application behaviour. The driver's ping exception PINGEXC, which
+     a slow call passes on, is compared as it is.
   3. A leading "expected <condition> [<values>]; " is dropped from
      reasons. KJ_REQUIRE prefixes it to the message, and the values are
      often addresses; the message after it is what is compared.
@@ -37,7 +37,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 
-APP_TEXTS = ("SRVEXC", "PINGEXC", "method raised error")
+APP_TEXTS = ("SRVEXC", "method raised error")
 
 
 def norm_line(line):
