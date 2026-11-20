@@ -1225,9 +1225,17 @@ contains
       call check(error, efile == CAPNP_OK .and. size(bytes) == 0, 'empty-file: zero bytes returned')
       if (allocated(error)) return
       call capnp_deserialize_bytes(bytes, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 0, &
+                 'empty-file: flat empty bytes are a message')
+      if (allocated(error)) return
       canonical = capnp_is_canonical(msg, err)
-      call check(error, err == CAPNP_OK .and. msg%nsegs == 0 .and. .not. canonical, &
+      call check(error, err == CAPNP_OK .and. .not. canonical, &
                  'empty-file: flat empty message is non-canonical')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 0, &
+                 'empty-file: flat empty view is a message')
       call capnp_message_free(msg)
    end subroutine test_read_empty_file
 
