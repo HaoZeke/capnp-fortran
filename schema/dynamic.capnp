@@ -51,3 +51,41 @@ struct Scalars {
   note @13 :Text;
   blob @14 :Data;
 }
+
+# Groups nested past the depth a walker could cap: selecting another arm
+# clears all of them.
+struct DeepGroups {
+  union {
+    a @0 :Int32;
+    g1 :group {
+      v1 @1 :Int32;
+      g2 :group {
+        v2 @2 :Int32;
+        g3 :group {
+          v3 @3 :Int32;
+          g4 :group {
+            v4 @4 :Int32;
+            g5 :group {
+              v5 @5 :Int32;
+              g6 :group {
+                v6 @6 :Int32;
+                g7 :group {
+                  v7 @7 :Int32;
+                  g8 :group {
+                    v8 @8 :Int32;
+                    g9 :group {
+                      v9 @9 :Int32;
+                      g10 :group {
+                        v10 @10 :Int32;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
