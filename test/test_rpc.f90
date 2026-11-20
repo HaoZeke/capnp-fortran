@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(97))
+      allocate (testsuite(98))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -300,18 +300,20 @@ contains
       testsuite(90)%test => w_vine_done_after_finish_reused_id
       testsuite(91)%name = "rpc-shutdown"
       testsuite(91)%test => w_shutdown
-      testsuite(92)%name = "posix-recv-eintr-retried"
-      testsuite(92)%test => t_recv_all_retries_eintr
-      testsuite(93)%name = "rpc-framing-511-accepted"
-      testsuite(93)%test => t_framing_511_accepted
-      testsuite(94)%name = "rpc-framing-512-rejected"
-      testsuite(94)%test => t_framing_512_rejected
-      testsuite(95)%name = "rpc-framing-oversized-rejected"
-      testsuite(95)%test => t_framing_oversized_rejected
-      testsuite(96)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(96)%test => t_framing_negative_traversal_rejected
-      testsuite(97)%name = "rpc-framing-short-and-padded"
-      testsuite(97)%test => t_framing_short_and_padded
+      testsuite(92)%name = "rpc-finish-after-resolve"
+      testsuite(92)%test => w_finish_after_resolve
+      testsuite(93)%name = "posix-recv-eintr-retried"
+      testsuite(93)%test => t_recv_all_retries_eintr
+      testsuite(94)%name = "rpc-framing-511-accepted"
+      testsuite(94)%test => t_framing_511_accepted
+      testsuite(95)%name = "rpc-framing-512-rejected"
+      testsuite(95)%test => t_framing_512_rejected
+      testsuite(96)%name = "rpc-framing-oversized-rejected"
+      testsuite(96)%test => t_framing_oversized_rejected
+      testsuite(97)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(97)%test => t_framing_negative_traversal_rejected
+      testsuite(98)%name = "rpc-framing-short-and-padded"
+      testsuite(98)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -539,6 +541,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_disembargo_promised_bad_walk(error)
    end subroutine w_disembargo_promised_bad_walk
+
+   subroutine w_finish_after_resolve(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_finish_after_resolve(error)
+   end subroutine w_finish_after_resolve
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7339,5 +7346,120 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_disembargo_promised_bad_walk
+
+   !> Resolve releases the promise export. Finish after that must set
+   !> releaseResultCaps false and Release the resolved capability once.
+   !> releaseResultCaps true makes a C++ 1.4.0 peer abort with
+   !> "Tried to release invalid export ID."
+   subroutine t_finish_after_resolve(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, promised
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(return_t) :: r
+      type(resolve_t) :: rv
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      type(finish_t) :: fin
+      type(release_t) :: rel
+      integer :: fa, fb, e, nmsg
+      integer(int64) :: qboot, q1
+      logical :: readable, saw_finish, saw_target, saw_promise_again
+      logical :: flag
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q1, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q1, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, 4_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, q1, [integer ::], promised, e)
+      call check_(error, e == CAPNP_OK .and. promised%kind == RPC_CAP_IMPORT, &
+                  'finish-after-resolve: promise cap')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_hosted_set(cd, 5_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 4_int64 .and. &
+                  release_reference_count_get(rel) == 1_int64, &
+                  'finish-after-resolve: Resolve releases the promise')
+      call capnp_message_free(reply)
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+
+      call rpc_finish_send(cconn, q1, .false., e)
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'finish-after-resolve: client stays up')
+      saw_finish = .false.
+      saw_target = .false.
+      saw_promise_again = .false.
+      flag = .true.
+      do nmsg = 1, 4
+         call px_poll_in(sconn%fd, 200, readable, e)
+         if (e /= CAPNP_OK .or. .not. readable) exit
+         call rpc_recv_message(sconn%fd, reply, e)
+         if (e /= CAPNP_OK) exit
+         rmsg = message_read_root(reply, e)
+         if (message_which(rmsg) == MESSAGE_FINISH_TAG) then
+            fin = message_finish_get(rmsg, e)
+            saw_finish = e == CAPNP_OK .and. finish_question_id_get(fin) == q1
+            if (saw_finish) flag = finish_release_result_caps_get(fin)
+         else if (message_which(rmsg) == MESSAGE_RELEASE_TAG) then
+            rel = message_release_get(rmsg, e)
+            if (e == CAPNP_OK .and. release_id_get(rel) == 5_int64 .and. &
+                release_reference_count_get(rel) == 1_int64) saw_target = .true.
+            if (e == CAPNP_OK .and. release_id_get(rel) == 4_int64) &
+               saw_promise_again = .true.
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, saw_finish .and. .not. flag, &
+                  'finish-after-resolve: releaseResultCaps is false')
+      call check_(error, saw_target, &
+                  'finish-after-resolve: Releases the resolved capability')
+      call check_(error, .not. saw_promise_again, &
+                  'finish-after-resolve: promise export is not released again')
+      call check_(error, rpc_conn_alive(cconn), &
+                  'finish-after-resolve: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_after_resolve
 
 end module test_rpc

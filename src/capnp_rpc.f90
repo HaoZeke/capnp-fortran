@@ -2271,7 +2271,9 @@ contains
    end subroutine rpc_result_cap
 
    !> Tell the peer we are done with a question. retain_caps=.true. keeps
-   !> capabilities we imported from the results alive.
+   !> capabilities we imported from the results alive. After Resolve has
+   !> already Released a result promise, releaseResultCaps stays false
+   !> and the question Releases the capability the promise resolved to.
    subroutine rpc_finish_send(conn, qid, retain_caps, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
@@ -2280,7 +2282,8 @@ contains
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(finish_t) :: f
-      integer :: q
+      integer :: q, relerr
+      logical :: release_flag, explicit_release, ignored
       err = CAPNP_OK
       if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
          err = CAPNP_ERR_BOUNDS
@@ -2291,23 +2294,68 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      explicit_release = .false.
+      if (.not. retain_caps .and. conn%questions(q)%returned .and. &
+          .not. conn%questions(q)%local_call .and. &
+          .not. conn%questions(q)%local_results) then
+         call scan_result_imports(conn, q, explicit_release, .false., err)
+         if (err /= CAPNP_OK) return
+      end if
+      release_flag = .not. retain_caps
+      if (explicit_release) release_flag = .false.
+      ! C++ sets releaseResultCaps only while the Return is outstanding
+      ! (rpc.c++ ~QuestionRef). A Return with no capabilities to release
+      ! needs none.
+      if (conn%questions(q)%returned .and. .not. result_has_caps(conn, q)) release_flag = .false.
       if (.not. conn%questions(q)%local_call) then
          call capnp_message_init_builder(m, err)
          if (err /= CAPNP_OK) return
          msg = message_new_root(m, err)
          f = message_finish_init(msg, err)
          call finish_question_id_set(f, qid, err)
-         call finish_release_result_caps_set(f, .not. retain_caps, err)
+         call finish_release_result_caps_set(f, release_flag, err)
          call finish_require_early_cancellation_workaround_set(f, .false., err)
          if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
          call capnp_message_free(m)
       end if
-      if (.not. retain_caps) call drop_finished_caps(conn, q)
+      if (.not. retain_caps) then
+         if (explicit_release) then
+            call scan_result_imports(conn, q, ignored, .true., relerr)
+            if (err == CAPNP_OK) err = relerr
+         else
+            call drop_finished_caps(conn, q)
+         end if
+      end if
       if (conn%questions(q)%used) then
          call capnp_message_free(conn%questions(q)%retmsg)
          call question_slot_clear(conn%questions(q))
       end if
    end subroutine rpc_finish_send
+
+   !> True when the Return of question `q` is a result with at least one
+   !> capability descriptor.
+   logical function result_has_caps(conn, q) result(has)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: q
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      integer :: ierr
+      has = .false.
+      if (conn%questions(q)%retmsg%nsegs < 1) return
+      msg = message_read_root(conn%questions(q)%retmsg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) return
+      r = message_return_get(msg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (return_which(r) /= RETURN_RESULTS_TAG) return
+      pl = return_results_get(r, ierr)
+      if (ierr /= CAPNP_OK) return
+      ctab = payload_cap_table_get(pl, ierr)
+      if (ierr /= CAPNP_OK) return
+      has = capnp_list_len(ctab) > 0
+   end function result_has_caps
 
    !> Finish(releaseResultCaps) is the release. A later rpc_release_send
    !> must not send a second Release for the same result caps.
@@ -2390,6 +2438,79 @@ contains
       node%refs = node%refs - 1
       if (node%refs == 0) node%released = .true.
    end subroutine forget_import_ref
+
+   !> Walk result imports recorded for question `q`. `any_released` is
+   !> true when one of them has already sent Release. With `do_release`,
+   !> each import is released through `rpc_release_send`, which follows
+   !> a resolved promise onto its replacement.
+   subroutine scan_result_imports(conn, q, any_released, do_release, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      logical, intent(out) :: any_released
+      logical, intent(in) :: do_release
+      integer, intent(out) :: err
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      type(rpc_import_node_t), pointer :: node
+      type(rpc_cap_t) :: cap
+      integer :: i, n, ierr
+      integer(int64) :: id
+      logical :: found
+      any_released = .false.
+      err = CAPNP_OK
+      if (.not. conn%questions(q)%returned) return
+      msg = message_read_root(conn%questions(q)%retmsg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) return
+      r = message_return_get(msg, ierr)
+      if (ierr /= CAPNP_OK) return
+      if (return_which(r) /= RETURN_RESULTS_TAG) return
+      pl = return_results_get(r, ierr)
+      if (ierr /= CAPNP_OK) return
+      ctab = payload_cap_table_get(pl, ierr)
+      if (ierr /= CAPNP_OK) return
+      n = int(capnp_list_len(ctab))
+      do i = 0, n - 1
+         cd%p = capnp_list_get_struct(ctab, i, ierr)
+         if (ierr /= CAPNP_OK) cycle
+         id = -1_int64
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            id = cap_descriptor_sender_hosted_get(cd)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            id = cap_descriptor_sender_promise_get(cd)
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            block
+               type(third_party_cap_descriptor_t) :: tp
+               integer :: verr
+               tp = cap_descriptor_third_party_hosted_get(cd, verr)
+               if (verr == CAPNP_OK .and. tp%p%kind == CAPNP_PK_STRUCT) &
+                  id = third_party_cap_descriptor_vine_id_get(tp)
+            end block
+         end select
+         if (id < 0_int64) cycle
+         found = .false.
+         node => null()
+         if (i < conn%questions(q)%nresult_handles .and. &
+             conn%questions(q)%result_handles(i) /= -1_int64) then
+            call import_find(conn, conn%questions(q)%result_handles(i), node, found)
+         else
+            call import_find_live(conn, id, node, found)
+            if (.not. found) call import_find_wire(conn, id, node, found)
+         end if
+         if (.not. found) cycle
+         if (node%released) any_released = .true.
+         if (do_release) then
+            cap%kind = RPC_CAP_IMPORT
+            cap%id = node%id
+            call rpc_release_send(conn, cap, err)
+            if (err /= CAPNP_OK) return
+         end if
+      end do
+   end subroutine scan_result_imports
 
    !> Request cancellation by sending Finish before a Return. Modern
    !> peers receive requireEarlyCancellationWorkaround=false, matching
