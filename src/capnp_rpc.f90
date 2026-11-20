@@ -5222,25 +5222,34 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
+      integer(int64), allocatable :: used(:)
       integer :: i, n, eid
       integer(int64) :: id
       err = CAPNP_OK
       if (inp%p%kind /= CAPNP_PK_STRUCT) return
       content = payload_content_get(inp, err)
       if (err /= CAPNP_OK) return
+      ! C++ copies the content and injects each cap it points to, so a
+      ! cap table entry nothing points to is not sent on.
+      allocate (used(0))
       if (content%kind /= CAPNP_PK_NULL) then
-         call payload_content_set(outp, capnp_copy(m, content, err), err)
+         call payload_content_set(outp, capnp_copy(m, content, err, caps=used), err)
          if (err /= CAPNP_OK) return
       end if
       ictab = payload_cap_table_get(inp, err)
       if (err /= CAPNP_OK) return
-      n = int(capnp_list_len(ictab))
+      n = size(used)
       if (n == 0) return
       octab = payload_cap_table_init(outp, int(n, int64), err)
       do i = 0, n - 1
          if (err /= CAPNP_OK) return
-         icd%p = capnp_list_get_struct(ictab, i, err)
-         if (err == CAPNP_OK) ocd%p = capnp_list_get_struct(octab, i, err)
+         ocd%p = capnp_list_get_struct(octab, i, err)
+         if (err /= CAPNP_OK) return
+         if (used(i + 1) < 0_int64 .or. used(i + 1) >= capnp_list_len(ictab)) then
+            call cap_descriptor_none_set(ocd, err)
+            cycle
+         end if
+         icd%p = capnp_list_get_struct(ictab, int(used(i + 1)), err)
          if (err /= CAPNP_OK) return
          select case (cap_descriptor_which(icd))
          case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)

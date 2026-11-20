@@ -171,7 +171,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(146))
+      allocate (testsuite(147))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -452,18 +452,20 @@ contains
       testsuite(139)%test => w_queued_call_param_promise_resolve
       testsuite(140)%name = "rpc-param-promise-resolves-twice"
       testsuite(140)%test => w_param_promise_resolves_twice
-      testsuite(141)%name = "posix-recv-eintr-retried"
-      testsuite(141)%test => t_recv_all_retries_eintr
-      testsuite(142)%name = "rpc-framing-511-accepted"
-      testsuite(142)%test => t_framing_511_accepted
-      testsuite(143)%name = "rpc-framing-512-rejected"
-      testsuite(143)%test => t_framing_512_rejected
-      testsuite(144)%name = "rpc-framing-oversized-rejected"
-      testsuite(144)%test => t_framing_oversized_rejected
-      testsuite(145)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(145)%test => t_framing_negative_traversal_rejected
-      testsuite(146)%name = "rpc-framing-short-and-padded"
-      testsuite(146)%test => t_framing_short_and_padded
+      testsuite(141)%name = "rpc-forward-drops-unreferenced-caps"
+      testsuite(141)%test => w_forward_drops_unreferenced_caps
+      testsuite(142)%name = "posix-recv-eintr-retried"
+      testsuite(142)%test => t_recv_all_retries_eintr
+      testsuite(143)%name = "rpc-framing-511-accepted"
+      testsuite(143)%test => t_framing_511_accepted
+      testsuite(144)%name = "rpc-framing-512-rejected"
+      testsuite(144)%test => t_framing_512_rejected
+      testsuite(145)%name = "rpc-framing-oversized-rejected"
+      testsuite(145)%test => t_framing_oversized_rejected
+      testsuite(146)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(146)%test => t_framing_negative_traversal_rejected
+      testsuite(147)%name = "rpc-framing-short-and-padded"
+      testsuite(147)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1077,6 +1079,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_param_promise_resolves_twice(error)
    end subroutine w_param_promise_resolves_twice
+
+   subroutine w_forward_drops_unreferenced_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forward_drops_unreferenced_caps(error)
+   end subroutine w_forward_drops_unreferenced_caps
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10220,11 +10227,14 @@ contains
 
    !> pa_send with params whose content is cap 0, senderHosted(`hosted`).
    !> `yourself` asks for the results to stay with the callee.
-   subroutine pa_send_cap(sconn, cq, qid, fields, hosted, yourself)
+   subroutine pa_send_cap(sconn, cq, qid, fields, hosted, yourself, spare)
       type(rpc_conn_t), intent(inout), target :: sconn
       integer(int64), intent(in) :: cq, qid, hosted
       integer, intent(in) :: fields(:)
       logical, intent(in), optional :: yourself
+      !> A senderHosted entry ahead of `hosted` that the content does not
+      !> point to.
+      integer(int64), intent(in), optional :: spare
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -10253,9 +10263,17 @@ contains
          call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
       end do
       params = call_params_init(c, e)
-      call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
-      ctab = payload_cap_table_init(params, 1_int64, e)
-      cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (present(spare)) then
+         call payload_content_set(params, rpc_make_cap_ptr(m, 1), e)
+         ctab = payload_cap_table_init(params, 2_int64, e)
+         cd%p = capnp_list_get_struct(ctab, 0, e)
+         call cap_descriptor_sender_hosted_set(cd, spare, e)
+         cd%p = capnp_list_get_struct(ctab, 1, e)
+      else
+         call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
+         ctab = payload_cap_table_init(params, 1_int64, e)
+         cd%p = capnp_list_get_struct(ctab, 0, e)
+      end if
       call cap_descriptor_sender_hosted_set(cd, hosted, e)
       call rpc_send_message(sconn%fd, m, e)
       call capnp_message_free(m)
@@ -11666,5 +11684,58 @@ contains
       call rpc_send_message(peer_fd, m, e)
       call capnp_message_free(m)
    end subroutine send_resolve_promise
+
+   !> A forwarded call sends on only the caps its content points to,
+   !> numbered from zero, as C++ copies the params and injects each cap
+   !> it meets. A cap table entry nothing points to stays behind.
+   subroutine t_forward_drops_unreferenced_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab, content
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qboot, qadder, eid, ncaps, rh
+      integer :: e, n
+      logical :: ok, seen
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send_cap(sconn, 30_int64, qadder, [0], 55_int64, spare=54_int64)
+      call rpc_pump_once(cconn, e)
+      seen = .false.
+      ncaps = -1_int64
+      rh = -1_int64
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG .and. .not. seen) then
+            c = message_call_get(msg, e)
+            if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) then
+               seen = .true.
+               pl = call_params_get(c, e)
+               content = payload_content_get(pl, e)
+               ctab = payload_cap_table_get(pl, e)
+               ncaps = capnp_list_len(ctab)
+               if (ncaps == 1_int64 .and. content%kind == CAPNP_PK_CAP .and. &
+                   content%capidx == 0_int64) then
+                  cd%p = capnp_list_get_struct(ctab, 0, e)
+                  if (cap_descriptor_which(cd) == CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG) &
+                     rh = cap_descriptor_receiver_hosted_get(cd)
+               end if
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, seen .and. ncaps == 1_int64 .and. rh == 55_int64, &
+                  'forward caps: only the referenced cap goes on')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forward_drops_unreferenced_caps
 
 end module test_rpc

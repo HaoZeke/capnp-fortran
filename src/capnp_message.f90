@@ -2207,19 +2207,27 @@ contains
    ! basis of orphan adoption.
    ! ------------------------------------------------------------------
 
-   recursive function capnp_copy(msg, src, err) result(q)
+   !> With `caps`, each capability pointer met gets the next index of a
+   !> new cap table, and `caps` lists the source index of each entry in
+   !> order. That is how C++ injectCap numbers the caps of a copy.
+   recursive function capnp_copy(msg, src, err, caps) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: q
-      q = copy_depth(msg, src, 0, err)
+      if (present(caps)) then
+         if (.not. allocated(caps)) allocate (caps(0))
+      end if
+      q = copy_depth(msg, src, 0, err, caps)
    end function capnp_copy
 
-   recursive function copy_depth(msg, src, depth, err) result(q)
+   recursive function copy_depth(msg, src, depth, err, caps) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
       integer, intent(in) :: depth
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: r, c
       integer(int64) :: i, nb
@@ -2236,10 +2244,14 @@ contains
          q%msg => msg
          q%kind = CAPNP_PK_CAP
          q%capidx = src%capidx
+         if (present(caps)) then
+            q%capidx = int(size(caps), int64)
+            caps = [caps, src%capidx]
+         end if
       case (CAPNP_PK_STRUCT)
          q = capnp_new_struct(msg, src%dwords, src%pwords, err)
          if (err /= CAPNP_OK) return
-         call copy_struct_body(q, src, depth, err)
+         call copy_struct_body(q, src, depth, err, caps)
       case (CAPNP_PK_LIST)
          select case (src%esize)
          case (CAPNP_SZ_COMPOSITE)
@@ -2256,7 +2268,7 @@ contains
                c = capnp_list_get_struct(q, int(i), err)
                if (err /= CAPNP_OK) return
                r%off = src%off + i*int(src%dwords + src%pwords, int64)*8_int64
-               call copy_struct_body(c, r, depth + 1, err)
+               call copy_struct_body(c, r, depth + 1, err, caps)
                if (err /= CAPNP_OK) return
             end do
          case (CAPNP_SZ_PTR)
@@ -2265,7 +2277,7 @@ contains
             do i = 0_int64, src%nelem - 1_int64
                r = capnp_getp(src, int(i), err)
                if (err /= CAPNP_OK) return
-               c = copy_depth(msg, r, depth + 1, err)
+               c = copy_depth(msg, r, depth + 1, err, caps)
                if (err /= CAPNP_OK) return
                call capnp_setp(q, int(i), c, err)
                if (err /= CAPNP_OK) return
@@ -2284,10 +2296,11 @@ contains
 
    !> Copy the contents of struct src into the (already allocated) struct
    !> dst: overlapping data bytes verbatim, pointer fields recursively.
-   recursive subroutine copy_struct_body(dst, src, depth, err)
+   recursive subroutine copy_struct_body(dst, src, depth, err, caps)
       type(capnp_ptr_t), intent(in) :: dst, src
       integer, intent(in) :: depth
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: r, c
       integer(int64) :: nb
       integer :: i, np
@@ -2302,7 +2315,7 @@ contains
          r = capnp_getp(src, i, err)
          if (err /= CAPNP_OK) return
          if (r%kind == CAPNP_PK_NULL) cycle
-         c = copy_depth(dst%msg, r, depth + 1, err)
+         c = copy_depth(dst%msg, r, depth + 1, err, caps)
          if (err /= CAPNP_OK) return
          call capnp_setp(dst, i, c, err)
          if (err /= CAPNP_OK) return
