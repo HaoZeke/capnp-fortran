@@ -80,9 +80,9 @@ Two conventions to carry into every program that touches this API:
   generated =<type>_t=) hold a pointer to their owning message, so
   =msg= and =rmsg= above must both be declared =target=.
 - *Every fallible call returns* =err=. =CAPNP_OK= (0) means
-  success; readers never crash on malformed input, they return an
-  error code and defaults instead. Production code checks =err=
-  after each call; this listing omits the checks for brevity.
+  success; readers return an error code and defaults for the
+  malformed inputs covered by the test suite. Production code checks
+  =err= after each call; this listing omits the checks for brevity.
 
 * A typed RPC client and server
 
