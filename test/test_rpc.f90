@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(138))
+      allocate (testsuite(139))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -429,18 +429,20 @@ contains
       testsuite(131)%test => w_param_promise_resolve_releases
       testsuite(132)%name = "rpc-only-pipeline-call-sends-no-return"
       testsuite(132)%test => w_only_pipeline_call_sends_no_return
-      testsuite(133)%name = "posix-recv-eintr-retried"
-      testsuite(133)%test => t_recv_all_retries_eintr
-      testsuite(134)%name = "rpc-framing-511-accepted"
-      testsuite(134)%test => t_framing_511_accepted
-      testsuite(135)%name = "rpc-framing-512-rejected"
-      testsuite(135)%test => t_framing_512_rejected
-      testsuite(136)%name = "rpc-framing-oversized-rejected"
-      testsuite(136)%test => t_framing_oversized_rejected
-      testsuite(137)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(137)%test => t_framing_negative_traversal_rejected
-      testsuite(138)%name = "rpc-framing-short-and-padded"
-      testsuite(138)%test => t_framing_short_and_padded
+      testsuite(133)%name = "rpc-return-after-finish-is-legal"
+      testsuite(133)%test => w_return_after_finish_is_legal
+      testsuite(134)%name = "posix-recv-eintr-retried"
+      testsuite(134)%test => t_recv_all_retries_eintr
+      testsuite(135)%name = "rpc-framing-511-accepted"
+      testsuite(135)%test => t_framing_511_accepted
+      testsuite(136)%name = "rpc-framing-512-rejected"
+      testsuite(136)%test => t_framing_512_rejected
+      testsuite(137)%name = "rpc-framing-oversized-rejected"
+      testsuite(137)%test => t_framing_oversized_rejected
+      testsuite(138)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(138)%test => t_framing_negative_traversal_rejected
+      testsuite(139)%name = "rpc-framing-short-and-padded"
+      testsuite(139)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1004,6 +1006,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_only_pipeline_call_sends_no_return(error)
    end subroutine w_only_pipeline_call_sends_no_return
+
+   subroutine w_return_after_finish_is_legal(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_return_after_finish_is_legal(error)
+   end subroutine w_return_after_finish_is_legal
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11048,5 +11055,51 @@ contains
       call px_close(fb)
       call free_minted_adders()
    end subroutine t_only_pipeline_call_sends_no_return
+
+   !> A Finish sent before the Return keeps the question id until that
+   !> Return comes. C++ answers such a call with a canceled Return, and
+   !> taking it must leave the connection up.
+   subroutine t_return_after_finish_is_legal(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      class(rpc_server_t), pointer :: none
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: params
+      integer(int64) :: q
+      integer :: fa, fb, e
+      logical :: ok
+
+      none => null()
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, none)
+      cap = rpc_cap_t()
+      cap%kind = RPC_CAP_IMPORT
+      cap%id = 0_int64
+      call rpc_call_begin(conn, cap, ECHO_IFACE, 0, m, params, q, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_call_send(conn, m, e)
+      call rpc_finish_send(conn, q, .false., e)
+      call raw_next(fb, reply, msg, ok)
+      if (ok) call capnp_message_free(reply)
+      call raw_next(fb, reply, msg, ok)
+      if (ok) call capnp_message_free(reply)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q, e)
+      call return_release_param_caps_set(r, .false., e)
+      call return_canceled_set(r, e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(conn) .and. &
+                  .not. conn%questions(int(q))%used, &
+                  'a Return after Finish ends the question and keeps the connection')
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_return_after_finish_is_legal
 
 end module test_rpc

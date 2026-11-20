@@ -2330,9 +2330,15 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qids(:)
       integer, intent(in) :: nsent
-      integer :: i, ferr
+      integer :: i, q, ferr
       do i = 1, nsent
-         if (qids(i) >= 0_int64) call rpc_finish_send(conn, qids(i), .false., ferr)
+         if (qids(i) < 0_int64) cycle
+         call rpc_finish_send(conn, qids(i), .false., ferr)
+         ! A finished Join part is never answered, so its id is free now.
+         q = int(qids(i))
+         if (qslot_ok(conn, qids(i))) then
+            if (conn%questions(q)%used) call question_slot_clear(conn%questions(q))
+         end if
       end do
    end subroutine finish_sent_joins
 
@@ -2666,8 +2672,15 @@ contains
       end if
       call settle_result_introductions(conn, qid, retain_caps)
       if (conn%questions(q)%used) then
-         call capnp_message_free(conn%questions(q)%retmsg)
-         call question_slot_clear(conn%questions(q))
+         if (.not. conn%questions(q)%returned .and. .not. conn%questions(q)%local_call &
+             .and. .not. conn%dead) then
+            ! The peer still sends a Return, canceled or resultsSentElsewhere
+            ! (rpc.c++ ~RpcCallContext). The id stays reserved for it.
+            conn%questions(q)%canceled = .true.
+         else
+            call capnp_message_free(conn%questions(q)%retmsg)
+            call question_slot_clear(conn%questions(q))
+         end if
       end if
    end subroutine rpc_finish_send
 
