@@ -1262,13 +1262,15 @@ contains
       integer, intent(out) :: err
       integer :: i, n, v, nd, a, b, c, d, outn
       integer, allocatable :: vals(:)
+      character(len=1) :: ch
       err = CAPNP_OK
       n = len(s)
       allocate (vals(n))
       nd = 0
       do i = 1, n
-         if (s(i:i) == '=') cycle
-         v = index(B64, s(i:i)) - 1
+         ch = s(i:i)
+         if (ch == '=' .or. ch == ' ' .or. ch == achar(9) .or. ch == achar(10) .or. ch == achar(13)) cycle
+         v = index(B64, ch) - 1
          if (v < 0) then
             err = CAPNP_ERR_ARG
             return
