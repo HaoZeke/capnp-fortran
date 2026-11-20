@@ -31,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(30))
+      allocate (testsuite(31))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -92,6 +92,8 @@ contains
       testsuite(29)%test => run_nested_union_clear
       testsuite(30)%name = "dynamic-null-struct-pointers"
       testsuite(30)%test => run_null_struct_pointers
+      testsuite(31)%name = "dynamic-int-to-float"
+      testsuite(31)%test => run_int_to_float
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1887,5 +1889,56 @@ contains
       call capnp_message_free(bmsg)
       call capnp_dyn_free(schema)
    end subroutine run_null_struct_pointers
+
+   !> Integer writes on Float32 and Float64 fields convert to float,
+   !> matching DynamicStruct::Builder::set in dynamic.c++.
+   subroutine run_int_to_float(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema, kschema
+      type(capnp_message_t), target :: msg, kmsg
+      type(capnp_ptr_t) :: root, sink
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, sidx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+
+      call capnp_dyn_set_int(schema, idx, root, 'f32', -42_int64, err)
+      x = capnp_dyn_get_f64(schema, idx, root, 'f32', err)
+      call check_(error, err == CAPNP_OK .and. abs(x + 42.0_real64) < 1.0e-6_real64, &
+                  'int-to-float: negative int to f32')
+
+      call capnp_dyn_set_int(schema, idx, root, 'f64', 1000000_int64, err)
+      x = capnp_dyn_get_f64(schema, idx, root, 'f64', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1000000.0_real64) < 1.0e-12_real64, &
+                  'int-to-float: positive int to f64')
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      call capnp_dyn_load(kschema, bytes, err)
+      sidx = capnp_dyn_find(kschema, 'Sink', err)
+      call capnp_message_init_builder(kmsg, err)
+      sink = capnp_dyn_new_root(kschema, sidx, kmsg, err)
+      call capnp_dyn_set_int(kschema, sidx, sink, 'ratio', 7_int64, err)
+      x = capnp_dyn_get_f64(kschema, sidx, sink, 'ratio', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 7.0_real64) < 1.0e-12_real64, &
+                  'int-to-float: defaulted f64 set to 7')
+      call capnp_dyn_set_int(kschema, sidx, sink, 'ratio', 0_int64, err)
+      x = capnp_dyn_get_f64(kschema, sidx, sink, 'ratio', err)
+      call check_(error, err == CAPNP_OK .and. abs(x) < 1.0e-12_real64, &
+                  'int-to-float: defaulted f64 set to 0')
+
+      call capnp_message_free(kmsg)
+      call capnp_dyn_free(kschema)
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_int_to_float
 
 end module test_dynamic
