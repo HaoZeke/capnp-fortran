@@ -325,6 +325,11 @@ module capnp_rpc
       logical :: released = .false.
       !> receiverHosted resolution kept one extra ref on the export.
       logical :: pinned = .false.
+      !> Forwards to the import `resolved_id` without owning a reference
+      !> to it: a pipelined cap of our own answer that names our import.
+      logical :: borrowed = .false.
+      !> The embargo guards calls bound for that import, not a local cap.
+      logical :: embargo_remote = .false.
       character(len=:), allocatable :: reason
       type(rpc_import_node_t), pointer :: next => null()
    end type rpc_import_node_t
@@ -1326,6 +1331,8 @@ contains
                      call fail_local_call(conn, qid, node%reason, err)
                      call capnp_message_free(m)
                      return
+                  else if (node%state == IMP_REMOTE .and. node%borrowed) then
+                     call retarget_call(conn, m, qid, node%resolved_id)
                   end if
                end if
             end if
@@ -1855,6 +1862,29 @@ contains
       end do
       conn%answer_wait => null()
    end subroutine free_answer_waits
+
+   !> Send the calls an embargo held for a remote import, in order.
+   subroutine drain_embargo_remote(conn, emb, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_embargo_node_t), intent(inout) :: emb
+      integer, intent(out) :: err
+      type(rpc_queued_call_t), pointer :: q, nxt
+      err = CAPNP_OK
+      q => emb%queued
+      emb%queued => null()
+      do while (associated(q))
+         nxt => q%next
+         if (err == CAPNP_OK) then
+            if (q%qid >= 0_int64 .and. q%qid < int(MAXQ, int64)) &
+               conn%questions(int(q%qid))%local_call = .false.
+            call rpc_call_send(conn, q%msg, err)
+         else
+            call capnp_message_free(q%msg)
+         end if
+         deallocate (q)
+         q => nxt
+      end do
+   end subroutine drain_embargo_remote
 
    subroutine drain_embargo_queue(conn, emb, export_id, err)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -3579,9 +3609,8 @@ contains
                                             pipelined=.true.)
                      return
                   case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
-                     call resolve_reflected(conn, node, &
-                                            cap_descriptor_receiver_hosted_get(acd), err, &
-                                            pipelined=.true.)
+                     call resolve_answer_import(conn, node, &
+                                                cap_descriptor_receiver_hosted_get(acd), err)
                      return
                   end select
                end if
@@ -3679,10 +3708,7 @@ contains
                   case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
                      call settle_reflected(conn, node, cap_descriptor_sender_promise_get(cd))
                   case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
-                     call resolve_reflected(conn, node, &
-                                            cap_descriptor_receiver_hosted_get(cd), err, &
-                                            pipelined=.true.)
-                     if (err /= CAPNP_OK) return
+                     call settle_answer_import(conn, node, cap_descriptor_receiver_hosted_get(cd))
                   case default
                      call break_answer_promise(node, "invalid 'receiverAnswer'")
                   end select
@@ -3734,6 +3760,107 @@ contains
          emb => emb%next
       end do
    end subroutine settle_reflected
+
+   !> A receiverAnswer whose capability our answer wrote as
+   !> receiverHosted names one of our imports. C++ 1.4.0 wraps that
+   !> import in a TribbleRaceBlocker (rpc.c++ 1613-1616), so the promise
+   !> resolves as reflected: a Disembargo when it was called, the
+   !> Release, and then calls go to that import on the wire.
+   subroutine resolve_answer_import(conn, node, wire, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      integer(int64), intent(in) :: wire
+      integer, intent(out) :: err
+      type(rpc_import_node_t), pointer :: tgt
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: found, held
+      err = CAPNP_OK
+      call import_find_live(conn, wire, tgt, found)
+      if (found) found = .not. associated(tgt, node)
+      if (.not. found) then
+         call release_all_import(conn, node, err)
+         if (err /= CAPNP_OK) return
+         call break_answer_promise(node, "invalid 'receiverHosted' export ID")
+         return
+      end if
+      held = node%refs > 0 .and. .not. node%released
+      node%local_refs = merge(node%refs, 0, held)
+      node%resolved_id = tgt%id
+      node%borrowed = .true.
+      node%state = IMP_REMOTE
+      if (held .and. node%received_call) then
+         allocate (emb)
+         emb%id = conn%next_embargo
+         conn%next_embargo = emb%id + 1_int64
+         emb%promise_id = node%id
+         emb%open = .true.
+         emb%next => conn%embargoes
+         conn%embargoes => emb
+         node%state = IMP_EMBARGO
+         node%embargo_remote = .true.
+         node%embargo_id = emb%id
+         call send_sender_loopback(conn, node%wire_id, emb%id, err)
+         if (err /= CAPNP_OK) return
+      end if
+      call release_all_import(conn, node, err)
+   end subroutine resolve_answer_import
+
+   !> The pending-answer form of resolve_answer_import: the Disembargo
+   !> and Release went out at Resolve.
+   subroutine settle_answer_import(conn, node, wire)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      integer(int64), intent(in) :: wire
+      type(rpc_import_node_t), pointer :: tgt
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: found
+      call import_find_live(conn, wire, tgt, found)
+      if (found) found = .not. associated(tgt, node)
+      if (.not. found) then
+         call break_answer_promise(node, "invalid 'receiverHosted' export ID")
+         return
+      end if
+      node%resolved_id = tgt%id
+      node%borrowed = .true.
+      node%state = IMP_REMOTE
+      if (node%embargo_id < 0_int64) return
+      emb => conn%embargoes
+      do while (associated(emb))
+         if (emb%id == node%embargo_id) then
+            if (emb%open) then
+               node%state = IMP_EMBARGO
+               node%embargo_remote = .true.
+            end if
+            return
+         end if
+         emb => emb%next
+      end do
+   end subroutine settle_answer_import
+
+   !> Point a call begun on a promise at the import the promise now
+   !> forwards to, so it can go on the wire.
+   subroutine retarget_call(conn, m, qid, handle)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout), target :: m
+      integer(int64), intent(in) :: qid, handle
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      integer(int64) :: final_id, wire
+      logical :: broken
+      character(len=:), allocatable :: breason
+      integer :: e
+      call import_follow(conn, handle, final_id, broken, breason)
+      call import_wire_id(conn, final_id, wire)
+      msg = message_read_root(m, e)
+      if (e == CAPNP_OK) c = message_call_get(msg, e)
+      if (e == CAPNP_OK) tgt = call_target_get(c, e)
+      if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
+      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+         conn%questions(int(qid))%import_handle = final_id
+         conn%questions(int(qid))%local_call = .false.
+      end if
+   end subroutine retarget_call
 
    pure function hi_bucket(qid) result(b)
       integer(int64), intent(in) :: qid
@@ -3888,6 +4015,7 @@ contains
          if (node%local_refs <= 0) return
          node%local_refs = node%local_refs - 1
          if (node%local_refs > 0) return
+         if (node%borrowed) return
          call import_find(conn, node%resolved_id, nxt, found)
          if (.not. found) return
          node => nxt
@@ -6151,8 +6279,13 @@ contains
          call import_find(conn, emb%promise_id, inode, efound)
          if (efound) then
             if (inode%state == IMP_EMBARGO .and. inode%embargo_id == embargo_id) then
-               inode%state = IMP_LOCAL
-               call drain_embargo_queue(conn, emb, int(inode%resolved_id), err)
+               if (inode%embargo_remote) then
+                  inode%state = IMP_REMOTE
+                  call drain_embargo_remote(conn, emb, err)
+               else
+                  inode%state = IMP_LOCAL
+                  call drain_embargo_queue(conn, emb, int(inode%resolved_id), err)
+               end if
                if (err /= CAPNP_OK) return
             end if
          end if

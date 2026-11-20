@@ -8345,7 +8345,8 @@ contains
       type(payload_t) :: pl
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
-      integer(int64) :: qboot, qadder, eid
+      type(rpc_cap_t) :: other
+      integer(int64) :: qboot, qadder, eid, qc
       integer :: e
       logical :: released, disembargo
 
@@ -8368,23 +8369,98 @@ contains
       call rpc_conn_close(sconn)
       if (allocated(error)) return
 
+      ! receiverHosted in our own answer names our import, here promise
+      ! 11 (rpc.c++ 1595-1616): reflected, then calls go to import 11.
       call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
       msg = message_read_root(cconn%answers(int(qboot))%retmsg, e)
       if (e == CAPNP_OK) ret = message_return_get(msg, e)
       if (e == CAPNP_OK) pl = return_results_get(ret, e)
       if (e == CAPNP_OK) ctab = payload_cap_table_get(pl, e)
       if (e == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, e)
-      if (e == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, eid, e)
+      if (e == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, 11_int64, e)
       call check_(error, e == CAPNP_OK, 'receiverAnswer: receiverHosted prepared')
       if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 11_int64, other)
+         call ra_called_promise(cconn, sconn, 10_int64, promised)
+         call ra_drain(sconn, 10_int64, released, disembargo)
+         call ra_resolve(cconn, sconn, 10_int64, qboot, [integer ::])
+         call ra_drain(sconn, 10_int64, released, disembargo)
+         call check_(error, rpc_conn_alive(cconn) .and. released .and. disembargo, &
+                     'receiverAnswer: receiverHosted is reflected')
+      end if
+      if (.not. allocated(error)) then
+         call pa_echo(cconn, promised, qc, e)
+         call check_(error, e == CAPNP_OK .and. ra_next_call_target(sconn) == -1_int64, &
+                     'receiverAnswer: receiverHosted call waits for the embargo')
+      end if
+      if (.not. allocated(error)) then
+         call ra_loopback(cconn, sconn, 10_int64, cconn%embargoes%id)
+         call check_(error, rpc_conn_alive(cconn) .and. &
+                     ra_next_call_target(sconn) == 11_int64, &
+                     'receiverAnswer: receiverHosted call goes to that import')
+      end if
+      if (.not. allocated(error)) then
+         call pa_echo(cconn, promised, qc, e)
+         call check_(error, e == CAPNP_OK .and. ra_next_call_target(sconn) == 11_int64, &
+                     'receiverAnswer: later receiverHosted call goes to that import')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      ! An id that is none of our imports breaks the promise.
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      msg = message_read_root(cconn%answers(int(qboot))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      if (e == CAPNP_OK) pl = return_results_get(ret, e)
+      if (e == CAPNP_OK) ctab = payload_cap_table_get(pl, e)
+      if (e == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (e == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, 77_int64, e)
+      if (e == CAPNP_OK) then
          call ra_called_promise(cconn, sconn, 10_int64, promised)
          call ra_resolve(cconn, sconn, 10_int64, qboot, [integer ::])
          call ra_drain(sconn, 10_int64, released, disembargo)
-         call check_(error, disembargo, 'receiverAnswer: receiverHosted is reflected')
+         call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                     'receiverAnswer: unknown receiverHosted import releases the promise')
+      end if
+      if (.not. allocated(error)) then
+         call pa_echo(cconn, promised, qc, e)
+         call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                     rpc_conn_reason(cconn) == "invalid 'receiverHosted' export ID", &
+                     'receiverAnswer: unknown receiverHosted import breaks the promise')
       end if
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_reflected_caps
+
+   !> Target import id of the next Call `cconn` sent to the raw peer, or
+   !> -1 when no Call arrives.
+   function ra_next_call_target(sconn) result(id)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64) :: id
+      type(capnp_message_t), target :: reply
+      type(message_t) :: rmsg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      logical :: got
+      integer :: e, n
+      id = -1_int64
+      do n = 1, 10
+         call px_poll_in(sconn%fd, 100, got, e)
+         if (e /= CAPNP_OK .or. .not. got) return
+         call rpc_recv_message(sconn%fd, reply, e)
+         if (e /= CAPNP_OK) return
+         rmsg = message_read_root(reply, e)
+         if (e == CAPNP_OK .and. message_which(rmsg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(rmsg, e)
+            if (e == CAPNP_OK) tgt = call_target_get(c, e)
+            if (e == CAPNP_OK) id = message_target_imported_cap_get(tgt)
+            call capnp_message_free(reply)
+            return
+         end if
+         call capnp_message_free(reply)
+      end do
+   end function ra_next_call_target
 
    !> A Call answer that returned an exception keeps its pipeline in
    !> C++ 1.4.0 (rpc.c++ 2533-2535), so a receiverAnswer to it, with
