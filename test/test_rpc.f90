@@ -7912,6 +7912,7 @@ contains
    end subroutine ra_called_promise
 
    !> Resolve `pid` to receiverAnswer `qid` walking pointer `fields`.
+   !> A negative field is sent as a noop op.
    subroutine ra_resolve(cconn, sconn, pid, qid, fields)
       type(rpc_conn_t), intent(inout), target :: cconn, sconn
       integer(int64), intent(in) :: pid, qid
@@ -7934,7 +7935,11 @@ contains
       ops = promised_answer_transform_init(pa, int(size(fields), int64), e)
       do i = 1, size(fields)
          op%p = capnp_list_get_struct(ops, i - 1, e)
-         call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+         if (fields(i) < 0) then
+            call promised_answer_op_noop_set(op, e)
+         else
+            call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+         end if
       end do
       call rpc_send_message(sconn%fd, m, e)
       call capnp_message_free(m)
@@ -7961,9 +7966,11 @@ contains
    end subroutine ra_drain
 
    !> receiverAnswer as C++ 1.4.0 reads it (rpc.c++ 1604-1624): a walk
-   !> through a cap aborts with a schema mismatch, a walk to a null
-   !> pointer gives a broken promise, and an export the active answer
-   !> still pins resolves as reflected even after its last Release.
+   !> of a Call answer through a cap aborts with a schema mismatch, a
+   !> walk to a null pointer gives a broken promise, any transform on a
+   !> Bootstrap answer gives a broken promise (SingleCapPipeline,
+   !> rpc.c++ 2915-2921), and an export the active answer still pins
+   !> resolves as reflected even after its last Release.
    subroutine t_resolve_receiver_answer_walk(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
@@ -7977,14 +7984,43 @@ contains
       logical :: released, disembargo
       character(len=*), parameter :: not_struct = "Schema mismatch: Message contains " // &
                                      "non-struct pointer where struct pointer was expected."
+      character(len=*), parameter :: bad_transform = 'Invalid pipeline transform.'
       srv => local_echo
 
       call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
       call ra_called_promise(cconn, sconn, 4_int64, promised)
-      call ra_resolve(cconn, sconn, 4_int64, qboot, [0])
+      call ra_resolve(cconn, sconn, 4_int64, qadder, [0, 0])
       call check_(error, .not. rpc_conn_alive(cconn) .and. &
                   rpc_conn_reason(cconn) == not_struct, &
                   'receiverAnswer: walk through a cap aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call ra_resolve(cconn, sconn, 4_int64, qboot, [0])
+      call ra_drain(sconn, 4_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                  'receiverAnswer: bootstrap field walk releases the promise')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  rpc_conn_reason(cconn) == bad_transform, &
+                  'receiverAnswer: bootstrap field walk breaks the promise')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call ra_resolve(cconn, sconn, 4_int64, qboot, [-1])
+      call ra_drain(sconn, 4_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                  'receiverAnswer: bootstrap noop releases the promise')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  rpc_conn_reason(cconn) == bad_transform, &
+                  'receiverAnswer: bootstrap noop breaks the promise')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
       if (allocated(error)) return

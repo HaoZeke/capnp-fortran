@@ -269,6 +269,9 @@ module capnp_rpc
       !> Set only for a sendResultsTo.yourself call whose results are
       !> held for a later takeFromOtherQuestion.
       logical :: redirected = .false.
+      !> The answer to a Bootstrap. Its pipeline is the one cap, so any
+      !> transform is invalid (rpc.c++ SingleCapPipeline).
+      logical :: bootstrap = .false.
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
       integer :: exports(0:MAXCAPS - 1) = -1
@@ -2760,6 +2763,7 @@ contains
       slot%has_results = .false.
       slot%finished = .false.
       slot%redirected = .false.
+      slot%bootstrap = .false.
       slot%nexp = 0
       slot%exports = -1
       slot%exports_pinned = .false.
@@ -3388,8 +3392,10 @@ contains
    !> way receiveCap reads `answer.pipeline` (rpc.c++ 1604-1624). Only an
    !> answer that is still active and has results can supply one; any
    !> other answer, and a walk that reaches a null pointer, gives a broken
-   !> capability. An unknown op or a walk through a pointer that is not a
-   !> struct makes C++ 1.4.0 abort the connection, so it does here too.
+   !> capability. A Bootstrap answer takes only an empty transform; any
+   !> op, noop included, gives a broken capability. An unknown op or a
+   !> walk through a pointer that is not a struct makes C++ 1.4.0 abort
+   !> the connection, so it does here too.
    subroutine resolve_receiver_answer(conn, node, cd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(inout), target :: node
@@ -3437,6 +3443,12 @@ contains
       call answer_find(conn, aqid, slot, active)
       if (active) active = associated(slot)
       if (active) active = slot%used .and. .not. slot%finished
+      if (active .and. n > 0) then
+         if (slot%bootstrap) then
+            reason = 'Invalid pipeline transform.'
+            active = .false.
+         end if
+      end if
       if (active .and. .not. slot%has_results) then
          node%state = IMP_ANSWER
          node%answer_qid = aqid
@@ -4160,6 +4172,7 @@ contains
       slot%has_results = .false.
       slot%finished = .false.
       slot%redirected = .false.
+      slot%bootstrap = .false.
       slot%nexp = 0
       slot%exports = -1
       ok = .true.
@@ -4177,10 +4190,14 @@ contains
       type(return_t) :: r
       integer(int64) :: qid
       integer :: idx
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
       b = message_bootstrap_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = bootstrap_question_id_get(b)
       if (.not. claim_question(conn, qid, err)) return
+      call answer_find(conn, qid, slot, found)
+      if (found .and. associated(slot)) slot%bootstrap = .true.
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
