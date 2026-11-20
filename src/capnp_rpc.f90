@@ -161,8 +161,11 @@ module capnp_rpc
       type(capnp_message_t), pointer :: rmsg => null() ! Return being built
       type(payload_t) :: results
       integer :: nexp = 0
-      type(rpc_srv_ref_t) :: staged(0:MAXCAPS - 1) ! servers for the capTable
-      integer :: staged_eids(0:MAXCAPS - 1) = -1   ! filled when the table flushes
+      !> Servers for the capTable, and their export ids once the table
+      !> flushes. Both hold at least MAXCAPS entries during a dispatch,
+      !> which may fill them directly; rpc_ctx_export_cap grows them.
+      type(rpc_srv_ref_t), allocatable :: staged(:)
+      integer, allocatable :: staged_eids(:)
    end type rpc_call_ctx_t
 
    !> A capability implementation hosted by this vat.
@@ -284,7 +287,7 @@ module capnp_rpc
       logical :: bootstrap = .false.
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
-      integer :: exports(0:MAXCAPS - 1) = -1
+      integer, allocatable :: exports(:)
       !> Set once the answer has pinned each result export. Finish
       !> drops those pins. The wire refcount is a separate count.
       logical :: exports_pinned = .false.
@@ -734,7 +737,7 @@ contains
       type :: staged_ptr_t
          class(*), pointer :: p => null()
       end type staged_ptr_t
-      type(staged_ptr_t) :: orig(0:MAXCAPS - 1)
+      type(staged_ptr_t), allocatable :: orig(:)
       integer :: i, j
       logical :: dup
       if (.not. associated(self%inner) .or. .not. associated(self%policy)) then
@@ -744,8 +747,10 @@ contains
       call membrane_check(self%policy, self%reverse, ctx%interface_id, &
                           ctx%method_id, err)
       if (err /= CAPNP_OK) return
+      call ctx_reserve(ctx, MAXCAPS)
       call self%inner%dispatch(ctx, err)
       if (err /= CAPNP_OK) return
+      allocate (orig(0:max(ctx%nexp, 1) - 1))
       do i = 0, ctx%nexp - 1
          orig(i)%p => ctx%staged(i)%s
       end do
@@ -1488,6 +1493,7 @@ contains
       integer :: derr
       logical :: dispatched
       integer(int8), allocatable :: bytes(:)
+      call ctx_reserve(ctx, MAXCAPS)
       err = CAPNP_OK
       if (.not. qslot_ok(conn, qid)) then
          err = CAPNP_ERR_BOUNDS
@@ -2931,7 +2937,7 @@ contains
       slot%redirected = .false.
       slot%bootstrap = .false.
       slot%nexp = 0
-      slot%exports = -1
+      if (allocated(slot%exports)) deallocate (slot%exports)
       slot%exports_pinned = .false.
    end subroutine answer_slot_clear
 
@@ -4361,16 +4367,36 @@ contains
       integer :: idx
       err = CAPNP_OK
       idx = -1
-      if (ctx%nexp >= MAXCAPS) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
+      call ctx_reserve(ctx, ctx%nexp + 1)
       ctx%staged(ctx%nexp)%s => srv
       ctx%staged(ctx%nexp)%owned = .false.
       if (present(owned)) ctx%staged(ctx%nexp)%owned = owned
       idx = ctx%nexp
       ctx%nexp = ctx%nexp + 1
    end function rpc_ctx_export_cap
+
+   !> Make room for n staged capabilities; C++ 1.4.0 puts no bound on a
+   !> capTable.
+   subroutine ctx_reserve(ctx, n)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(in) :: n
+      type(rpc_srv_ref_t), allocatable :: grown(:)
+      integer, allocatable :: grown_eids(:)
+      integer :: have, want
+      have = 0
+      if (allocated(ctx%staged)) have = size(ctx%staged)
+      if (have >= n) return
+      want = max(n, 2 * have, MAXCAPS)
+      allocate (grown(0:want - 1))
+      allocate (grown_eids(0:want - 1))
+      grown_eids = -1
+      if (have > 0) then
+         grown(0:have - 1) = ctx%staged
+         grown_eids(0:have - 1) = ctx%staged_eids
+      end if
+      call move_alloc(grown, ctx%staged)
+      call move_alloc(grown_eids, ctx%staged_eids)
+   end subroutine ctx_reserve
 
    !> Capability pointer handle for content slots: index into the
    !> payload's capTable.
@@ -4603,7 +4629,7 @@ contains
       slot%redirected = .false.
       slot%bootstrap = .false.
       slot%nexp = 0
-      slot%exports = -1
+      if (allocated(slot%exports)) deallocate (slot%exports)
       ok = .true.
       err = CAPNP_OK
    end function claim_question
@@ -4621,6 +4647,7 @@ contains
       integer :: idx
       type(rpc_answer_slot_t), pointer :: slot
       logical :: found
+      call ctx_reserve(ctx, MAXCAPS)
       b = message_bootstrap_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = bootstrap_question_id_get(b)
@@ -4725,6 +4752,7 @@ contains
       type(return_t) :: r
       integer :: derr
       logical :: dispatched
+      call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -5568,6 +5596,7 @@ contains
       type(rpc_call_ctx_t) :: ctx
       type(cap_descriptor_t) :: cd
       type(capnp_ptr_t) :: ctab
+      call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -5644,6 +5673,7 @@ contains
       type(message_t) :: rmsg
       type(return_t) :: r
       type(rpc_call_ctx_t) :: ctx
+      call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -5667,6 +5697,7 @@ contains
       type(message_t) :: rmsg
       type(return_t) :: r
       type(rpc_call_ctx_t) :: ctx
+      call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -5850,6 +5881,7 @@ contains
       type(join_result_t) :: jr
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
+      call ctx_reserve(ctx, MAXCAPS)
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -6150,6 +6182,8 @@ contains
          slot%has_results = .true.
          slot%redirected = hold
          slot%nexp = ctx%nexp
+         if (allocated(slot%exports)) deallocate (slot%exports)
+         allocate (slot%exports(0:max(ctx%nexp, 1) - 1))
          do i = 0, ctx%nexp - 1
             slot%exports(i) = ctx%staged_eids(i)
          end do

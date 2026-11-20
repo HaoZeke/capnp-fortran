@@ -28,6 +28,13 @@ module test_rpc
       procedure :: outbound_call => counting_outbound_call
    end type counting_membrane_policy_t
 
+   !> Answers any call with ncaps fresh adders, adder k with base 100*k.
+   type, extends(rpc_server_t) :: many_caps_srv_t
+      integer :: ncaps = 0
+   contains
+      procedure :: dispatch => many_caps_dispatch
+   end type many_caps_srv_t
+
    type, extends(rpc_server_t) :: stage_srv_t
       class(*), pointer :: staged => null()
    contains
@@ -134,7 +141,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(119))
+      allocate (testsuite(120))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -361,18 +368,20 @@ contains
       testsuite(112)%test => w_seventy_concurrent_questions
       testsuite(113)%name = "rpc-seventy-live-exports"
       testsuite(113)%test => w_seventy_live_exports
-      testsuite(114)%name = "posix-recv-eintr-retried"
-      testsuite(114)%test => t_recv_all_retries_eintr
-      testsuite(115)%name = "rpc-framing-511-accepted"
-      testsuite(115)%test => t_framing_511_accepted
-      testsuite(116)%name = "rpc-framing-512-rejected"
-      testsuite(116)%test => t_framing_512_rejected
-      testsuite(117)%name = "rpc-framing-oversized-rejected"
-      testsuite(117)%test => t_framing_oversized_rejected
-      testsuite(118)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(118)%test => t_framing_negative_traversal_rejected
-      testsuite(119)%name = "rpc-framing-short-and-padded"
-      testsuite(119)%test => t_framing_short_and_padded
+      testsuite(114)%name = "rpc-twenty-caps-in-one-result"
+      testsuite(114)%test => w_twenty_caps_in_one_result
+      testsuite(115)%name = "posix-recv-eintr-retried"
+      testsuite(115)%test => t_recv_all_retries_eintr
+      testsuite(116)%name = "rpc-framing-511-accepted"
+      testsuite(116)%test => t_framing_511_accepted
+      testsuite(117)%name = "rpc-framing-512-rejected"
+      testsuite(117)%test => t_framing_512_rejected
+      testsuite(118)%name = "rpc-framing-oversized-rejected"
+      testsuite(118)%test => t_framing_oversized_rejected
+      testsuite(119)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(119)%test => t_framing_negative_traversal_rejected
+      testsuite(120)%name = "rpc-framing-short-and-padded"
+      testsuite(120)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -431,6 +440,31 @@ contains
       call px_close(fa)
       call px_close(fb)
    end subroutine t_recv_all_retries_eintr
+
+   subroutine many_caps_dispatch(self, ctx, err)
+      class(many_caps_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(adder_srv_t), pointer :: ad
+      class(rpc_server_t), pointer :: sp
+      type(capnp_ptr_t) :: s
+      integer :: k, idx
+      s = capnp_new_struct(ctx%rmsg, 0, self%ncaps, err)
+      if (err /= CAPNP_OK) return
+      do k = 0, self%ncaps - 1
+         allocate (ad)
+         ad%base = int(100 * k, int64)
+         sp => ad
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK) then
+            deallocate (ad)
+            return
+         end if
+         call capnp_setp(s, k, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err /= CAPNP_OK) return
+      end do
+      call payload_content_set(ctx%results, s, err)
+   end subroutine many_caps_dispatch
 
    subroutine stage_srv_dispatch(self, ctx, err)
       class(stage_srv_t), intent(inout) :: self
@@ -750,6 +784,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_seventy_live_exports(error)
    end subroutine w_seventy_live_exports
+
+   subroutine w_twenty_caps_in_one_result(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_twenty_caps_in_one_result(error)
+   end subroutine w_twenty_caps_in_one_result
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7212,6 +7251,61 @@ contains
       call rpc_conn_close(sconn)
       call free_minted_adders()
    end subroutine t_seventy_live_exports
+
+   !> C++ 1.4.0 puts no bound on a capTable, so a result may carry more
+   !> capabilities than a dispatch first has room for.
+   subroutine t_twenty_caps_in_one_result(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(many_caps_srv_t), target :: local_many
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap, last
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content
+      integer(int64) :: qboot, q
+      integer :: fa, fb, e
+      local_many%ncaps = 20
+      call px_socketpair(fa, fb, e)
+      local_boot => local_many
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call check_(error, e == CAPNP_OK, 'twenty caps: bootstrap')
+      if (allocated(error)) return
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q, e)
+      s = capnp_new_struct(m, 0, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q, e)
+      call check_(error, e == CAPNP_OK, 'twenty caps: the call returns results')
+      if (allocated(error)) return
+      call rpc_result_cap(cconn, q, [19], last, e)
+      call check_(error, e == CAPNP_OK, 'twenty caps: the last cap is readable')
+      if (allocated(error)) return
+      call rpc_finish_send(cconn, q, .true., e)
+      call rpc_pump_once(sconn, e)
+      call capnp_message_init_builder(m, e)
+      call rpc_call_begin(cconn, last, 0_int64, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 7_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, q, e)
+      call rpc_result_content(cconn, q, content, e)
+      call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 1907_int64, &
+                  'twenty caps: the last cap reaches its own server')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_twenty_caps_in_one_result
 
    !> A Finish that released a thirdPartyHosted vine frees its export id.
    !> When the peer hands that id out again, a late `rpc_introduction_done`
