@@ -180,16 +180,19 @@ contains
       if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
    end subroutine capnp_parse_f32
 
-   subroutine capnp_parse_i64(tok, v, err)
+   subroutine capnp_parse_i64(tok, v, err, allow_octal)
       character(len=*), intent(in) :: tok
       integer(int64), intent(out) :: v
       integer, intent(out) :: err
+      logical, intent(in), optional :: allow_octal
       integer(int64) :: bits
-      logical :: neg
+      logical :: neg, oct
       character(len=:), allocatable :: body
+      oct = .false.
+      if (present(allow_octal)) oct = allow_octal
       call split_sign(tok, neg, body, err)
       if (err /= CAPNP_OK) return
-      call parse_u64_body(body, bits, err)
+      call parse_u64_body(body, bits, oct, err)
       if (err /= CAPNP_OK) return
       if (neg) then
          if (bits == int(z'8000000000000000', int64)) then
@@ -208,19 +211,22 @@ contains
       end if
    end subroutine capnp_parse_i64
 
-   subroutine capnp_parse_u64(tok, v, err)
+   subroutine capnp_parse_u64(tok, v, err, allow_octal)
       character(len=*), intent(in) :: tok
       integer(int64), intent(out) :: v
       integer, intent(out) :: err
-      logical :: neg
+      logical, intent(in), optional :: allow_octal
+      logical :: neg, oct
       character(len=:), allocatable :: body
+      oct = .false.
+      if (present(allow_octal)) oct = allow_octal
       call split_sign(tok, neg, body, err)
       if (err /= CAPNP_OK) return
       if (neg) then
          err = CAPNP_ERR_ARG
          return
       end if
-      call parse_u64_body(body, v, err)
+      call parse_u64_body(body, v, oct, err)
    end subroutine capnp_parse_u64
 
    subroutine capnp_cescape_text(str, out)
@@ -551,38 +557,37 @@ contains
       if (len(body) == 0) err = CAPNP_ERR_ARG
    end subroutine split_sign
 
-   subroutine parse_u64_body(body, bits, err)
+   subroutine parse_u64_body(body, bits, allow_octal, err)
       character(len=*), intent(in) :: body
       integer(int64), intent(out) :: bits
+      logical, intent(in) :: allow_octal
       integer, intent(out) :: err
-      integer :: i, d
-      logical :: hex
+      integer :: i, d, base
       integer(int64) :: mul
       err = CAPNP_OK
       bits = 0_int64
       i = 1
-      hex = .false.
+      base = 10
       if (len(body) >= 2) then
          if (body(1:1) == '0' .and. (body(2:2) == 'x' .or. body(2:2) == 'X')) then
-            hex = .true.
+            base = 16
             i = 3
+         else if (allow_octal .and. body(1:1) == '0') then
+            base = 8
+            i = 2
          end if
       end if
       if (i > len(body)) then
          err = CAPNP_ERR_ARG
          return
       end if
-      if (hex) then
-         mul = 16_int64
-      else
-         mul = 10_int64
-      end if
+      mul = int(base, int64)
       do while (i <= len(body))
-         if (hex) then
-            d = hex_digit(body(i:i))
-         else
-            d = dec_digit(body(i:i))
-         end if
+         select case (base)
+         case (16); d = hex_digit(body(i:i))
+         case (8); d = oct_digit(body(i:i))
+         case default; d = dec_digit(body(i:i))
+         end select
          if (d < 0) then
             err = CAPNP_ERR_ARG
             return

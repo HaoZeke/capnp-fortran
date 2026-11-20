@@ -7,6 +7,7 @@ program test_fixgate
    nfail = 0
    call case_fmt()
    call case_f32()
+   call case_oct()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -28,5 +29,13 @@ contains
       if (err /= 0) call bad()
       if (abs(y - 1.5_real32) > 1.0e-6_real32) call bad()
    end subroutine case_f32
+
+
+   subroutine case_oct()
+      integer(int64) :: v
+      integer :: err
+      call capnp_parse_i64("010", v, err, allow_octal=.true.)
+      if (err /= 0 .or. v /= 8_int64) call bad()
+   end subroutine case_oct
 
 end program
