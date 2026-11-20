@@ -535,7 +535,7 @@ contains
             return
          end if
          root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) then
+         if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
             call capnp_message_free(msg)
             call fail('bad root', rc)
             return
@@ -577,7 +577,7 @@ contains
             return
          end if
          root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) then
+         if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
             call capnp_message_free(msg)
             call fail('bad root', rc)
             return
@@ -674,7 +674,7 @@ contains
                return
             end if
             root = capnp_root(msg, err)
-            if (err /= CAPNP_OK) then
+            if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
                call capnp_message_free(msg)
                call fail('bad root', rc)
                return
@@ -706,7 +706,7 @@ contains
             return
          end if
          root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) then
+         if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
             call capnp_message_free(msg)
             call fail('bad root', rc)
             return
@@ -719,6 +719,12 @@ contains
       end do
       if (count == 0) call fail('empty input', rc)
    end subroutine bytes_to_out
+
+   pure function root_is_struct(root) result(ok)
+      type(capnp_ptr_t), intent(in) :: root
+      logical :: ok
+      ok = root%kind == CAPNP_PK_NULL .or. root%kind == CAPNP_PK_STRUCT
+   end function root_is_struct
 
    subroutine emit_one(sch, idx, env, msg, root, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch

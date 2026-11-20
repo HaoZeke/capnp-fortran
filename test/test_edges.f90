@@ -33,6 +33,7 @@ contains
          new_unittest("nest-depth", run_nest_depth), &
          new_unittest("canonical-depth", run_canonical_depth), &
          new_unittest("text-depth", run_text_depth), &
+         new_unittest("corrupt-input", run_corrupt_input), &
          new_unittest("segment-sweep", run_segment_sweep), &
          new_unittest("far-landing-pad", run_far_pad), &
          new_unittest("huge-list", run_huge_list), &
@@ -380,6 +381,112 @@ contains
          //' && cmp -s '//tmp//'/td.ref '//tmp//'/td.ours'), &
          'edges: text depth '//trim(dbuf))
    end subroutine text_depth
+
+   subroutine run_corrupt_input(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int8), allocatable :: raw(:)
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+
+      allocate (raw(0:14))
+      raw = 0_int8
+      raw(4) = 1_int8
+      call corrupt_case(error, raw, 'truncated segment')
+
+      deallocate (raw)
+      allocate (raw(0:15))
+      raw = 0_int8
+      raw(4) = 1_int8
+      call cp_put_i64(raw, 8_int64, 1_int64)
+      call corrupt_case(error, raw, 'void list at segment end')
+
+      call cp_put_i64(raw, 8_int64, 2_int64)
+      call corrupt_case(error, raw, 'self far pointer')
+
+      call cp_put_i64(raw, 8_int64, wp_make_list(0_int32, CAPNP_SZ_BYTE, 100_int64))
+      call corrupt_case(error, raw, 'out of bounds list')
+
+      call cp_put_i64(raw, 8_int64, wp_make_struct(1_int32, 0_int32, 0_int32))
+      call corrupt_case(error, raw, 'empty struct past segment')
+
+      deallocate (raw)
+      allocate (raw(0:47))
+      raw = 0_int8
+      raw(4) = 5_int8
+      call cp_put_i64(raw, 8_int64, wp_make_struct(0_int32, 1_int32, 1_int32))
+      call cp_put_i64(raw, 16_int64, 7_int64)
+      call cp_put_i64(raw, 24_int64, wp_make_far(.false., 4_int64, 0_int64))
+      call cp_put_i64(raw, 32_int64, 99_int64)
+      call cp_put_i64(raw, 40_int64, wp_make_struct(-2_int32, 1_int32, 0_int32))
+      call corrupt_case(error, raw, 'landing pad in the same segment')
+
+      deallocate (raw)
+      allocate (raw(0:55))
+      raw = 0_int8
+      raw(4) = 6_int8
+      call cp_put_i64(raw, 8_int64, wp_make_struct(0_int32, 1_int32, 1_int32))
+      call cp_put_i64(raw, 16_int64, 7_int64)
+      call cp_put_i64(raw, 24_int64, wp_make_far(.true., 4_int64, 0_int64))
+      call cp_put_i64(raw, 32_int64, 99_int64)
+      call cp_put_i64(raw, 40_int64, wp_make_far(.false., 3_int64, 0_int64))
+      call cp_put_i64(raw, 48_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call corrupt_case(error, raw, 'double far in the same segment')
+
+      deallocate (raw)
+      allocate (raw(0:47))
+      raw = 0_int8
+      raw(0) = 1_int8
+      raw(4) = 3_int8
+      raw(8) = 1_int8
+      call cp_put_i64(raw, 16_int64, wp_make_struct(0_int32, 1_int32, 1_int32))
+      call cp_put_i64(raw, 24_int64, 7_int64)
+      call cp_put_i64(raw, 32_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(raw, 40_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call corrupt_case(error, raw, 'far pointers in a cycle')
+
+      deallocate (raw)
+      allocate (raw(0:63))
+      raw = 0_int8
+      raw(0) = 2_int8
+      raw(4) = 3_int8
+      raw(8) = 1_int8
+      raw(12) = 2_int8
+      call cp_put_i64(raw, 16_int64, wp_make_struct(0_int32, 1_int32, 1_int32))
+      call cp_put_i64(raw, 24_int64, 7_int64)
+      call cp_put_i64(raw, 32_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(raw, 40_int64, wp_make_far(.false., 0_int64, 2_int64))
+      call cp_put_i64(raw, 48_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(raw, 56_int64, 99_int64)
+      call corrupt_case(error, raw, 'landing pad that is far')
+   end subroutine run_corrupt_input
+
+   subroutine corrupt_case(error, raw, label)
+      type(error_type), allocatable, intent(inout) :: error
+      integer(int8), intent(in) :: raw(0:)
+      character(len=*), intent(in) :: label
+      integer :: err
+      character(len=:), allocatable :: cmd
+      if (allocated(error)) return
+      call capnp_write_file(tmp//'/corrupt.bin', raw, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'corrupt: write '//label)
+         return
+      end if
+      cmd = capnpf_setup()//' && capnp convert binary:canonical < '//tmp//'/corrupt.bin > ' &
+         //tmp//'/corrupt.ref 2>'//tmp//'/corrupt.ref.err; echo $? > '//tmp//'/corrupt.ref.rc' &
+         //' && "$CAP" convert binary:canonical < '//tmp//'/corrupt.bin > '//tmp//'/corrupt.ours' &
+         //' 2>'//tmp//'/corrupt.ours.err; echo $? > '//tmp//'/corrupt.ours.rc' &
+         //' && cmp -s '//tmp//'/corrupt.ref.rc '//tmp//'/corrupt.ours.rc' &
+         //' && if grep -qx 0 '//tmp//'/corrupt.ref.rc; then cmp -s '//tmp &
+         //'/corrupt.ref '//tmp//'/corrupt.ours; else true; fi'
+      call check_(error, sh(cmd), 'corrupt: '//label)
+   end subroutine corrupt_case
 
    subroutine run_segment_sweep(error)
       type(error_type), allocatable, intent(out) :: error
