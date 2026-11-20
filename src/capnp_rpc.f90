@@ -251,6 +251,10 @@ module capnp_rpc
       !> Dispatches of this server that have been entered and not left.
       !> drop_export will not deallocate while this is positive.
       integer :: dispatching = 0
+      !> The id no longer comes back when srv is written again. C++
+      !> releaseExport erases exportsByCap for the released export's
+      !> clientHook, which a resolved promise export shares with this one.
+      logical :: unindexed = .false.
    end type rpc_export_slot_t
 
    !> The server of an export that stands for the pipeline `ops` of our
@@ -268,6 +272,8 @@ module capnp_rpc
       !> for its pipeline `ops`. C++ exports that QueuedClient as a
       !> promise and resolves it when the call returns.
       integer(int64) :: aqid = -1_int64
+      !> The null cap export the proxy resolved to, if it did.
+      integer :: null_eid = -1
       !> Made for a broken cap, so the export stands for that cap and
       !> keeps its id when the cap is written again.
       logical :: for_broken = .false.
@@ -4752,6 +4758,9 @@ contains
             end if
          end if
          if (srv%eid >= 0) then
+            if (eslot_ok(conn, int(srv%eid, int64))) then
+               if (conn%exports(srv%eid)%used) conn%exports(srv%eid)%unindexed = .true.
+            end if
             call drop_export_pin(conn, srv%eid)
             srv%eid = -1
          end if
@@ -5067,7 +5076,8 @@ contains
       ! Reuse an existing export of the same server.
       ! A released export is gone from the C++ table, so it is skipped.
       do i = 0, nexports(conn) - 1
-         if (conn%exports(i)%used .and. .not. export_released(conn, i)) then
+         if (conn%exports(i)%used .and. .not. export_released(conn, i) .and. &
+             .not. conn%exports(i)%unindexed) then
             if (associated(conn%exports(i)%srv, srv)) then
                conn%exports(i)%refcount = conn%exports(i)%refcount + 1
                if (own) conn%exports(i)%owned = .true.
@@ -5105,6 +5115,7 @@ contains
             conn%exports(i)%srv => srv
             conn%exports(i)%owned = own
             conn%exports(i)%shared = .false.
+            conn%exports(i)%unindexed = .false.
             if (share_old) then
                conn%exports(i)%owned = .true.
                do k = 0, size(conn%exports) - 1
@@ -5718,11 +5729,30 @@ contains
       ! C++ copies the content and injects each cap it points to, so a
       ! cap table entry nothing points to is not sent on.
       allocate (used(0))
-      if (content%kind /= CAPNP_PK_NULL) then
-         call payload_content_set(outp, capnp_copy(m, content, err, caps=used), err)
-         if (err /= CAPNP_OK) return
-      end if
       ictab = payload_cap_table_get(inp, err)
+      if (err /= CAPNP_OK) return
+      ! A null cap is written as a null pointer, with no table entry.
+      if (content%kind == CAPNP_PK_CAP) then
+         if (content%capidx >= 0_int64 .and. content%capidx < capnp_list_len(ictab)) then
+            icd%p = capnp_list_get_struct(ictab, int(content%capidx), err)
+            if (err /= CAPNP_OK) return
+            if (cap_descriptor_which(icd) == CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG) then
+               if (forwards_null(conn, cap_descriptor_receiver_hosted_get(icd))) return
+            end if
+         end if
+      end if
+      if (content%kind /= CAPNP_PK_NULL) then
+         block
+            type(capnp_ptr_t) :: copied
+            copied = capnp_copy(m, content, err, caps=used)
+            if (err /= CAPNP_OK) return
+            call payload_content_set(outp, copied, err)
+            if (err /= CAPNP_OK) return
+            if (content%kind == CAPNP_PK_STRUCT) &
+               call drop_null_fields(conn, content, copied, ictab, used, err)
+            if (err /= CAPNP_OK) return
+         end block
+      end if
       if (err /= CAPNP_OK) return
       n = size(used)
       if (n == 0) return
@@ -5768,7 +5798,18 @@ contains
             if (eslot_ok(conn, id)) then
                eid = int(id)
                if (conn%exports(eid)%used .and. conn%exports(eid)%refcount > 0) then
-                  if (broken_px_reason(conn, eid, why)) then
+                  eid = resolved_export(conn, eid)
+                  if (eid /= int(id)) then
+                     block
+                        class(*), pointer :: rsrv
+                        integer :: reid
+                        rsrv => conn%exports(eid)%srv
+                        reid = export_server(conn, rsrv)
+                        if (reid >= 0) then
+                           call cap_descriptor_sender_hosted_set(ocd, int(reid, int64), err)
+                        end if
+                     end block
+                  else if (broken_px_reason(conn, eid, why)) then
                      call write_broken_export(conn, ocd, eid, why, err)
                   else
                      conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
@@ -5942,6 +5983,106 @@ contains
       end select
    end function broken_px_reason
 
+   !> Null the cap fields of copied struct `out` whose cap is null, as
+   !> C++ writes a null cap as a null pointer, and renumber the rest.
+   !> Only a struct whose caps all sit in its own pointer fields is
+   !> rewritten; `used` keeps the input index of each cap left.
+   subroutine drop_null_fields(conn, src, out, ictab, used, err)
+      type(rpc_conn_t), intent(in), target :: conn
+      type(capnp_ptr_t), intent(in) :: src, out, ictab
+      integer(int64), allocatable, intent(inout) :: used(:)
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: ip, cp
+      type(cap_descriptor_t) :: icd
+      integer(int64), allocatable :: kept(:)
+      logical, allocatable :: null_field(:)
+      integer :: j, r
+      err = CAPNP_OK
+      if (size(used) == 0) return
+      allocate (null_field(0:max(src%pwords, 1) - 1))
+      null_field = .false.
+      r = 0
+      do j = 0, src%pwords - 1
+         ip = capnp_getp(src, j, err)
+         if (err /= CAPNP_OK) return
+         if (ip%kind /= CAPNP_PK_CAP) cycle
+         r = r + 1
+         if (ip%capidx < 0_int64 .or. ip%capidx >= capnp_list_len(ictab)) cycle
+         icd%p = capnp_list_get_struct(ictab, int(ip%capidx), err)
+         if (err /= CAPNP_OK) return
+         if (cap_descriptor_which(icd) == CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG) &
+            null_field(j) = forwards_null(conn, cap_descriptor_receiver_hosted_get(icd))
+      end do
+      if (r /= size(used) .or. .not. any(null_field)) return
+      allocate (kept(0))
+      r = 0
+      do j = 0, src%pwords - 1
+         ip = capnp_getp(src, j, err)
+         if (err /= CAPNP_OK) return
+         if (ip%kind /= CAPNP_PK_CAP) cycle
+         r = r + 1
+         cp = capnp_ptr_t()
+         if (.not. null_field(j)) then
+            cp%msg => out%msg
+            cp%kind = CAPNP_PK_CAP
+            cp%capidx = int(size(kept), int64)
+            kept = [kept, used(r)]
+         end if
+         call capnp_setp(out, j, cp, err)
+         if (err /= CAPNP_OK) return
+      end do
+      call move_alloc(kept, used)
+   end subroutine drop_null_fields
+
+   !> A promise export that resolved to another export stands for that
+   !> one: C++ resolveExportedPromise sets its clientHook to the
+   !> resolution. Any other export stands for itself.
+   integer function resolved_export(conn, eid) result(rid)
+      type(rpc_conn_t), intent(in), target :: conn
+      integer, intent(in) :: eid
+      rid = eid
+      select type (px => conn%exports(eid)%srv)
+      type is (rpc_pipe_proxy_t)
+         if (px%settled .and. px%aqid < 0_int64 .and. px%qid < 0_int64) then
+            if (px%eid >= 0) then
+               if (eslot_ok(conn, int(px%eid, int64))) then
+                  if (conn%exports(px%eid)%used) rid = px%eid
+               end if
+            else if (px%null_eid >= 0) then
+               if (eslot_ok(conn, int(px%null_eid, int64))) then
+                  if (conn%exports(px%null_eid)%used) then
+                     ! The slot may hold a new export once the null one went.
+                     select type (nul => conn%exports(px%null_eid)%srv)
+                     type is (rpc_pipe_proxy_t)
+                        if (allocated(nul%reason)) then
+                           if (nul%reason == 'Called null capability.') rid = px%null_eid
+                        end if
+                     end select
+                  end if
+               end if
+            end if
+         end if
+      end select
+   end function resolved_export
+
+   !> Export `id` names the null cap, directly or through its resolution.
+   logical function forwards_null(conn, id) result(is_null)
+      type(rpc_conn_t), intent(in), target :: conn
+      integer(int64), intent(in) :: id
+      integer :: eid
+      is_null = .false.
+      if (.not. eslot_ok(conn, id)) return
+      eid = int(id)
+      if (.not. conn%exports(eid)%used .or. conn%exports(eid)%refcount <= 0) return
+      eid = resolved_export(conn, eid)
+      select type (px => conn%exports(eid)%srv)
+      type is (rpc_pipe_proxy_t)
+         if (px%settled .and. px%eid < 0 .and. px%import < 0_int64 .and. &
+             px%aqid < 0_int64 .and. px%qid < 0_int64 .and. allocated(px%reason)) &
+            is_null = px%reason == 'Called null capability.'
+      end select
+   end function forwards_null
+
    !> Write a new promise export that resolves to `reason`, as C++
    !> writes a broken cap (rpc.c++ writeDescriptor, BrokenClient). With
    !> `promise` true, C++ holds a local promise that broke, so writing it
@@ -6098,6 +6239,7 @@ contains
                         e = CAPNP_ERR_ALLOC
                      else if (e == CAPNP_OK) then
                         call cap_descriptor_sender_hosted_set(cd, int(peid, int64), e)
+                        px%null_eid = peid
                      end if
                   end block
                case (PIPE_EXPORT)

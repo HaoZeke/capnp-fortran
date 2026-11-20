@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(34))
+      allocate (testsuite(37))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -100,6 +100,12 @@ contains
       testsuite(33)%test => t_fwd_sp_ra_npp
       testsuite(34)%name = "embargo-id-reused"
       testsuite(34)%test => t_embargo_reuse
+      testsuite(35)%name = "fwd-rh-resolved-proxy"
+      testsuite(35)%test => t_fwd_rh_resolved
+      testsuite(36)%name = "fwd-rh-null-proxy"
+      testsuite(36)%test => t_fwd_rh_null
+      testsuite(37)%name = "released-proxy-unindexes"
+      testsuite(37)%test => t_proxy_unindexes
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1572,6 +1578,142 @@ contains
       call rpc_send_message(fd, m, e)
       call capnp_message_free(m)
    end subroutine wdisrl
+
+   !> Our promise export resolved to another export. C++ sets its
+   !> clientHook to the resolution (resolveExportedPromise), so a
+   !> receiverHosted param naming it is forwarded as that export.
+   subroutine t_fwd_rh_resolved(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k, px
+      integer :: fd, e, i, idx
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'resolved proxy: call 2 is not deferred')
+         call close_peer(conn, fd)
+         return
+      end if
+      idx = rpc_ctx_export_cap(ctx, made, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      d = wtext(fd, k)
+      call check(error, px >= 0_int64 .and. index(c, 'RET 2 res [sh') == 1 .and. &
+                 index(c, ' | RES '//itoa(px)//' cap') > 0 .and. index(d, ' I4 y [sh') > 0 .and. &
+                 index(d, '[sh'//itoa(px)//']') == 0, &
+                 'resolved proxy: got '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_resolved
+
+   !> Our promise export resolved to a null cap. C++ writes a null cap as
+   !> a null pointer, so a param naming it is forwarded with no cap.
+   subroutine t_fwd_rh_null(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k, px
+      integer :: fd, e, i
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'null proxy: call 2 is not deferred')
+         call close_peer(conn, fd)
+         return
+      end if
+      call payload_content_set(ctx%results, capnp_new_struct(ctx%rmsg, 0, 1, e), e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      d = wtext(fd, k)
+      call check(error, px >= 0_int64 .and. index(c, 'RET 2 res []') == 1 .and. &
+                 index(d, ' I4 y []') > 0, 'null proxy: got '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_null
+
+   !> The peer releases our promise export after it resolved to another
+   !> export. C++ releaseExport erases exportsByCap for the clientHook
+   !> both share, so the next write of that server makes a new export.
+   subroutine t_proxy_unindexes(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k, px
+      integer :: fd, e, i, idx
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'unindexed: call 2 is not deferred')
+         call close_peer(conn, fd)
+         return
+      end if
+      idx = rpc_ctx_export_cap(ctx, made, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call wrel(fd, px, 1_int64)
+      a = step(conn, fd, 1)
+      call wcall(fd, 7_int64, 2, -1_int64, NOCAPS, NOIDS)
+      d = step(conn, fd, 1)
+      call check(error, px >= 0_int64 .and. index(c, 'RET 2 res [sh') == 1 .and. &
+                 index(d, 'RET 7 res [sh') == 1 .and. index(c, d(index(d, '[sh'):)) == 0, &
+                 'unindexed: got '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_proxy_unindexes
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
