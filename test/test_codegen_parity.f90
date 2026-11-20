@@ -10,7 +10,8 @@ contains
       testsuite = [ &
          new_unittest("g1_min_signed", test_g1), &
          new_unittest("g2_text_escape", test_g2), &
-         new_unittest("g3_default_list_copy", test_g3) &
+         new_unittest("g3_default_list_copy", test_g3), &
+         new_unittest("g4_get_elem_default", test_g4) &
          ]
    end subroutine collect_codegen_parity
 
@@ -37,4 +38,9 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_gap(error, "g3")
    end subroutine test_g3
+
+   subroutine test_g4(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, "g4")
+   end subroutine test_g4
 end module test_codegen_parity
