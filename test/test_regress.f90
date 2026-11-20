@@ -97,7 +97,8 @@ contains
          new_unittest("text-shorthand", run_text_shorthand), &
          new_unittest("text-group-replace", run_text_group_replace), &
          new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
-         new_unittest("text-inactive-arm", run_text_inactive_arm) &
+         new_unittest("text-inactive-arm", run_text_inactive_arm), &
+         new_unittest("json-dup-bad", run_json_dup_bad) &
          ]
    end subroutine collect_regress
 
@@ -2617,4 +2618,50 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_inactive_arm
+
+
+   subroutine run_json_dup_bad(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: idx, err
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_dup('{"big":"bad","big":"1"}', .true., '"big":"1"')
+      call check_dup('{"big":"1","big":"bad"}', .true., '"big":"0"')
+      call check_dup('{"big":"bad"}', .true., '"big":"0"')
+      call check_dup('{"big":"1","big":"2"}', .false., '"big":"2"')
+      call check_dup('{"big":{}}', .true., '')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine check_dup(text, bad, frag)
+         character(len=*), intent(in) :: text, frag
+         logical, intent(in) :: bad
+         type(capnp_message_t) :: msg
+         type(capnp_ptr_t) :: root
+         character(len=:), allocatable :: out
+         integer :: e2
+         if (allocated(error)) return
+         call capnp_json_decode(schema, idx, text, msg, e2)
+         if (bad) then
+            call check_(error, e2 /= CAPNP_OK, 'dup rejected '//text)
+         else
+            call check_(error, e2 == CAPNP_OK, 'dup accepted '//text)
+         end if
+         if (allocated(error) .or. len(frag) == 0) then
+            call capnp_message_free(msg)
+            return
+         end if
+         if (bad .and. .not. capnp_json_number_failed()) then
+            call capnp_message_free(msg)
+            return
+         end if
+         root = capnp_root(msg, e2)
+         call capnp_json_encode(schema, idx, root, out, e2, pretty=.false.)
+         call check_(error, e2 == CAPNP_OK .and. index(out, frag) > 0, 'dup value '//text)
+         call capnp_message_free(msg)
+      end subroutine check_dup
+   end subroutine run_json_dup_bad
+
+
 end module test_regress

@@ -183,8 +183,9 @@ applied after it. A repeated known tag is rejected. A void value accepts
 any payload. A flattened struct is reused for later keys in the same
 object, and a nested flattened union keeps the tag it already saw.
 A non-string discriminator is rejected. Unknown JSON fields
-are ignored on decode. If a duplicate key has an earlier value of the wrong
-type, the later valid value is used; capnp 1.4.0 rejects the earlier value.
+are ignored on decode. Every occurrence of a key is decoded. A string
+that is not a number becomes zero, later keys still apply, and the
+decode fails.
 Pretty output matches `capnp convert binary:json`; pass `pretty=.false.` for
 `--short`, and use `capnp_json_span` to step through multi-value JSON streams.
 The span routine recognizes strings, so braces, `#`, and `//` inside a string

@@ -31,6 +31,7 @@ module capnp_json
    private
 
    public :: capnp_json_encode, capnp_json_decode, capnp_json_span
+   public :: capnp_json_number_failed
 
    integer(int64), parameter :: ANN_NAME = int(z'FA5B1FD61C2E7C3D', int64)
    integer(int64), parameter :: ANN_FLATTEN = int(z'82D3E852AF0336BF', int64)
@@ -40,6 +41,7 @@ module capnp_json
    integer, parameter :: MAX_DEPTH = 64
    integer, parameter :: UNION_SEEN_START = 16
    integer, save :: union_seen_n = 0
+   logical, save :: number_bad = .false.
    integer, allocatable, save :: union_seen_seg(:)
    integer(int64), allocatable, save :: union_seen_off(:)
    integer, allocatable, save :: union_seen_disc(:)
@@ -183,6 +185,7 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      number_bad = .false.
       sc%s = text
       nul = index(text, achar(0))
       if (nul > 0) then
@@ -209,9 +212,16 @@ contains
       if (err /= CAPNP_OK) return
       call union_seen_reset()
       call fill_struct(schema, idx, obj, env, no_disc, root, 0, .false., err)
+      if (err == CAPNP_OK .and. number_bad) err = CAPNP_ERR_ARG
    end subroutine capnp_json_decode
 
-   !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
+   !> True when the last decode stored zero for a string that was not a
+   !> number. The message is complete. capnp 1.4.0 reports that failure
+   !> and still writes the message.
+   logical function capnp_json_number_failed() result(y)
+      y = number_bad
+   end function capnp_json_number_failed
+
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
    subroutine capnp_json_span(text, from, beg, to, err)
       character(len=*), intent(in) :: text
@@ -1001,7 +1011,7 @@ contains
       type(capnp_brand_env_t) :: cenv
       type(disc_opts_t) :: opts, gdisc, no_disc
       character(len=:), allocatable :: nm, raw_nm, fpfx, dkey
-      integer :: i, nf, gidx, sidx, kidx, dw, pw
+      integer :: i, nf, gidx, sidx, dw, pw
       logical :: is_flat, hit
       err = CAPNP_OK
       if (present(unresolved)) unresolved = .false.
@@ -1071,10 +1081,8 @@ contains
          else
             call json_field_name(f, nm, err)
             if (err /= CAPNP_OK) return
-            if (find_jkey(jv, pfx//nm, kidx)) then
-               call fill_field(schema, f, p, env, jv%kids(kidx), depth + 1, err)
-               if (err /= CAPNP_OK) return
-            end if
+            call fill_each_key(schema, f, p, env, jv, pfx//nm, depth + 1, err)
+            if (err /= CAPNP_OK) return
          end if
       end do
 
@@ -1757,6 +1765,15 @@ contains
       end if
    end subroutine fill_data
 
+   subroutine recover_i64(iv, err)
+      integer(int64), intent(inout) :: iv
+      integer, intent(inout) :: err
+      if (err == CAPNP_OK) return
+      iv = 0_int64
+      err = CAPNP_OK
+      number_bad = .true.
+   end subroutine recover_i64
+
    subroutine j_signed(jv, iv, err)
       type(jval), intent(in) :: jv
       integer(int64), intent(out) :: iv
@@ -1765,6 +1782,7 @@ contains
       iv = 0_int64
       if (jv%k == JK_STR) then
          call kj_parse_i64(jv%str, iv, err)
+         call recover_i64(iv, err)
       else if (jv%k == JK_NUM .and. allocated(jv%str)) then
          if (json_int_token(jv%str)) then
             call kj_parse_i64(jv%str, iv, err)
@@ -1787,6 +1805,7 @@ contains
       iv = 0_int64
       if (jv%k == JK_STR) then
          call kj_parse_u64(jv%str, iv, err)
+         call recover_i64(iv, err)
       else if (jv%k == JK_NUM .and. allocated(jv%str)) then
          if (jv%str == '-0') then
             iv = 0_int64
@@ -1999,6 +2018,11 @@ contains
          fv = jv%num
       else if (jv%k == JK_STR) then
          call capnp_parse_f64(jv%str, fv, err)
+         if (err /= CAPNP_OK) then
+            fv = 0.0_real64
+            err = CAPNP_OK
+            number_bad = .true.
+         end if
       else
          err = CAPNP_ERR_ARG
       end if
@@ -2939,6 +2963,31 @@ contains
       if (len(a) /= len(b)) return
       y = (a == b)
    end function exact_eq
+
+   !> Decode every occurrence of key in document order. A wrong-typed
+   !> earlier value is an error even when a later value would fit.
+   recursive subroutine fill_each_key(schema, f, p, env, jv, key, depth, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
+      type(jval), intent(in) :: jv
+      character(len=*), intent(in) :: key
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      integer :: i
+      err = CAPNP_OK
+      if (.not. allocated(jv%kids)) return
+      do i = 1, size(jv%kids)
+         if (.not. allocated(jv%kids(i)%key)) cycle
+         if (.not. exact_eq(jv%kids(i)%key, key)) cycle
+         call fill_field(schema, f, p, env, jv%kids(i), depth, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine fill_each_key
+
+   !> A struct field whose pointer is a list or a far/other word is a
+   !> schema mismatch. Encoding continues from a null struct so the
+   !> recovered text matches capnp 1.4.0, and the encode reports the error.
 
    function find_jkey(jv, key, idx) result(y)
       type(jval), intent(in) :: jv

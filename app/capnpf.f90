@@ -572,6 +572,12 @@ contains
          if (beg == 0) exit
          call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
+            if (capnp_json_number_failed()) then
+               root = capnp_root(msg, err)
+               if (err == CAPNP_OK .and. root_is_struct(root)) then
+                  call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+               end if
+            end if
             call capnp_message_free(msg)
             call fail('json decode failed', rc)
             return
