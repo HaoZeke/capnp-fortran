@@ -400,7 +400,7 @@ contains
       integer(int64), intent(in) :: file_id
       character(len=*), intent(in) :: filename
       integer, intent(out) :: err
-      character(len=:), allocatable :: modname, base, prefix, dn
+      character(len=:), allocatable :: modname, base, prefix, dn, dir, outfile
       integer :: i, ios, fidx
       logical :: mine
 
@@ -408,8 +408,12 @@ contains
       if (err /= CAPNP_OK) return
 
       base = filename
+      dir = ''
       i = index(base, '/', back=.true.)
-      if (i > 0) base = base(i + 1:)
+      if (i > 0) then
+         dir = base(1:i)
+         base = base(i + 1:)
+      end if
       i = index(base, '.')
       if (i > 0) base = base(1:i - 1)
       do i = 1, len(base)
@@ -468,7 +472,16 @@ contains
       end do
       g_suppress = .false.
 
-      open (newunit=g_out, file=modname//'.f90', status='replace', action='write', iostat=ios)
+      outfile = dir//modname//'.f90'
+      if (len(dir) > 0) then
+         call execute_command_line('mkdir -p "'//dir(1:len(dir) - 1)//'"', &
+                                   exitstat=ios)
+         if (ios /= 0) then
+            err = CAPNP_ERR_IO
+            return
+         end if
+      end if
+      open (newunit=g_out, file=outfile, status='replace', action='write', iostat=ios)
       if (ios /= 0) then
          err = CAPNP_ERR_IO
          return

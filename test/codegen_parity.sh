@@ -240,6 +240,25 @@ EOF
   echo "g6 ok"
 }
 
+g7() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir dir_a dir_b
+  cat > dir_a/dup.capnp <<'EOF'
+@0x8777777777777701;
+struct FromA { value @0 :Int32; }
+EOF
+  cat > dir_b/dup.capnp <<'EOF'
+@0x8777777777777702;
+struct FromB { value @0 :Int32; }
+EOF
+  capnp compile -o"$BIN" dir_a/dup.capnp dir_b/dup.capnp
+  grep -q 'type :: from_a_t' dir_a/dup_capnp.f90
+  grep -q 'type :: from_b_t' dir_b/dup_capnp.f90
+  echo "g7 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
@@ -247,6 +266,7 @@ case "${1:-all}" in
   g4) g34 g4 ;;
   g5) g5 ;;
   g6) g6 ;;
-  all) g1; g2; g34 g3; g34 g4; g5; g6 ;;
+  g7) g7 ;;
+  all) g1; g2; g34 g3; g34 g4; g5; g6; g7 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac
