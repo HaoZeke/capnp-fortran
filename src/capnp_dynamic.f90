@@ -1409,7 +1409,7 @@ contains
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
-            TYPE_INT64, TYPE_UINT64, TYPE_ENUM)
+            TYPE_INT64, TYPE_UINT64, TYPE_ENUM, TYPE_FLOAT32, TYPE_FLOAT64)
       case default
          err = CAPNP_ERR_KIND
          return
@@ -1441,6 +1441,10 @@ contains
          call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
       case (TYPE_UINT64)
          call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
+      case (TYPE_FLOAT32)
+         call capnp_set_f32(p, off*4_int64, real(v, real32), err, default=value_f32(dv))
+      case (TYPE_FLOAT64)
+         call capnp_set_f64(p, off*8_int64, real(v, real64), err, default=value_f64(dv))
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -1466,7 +1470,7 @@ contains
          ok = v >= -2147483648_int64 .and. v <= 2147483647_int64
       case (TYPE_UINT32)
          ok = v >= 0_int64 .and. v <= 4294967295_int64
-      case (TYPE_INT64)
+      case (TYPE_INT64, TYPE_FLOAT32, TYPE_FLOAT64)
          ok = .true.
       case (TYPE_UINT64)
          ok = v >= 0_int64
