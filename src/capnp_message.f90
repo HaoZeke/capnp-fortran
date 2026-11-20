@@ -397,7 +397,7 @@ contains
       integer, intent(in) :: i
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
-      integer :: sb
+      integer :: sb, dstep
       err = CAPNP_OK
       q = capnp_ptr_t()
       if (.not. associated(p%msg)) return
@@ -410,6 +410,15 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
+      ! layout.c++ ListReader::getStructElement requires nestingLimit > 0
+      ! and passes nestingLimit - 1 to the element reader. Builders carry no
+      ! nesting limit in C++, so a builder element keeps the list's depth.
+      dstep = 1
+      if (p%msg%is_builder) dstep = 0
+      if (.not. p%msg%is_builder .and. p%depth + 1 >= p%msg%depth_limit) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       select case (p%esize)
       case (CAPNP_SZ_COMPOSITE)
          q%kind = CAPNP_PK_STRUCT
@@ -417,7 +426,7 @@ contains
          q%off = p%off + int(i, int64)*int(p%dwords + p%pwords, int64)*8_int64
          q%dwords = p%dwords
          q%pwords = p%pwords
-         q%depth = p%depth
+         q%depth = p%depth + dstep
       case (CAPNP_SZ_BYTE, CAPNP_SZ_TWO, CAPNP_SZ_FOUR, CAPNP_SZ_EIGHT)
          sb = capnp_list_step_bits(p%esize)
          q%kind = CAPNP_PK_STRUCT
@@ -426,7 +435,7 @@ contains
          q%dwords = 1
          q%pwords = 0
          q%dbits = int(sb, int64)
-         q%depth = p%depth
+         q%depth = p%depth + dstep
       case (CAPNP_SZ_PTR)
          q%kind = CAPNP_PK_STRUCT
          q%seg = p%seg
@@ -434,7 +443,7 @@ contains
          q%dwords = 0
          q%pwords = 1
          q%dbits = 0_int64
-         q%depth = p%depth
+         q%depth = p%depth + dstep
       case (CAPNP_SZ_VOID)
          ! layout.c++ readListPointer (the non-composite arm) treats VOID as
          ! a struct list with dataSize 0 and pointerCount 0.
@@ -445,7 +454,7 @@ contains
          q%dwords = 0
          q%pwords = 0
          q%dbits = 0_int64
-         q%depth = p%depth
+         q%depth = p%depth + dstep
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -1793,7 +1802,6 @@ contains
       integer, intent(in) :: i
       character(len=:), allocatable, intent(out) :: str
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: el
       str = ''
       err = CAPNP_OK
       if (p%kind /= CAPNP_PK_LIST) then
@@ -1807,10 +1815,9 @@ contains
          return
       end if
       if (p%esize == CAPNP_SZ_COMPOSITE) then
-         ! C=7 upgrade: element is a 0-data/1-pointer struct; Text at ptr 0.
-         el = capnp_list_get_struct(p, i, err)
-         if (err /= CAPNP_OK) return
-         call capnp_get_text(el, 0, str, err)
+         ! C=7 upgrade: element is a struct whose first pointer is Text
+         ! (layout.h ListReader::getPointerElement keeps nestingLimit).
+         call capnp_get_text(p, i, str, err)
          return
       end if
       err = CAPNP_ERR_KIND
@@ -2046,12 +2053,20 @@ contains
          select case (p%esize)
          case (CAPNP_SZ_COMPOSITE)
             words = 1_int64 + p%nelem*(int(p%dwords, int64) + int(p%pwords, int64))
-            do i = 0_int64, p%nelem - 1_int64
-               r = capnp_list_get_struct(p, int(i), err)
-               if (err /= CAPNP_OK) return
-               words = words + size_children(r, depth, err)
-               if (err /= CAPNP_OK) return
-            end do
+            if (p%pwords > 0) then
+               r = capnp_ptr_t()
+               r%msg => p%msg
+               r%kind = CAPNP_PK_STRUCT
+               r%seg = p%seg
+               r%dwords = p%dwords
+               r%pwords = p%pwords
+               r%depth = p%depth
+               do i = 0_int64, p%nelem - 1_int64
+                  r%off = p%off + i*int(p%dwords + p%pwords, int64)*8_int64
+                  words = words + size_children(r, depth, err)
+                  if (err /= CAPNP_OK) return
+               end do
+            end if
          case (CAPNP_SZ_PTR)
             words = p%nelem
             do i = 0_int64, p%nelem - 1_int64
@@ -2129,11 +2144,17 @@ contains
          case (CAPNP_SZ_COMPOSITE)
             q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, err)
             if (err /= CAPNP_OK) return
+            r = capnp_ptr_t()
+            r%msg => src%msg
+            r%kind = CAPNP_PK_STRUCT
+            r%seg = src%seg
+            r%dwords = src%dwords
+            r%pwords = src%pwords
+            r%depth = src%depth
             do i = 0_int64, src%nelem - 1_int64
                c = capnp_list_get_struct(q, int(i), err)
                if (err /= CAPNP_OK) return
-               r = capnp_list_get_struct(src, int(i), err)
-               if (err /= CAPNP_OK) return
+               r%off = src%off + i*int(src%dwords + src%pwords, int64)*8_int64
                call copy_struct_body(c, r, depth + 1, err)
                if (err /= CAPNP_OK) return
             end do

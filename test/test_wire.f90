@@ -22,6 +22,7 @@ contains
            new_unittest("lists", test_lists), &
            new_unittest("list-count-limit", test_list_count_limit), &
            new_unittest("void-list-struct", test_void_list_struct), &
+           new_unittest("list-struct-depth", test_list_struct_depth), &
            new_unittest("void-list-amplify", test_void_list_amplify), &
            new_unittest("empty-list-amplify", test_empty_list_amplify), &
            new_unittest("composite-list", test_composite_list), &
@@ -406,6 +407,120 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_void_list_struct
+
+   subroutine test_list_struct_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, list, el, child
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: words
+      integer :: err, i
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      list = capnp_new_composite_list(msg, 1_int64, 0, 1, err)
+      el = capnp_list_get_struct(list, 0, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 17_int64, err)
+      call capnp_setp(el, 0, child, err)
+      call capnp_setp(root, 0, list, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+
+      ! Limit 2: ListReader::getStructElement itself fails nestingLimit > 0.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK, 'list-depth: list resolves at limit 2')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'list-depth: get_struct fails at limit 2')
+      call capnp_message_free(rmsg)
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Limit 3: get_struct succeeds, child pointer fails at decremented depth.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=3)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_OK, 'list-depth: get_struct succeeds at limit 3')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      child = capnp_getp(el, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'list-depth: element consumes nesting level')
+      call capnp_message_free(rmsg)
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Limit 4: child resolves cleanly.
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=4)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      el = capnp_list_get_struct(list, 0, err)
+      child = capnp_getp(el, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(child, 0_int64) == 17_int64, &
+                 'list-depth: child resolves at limit 4')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+      if (allocated(error)) return
+
+      ! Data-only composite list at limit 2: totalSize succeeds while get_struct fails.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      list = capnp_new_composite_list(msg, 1_int64, 1, 0, err)
+      call capnp_setp(root, 0, list, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
+      root = capnp_root(rmsg, err)
+      list = capnp_getp(root, 0, err)
+      words = capnp_total_size(list, err)
+      call check(error, err == CAPNP_OK .and. words == 2_int64, &
+                 'list-depth: totalSize succeeds on data-only composite list at limit 2')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+         return
+      end if
+      el = capnp_list_get_struct(list, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, &
+                 'list-depth: data-only get_struct fails at limit 2')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      ! Builders carry no nesting limit in C++: a 40-level chain of struct
+      ! lists reads back through the builder.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      el = root
+      do i = 1, 40
+         list = capnp_new_composite_list(msg, 1_int64, 0, 1, err)
+         call capnp_setp(el, 0, list, err)
+         el = capnp_list_get_struct(list, 0, err)
+      end do
+      el = capnp_root(msg, err)
+      do i = 1, 40
+         list = capnp_getp(el, 0, err)
+         if (err /= CAPNP_OK) exit
+         el = capnp_list_get_struct(list, 0, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check(error, err == CAPNP_OK, 'list-depth: builder list chain reads back past 32 levels')
+      call capnp_message_free(msg)
+   end subroutine test_list_struct_depth
    !> List(Void) of 10^7 elements has no payload bytes but costs one word
    !> each (layout.c++ amplifiedRead). The default limit is 2^23 words.
    subroutine test_void_list_amplify(error)
