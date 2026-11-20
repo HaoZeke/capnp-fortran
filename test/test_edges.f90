@@ -58,6 +58,8 @@ contains
       character(len=*), intent(in) :: cmd
       logical :: ok
       integer :: st, cs
+      st = 0
+      cs = 0
       call execute_command_line(cmd, exitstat=st, cmdstat=cs, wait=.true.)
       ok = cs == 0 .and. st == 0
    end function sh
