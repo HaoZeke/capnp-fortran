@@ -8,6 +8,7 @@ program test_gate2
    call case_4()
    call case_5()
    call case_6()
+   call case_7()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -215,4 +216,35 @@ contains
          '/tmp/g2-az.o /tmp/g2-az.r && cmp -s /tmp/g2-az.e1 /tmp/g2-az' // &
          '.e2')
    end subroutine case_6
+
+   subroutine case_7()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '{"textBox": {"value": "hi"}, "listBox": {"value": ["a", "b"]' // &
+         '}, "nest": {"inner": {"value": "n"}, "boxes": [{"value": "m"' // &
+         '}]}}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-bj.in' // &
+         achar(10) // &
+         'for t in text binary; do' // &
+         achar(10) // &
+         '  "$CAP" convert json:$t schema/box.capnp BoxUse < /tmp/g2-b' // &
+         'j.in > /tmp/g2-bj.o; echo $? >> /tmp/g2-bj.o' // &
+         achar(10) // &
+         '  capnp convert json:$t schema/box.capnp BoxUse < /tmp/g2-bj' // &
+         '.in > /tmp/g2-bj.r; echo $? >> /tmp/g2-bj.r' // &
+         achar(10) // &
+         '  cmp -s /tmp/g2-bj.o /tmp/g2-bj.r || exit 1' // &
+         achar(10) // &
+         'done')
+   end subroutine case_7
 end program test_gate2

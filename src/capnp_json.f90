@@ -69,12 +69,17 @@ contains
       character(len=*), intent(in) :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
+      type(capnp_brand_env_t) :: env
       type(jval) :: root
       type(capnp_ptr_t) :: obj
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      if (idx < 1 .or. .not. schema%loaded .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -97,7 +102,7 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
-      call fill_struct(schema, idx, obj, root, 0, err)
+      call fill_struct(schema, idx, obj, env, root, 0, err)
    end subroutine capnp_json_decode
 
 
@@ -523,10 +528,11 @@ contains
       call capnp_fmt_i64(int(ord, int64), out)
    end subroutine enc_enum
 
-   recursive subroutine fill_struct(schema, idx, p, jv, depth, err)
+   recursive subroutine fill_struct(schema, idx, p, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(out) :: err
       integer :: i
@@ -548,18 +554,20 @@ contains
                                   field_discriminant(f), err)
             if (err /= CAPNP_OK) return
          end if
-         call fill_field(schema, f, p, jv%kids(i), depth + 1, err)
+         call fill_field(schema, f, p, env, jv%kids(i), depth + 1, err)
          if (err /= CAPNP_OK) return
       end do
    end subroutine fill_struct
 
-   recursive subroutine fill_field(schema, f, p, jv, depth, err)
+   recursive subroutine fill_field(schema, f, p, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(in) :: depth
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: t, q, et, dv
+      type(capnp_ptr_t) :: raw_t, t, q, et, dv
+      type(capnp_brand_env_t) :: cenv
       integer :: tw, idx, dw, pw, mode
       integer(int64) :: off
       err = CAPNP_OK
@@ -569,11 +577,12 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call fill_struct(schema, idx, p, jv, depth, err)
+         call fill_struct(schema, idx, p, env, jv, depth, err)
          return
       end if
-      t = field_slot_type(f, err)
+      raw_t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      t = capnp_brand_resolve(env, raw_t)
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       tw = type_which(t)
@@ -584,7 +593,7 @@ contains
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call fill_list(schema, et, p, int(off), jv, depth, err)
+         call fill_list(schema, et, p, int(off), env, jv, depth, err)
       case (TYPE_STRUCT)
          if (jv%k /= JK_OBJ) then
             err = CAPNP_ERR_ARG
@@ -595,13 +604,15 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
+         call capnp_brand_enter(env, t, cenv, err)
+         if (err /= CAPNP_OK) return
          dw = node_struct_data_words(schema%nodes(idx))
          pw = node_struct_pointer_count(schema%nodes(idx))
          q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, q, jv, depth, err)
+         call fill_struct(schema, idx, q, cenv, jv, depth, err)
       case (TYPE_DATA)
          call fill_data(p, int(off), jv, mode, .false., 0_int64, err)
       case default
@@ -609,15 +620,21 @@ contains
       end select
    end subroutine fill_field
 
-   recursive subroutine fill_list(schema, et, parent, slot, jv, depth, err)
+   recursive subroutine fill_list(schema, raw_et, parent, slot, env, jv, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      type(capnp_ptr_t), intent(in) :: et, parent
+      type(capnp_ptr_t), intent(in) :: raw_et, parent
       integer, intent(in) :: slot, depth
+      type(capnp_brand_env_t), intent(in) :: env
       type(jval), intent(in) :: jv
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: lst, inner, el
+      type(capnp_ptr_t) :: lst, et, inner, el
+      type(capnp_brand_env_t) :: cenv
       integer :: n, i, tw, idx
       err = CAPNP_OK
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (jv%k /= JK_ARR) then
          err = CAPNP_ERR_ARG
          return
@@ -627,7 +644,8 @@ contains
       else
          n = 0
       end if
-      lst = capnp_codec_alloc_list(parent, et, n, schema, err)
+      et = capnp_brand_resolve(env, raw_et)
+      lst = capnp_codec_alloc_list(parent, et, n, schema, err, env=env)
       if (err /= CAPNP_OK) return
       call capnp_setp(parent, slot, lst, err)
       if (err /= CAPNP_OK) return
@@ -637,7 +655,7 @@ contains
          case (TYPE_LIST)
             inner = type_list_element(et, err)
             if (err /= CAPNP_OK) return
-            call fill_list(schema, inner, lst, i - 1, jv%kids(i), depth + 1, err)
+            call fill_list(schema, inner, lst, i - 1, env, jv%kids(i), depth + 1, err)
          case (TYPE_STRUCT)
             el = capnp_list_get_struct(lst, i - 1, err)
             if (err /= CAPNP_OK) return
@@ -646,7 +664,9 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            call fill_struct(schema, idx, el, jv%kids(i), depth + 1, err)
+            call capnp_brand_enter(env, et, cenv, err)
+            if (err /= CAPNP_OK) return
+            call fill_struct(schema, idx, el, cenv, jv%kids(i), depth + 1, err)
          case (TYPE_DATA)
             call fill_data(lst, i - 1, jv%kids(i), 0, .true., int(i - 1, int64), err)
          case default
