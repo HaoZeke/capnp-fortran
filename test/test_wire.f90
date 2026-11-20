@@ -57,6 +57,7 @@ contains
            new_unittest("traversal-root-words", test_traversal_root_words), &
            new_unittest("traversal-single-far", test_traversal_single_far), &
            new_unittest("traversal-double-far", test_traversal_double_far), &
+           new_unittest("void-list-words", test_void_list_words), &
            new_unittest("depth-limit", test_depth_limit), &
            new_unittest("depth-limit-nested", test_depth_limit_nested), &
            new_unittest("nest-limit-64", test_nest_limit_64), &
@@ -2093,6 +2094,57 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_traversal_double_far
+   !> List(Void) charges one traversal word per element. A count of three
+   !> fits in a six-word budget (root pointer + root struct use three).
+   !> One more element, or ten million under the default budget, is
+   !> CAPNP_ERR_TRAVERSAL.
+   subroutine test_void_list_words(error)
+      type(error_type), allocatable, intent(out) :: error
+      call void_list_case(error, 3_int64, 6_int64, CAPNP_OK)
+      if (allocated(error)) return
+      call void_list_case(error, 4_int64, 6_int64, CAPNP_ERR_TRAVERSAL)
+      if (allocated(error)) return
+      call void_list_case(error, 10000000_int64, CAPNP_DEFAULT_TRAVERSAL_WORDS, &
+                          CAPNP_ERR_TRAVERSAL)
+   end subroutine test_void_list_words
+
+   subroutine void_list_case(error, count, budget, expect)
+      type(error_type), allocatable, intent(inout) :: error
+      integer(int64), intent(in) :: count, budget
+      integer, intent(in) :: expect
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, count, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=budget)
+      if (err /= CAPNP_OK) then
+         call check(error, .false., 'void list: framing')
+         call capnp_message_free(rmsg)
+         return
+      end if
+      root = capnp_root(rmsg, err)
+      if (err /= CAPNP_OK) then
+         call check(error, .false., 'void list: root')
+         call capnp_message_free(rmsg)
+         return
+      end if
+      lst = capnp_getp(root, 0, err)
+      if (expect == CAPNP_OK) then
+         call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == count, &
+                    'void list: small count is readable')
+      else
+         call check(error, err == expect, 'void list: element words hit the budget')
+      end if
+      call capnp_message_free(rmsg)
+   end subroutine void_list_case
+
    !> nestingLimit must be greater than zero to read the root
    !> (layout.c++:2186). Limit 1 allows the root and rejects the first getp.
    subroutine test_depth_limit(error)
