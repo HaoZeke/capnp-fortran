@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(95))
+      allocate (testsuite(96))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -294,20 +294,22 @@ contains
       testsuite(87)%test => w_delayed_result_cap_reused_id
       testsuite(88)%name = "rpc-resolve-multiref-release"
       testsuite(88)%test => w_resolve_multiref_release
-      testsuite(89)%name = "rpc-shutdown"
-      testsuite(89)%test => w_shutdown
-      testsuite(90)%name = "posix-recv-eintr-retried"
-      testsuite(90)%test => t_recv_all_retries_eintr
-      testsuite(91)%name = "rpc-framing-511-accepted"
-      testsuite(91)%test => t_framing_511_accepted
-      testsuite(92)%name = "rpc-framing-512-rejected"
-      testsuite(92)%test => t_framing_512_rejected
-      testsuite(93)%name = "rpc-framing-oversized-rejected"
-      testsuite(93)%test => t_framing_oversized_rejected
-      testsuite(94)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(94)%test => t_framing_negative_traversal_rejected
-      testsuite(95)%name = "rpc-framing-short-and-padded"
-      testsuite(95)%test => t_framing_short_and_padded
+      testsuite(89)%name = "rpc-disembargo-promised-bad-walk"
+      testsuite(89)%test => w_disembargo_promised_bad_walk
+      testsuite(90)%name = "rpc-shutdown"
+      testsuite(90)%test => w_shutdown
+      testsuite(91)%name = "posix-recv-eintr-retried"
+      testsuite(91)%test => t_recv_all_retries_eintr
+      testsuite(92)%name = "rpc-framing-511-accepted"
+      testsuite(92)%test => t_framing_511_accepted
+      testsuite(93)%name = "rpc-framing-512-rejected"
+      testsuite(93)%test => t_framing_512_rejected
+      testsuite(94)%name = "rpc-framing-oversized-rejected"
+      testsuite(94)%test => t_framing_oversized_rejected
+      testsuite(95)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(95)%test => t_framing_negative_traversal_rejected
+      testsuite(96)%name = "rpc-framing-short-and-padded"
+      testsuite(96)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -498,6 +500,7 @@ contains
    subroutine w_sender_loopback_echo(error)
       type(error_type), allocatable, intent(out) :: error
       call t_sender_loopback_echo(error)
+      if (.not. allocated(error)) call t_sender_loopback_echo_yourself(error)
    end subroutine w_sender_loopback_echo
 
    subroutine w_result_third_party_vine(error)
@@ -524,6 +527,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_multiref_release(error)
    end subroutine w_resolve_multiref_release
+
+   subroutine w_disembargo_promised_bad_walk(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_disembargo_promised_bad_walk(error)
+   end subroutine w_disembargo_promised_bad_walk
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6592,6 +6600,77 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_sender_loopback_echo
 
+   !> The same echo for a call with sendResultsTo.yourself. Its results
+   !> stay here, and a result that points back at the peer still echoes.
+   subroutine t_sender_loopback_echo_yourself(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(reflect_srv_t), target :: reflector
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(call_t) :: c
+      type(disembargo_t) :: d, rd
+      type(message_target_t) :: tgt, rtgt
+      type(promised_answer_t) :: pa
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qcall
+      call px_socketpair(fa, fb, e)
+      boot => reflector
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      msg = message_read_root(m, e)
+      c = message_call_get(msg, e)
+      call call_send_results_to_yourself_set(c, e)
+      s = capnp_new_struct(m, 0, 0, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(d, 42_int64, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qcall, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, rpc_conn_alive(sconn), 'loopback echo yourself: vat stays up')
+      if (.not. allocated(error)) then
+         call recv_within(cconn%fd, reply, error, 'loopback echo yourself: reply arrives')
+      end if
+      if (.not. allocated(error)) then
+         rmsg = message_read_root(reply, e)
+         call check_(error, e == CAPNP_OK .and. &
+                     message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                     'loopback echo yourself: reply is Disembargo')
+         rd = message_disembargo_get(rmsg, e)
+         call check_(error, disembargo_context_which(rd) == &
+                     DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG .and. &
+                     disembargo_context_receiver_loopback_get(rd) == 42_int64, &
+                     'loopback echo yourself: receiverLoopback carries the id')
+         rtgt = disembargo_target_get(rd, e)
+         call check_(error, message_target_which(rtgt) == &
+                     MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
+                     message_target_imported_cap_get(rtgt) == 4_int64, &
+                     'loopback echo yourself: target is the reflected import')
+         call capnp_message_free(reply)
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_sender_loopback_echo_yourself
+
    !> C++ `receiveCap` imports the vine of a `thirdPartyHosted` result
    !> (`rpc.c++` lines 1628-1630). `rpc_result_cap` must return that
    !> import, and the level-3 pickup must share its one reference.
@@ -7091,5 +7170,76 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_multiref_release
+
+   !> A senderLoopback Disembargo walking a non-struct field in a
+   !> promisedAnswer must abort the connection rather than return an
+   !> unhandled read error.
+   subroutine t_disembargo_promised_bad_walk(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(reflect_srv_t), target :: rsrv
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(payload_t) :: params
+      type(disembargo_t) :: dis
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qcall
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => rsrv
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      call rpc_call_send(cconn, m, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qcall, e)
+
+      ! reflect_dispatch returns a bare cap pointer (non-struct content).
+      ! Walking getPointerField(0) fails capnp_getp and must send Abort.
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      dis = message_disembargo_init(msg, e)
+      call disembargo_context_sender_loopback_set(dis, 77_int64, e)
+      tgt = disembargo_target_init(dis, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qcall, e)
+      ops = promised_answer_transform_init(pa, 1_int64, e)
+      op%p = capnp_list_get_struct(ops, 0, e)
+      call promised_answer_op_get_pointer_field_set(op, 0, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call check_(error, .not. rpc_conn_alive(sconn), &
+                  'bad loopback walk: server aborted connection')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+      call px_poll_in(cconn%fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, &
+                  'bad loopback walk: Abort arrives at peer')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+      call rpc_recv_message(cconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      call check_(error, e == CAPNP_OK .and. &
+                  message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                  'bad loopback walk: peer receives Abort')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_disembargo_promised_bad_walk
 
 end module test_rpc

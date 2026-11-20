@@ -5515,7 +5515,10 @@ contains
          case (PROMISED_ANSWER_OP_NOOP_TAG)
          case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
             p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) then
+               call abort_conn(conn, back, err)
+               return
+            end if
          case default
             call abort_conn(conn, 'Unsupported pipeline op.', err)
             return
