@@ -144,9 +144,66 @@ EOF
   echo "g2 ok"
 }
 
+g34() {
+  local d which=$1
+  d=$(work)
+  cd "$d"
+  cat > deflists.capnp << 'EOF'
+@0x8333333333333301;
+struct Elem { v @0 :Int32; }
+struct DefLists {
+  nums @0 :List(Int32) = [10, 20, 30];
+  tags @1 :List(Text) = ["alpha", "beta"];
+  elems @2 :List(Elem) = [(v = 7)];
+}
+EOF
+  capnp compile -o"$BIN" deflists.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use deflists_capnp
+   implicit none
+   type(capnp_message_t), target :: m1, m2
+   type(def_lists_t) :: h, h2
+   integer :: err
+   call capnp_message_init_builder(m1, err)
+   h = def_lists_new_root(m1, err)
+   call capnp_list_set_i32(def_lists_nums_get(h, err), 0_int64, 999_int32, err)
+   call capnp_message_init_builder(m2, err)
+   h2 = def_lists_new_root(m2, err)
+   print '(i0)', capnp_list_get_i32(def_lists_nums_get(h2, err), 0_int64, err)
+   call capnp_message_free(m1)
+   call capnp_message_free(m2)
+end program drv
+EOF
+  fc deflists_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  capnp compile -oc++ deflists.capnp
+  cat > cpp.cpp << 'EOF'
+#include "deflists.capnp.h"
+#include <capnp/message.h>
+#include <cstdio>
+int main() {
+  capnp::MallocMessageBuilder m1;
+  auto d1 = m1.initRoot<DefLists>();
+  d1.getNums().set(0, 999);
+  capnp::MallocMessageBuilder m2;
+  auto d2 = m2.initRoot<DefLists>();
+  std::printf("%d\n", d2.getNums()[0]);
+}
+EOF
+  "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
+  local f c
+  f=$(./drv)
+  c=$(./cppdrv)
+  cmp_out "$f" "$c"
+  [[ "$f" == 10 ]]
+  echo "$which ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
-  all) g1; g2 ;;
+  g3) g34 g3 ;;
+  all) g1; g2; g34 g3 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac

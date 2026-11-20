@@ -1371,6 +1371,15 @@ contains
          call w('         defloaded = .true.')
          call w('      end if')
          call w('      l = capnp_root(defmsg, err)')
+         call w('      if (err /= CAPNP_OK) return')
+         call w('      if (associated(h%p%msg)) then')
+         call w('         if (h%p%msg%is_builder) then')
+         call w('            l = capnp_copy(h%p%msg, l, err)')
+         call w('            if (err == CAPNP_OK) call capnp_setp(h%p, '// &
+                itoa(int(pidx, int64))//', l, err)')
+         call w('            return')
+         call w('         end if')
+         call w('      end if')
       else
          call w('      l = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
       end if
