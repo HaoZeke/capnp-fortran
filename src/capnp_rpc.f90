@@ -7438,6 +7438,12 @@ contains
       end if
       ! Finish always drops the pipeline reference, including when
       ! releaseResultCaps is false and the wire refs stay.
+      ! A yourself answer nobody took ends with its call context, which
+      ! sends resultsSentElsewhere (rpc.c++ ~RpcCallContext).
+      if (jslot%redirected .and. .not. conn%dead .and. associated(conn%transport)) then
+         call send_results_elsewhere(conn, qid, jerr)
+         if (jerr /= CAPNP_OK) err = jerr
+      end if
       call drop_param_holds(conn, jslot%held_params, err)
       call unpin_answer_exports(conn, jslot)
       if (jslot%forward_qid >= 0_int64) then

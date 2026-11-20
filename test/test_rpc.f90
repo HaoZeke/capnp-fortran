@@ -3404,6 +3404,13 @@ contains
       call rpc_pump_once(srv, err)
       call rpc_finish_send(cli, qy, .false., err)
       call rpc_pump_once(srv, err)
+      ! Nothing took the answer, so its Finish draws resultsSentElsewhere.
+      call px_poll_in(cli%fd, 200, readable, err)
+      call check_(error, err == CAPNP_OK .and. readable, &
+                  'rpc: yourself Finish draws resultsSentElsewhere')
+      if (readable) call rpc_pump_once(cli, err)
+      call check_(error, err == CAPNP_OK .and. rpc_conn_alive(cli), &
+                  'rpc: a Return after Finish is legal')
       ! A takeFromOtherQuestion that does not name a yourself redirect
       ! aborts the connection. That case has its own pair
       ! (rpc-take-from-normal-answer) so this shared pair stays up.
