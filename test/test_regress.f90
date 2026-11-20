@@ -20,6 +20,7 @@ contains
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
+         new_unittest("binary-stdout", run_binary_stdout), &
          new_unittest("list-linear", run_list_linear), &
          new_unittest("canonical-release", run_canonical_release), &
          new_unittest("json-collisions", run_json_collisions), &
@@ -125,6 +126,38 @@ contains
          //' schema/common.capnp Vec3 >/dev/null 2>'//tmp//'/bomb.err; test $? -ne 0'), &
          'bomb: cli packed header exits')
    end subroutine run_segment_bomb
+
+   subroutine run_binary_stdout(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int8), allocatable :: got(:), ref(:)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && printf "(x = 1, y = 0, z = 0)\n(x = 2, y = 0, z = 0)\n"' &
+         //' | "$CAP" encode schema/common.capnp Vec3 > '//tmp//'/two.bin' &
+         //' && printf "(x = 1, y = 0, z = 0)\n(x = 2, y = 0, z = 0)\n"' &
+         //' | capnp encode schema/common.capnp Vec3 > '//tmp//'/two.ref' &
+         //' && printf "(x = 3, y = 0, z = 0)\n"' &
+         //' | "$CAP" encode schema/common.capnp Vec3 > '//tmp//'/app.bin' &
+         //' && printf "(x = 4, y = 0, z = 0)\n"' &
+         //' | "$CAP" encode schema/common.capnp Vec3 >> '//tmp//'/app.bin' &
+         //' && printf "(x = 3, y = 0, z = 0)\n(x = 4, y = 0, z = 0)\n"' &
+         //' | capnp encode schema/common.capnp Vec3 > '//tmp//'/app.ref')) then
+         call test_failed(error, 'binary stdout encode failed')
+         return
+      end if
+      call capnp_read_file(tmp//'/two.bin', got, err)
+      call capnp_read_file(tmp//'/two.ref', ref, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
+                  'stdout: two messages match capnp')
+      call capnp_read_file(tmp//'/app.bin', got, err)
+      call capnp_read_file(tmp//'/app.ref', ref, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
+                  'stdout: append keeps both messages')
+   end subroutine run_binary_stdout
 
    subroutine run_list_linear(error)
       type(error_type), allocatable, intent(out) :: error

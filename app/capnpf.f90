@@ -2,7 +2,7 @@
 !> the capnp tool. Schemas are compiled with the capnp driver
 !> (`capnp compile -o-`) and loaded as a CodeGeneratorRequest.
 program capnpf
-   use, intrinsic :: iso_c_binding, only: c_int
+   use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_size_t, c_intptr_t, c_long
    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
    use capnp
    use capnp_schema
@@ -17,6 +17,13 @@ program capnpf
          import c_int
          integer(c_int) :: p
       end function c_getpid
+      function c_write(fd, buf, n) bind(c, name="write") result(nw)
+         import c_int, c_ptr, c_size_t, c_long
+         integer(c_int), value :: fd
+         type(c_ptr), value :: buf
+         integer(c_size_t), value :: n
+         integer(c_long) :: nw
+      end function c_write
       subroutine c_exit(code) bind(c, name="exit")
          import c_int
          integer(c_int), value :: code
@@ -649,7 +656,8 @@ contains
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       character(len=:), allocatable :: text
-      integer :: err, unit
+      integer(int8), allocatable :: outb(:)
+      integer :: err
       rc = 0
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
@@ -666,27 +674,52 @@ contains
          end if
          write (output_unit, '(a)') text
       else
-         open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-               action='write', status='old', iostat=err)
-         if (err /= 0) then
-            call fail('cannot write stdout', rc)
+         call write_binary_message(msg, to, seg_words, outb, err)
+         if (err /= CAPNP_OK) then
+            call fail('binary encode failed', rc)
             return
          end if
-         call write_binary_message(unit, msg, to, seg_words, err)
-         close (unit)
-         if (err /= CAPNP_OK) call fail('binary encode failed', rc)
+         call write_stdout(outb, err)
+         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
       end if
    end subroutine emit_one
 
-   subroutine write_binary_message(unit, msg, to, seg_words, err)
-      integer, intent(in) :: unit
+   !> Append bytes to stdout. One descriptor for every message, so a
+   !> redirected file keeps each message in order.
+   subroutine write_stdout(buf, err)
+      integer(int8), intent(in), target :: buf(:)
+      integer, intent(out) :: err
+      integer(c_intptr_t) :: addr
+      integer(c_size_t) :: left
+      integer(c_long) :: nw
+      integer :: lb
+      type(c_ptr) :: p
+      err = CAPNP_OK
+      if (size(buf) <= 0) return
+      lb = lbound(buf, 1)
+      addr = transfer(c_loc(buf(lb)), addr)
+      left = int(size(buf), c_size_t)
+      do while (left > 0_c_size_t)
+         p = transfer(addr, p)
+         nw = c_write(1_c_int, p, left)
+         if (nw <= 0_c_long) then
+            err = CAPNP_ERR_IO
+            return
+         end if
+         addr = addr + int(nw, c_intptr_t)
+         left = left - int(nw, c_size_t)
+      end do
+   end subroutine write_stdout
+
+   subroutine write_binary_message(msg, to, seg_words, outb, err)
       type(capnp_message_t), intent(inout), target :: msg
+      integer(int8), allocatable, intent(out) :: outb(:)
       character(len=*), intent(in) :: to
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: err
       type(capnp_message_t), target :: reseg
       type(capnp_ptr_t) :: root, croot
-      integer(int8), allocatable :: outb(:), flatb(:)
+      integer(int8), allocatable :: flatb(:)
       err = CAPNP_OK
       if (to == 'canonical') then
          call capnp_canonicalize(msg, outb, err)
@@ -722,8 +755,6 @@ contains
       else
          call capnp_serialize_bytes(msg, outb, err)
       end if
-      if (err /= CAPNP_OK) return
-      if (size(outb) > 0) write (unit) outb
    end subroutine write_binary_message
 
    subroutine to_flat_bytes(msg, flatb, err)
