@@ -3518,6 +3518,8 @@ contains
       if (b%kind == CAPNP_PK_NULL) return
       scopes = brand_scopes(b, err)
       if (err /= CAPNP_OK) return
+      call capnp_count_fits(scopes, capnp_list_len(scopes), err)
+      if (err /= CAPNP_OK) return
       n = 0
       do i = 0_int64, capnp_list_len(scopes) - 1_int64
          sc = capnp_list_get_struct(scopes, int(i), err)
@@ -3527,6 +3529,8 @@ contains
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
          nb = capnp_list_len(binds)
+         call capnp_count_fits(binds, nb, err)
+         if (err /= CAPNP_OK) return
          if (allocated(btypes)) deallocate (btypes)
          if (allocated(bctx)) deallocate (bctx)
          if (nb > 0_int64) then

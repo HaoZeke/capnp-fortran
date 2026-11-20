@@ -1,6 +1,7 @@
 !> Generator regressions: multi-file generics, suffixed names, annotation
 !> stems, and checked-in modules that drift from the plugin.
 module test_codegen
+   use capnp
    use testdrive, only: unittest_type, error_type, check, test_failed
    implicit none
    private
@@ -10,7 +11,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(7))
+      allocate (testsuite(8))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -25,6 +26,8 @@ contains
       testsuite(6)%test => run_helper_starts
       testsuite(7)%name = "codegen-long-annotation-text"
       testsuite(7)%test => run_longann
+      testsuite(8)%name = "codegen-wire-count"
+      testsuite(8)%test => run_wire_count
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -212,5 +215,85 @@ contains
       moddir = trim(line)
       ok = len(moddir) > 0
    end subroutine newest_module_dir
+
+   !> A node list, or a requested-file list, may not claim more elements
+   !> than the message holds.
+   subroutine run_wire_count(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, nodes, files, elem
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: bin, moddir, text
+      integer :: err, stat, cs
+      logical :: ok
+
+      call plugin_paths(bin, moddir, ok)
+      if (.not. ok) then
+         call test_failed(error, 'codegen: this test binary has no plugin path')
+         return
+      end if
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      nodes = capnp_new_composite_list(msg, 4096_int64, 0, 0, err)
+      call capnp_setp(root, 0, nodes, err)
+      files = capnp_new_composite_list(msg, 1_int64, 1, 1, err)
+      elem = capnp_list_get_struct(files, 0, err)
+      call capnp_set_i64(elem, 0_int64, 1_int64, err)
+      call capnp_set_text(elem, 0, 'x.capnp', err)
+      call capnp_setp(root, 1, files, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_write_file('/tmp/capnp-fortran-amp-nodes.bin', bytes, err)
+      call capnp_message_free(msg)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'codegen: could not write the node request')
+         return
+      end if
+      call execute_command_line( &
+         '"'//bin//'" /tmp/capnp-fortran-amp-nodes.bin ' // &
+         '> /tmp/capnp-fortran-amp-nodes.out 2> /tmp/capnp-fortran-amp-nodes.err', &
+         exitstat=stat, cmdstat=cs)
+      text = slurp('/tmp/capnp-fortran-amp-nodes.out')
+      call check(error, cs == 0 .and. index(text, ', err=5') > 0, &
+                 'codegen: amplified node list')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      files = capnp_new_list(msg, CAPNP_SZ_VOID, 4096_int64, err)
+      call capnp_setp(root, 1, files, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_write_file('/tmp/capnp-fortran-amp-files.bin', bytes, err)
+      call capnp_message_free(msg)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'codegen: could not write the file request')
+         return
+      end if
+      call execute_command_line( &
+         '"'//bin//'" /tmp/capnp-fortran-amp-files.bin ' // &
+         '> /tmp/capnp-fortran-amp-files.out 2> /tmp/capnp-fortran-amp-files.err', &
+         exitstat=stat, cmdstat=cs)
+      text = slurp('/tmp/capnp-fortran-amp-files.out')
+      call check(error, cs == 0 .and. index(text, 'requestedFiles exceeds') > 0, &
+                 'codegen: amplified requestedFiles')
+   end subroutine run_wire_count
+
+   function slurp(path) result(s)
+      character(len=*), intent(in) :: path
+      character(len=:), allocatable :: s
+      character(len=512) :: line
+      integer :: u, ios
+      s = ''
+      open (newunit=u, file=path, status='old', action='read', iostat=ios)
+      if (ios /= 0) return
+      do
+         read (u, '(A)', iostat=ios) line
+         if (ios /= 0) exit
+         s = s//trim(line)
+      end do
+      close (u)
+   end function slurp
 
 end module test_codegen
