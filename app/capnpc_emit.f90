@@ -39,7 +39,7 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      type(capnp_ptr_t) :: bindings(0:3)
+      type(capnp_ptr_t), allocatable :: bindings(:)
       integer :: nbind = 0
    end type inst_t
    type(inst_t) :: g_insts(64)
@@ -1463,7 +1463,7 @@ contains
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
       type(capnp_ptr_t) :: b, scopes, sc, binds, bd
-      type(capnp_ptr_t) :: btypes(0:3)
+      type(capnp_ptr_t), allocatable :: btypes(:)
       character(len=:), allocatable :: gname, part
       integer(int64) :: i, j
       integer :: n, k, bidx
@@ -1482,7 +1482,9 @@ contains
          if (scope_which(sc) /= SCOPE_BIND) cycle
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
-         do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
+         if (allocated(btypes)) deallocate (btypes)
+         allocate (btypes(0:capnp_list_len(binds) - 1_int64))
+         do j = 0_int64, capnp_list_len(binds) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)
             if (err /= CAPNP_OK) return
             if (binding_which(bd) == BINDING_BOUND_TYPE) then
@@ -1536,6 +1538,9 @@ contains
       g_insts(g_ninsts)%gidx = gidx
       g_insts(g_ninsts)%name = o
       g_insts(g_ninsts)%nbind = n
+      if (allocated(g_insts(g_ninsts)%bindings)) &
+         deallocate (g_insts(g_ninsts)%bindings)
+      allocate (g_insts(g_ninsts)%bindings(0:n - 1))
       do k = 0, n - 1
          g_insts(g_ninsts)%bindings(k) = btypes(k)
       end do
