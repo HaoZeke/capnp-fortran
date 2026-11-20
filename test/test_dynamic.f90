@@ -31,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(23))
+      allocate (testsuite(24))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -78,6 +78,8 @@ contains
       testsuite(22)%test => run_bad_handle
       testsuite(23)%name = "dynamic-deep-groups"
       testsuite(23)%test => run_deep_groups
+      testsuite(24)%name = "dynamic-nested-union-clear"
+      testsuite(24)%test => run_nested_union_clear
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1229,6 +1231,109 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_deep_groups
+
+   !> Clearing a union group arm resets any inner union discriminant as well
+   !> as the slots, and a cyclic group schema terminates with CAPNP_ERR_DEPTH.
+   subroutine run_nested_union_clear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema, cschema
+      type(capnp_message_t), target :: msg, cgr, cmsg
+      type(capnp_ptr_t) :: root, croot, nodes, n0, n1, fl0, fl1, f, sroot
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer(int64) :: v
+      integer :: err, idx, gidx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0 .and. gidx > 0, &
+                  'nested-union: nodes found')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, root, 'y', 'hello', err)
+      tag = capnp_dyn_which(schema, gidx, root, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1, &
+                  'nested-union: inner y arm active')
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call check_(error, err == CAPNP_OK, 'nested-union: switch to outer a')
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      tag = capnp_dyn_which(schema, gidx, root, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0, &
+                  'nested-union: inner discriminant reset to 0')
+      v = capnp_dyn_get_int(schema, gidx, root, 'x', err)
+      call check_(error, err == CAPNP_OK .and. v == 0_int64, &
+                  'nested-union: inner x arm readable as 0')
+      call capnp_dyn_select(schema, gidx, root, 'y', err)
+      call capnp_dyn_get_text(schema, gidx, root, 'y', s, err)
+      call check_(error, err == CAPNP_OK .and. s == '', &
+                  'nested-union: inner text slot cleared')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+
+      ! Build a two-node CGR where a union group arm references itself.
+      call capnp_message_init_builder(cgr, err)
+      croot = capnp_new_struct(cgr, 0, 4, err)
+      call capnp_set_root(cgr, croot, err)
+      nodes = capnp_new_composite_list(cgr, 2_int64, 6, 6, err)
+      call capnp_setp(croot, 0, nodes, err)
+
+      n0 = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(n0, 0_int64, 100_int64, err)
+      call capnp_set_text(n0, 0, 'Cyclic', err)
+      call capnp_set_u16(n0, 12_int64, 1_int32, err)
+      call capnp_set_u16(n0, 14_int64, 1_int32, err)
+      call capnp_set_u16(n0, 24_int64, 0_int32, err)
+      call capnp_set_u16(n0, 30_int64, 2_int32, err)
+      call capnp_set_u32(n0, 32_int64, 0_int64, err)
+      fl0 = capnp_new_composite_list(cgr, 2_int64, 3, 4, err)
+      call capnp_setp(n0, 3, fl0, err)
+      f = capnp_list_get_struct(fl0, 0, err)
+      call capnp_set_text(f, 0, 'a', err)
+      call capnp_set_u16(f, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 0_int32, err)
+      f = capnp_list_get_struct(fl0, 1, err)
+      call capnp_set_text(f, 0, 'g', err)
+      call capnp_set_u16(f, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 1_int32, err)
+      call capnp_set_i64(f, 16_int64, 200_int64, err)
+
+      n1 = capnp_list_get_struct(nodes, 1, err)
+      call capnp_set_i64(n1, 0_int64, 200_int64, err)
+      call capnp_set_text(n1, 0, 'Cyclic.g', err)
+      call capnp_set_u16(n1, 12_int64, 1_int32, err)
+      call capnp_set_u16(n1, 14_int64, 1_int32, err)
+      call capnp_set_u16(n1, 24_int64, 0_int32, err)
+      call capnp_set_bool(n1, 224_int64, .true., err)
+      fl1 = capnp_new_composite_list(cgr, 1_int64, 3, 4, err)
+      call capnp_setp(n1, 3, fl1, err)
+      f = capnp_list_get_struct(fl1, 0, err)
+      call capnp_set_text(f, 0, 'loop', err)
+      call capnp_set_u16(f, 2_int64, 65535_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 1_int32, err)
+      call capnp_set_i64(f, 16_int64, 200_int64, err)
+
+      call capnp_serialize_bytes(cgr, bytes, err)
+      call capnp_dyn_load(cschema, bytes, err)
+      idx = capnp_dyn_find(cschema, 'Cyclic', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'nested-union: cyclic schema loaded')
+      call capnp_message_init_builder(cmsg, err)
+      sroot = capnp_dyn_new_root(cschema, idx, cmsg, err)
+      call capnp_dyn_select(cschema, idx, sroot, 'g', err)
+      call check_(error, err == CAPNP_OK, 'nested-union: select cyclic group arm')
+      call capnp_dyn_select(cschema, idx, sroot, 'a', err)
+      call check_(error, err == CAPNP_ERR_DEPTH, &
+                  'nested-union: cyclic group terminates with CAPNP_ERR_DEPTH')
+      call capnp_message_free(cmsg)
+      call capnp_dyn_free(cschema)
+      call capnp_message_free(cgr)
+   end subroutine run_nested_union_clear
 
    !> A failed discriminant write is the error the caller sees, and the
    !> value is not stored afterwards.
