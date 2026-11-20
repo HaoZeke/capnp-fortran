@@ -14,7 +14,6 @@ module test_regress
 
 contains
 
-
    subroutine collect_regress(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
@@ -28,7 +27,8 @@ contains
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
          new_unittest("json-unloaded-guard", run_json_unloaded), &
-         new_unittest("long-argument", run_long_arg) &
+         new_unittest("long-argument", run_long_arg), &
+         new_unittest("schema-pipe", run_schema_pipe) &
          ]
    end subroutine collect_regress
 
@@ -459,6 +459,52 @@ contains
          if (local /= CAPNP_OK) call test_failed(err_ignored, 'write '//path)
       end if
    end subroutine spit
+
+   subroutine run_schema_pipe(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int8), allocatable :: got(:), ref(:)
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && echo kept > '//tmp//'/kept' &
+         //' && '//cap_setup() &
+         //' && python3 - <<''PY'' &&'//achar(10)// &
+         'import os'//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'pid = os.getpid()'//achar(10)// &
+         'Path("'//tmp//'/pid").write_text(str(pid))'//achar(10)// &
+         'kept = Path("'//tmp//'/kept")'//achar(10)// &
+         'for i in range(1, 81):'//achar(10)// &
+         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    if p.is_symlink() or p.exists():'//achar(10)// &
+         '        p.unlink()'//achar(10)// &
+         '    p.symlink_to(kept)'//achar(10)// &
+         'PY'//achar(10)// &
+         'ok=0' &
+         //' && printf "(x = 1, y = 2, z = 3)\n" | "$CAP" encode' &
+         //' schema/common.capnp Vec3 > '//tmp//'/pipe.bin' &
+         //' && test "$(cat '//tmp//'/kept)" = kept && ok=1'//achar(10)// &
+         'python3 - <<''PY'''//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'pid = int(Path("'//tmp//'/pid").read_text())'//achar(10)// &
+         'for i in range(1, 81):'//achar(10)// &
+         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    if p.is_symlink() or p.exists():'//achar(10)// &
+         '        p.unlink()'//achar(10)// &
+         'PY'//achar(10)// &
+         'test "$ok" = 1' &
+         //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
+         //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref')) then
+         call test_failed(error, 'schema pipe encode failed')
+         return
+      end if
+      call capnp_read_file(tmp//'/pipe.bin', got, err)
+      call capnp_read_file(tmp//'/pipe.ref', ref, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == size(ref) .and. all(got == ref), &
+                  'schema: pipe matches capnp and leaves the symlink target')
+   end subroutine run_schema_pipe
 
    subroutine slurp(path, s, err)
       character(len=*), intent(in) :: path

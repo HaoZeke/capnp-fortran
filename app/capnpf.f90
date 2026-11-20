@@ -2,7 +2,8 @@
 !> the capnp tool. Schemas are compiled with the capnp driver
 !> (`capnp compile -o-`) and loaded as a CodeGeneratorRequest.
 program capnpf
-   use, intrinsic :: iso_c_binding, only: c_int, c_ptr, c_loc, c_size_t, c_intptr_t, c_long
+   use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_loc, c_size_t, &
+      c_null_char, c_associated, c_intptr_t, c_long
    use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
    use capnp
    use capnp_schema
@@ -13,10 +14,31 @@ program capnpf
    implicit none
 
    interface
-      function c_getpid() bind(c, name="getpid") result(p)
+      subroutine c_exit(code) bind(c, name="exit")
          import c_int
-         integer(c_int) :: p
-      end function c_getpid
+         integer(c_int), value :: code
+      end subroutine c_exit
+      function c_popen(cmd, mode) bind(c, name="popen") result(fp)
+         import c_ptr
+         type(c_ptr), value :: cmd, mode
+         type(c_ptr) :: fp
+      end function c_popen
+      function c_fread(buf, sz, nmemb, fp) bind(c, name="fread") result(n)
+         import c_ptr, c_size_t
+         type(c_ptr), value :: buf, fp
+         integer(c_size_t), value :: sz, nmemb
+         integer(c_size_t) :: n
+      end function c_fread
+      function c_pclose(fp) bind(c, name="pclose") result(st)
+         import c_ptr, c_int
+         type(c_ptr), value :: fp
+         integer(c_int) :: st
+      end function c_pclose
+      function c_ferror(fp) bind(c, name="ferror") result(st)
+         import c_ptr, c_int
+         type(c_ptr), value :: fp
+         integer(c_int) :: st
+      end function c_ferror
       function c_write(fd, buf, n) bind(c, name="write") result(nw)
          import c_int, c_ptr, c_size_t, c_long
          integer(c_int), value :: fd
@@ -24,10 +46,6 @@ program capnpf
          integer(c_size_t), value :: n
          integer(c_long) :: nw
       end function c_write
-      subroutine c_exit(code) bind(c, name="exit")
-         import c_int
-         integer(c_int), value :: code
-      end subroutine c_exit
    end interface
 
    integer :: exit_code
@@ -298,42 +316,108 @@ contains
       q = q//"'"
    end function shell_quote
 
-   subroutine remove_file(path)
-      character(len=*), intent(in) :: path
-      integer :: u, ios
-      open (newunit=u, file=path, status='old', iostat=ios)
-      if (ios == 0) close (u, status='delete', iostat=ios)
-   end subroutine remove_file
-
    subroutine load_schema(path, extra_inc, no_std, sch, err)
       character(len=*), intent(in) :: path, extra_inc
       logical, intent(in) :: no_std
       type(capnp_dyn_schema_t), intent(inout), target :: sch
       integer, intent(out) :: err
-      character(len=96) :: tmp
       character(len=:), allocatable :: shcmd
       integer(int8), allocatable :: bytes(:)
-      integer :: st, cs
-      write (tmp, '(a,i0,a)') '/tmp/capnpf-', c_getpid(), '.cgr'
       if (no_std) then
          shcmd = 'capnp compile --no-standard-import'//extra_inc//' -o- ' &
-                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+                 //shell_quote(trim(path))
       else
          shcmd = 'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
                  //'capnp compile -I"$INC"'//extra_inc//' -o- ' &
-                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+                 //shell_quote(trim(path))
       end if
-      call execute_command_line(shcmd, exitstat=st, cmdstat=cs, wait=.true.)
-      if (cs /= 0 .or. st /= 0) then
-         call remove_file(trim(tmp))
-         err = CAPNP_ERR_IO
-         return
-      end if
-      call capnp_read_file(trim(tmp), bytes, err)
-      call remove_file(trim(tmp))
+      call read_pipe(shcmd, bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(sch, bytes, err)
    end subroutine load_schema
+
+   !> Read the stdout of a shell command. No temporary path is created.
+   subroutine read_pipe(shcmd, bytes, err)
+      character(len=*), intent(in) :: shcmd
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      character(kind=c_char), allocatable, target :: cmd(:), mode(:)
+      integer(int8), allocatable, target :: acc(:)
+      integer(int8), allocatable :: grown(:)
+      type(c_ptr) :: fp
+      integer(c_size_t) :: nread
+      integer(c_intptr_t) :: addr
+      integer :: got, cap, stat, st
+      err = CAPNP_OK
+      call to_cchars(shcmd, cmd)
+      call to_cchars('r', mode)
+      fp = c_popen(c_loc(cmd(1)), c_loc(mode(1)))
+      if (.not. c_associated(fp)) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      cap = 65536
+      got = 0
+      allocate (acc(0:cap - 1), stat=stat)
+      if (stat /= 0) then
+         st = c_pclose(fp)
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do
+         if (got + 4096 > cap) then
+            if (cap > ishft(huge(cap), -1)) then
+               st = c_pclose(fp)
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+            allocate (grown(0:cap*2 - 1), stat=stat)
+            if (stat /= 0) then
+               st = c_pclose(fp)
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+            grown(0:got - 1) = acc(0:got - 1)
+            call move_alloc(grown, acc)
+            cap = cap*2
+         end if
+         addr = transfer(c_loc(acc(got)), addr)
+         nread = c_fread(transfer(addr, fp), 1_c_size_t, 4096_c_size_t, fp)
+         if (nread == 0_c_size_t) exit
+         got = got + int(nread)
+      end do
+      if (c_ferror(fp) /= 0) then
+         st = c_pclose(fp)
+         err = CAPNP_ERR_IO
+         return
+      end if
+      st = c_pclose(fp)
+      if (st /= 0) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      if (got <= 0) then
+         allocate (bytes(0))
+      else
+         allocate (bytes(0:got - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         bytes = acc(0:got - 1)
+      end if
+   end subroutine read_pipe
+
+   subroutine to_cchars(s, a)
+      character(len=*), intent(in) :: s
+      character(kind=c_char), allocatable, intent(out) :: a(:)
+      integer :: i
+      allocate (a(len(s) + 1))
+      do i = 1, len(s)
+         a(i) = s(i:i)
+      end do
+      a(len(s) + 1) = c_null_char
+   end subroutine to_cchars
 
    subroutine take_arg(i, s)
       integer, intent(in) :: i
