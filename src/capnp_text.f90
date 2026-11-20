@@ -10,7 +10,8 @@ module capnp_text
    private
 
    public :: capnp_text_encode, capnp_text_decode
-   public :: capnp_text_encode_value, capnp_text_span
+   public :: capnp_text_encode_value, capnp_text_encode_list, capnp_text_encode_enum
+   public :: capnp_text_span
 
    integer, parameter :: MODE_BARE = 1
    integer, parameter :: MODE_PREF = 2
@@ -28,13 +29,14 @@ module capnp_text
 
 contains
 
-   subroutine capnp_text_encode(schema, idx, p, text, err, pretty)
+   subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      type(capnp_brand_env_t), intent(in), optional :: brand_env
       type(capnp_brand_env_t) :: env
       integer :: ind
       err = CAPNP_OK
@@ -51,8 +53,33 @@ contains
       if (present(pretty)) then
          if (.not. pretty) ind = 0
       end if
+      if (present(brand_env)) env = brand_env
       call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode
+
+   subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_ptr_t), intent(in) :: et, lst
+      type(capnp_brand_env_t), intent(in) :: env
+      character(len=:), allocatable, intent(out) :: text
+      integer, intent(out) :: err
+      logical, intent(in), optional :: pretty
+      integer :: ind
+      ind = 1
+      if (present(pretty)) then
+         if (.not. pretty) ind = 0
+      end if
+      call enc_list(schema, et, lst, env, ind, MODE_BARE, 0, text, err)
+   end subroutine capnp_text_encode_list
+
+   subroutine capnp_text_encode_enum(schema, tid, ord, text, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: tid
+      integer, intent(in) :: ord
+      character(len=:), allocatable, intent(out) :: text
+      integer, intent(out) :: err
+      call enum_text(schema, tid, ord, text, err)
+   end subroutine capnp_text_encode_enum
 
    subroutine capnp_text_decode(schema, idx, text, msg, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
