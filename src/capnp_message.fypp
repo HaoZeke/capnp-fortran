@@ -420,6 +420,17 @@ contains
          q%pwords = 1
          q%dbits = 0_int64
          q%depth = p%depth
+      case (CAPNP_SZ_VOID)
+         ! layout.c++ readListPointer (the non-composite arm) treats VOID as
+         ! a struct list with dataSize 0 and pointerCount 0.
+         ! getStructElement then returns that zero-size struct.
+         q%kind = CAPNP_PK_STRUCT
+         q%seg = p%seg
+         q%off = p%off
+         q%dwords = 0
+         q%pwords = 0
+         q%dbits = 0_int64
+         q%depth = p%depth
       case default
          err = CAPNP_ERR_KIND
       end select

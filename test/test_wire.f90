@@ -20,6 +20,7 @@ contains
            new_unittest("text-data", test_text_data), &
            new_unittest("lists", test_lists), &
            new_unittest("list-count-limit", test_list_count_limit), &
+           new_unittest("void-list-struct", test_void_list_struct), &
            new_unittest("composite-list", test_composite_list), &
            new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
            new_unittest("nested-struct", test_nested_struct), &
@@ -298,6 +299,38 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_list_count_limit
+   !> List(Void) upgrades to a struct list of zero-size elements. Field
+   !> reads are defaults. layout.c++ readListPointer / getStructElement.
+   subroutine test_void_list_struct(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, el
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:23))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 2_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_VOID, 3_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'void-struct: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. lst%kind == CAPNP_PK_LIST .and. &
+                  capnp_list_len(lst) == 3_int64, 'void-struct: list')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 0, err)
+      call check(error, err == CAPNP_OK .and. el%kind == CAPNP_PK_STRUCT, 'void-struct: element')
+      if (allocated(error)) return
+      call check(error, capnp_get_i64(el, 0_int64) == 0_int64, 'void-struct: default field')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 2, err)
+      call check(error, err == CAPNP_OK, 'void-struct: last element')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_void_list_struct
    subroutine test_composite_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
