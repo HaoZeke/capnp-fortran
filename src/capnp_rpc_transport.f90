@@ -138,26 +138,31 @@ contains
 
    !> Read exactly one framed message off the socket (blocking). EOF or a
    !> short read surfaces as CAPNP_ERR_IO. Mirrors Cap'n Proto C++ 1.4.0
-   !> AsyncMessageReader: firstWord[0] < 511 (at most 511 segments) and
-   !> total segment words <= traversal_words (default
-   !> CAPNP_DEFAULT_TRAVERSAL_WORDS) checked before allocating the body.
-   subroutine rpc_recv_message_fd(fd, msg, err, traversal_words)
+   !> BufferedMessageStream, which TwoPartyVatNetwork reads with: it has
+   !> no segment-count limit of its own. The frame is refused when its
+   !> segment count overflows, or when its header or segments are more
+   !> than traversal_words (default CAPNP_DEFAULT_TRAVERSAL_WORDS), and
+   !> that is checked before the body is allocated.
+   !> `detail` gets the text C++ puts in the Abort for the failure: a
+   !> stream that ends inside a frame, or a frame it refuses.
+   subroutine rpc_recv_message_fd(fd, msg, err, traversal_words, detail)
       integer, intent(in) :: fd
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
+      character(len=:), allocatable, intent(out), optional :: detail
       type(rpc_fd_stream_t) :: stream
       call rpc_fd_stream_init(stream, fd)
-      call rpc_recv_message_stream(stream, msg, err, traversal_words)
+      call rpc_recv_message_stream(stream, msg, err, traversal_words, detail)
    end subroutine rpc_recv_message_fd
 
-   subroutine rpc_recv_message_stream(stream, msg, err, traversal_words)
+   subroutine rpc_recv_message_stream(stream, msg, err, traversal_words, detail)
       class(rpc_byte_stream_t), intent(inout) :: stream
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: traversal_words
-      integer(int8), target :: hdr(0:2047)
-      integer(int8), allocatable, target :: whole(:)
+      character(len=:), allocatable, intent(out), optional :: detail
+      integer(int8), allocatable, target :: whole(:), first(:)
       integer(int64) :: raw_count, nsegs64, header_bytes, total_words, total_bytes
       integer(int64) :: limit, i, n
       integer :: astat
@@ -170,40 +175,94 @@ contains
          end if
          limit = traversal_words
       end if
-      call stream%recv_all(hdr(0:7), err)
+      allocate (first(0:7))
+      ! The first byte tells a stream that ended between frames from one
+      ! that ended inside a frame.
+      call stream%recv_all(first(0:0), err)
       if (err /= CAPNP_OK) return
-      raw_count = iand(int(cp_get_i32(hdr, 0_int64), int64), 4294967295_int64)
-      if (raw_count >= 511_int64) then
+      call stream%recv_all(first(1:7), err)
+      if (err /= CAPNP_OK) then
+         call cut_short(err, detail)
+         return
+      end if
+      raw_count = iand(int(cp_get_i32(first, 0_int64), int64), 4294967295_int64)
+      if (raw_count == 4294967295_int64) then
          err = CAPNP_ERR_FRAMING
+         if (present(detail)) detail = 'Message segment count too large, caused overflow.'
          return
       end if
       nsegs64 = raw_count + 1_int64
       header_bytes = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64*8_int64
-      if (header_bytes > 8_int64) then
-         call stream%recv_all(hdr(8:header_bytes - 1_int64), err)
-         if (err /= CAPNP_OK) return
+      if (header_bytes/CAPNP_WORD_BYTES > limit) then
+         err = CAPNP_ERR_TRAVERSAL
+         if (present(detail)) detail = 'incoming RPC message exceeds size limit'
+         return
       end if
+      allocate (whole(0:header_bytes - 1_int64), stat=astat)
+      if (astat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      whole(0:7) = first
+      if (header_bytes > 8_int64) then
+         call stream%recv_all(whole(8:header_bytes - 1_int64), err)
+         if (err /= CAPNP_OK) then
+            call cut_short(err, detail)
+            return
+         end if
+      end if
+      ! Segment sizes are untrusted: add and scale them only after checking
+      ! that the result fits, so a large traversal limit cannot let a wrapped
+      ! total through.
       total_words = 0_int64
       do i = 1_int64, nsegs64
-         n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
+         n = iand(int(cp_get_i32(whole, i*4_int64), int64), 4294967295_int64)
+         if (n > huge(total_words) - total_words) then
+            call size_overflow(err, detail)
+            return
+         end if
          total_words = total_words + n
       end do
       if (total_words > limit) then
          err = CAPNP_ERR_TRAVERSAL
+         if (present(detail)) detail = 'incoming RPC message exceeds size limit'
+         return
+      end if
+      if (total_words > (huge(total_words) - header_bytes)/CAPNP_WORD_BYTES) then
+         call size_overflow(err, detail)
          return
       end if
       total_bytes = total_words*CAPNP_WORD_BYTES
+      call move_alloc(whole, first)
       allocate (whole(0:header_bytes + total_bytes - 1_int64), stat=astat)
       if (astat /= 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
-      whole(0:header_bytes - 1_int64) = hdr(0:header_bytes - 1_int64)
+      whole(0:header_bytes - 1_int64) = first
+      deallocate (first)
       if (total_bytes > 0_int64) then
          call stream%recv_all(whole(header_bytes:), err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call cut_short(err, detail)
+            return
+         end if
       end if
       call capnp_deserialize_bytes(whole, msg, err, traversal_words=limit)
    end subroutine rpc_recv_message_stream
+
+   subroutine size_overflow(err, detail)
+      integer, intent(out) :: err
+      character(len=:), allocatable, intent(inout), optional :: detail
+      err = CAPNP_ERR_FRAMING
+      if (present(detail)) detail = 'Message segment sizes overflow.'
+   end subroutine size_overflow
+
+   subroutine cut_short(err, detail)
+      integer, intent(in) :: err
+      character(len=:), allocatable, intent(inout), optional :: detail
+      if (.not. present(detail)) return
+      if (err == CAPNP_ERR_IO) detail = 'stream disconnected prematurely'
+   end subroutine cut_short
 
 end module capnp_rpc_transport

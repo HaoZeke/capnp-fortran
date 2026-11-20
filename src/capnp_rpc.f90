@@ -4708,17 +4708,28 @@ contains
       integer, intent(out) :: err
       type(capnp_message_t), target :: m
       type(message_t) :: msg
+      character(len=:), allocatable :: detail
       err = CAPNP_OK
       if (conn%dead) then
          err = RPC_ERR_DEAD
          return
       end if
-      call rpc_recv_message(conn%transport, m, err)
+      call rpc_recv_message(conn%transport, m, err, detail=detail)
       if (err /= CAPNP_OK) then
          ! No Return is coming for an abandoned Join, so the slot must
          ! not wait for a Finish that the dead peer will never send.
          call capnp_message_free(m)
          call clear_joins(conn)
+         ! A peer that closed its end still reads the Abort, as from C++.
+         if (associated(conn%transport)) then
+            if (err == CAPNP_ERR_IO) then
+               if (.not. allocated(detail)) detail = "Peer disconnected."
+               call send_abort_frame(conn, EXCEPTION_TYPE_DISCONNECTED_E, detail)
+            else if (allocated(detail) .and. (err == CAPNP_ERR_FRAMING .or. &
+                                              err == CAPNP_ERR_TRAVERSAL)) then
+               call send_abort_frame(conn, EXCEPTION_TYPE_FAILED_E, detail)
+            end if
+         end if
          conn%dead = .true.
          err = RPC_ERR_DEAD
          return
@@ -4804,27 +4815,31 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       character(len=*), intent(in) :: reason
       integer, intent(out) :: err
-      type(capnp_message_t), target :: m
-      type(message_t) :: msg
-      type(exception_t) :: ex
-      integer :: e
       conn%abort_reason = reason
       conn%dead = .true.
       err = CAPNP_ERR_BOUNDS
       if (.not. associated(conn%transport)) return
-      call capnp_message_init_builder(m, e)
-      if (e /= CAPNP_OK) return
-      msg = message_new_root(m, e)
-      if (e /= CAPNP_OK) return
-      ex = message_abort_init(msg, e)
-      if (e /= CAPNP_OK) return
-      call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
-      if (e /= CAPNP_OK) return
-      call exception_reason_set(ex, reason, e)
-      if (e /= CAPNP_OK) return
-      call rpc_send_message(conn%transport, m, e)
-      call capnp_message_free(m)
+      call send_abort_frame(conn, EXCEPTION_TYPE_FAILED_E, reason)
    end subroutine abort_conn
+
+   !> Write one Abort frame. A failed write is ignored, since the
+   !> connection is going away either way.
+   subroutine send_abort_frame(conn, kind, reason)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: kind
+      character(len=*), intent(in) :: reason
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(exception_t) :: ex
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      if (e == CAPNP_OK) msg = message_new_root(m, e)
+      if (e == CAPNP_OK) ex = message_abort_init(msg, e)
+      if (e == CAPNP_OK) call exception_type_set(ex, kind, e)
+      if (e == CAPNP_OK) call exception_reason_set(ex, reason, e)
+      if (e == CAPNP_OK) call rpc_send_message(conn%transport, m, e)
+      call capnp_message_free(m)
+   end subroutine send_abort_frame
 
    !> True when qid can still be answered. A duplicate, a negative id,
    !> or an id already sitting in a Join set aborts the connection

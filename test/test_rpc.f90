@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(134))
+      allocate (testsuite(135))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -421,18 +421,20 @@ contains
       testsuite(127)%test => w_forward_needs_live_question
       testsuite(128)%name = "rpc-finish-after-abort-is-silent"
       testsuite(128)%test => w_finish_after_abort_is_silent
-      testsuite(129)%name = "posix-recv-eintr-retried"
-      testsuite(129)%test => t_recv_all_retries_eintr
-      testsuite(130)%name = "rpc-framing-511-accepted"
-      testsuite(130)%test => t_framing_511_accepted
-      testsuite(131)%name = "rpc-framing-512-rejected"
-      testsuite(131)%test => t_framing_512_rejected
-      testsuite(132)%name = "rpc-framing-oversized-rejected"
-      testsuite(132)%test => t_framing_oversized_rejected
-      testsuite(133)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(133)%test => t_framing_negative_traversal_rejected
-      testsuite(134)%name = "rpc-framing-short-and-padded"
-      testsuite(134)%test => t_framing_short_and_padded
+      testsuite(129)%name = "rpc-peer-eof-gets-abort"
+      testsuite(129)%test => w_peer_eof_gets_abort
+      testsuite(130)%name = "posix-recv-eintr-retried"
+      testsuite(130)%test => t_recv_all_retries_eintr
+      testsuite(131)%name = "rpc-framing-511-accepted"
+      testsuite(131)%test => t_framing_511_accepted
+      testsuite(132)%name = "rpc-framing-512-rejected"
+      testsuite(132)%test => t_framing_512_rejected
+      testsuite(133)%name = "rpc-framing-oversized-rejected"
+      testsuite(133)%test => t_framing_oversized_rejected
+      testsuite(134)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(134)%test => t_framing_negative_traversal_rejected
+      testsuite(135)%name = "rpc-framing-short-and-padded"
+      testsuite(135)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -976,6 +978,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_after_abort_is_silent(error)
    end subroutine w_finish_after_abort_is_silent
+
+   subroutine w_peer_eof_gets_abort(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_peer_eof_gets_abort(error)
+   end subroutine w_peer_eof_gets_abort
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -3714,42 +3721,129 @@ contains
       call px_close(fb)
    end subroutine t_framing_511_accepted
 
-   !> Cap'n Proto C++ AsyncMessageReader rejects firstWord[0] >= 511
-   !> (512 segments and u32 overflow) before reading moreSizes or allocating.
+   !> Segment-count framing, as C++ reads it. TwoPartyVatNetwork uses
+   !> BufferedMessageStream, which has no segment-count limit: 512 and
+   !> 4097 segments are served, and only the cases below are refused.
+   !> A stream cut inside the header is a short frame, a count that
+   !> overflows is refused at once, and a header over the traversal limit
+   !> is refused before it is read.
    subroutine t_framing_512_rejected(error)
       type(error_type), allocatable, intent(out) :: error
-      type(capnp_message_t) :: dst
+      type(capnp_message_t), target :: src, dst
+      type(capnp_ptr_t) :: s
       integer(int8) :: head(0:7)
-      integer :: fa, fb, e
+      integer(int8), allocatable :: single(:), frame(:)
+      character(len=:), allocatable :: why
+      integer(int64) :: header_bytes, seg0_bytes
+      integer :: fa, fb, e, i, k, nsegs(2)
 
+      call capnp_message_init_builder(src, e)
+      s = capnp_new_struct(src, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 515151_int64, e)
+      call capnp_set_root(src, s, e)
+      call capnp_serialize_bytes(src, single, e)
+      call check_(error, e == CAPNP_OK, 'framing 512: serialize base')
+      if (allocated(error)) then
+         call capnp_message_free(src)
+         return
+      end if
+      seg0_bytes = size(single, kind=int64) - 8_int64
+      nsegs = [512, 4097]
+      do k = 1, 2
+         header_bytes = ((1_int64 + nsegs(k))*4_int64 + 7_int64)/8_int64*8_int64
+         allocate (frame(0:header_bytes + seg0_bytes - 1_int64))
+         frame = 0_int8
+         call cp_put_i32(frame, 0_int64, int(nsegs(k) - 1, int32))
+         call cp_put_i32(frame, 4_int64, int(seg0_bytes/CAPNP_WORD_BYTES, int32))
+         frame(header_bytes:header_bytes + seg0_bytes - 1_int64) = &
+            single(8:8 + seg0_bytes - 1_int64)
+         call px_socketpair(fa, fb, e)
+         call check_(error, e == CAPNP_OK, 'framing 512: socketpair')
+         if (.not. allocated(error)) then
+            call send_closed(fa, frame, e)
+            call rpc_recv_message(fb, dst, e, detail=why)
+            call check_(error, e == CAPNP_OK, 'framing 512: valid frame accepted')
+            call check_(error, dst%nsegs == nsegs(k), 'framing 512: segment count')
+            if (.not. allocated(error)) then
+               s = capnp_root(dst, e)
+               call check_(error, e == CAPNP_OK .and. capnp_get_i64(s, 0_int64) == 515151_int64, &
+                           'framing 512: payload intact')
+            end if
+         end if
+         call capnp_message_free(dst)
+         call px_close(fa)
+         call px_close(fb)
+         deallocate (frame)
+         if (allocated(error)) exit
+      end do
+      call capnp_message_free(src)
+      if (allocated(error)) return
+
+      ! The whole header of 512 segments and nothing after it.
+      allocate (frame(0:2055))
+      frame = 0_int8
+      call cp_put_i32(frame, 0_int64, 511_int32)
+      call cp_put_i32(frame, 4_int64, 1_int32)
       call px_socketpair(fa, fb, e)
-      call check_(error, e == CAPNP_OK, 'framing 512: socketpair')
+      call check_(error, e == CAPNP_OK, 'framing 512 header: socketpair')
       if (.not. allocated(error)) then
-         head = 0_int8
-         call cp_put_i32(head, 0_int64, 511_int32)
-         call cp_put_i32(head, 4_int64, 1_int32)
-         call send_closed(fa, head, e)
-         call check_(error, e == CAPNP_OK, 'framing 512: send header word')
-         call rpc_recv_message(fb, dst, e)
-         call check_(error, e == CAPNP_ERR_FRAMING, 'framing 512: rejected')
-         call check_(error, dst%nsegs == 0, 'framing 512: message empty')
+         call send_closed(fa, frame, e)
+         call rpc_recv_message(fb, dst, e, detail=why)
+         call check_(error, e == CAPNP_ERR_IO, 'framing 512 header: short frame')
+         call check_(error, why == 'stream disconnected prematurely', &
+                     'framing 512 header: reason')
       end if
       call capnp_message_free(dst)
       call px_close(fa)
       call px_close(fb)
-
       if (allocated(error)) return
+
+      do i = 1, 3
+         call px_socketpair(fa, fb, e)
+         call check_(error, e == CAPNP_OK, 'framing 512 cut: socketpair')
+         if (allocated(error)) exit
+         head = 0_int8
+         select case (i)
+         case (1)
+            call cp_put_i32(head, 0_int64, 511_int32)
+            call cp_put_i32(head, 4_int64, 1_int32)
+         case (2)
+            call cp_put_i32(head, 0_int64, 99999_int32)
+            call cp_put_i32(head, 4_int64, 0_int32)
+         case default
+            call cp_put_i32(head, 0_int64, -1_int32)
+            call cp_put_i32(head, 4_int64, 0_int32)
+         end select
+         call send_closed(fa, head, e)
+         call rpc_recv_message(fb, dst, e, detail=why)
+         select case (i)
+         case (1, 2)
+            call check_(error, e == CAPNP_ERR_IO, 'framing 512 cut: short frame')
+            call check_(error, why == 'stream disconnected prematurely', &
+                        'framing 512 cut: reason')
+         case default
+            call check_(error, e == CAPNP_ERR_FRAMING, 'framing u32max: rejected')
+            call check_(error, why == 'Message segment count too large, caused overflow.', &
+                        'framing u32max: reason')
+         end select
+         call check_(error, dst%nsegs == 0, 'framing cut: message empty')
+         call capnp_message_free(dst)
+         call px_close(fa)
+         call px_close(fb)
+         if (allocated(error)) return
+      end do
+
+      ! A header past the traversal limit is refused before it is read.
       call px_socketpair(fa, fb, e)
-      call check_(error, e == CAPNP_OK, 'framing u32max: socketpair')
+      call check_(error, e == CAPNP_OK, 'framing huge: socketpair')
       if (.not. allocated(error)) then
          head = 0_int8
-         call cp_put_i32(head, 0_int64, -1_int32)
-         call cp_put_i32(head, 4_int64, 0_int32)
+         call cp_put_i32(head, 0_int64, 2147483647_int32)
          call send_closed(fa, head, e)
-         call check_(error, e == CAPNP_OK, 'framing u32max: send header word')
-         call rpc_recv_message(fb, dst, e)
-         call check_(error, e == CAPNP_ERR_FRAMING, 'framing u32max: rejected')
-         call check_(error, dst%nsegs == 0, 'framing u32max: message empty')
+         call rpc_recv_message(fb, dst, e, detail=why)
+         call check_(error, e == CAPNP_ERR_TRAVERSAL, 'framing huge: rejected')
+         call check_(error, why == 'incoming RPC message exceeds size limit', &
+                     'framing huge: reason')
       end if
       call capnp_message_free(dst)
       call px_close(fa)
@@ -10688,5 +10782,42 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_finish_after_abort_is_silent
+
+   !> A peer that shuts down its write side still gets an Abort of type
+   !> disconnected with "Peer disconnected.", as from C++. Serving still
+   !> ends cleanly.
+   subroutine t_peer_eof_gets_abort(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fa, fb, e
+      logical :: ok, got
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      call px_shutdown_wr(fb)
+      call rpc_serve(conn, e)
+      call check_(error, e == CAPNP_OK, 'peer EOF: serving ends cleanly')
+      got = .false.
+      call raw_next(fb, reply, msg, ok)
+      if (ok) then
+         if (message_which(msg) == MESSAGE_ABORT_TAG) then
+            ex = message_abort_get(msg, e)
+            call exception_reason_get(ex, reason, e)
+            got = reason == "Peer disconnected." .and. &
+                  exception_type_get(ex) == EXCEPTION_TYPE_DISCONNECTED_E
+         end if
+         call capnp_message_free(reply)
+      end if
+      call check_(error, got, 'peer EOF: the Abort says the peer disconnected')
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_peer_eof_gets_abort
 
 end module test_rpc
