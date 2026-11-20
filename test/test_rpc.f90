@@ -131,6 +131,18 @@ module test_rpc
       procedure :: close => fail_stream_close
    end type fail_stream_t
 
+   !> Serves a segment table of nsegs entries of 0xFFFFFFFF words without
+   !> storing it, so a test can reach sizes whose byte count wraps.
+   type, extends(rpc_byte_stream_t) :: table_stream_t
+      integer(int64) :: nsegs = 1_int64
+      integer(int64) :: pos = 0_int64
+   contains
+      procedure :: send_all => table_stream_send
+      procedure :: recv_all => table_stream_recv
+      procedure :: poll_in => table_stream_poll
+      procedure :: close => table_stream_close
+   end type table_stream_t
+
    type(rpc_conn_t), target :: cli, srv
    type(echo_srv_t), target :: echo
    class(rpc_server_t), pointer :: boot
@@ -190,7 +202,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(154))
+      allocate (testsuite(156))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -499,6 +511,10 @@ contains
       testsuite(153)%test => t_framing_negative_traversal_rejected
       testsuite(154)%name = "rpc-framing-short-and-padded"
       testsuite(154)%test => t_framing_short_and_padded
+      testsuite(155)%name = "rpc-resolve-long-chain-release"
+      testsuite(155)%test => t_resolve_long_chain_release
+      testsuite(156)%name = "rpc-framing-segment-size-overflow"
+      testsuite(156)%test => t_framing_segment_size_overflow
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -3721,7 +3737,7 @@ contains
 
    !> A promisedAnswer that resolves to a local export does not point
    !> back at the sender, so senderLoopback aborts. An unknown question
-   !> id aborts the same way.
+   !> id names a broken pipeline, and the abort carries its reason.
    subroutine t_disembargo_promised_answer(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
@@ -3792,8 +3808,8 @@ contains
                   'rpc: unknown promisedAnswer aborts')
       ex = message_abort_get(rmsg, e)
       call exception_reason_get(ex, reason, e)
-      call check_(error, index(reason, 'senderLoopback') > 0, &
-                  'rpc: unknown promisedAnswer reason')
+      call check_(error, index(reason, 'returned no capabilities or was already closed') > 0, &
+                  'rpc: unknown promisedAnswer reason, got '//reason)
       call capnp_message_free(reply)
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
@@ -12414,5 +12430,169 @@ contains
       call rpc_conn_close(conn)
       call px_close(fb)
    end subroutine t_deferred_call_frees_released_id
+
+   subroutine table_stream_send(self, bytes, err)
+      class(table_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      err = CAPNP_ERR_IO
+      if (size(bytes) < 0) self%pos = 0_int64
+   end subroutine table_stream_send
+
+   subroutine table_stream_recv(self, bytes, err)
+      class(table_stream_t), intent(inout) :: self
+      integer(int8), intent(inout), target :: bytes(:)
+      integer, intent(out) :: err
+      integer(int8) :: head(0:3)
+      integer(int64) :: k, n, table_end
+      n = size(bytes, kind=int64)
+      table_end = (self%nsegs + 1_int64)*4_int64
+      call cp_put_i32(head, 0_int64, int(self%nsegs - 1_int64, int32))
+      bytes = -1_int8
+      do k = self%pos, min(3_int64, self%pos + n - 1_int64)
+         bytes(k - self%pos + 1_int64) = head(k)
+      end do
+      if (table_end < self%pos + n) bytes(max(1_int64, table_end - self%pos + 1_int64):) = 0_int8
+      self%pos = self%pos + n
+      err = CAPNP_OK
+      if (self%pos > table_end + 8_int64) err = CAPNP_ERR_IO
+   end subroutine table_stream_recv
+
+   subroutine table_stream_poll(self, timeout_ms, readable, err)
+      class(table_stream_t), intent(inout) :: self
+      integer, intent(in) :: timeout_ms
+      logical, intent(out) :: readable
+      integer, intent(out) :: err
+      readable = .true.
+      err = CAPNP_OK
+      if (timeout_ms < 0) self%pos = 0_int64
+   end subroutine table_stream_poll
+
+   subroutine table_stream_close(self)
+      class(table_stream_t), intent(inout) :: self
+      self%pos = 0_int64
+   end subroutine table_stream_close
+
+   !> 2**28 + 1 segments of 0xFFFFFFFF words: the word count fits in 64
+   !> bits but its byte count does not. Reading it must be a framing error.
+   subroutine t_framing_segment_size_overflow(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(table_stream_t) :: table
+      type(capnp_message_t) :: dst
+      character(len=:), allocatable :: why
+      integer :: e
+      table%nsegs = 268435457_int64
+      call rpc_recv_message(table, dst, e, traversal_words=huge(0_int64), detail=why)
+      call check_(error, e == CAPNP_ERR_FRAMING, 'size overflow: framing error')
+      call check_(error, dst%nsegs == 0, 'size overflow: message empty')
+      call check_(error, table%pos <= (table%nsegs + 2_int64)*4_int64, &
+                  'size overflow: no body is read')
+      call capnp_message_free(dst)
+   end subroutine t_framing_segment_size_overflow
+
+   !> A promise resolved through ten more promises to a hosted capability:
+   !> releasing the first handle releases the terminal import.
+   subroutine t_resolve_long_chain_release(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, p1
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(resolve_t) :: rv
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      integer, parameter :: links = 10
+      integer :: fa, fb, e, k
+      integer(int64) :: qboot, q1
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q1, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q1, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, 1_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, q1, [integer ::], p1, e)
+      call check_(error, e == CAPNP_OK, 'long chain: first promise received')
+
+      ! Promise k resolves to promise k + 1; the last resolves to hosted 50.
+      do k = 1, links + 1
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, int(k, int64), e)
+         cd = resolve_cap_init(rv, e)
+         if (k <= links) then
+            call cap_descriptor_sender_promise_set(cd, int(k + 1, int64), e)
+         else
+            call cap_descriptor_sender_hosted_set(cd, 50_int64, e)
+         end if
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+      end do
+      call check_(error, rpc_conn_alive(cconn), 'long chain: connection stays up')
+      do
+         call px_poll_in(sconn%fd, 50, readable, e)
+         if (e /= CAPNP_OK .or. .not. readable) exit
+         call rpc_recv_message(sconn%fd, reply, e)
+         call capnp_message_free(reply)
+         if (e /= CAPNP_OK) exit
+      end do
+
+      call rpc_release_send(cconn, p1, e)
+      call check_(error, e == CAPNP_OK, 'long chain: release sent')
+      call check_(error, release_seen(sconn%fd, 50_int64), &
+                  'long chain: terminal import is released')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_long_chain_release
+
+   !> True when a Release of id arrives on fd before the line goes quiet.
+   function release_seen(fd, id) result(seen)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: id
+      logical :: seen, readable
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      integer :: e
+      seen = .false.
+      do
+         call px_poll_in(fd, 50, readable, e)
+         if (e /= CAPNP_OK .or. .not. readable) return
+         call rpc_recv_message(fd, m, e)
+         if (e /= CAPNP_OK) return
+         msg = message_read_root(m, e)
+         if (e == CAPNP_OK .and. message_which(msg) == MESSAGE_RELEASE_TAG) then
+            rel = message_release_get(msg, e)
+            if (e == CAPNP_OK .and. release_id_get(rel) == id) seen = .true.
+         end if
+         call capnp_message_free(m)
+         if (seen) return
+      end do
+   end function release_seen
 
 end module test_rpc

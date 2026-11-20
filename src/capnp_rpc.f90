@@ -6943,7 +6943,8 @@ contains
             if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
             if (e == CAPNP_OK) tgt = disembargo_target_get(d, e)
             if (e == CAPNP_OK) &
-               call echo_promised_loopback(conn, tgt, disembargo_context_sender_loopback_get(d), e)
+               call echo_promised_loopback(conn, tgt, disembargo_context_sender_loopback_get(d), e, &
+                                           replayed=.true.)
             if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
          end if
          call capnp_message_free(node%msg)
@@ -9844,11 +9845,13 @@ contains
 
    !> Resolve a promisedAnswer the way getMessageTarget does, then echo
    !> when the capability is an import or a pipeline on this connection.
-   subroutine echo_promised_loopback(conn, tgt, embargo_id, err)
+   subroutine echo_promised_loopback(conn, tgt, embargo_id, err, replayed)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_target_t), intent(in) :: tgt
       integer(int64), intent(in) :: embargo_id
       integer, intent(out) :: err
+      !> Set when the Disembargo waited for the answer to return.
+      logical, intent(in), optional :: replayed
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops, p, ctab
@@ -9868,8 +9871,22 @@ contains
       if (err /= CAPNP_OK) return
       aqid = promised_answer_question_id_get(pa)
       call answer_find(conn, aqid, aslot, afound)
+      if (afound) afound = associated(aslot)
+      if (afound) afound = aslot%used .and. .not. aslot%finished
+      ! An answer that is gone or finished has no pipeline, and the broken
+      ! one getMessageTarget gives fails the Disembargo task.
       if (.not. afound) then
-         call abort_conn(conn, back, err)
+         ! A waiting Disembargo holds the pipeline it found on arrival. An
+         ! answer that ended without capabilities leaves a cap that is
+         ! not this connection's.
+         if (present(replayed)) then
+            if (replayed) then
+               call abort_conn(conn, back, err)
+               return
+            end if
+         end if
+         call abort_conn(conn, 'Pipeline call on a request that returned no ' // &
+                         'capabilities or was already closed.', err)
          return
       end if
       ! A disabled pipeline gives a broken cap, and whenResolved() on it
