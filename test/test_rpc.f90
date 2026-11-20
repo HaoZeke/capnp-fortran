@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(152))
+      allocate (testsuite(153))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -483,18 +483,20 @@ contains
       testsuite(145)%test => w_quiet_results_take_no_export_id
       testsuite(146)%name = "rpc-npp-walk-aborts-on-bad-path"
       testsuite(146)%test => w_npp_walk_aborts_on_bad_path
-      testsuite(147)%name = "posix-recv-eintr-retried"
-      testsuite(147)%test => t_recv_all_retries_eintr
-      testsuite(148)%name = "rpc-framing-511-accepted"
-      testsuite(148)%test => t_framing_511_accepted
-      testsuite(149)%name = "rpc-framing-512-rejected"
-      testsuite(149)%test => t_framing_512_rejected
-      testsuite(150)%name = "rpc-framing-oversized-rejected"
-      testsuite(150)%test => t_framing_oversized_rejected
-      testsuite(151)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(151)%test => t_framing_negative_traversal_rejected
-      testsuite(152)%name = "rpc-framing-short-and-padded"
-      testsuite(152)%test => t_framing_short_and_padded
+      testsuite(147)%name = "rpc-forwarded-promise-resolve-disembargo"
+      testsuite(147)%test => w_forwarded_promise_resolve_disembargo
+      testsuite(148)%name = "posix-recv-eintr-retried"
+      testsuite(148)%test => t_recv_all_retries_eintr
+      testsuite(149)%name = "rpc-framing-511-accepted"
+      testsuite(149)%test => t_framing_511_accepted
+      testsuite(150)%name = "rpc-framing-512-rejected"
+      testsuite(150)%test => t_framing_512_rejected
+      testsuite(151)%name = "rpc-framing-oversized-rejected"
+      testsuite(151)%test => t_framing_oversized_rejected
+      testsuite(152)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(152)%test => t_framing_negative_traversal_rejected
+      testsuite(153)%name = "rpc-framing-short-and-padded"
+      testsuite(153)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1192,6 +1194,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_npp_walk_aborts_on_bad_path(error)
    end subroutine w_npp_walk_aborts_on_bad_path
+
+   subroutine w_forwarded_promise_resolve_disembargo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forwarded_promise_resolve_disembargo(error)
+   end subroutine w_forwarded_promise_resolve_disembargo
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -5153,10 +5160,12 @@ contains
       call capnp_message_free(m)
    end subroutine inject_promise
 
-   subroutine send_resolve_hosted(peer_fd, promise_id, hosted, e)
+   subroutine send_resolve_hosted(peer_fd, promise_id, hosted, e, receiver)
       integer, intent(in) :: peer_fd
       integer(int64), intent(in) :: promise_id, hosted
       integer, intent(out) :: e
+      !> Resolve to receiverHosted `hosted`, an export of the receiver.
+      logical, intent(in), optional :: receiver
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(resolve_t) :: rv
@@ -5167,7 +5176,15 @@ contains
       rv = message_resolve_init(msg, e)
       call resolve_promise_id_set(rv, promise_id, e)
       cd = resolve_cap_init(rv, e)
-      call cap_descriptor_sender_hosted_set(cd, hosted, e)
+      if (present(receiver)) then
+         if (receiver) then
+            call cap_descriptor_receiver_hosted_set(cd, hosted, e)
+         else
+            call cap_descriptor_sender_hosted_set(cd, hosted, e)
+         end if
+      else
+         call cap_descriptor_sender_hosted_set(cd, hosted, e)
+      end if
       if (e /= CAPNP_OK) return
       call rpc_send_message(peer_fd, m, e)
       call capnp_message_free(m)
@@ -12279,5 +12296,66 @@ contains
       call rpc_send_message(fd, m, e)
       call capnp_message_free(m)
    end subroutine raw_pa_ops_call
+
+   !> A forward that writes a param promise back to its host counts as a
+   !> call on the promise (rpc.c++ PromiseClient::writeDescriptor). When
+   !> it resolves to one of our exports, a Disembargo goes out first.
+   subroutine t_forwarded_promise_resolve_disembargo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(release_t) :: rel
+      integer(int64) :: qboot, qadder, eid, dis_target, rel_id
+      integer :: e, n
+      logical :: ok, seen_call, dis_first
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call raw_pa_promise_call(sconn%fd, 30_int64, qadder, 40_int64)
+      call rpc_pump_once(cconn, e)
+      seen_call = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         seen_call = message_which(msg) == MESSAGE_CALL_TAG
+         call capnp_message_free(reply)
+         if (seen_call) exit
+      end do
+      call check_(error, seen_call, 'forwarded promise: the call goes on')
+      if (allocated(error)) return
+      call send_resolve_hosted(sconn%fd, 40_int64, eid, e, receiver=.true.)
+      call rpc_pump_once(cconn, e)
+      dis_target = -1_int64
+      rel_id = -1_int64
+      dis_first = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         select case (message_which(msg))
+         case (MESSAGE_DISEMBARGO_TAG)
+            d = message_disembargo_get(msg, e)
+            if (disembargo_context_which(d) == DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG) then
+               tgt = disembargo_target_get(d, e)
+               dis_target = message_target_imported_cap_get(tgt)
+               dis_first = rel_id < 0_int64
+            end if
+         case (MESSAGE_RELEASE_TAG)
+            rel = message_release_get(msg, e)
+            rel_id = release_id_get(rel)
+         end select
+         call capnp_message_free(reply)
+         if (rel_id >= 0_int64) exit
+      end do
+      call check_(error, dis_target == 40_int64 .and. dis_first .and. rel_id == 40_int64, &
+                  'forwarded promise: senderLoopback, then the Release')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forwarded_promise_resolve_disembargo
 
 end module test_rpc

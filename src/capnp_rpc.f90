@@ -609,6 +609,9 @@ module capnp_rpc
       !> one of its refs, and is one of the users C++ counts on the one
       !> ImportClient.
       integer(int64) :: node = -1_int64
+      !> A forward wrote the promise into a descriptor, which C++ counts
+      !> as a call on it (rpc.c++ PromiseClient::writeDescriptor).
+      logical :: written = .false.
    end type rpc_param_hold_t
 
    !> A call whose server answers later, as a C++ server returns a
@@ -5609,6 +5612,9 @@ contains
          end if
       end if
       if (err == CAPNP_OK .and. direct) call call_send_results_to_yourself_set(fc, err)
+      ! The call context keeps the param caps until the forwarded
+      ! question returns or our answer is finished.
+      if (.not. allocated(pids)) call hold_call_params(conn, c, pids)
       if (err == CAPNP_OK) inp = call_params_get(c, err)
       if (err == CAPNP_OK) outp = call_params_init(fc, err)
       if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err)
@@ -5622,9 +5628,6 @@ contains
          end if
          return
       end if
-      ! The call context keeps the param caps until the forwarded
-      ! question returns or our answer is finished.
-      if (.not. allocated(pids)) call hold_call_params(conn, c, pids)
       if (.not. direct) then
          call answer_find(conn, qid, slot, found)
          if (.not. found) call answer_add_hi(conn, qid, slot)
@@ -5675,12 +5678,15 @@ contains
    !> capability is written as C++ 1.4.0 writeDescriptor writes it for
    !> that connection: the peer's own export as receiverHosted, ours as
    !> senderHosted with one more reference, a vine as the import it is.
-   subroutine copy_forwarded_payload(conn, inp, outp, m, err)
+   subroutine copy_forwarded_payload(conn, inp, outp, m, err, local)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: inp
       type(payload_t), intent(inout) :: outp
       type(capnp_message_t), intent(inout), target :: m
       integer, intent(out) :: err
+      !> The copy stays in this vat (a yourself Return), so nothing is
+      !> written to a descriptor.
+      logical, intent(in), optional :: local
       character(len=:), allocatable :: why
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
@@ -5718,6 +5724,26 @@ contains
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_hosted_get(icd), err)
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_promise_get(icd), err)
+            ! Writing a promise into a descriptor counts as a call on it
+            ! (rpc.c++ PromiseClient::writeDescriptor), so a reflected
+            ! Resolve of it needs a Disembargo.
+            block
+               type(rpc_import_node_t), pointer :: pnode
+               logical :: pfound
+               integer :: hk
+               logical :: written
+               written = .true.
+               if (present(local)) written = .not. local
+               if (written) then
+                  call import_find_live(conn, cap_descriptor_sender_promise_get(icd), pnode, pfound)
+                  if (pfound) then
+                     if (pnode%state == IMP_PROMISE) pnode%received_call = .true.
+                  else
+                     hk = hold_by_wire(conn, cap_descriptor_sender_promise_get(icd))
+                     if (hk > 0) conn%param_holds(hk)%written = .true.
+                  end if
+               end if
+            end block
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
             id = cap_descriptor_receiver_hosted_get(icd)
             call cap_descriptor_none_set(ocd, err)
@@ -8592,7 +8618,7 @@ contains
             results = .true.
             inp = return_results_get(qr, err)
             if (err == CAPNP_OK) outp = return_results_init(r, err)
-            if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, rm, err)
+            if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, rm, err, local=yourself)
          else if (return_which(qr) == RETURN_EXCEPTION_TAG) then
             qex = return_exception_get(qr, err)
             if (err == CAPNP_OK) call exception_reason_get(qex, why, err)
@@ -8991,11 +9017,37 @@ contains
       type(third_party_cap_descriptor_t) :: tp
       integer(int64) :: next
       integer :: j, k, e
-      logical :: found
+      logical :: found, loop
       held = .false.
       k = hold_by_wire(conn, pid)
       if (k < 0) return
       held = .true.
+      ! A written promise that resolves to one of our exports echoes a
+      ! Disembargo first, as resolve_reflected does for an import.
+      if (present(cd) .and. conn%param_holds(k)%written) then
+         loop = .false.
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+            next = cap_descriptor_receiver_hosted_get(cd)
+            if (eslot_ok(conn, next)) loop = conn%exports(int(next))%used .and. &
+                                             conn%exports(int(next))%refcount > 0
+         case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+            loop = answer_cap_reflects(conn, cd)
+         end select
+         if (loop) then
+            block
+               type(rpc_embargo_node_t), pointer :: emb
+               allocate (emb)
+               emb%id = conn%next_embargo
+               conn%next_embargo = emb%id + 1_int64
+               emb%open = .true.
+               emb%next => conn%embargoes
+               conn%embargoes => emb
+               call send_sender_loopback(conn, pid, emb%id, e)
+               if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+            end block
+         end if
+      end if
       call send_release(conn, pid, conn%param_holds(k)%refs, e)
       if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
       next = -1_int64
@@ -9026,6 +9078,8 @@ contains
          if (j > 0 .and. j /= k) then
             conn%param_holds(j)%refs = conn%param_holds(j)%refs + 1_int64
             conn%param_holds(j)%holders = conn%param_holds(j)%holders + 1
+            conn%param_holds(j)%written = conn%param_holds(j)%written .or. &
+                                          conn%param_holds(k)%written
             conn%param_holds(k)%into = conn%param_holds(j)%id
             next = -1_int64
          end if
@@ -9033,6 +9087,42 @@ contains
       conn%param_holds(k)%wire = next
       conn%param_holds(k)%refs = 1_int64
    end function resolve_param_hold
+
+   !> A receiverAnswer names a cap that is neither null nor broken. C++
+   !> wraps a cap of this connection in a TribbleRaceBlocker (rpc.c++
+   !> receiveCap), so a promise resolved to any such cap is reflected and
+   !> embargoed (PromiseClient::resolve).
+   logical function answer_cap_reflects(conn, cd) result(local)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: cd
+      type(rpc_answer_slot_t), pointer :: slot
+      integer, allocatable :: fields(:)
+      character(len=:), allocatable :: reason
+      integer(int64) :: aqid, id
+      integer :: kind, e
+      logical :: active
+      local = .false.
+      call descriptor_pipeline(cd, aqid, fields, e)
+      if (e /= CAPNP_OK) return
+      call answer_find(conn, aqid, slot, active)
+      if (active) active = associated(slot)
+      if (active) active = slot%used .and. .not. slot%finished
+      if (.not. active) return
+      if (slot%bootstrap .and. size(fields) > 0) return
+      ! A disabled pipeline gives a broken cap, which needs no embargo.
+      if (slot%no_pipeline) return
+      if (.not. slot%has_results) then
+         local = .true.
+         return
+      end if
+      call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, e, deferred=.true.)
+      select case (kind)
+      case (PIPE_EXPORT)
+         if (eslot_ok(conn, id)) local = conn%exports(int(id))%used
+      case (PIPE_IMPORT, PIPE_QUESTION)
+         local = .true.
+      end select
+   end function answer_cap_reflects
 
    !> A Finish for a call still queued on a pending answer drops it, as
    !> C++ drops the call's task (rpc.c++ handleFinish). The call never

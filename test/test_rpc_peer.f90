@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(29))
+      allocate (testsuite(33))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -90,6 +90,14 @@ contains
       testsuite(28)%test => t_fwd_rh_broken_again
       testsuite(29)%name = "fwd-rh-npp-promise-again"
       testsuite(29)%test => t_fwd_rh_npp_again
+      testsuite(30)%name = "fwd-sp-resolve-to-ra"
+      testsuite(30)%test => t_fwd_sp_ra
+      testsuite(31)%name = "param-promise-written-merge"
+      testsuite(31)%test => t_written_merge
+      testsuite(32)%name = "fwd-sp-resolve-to-ra-import"
+      testsuite(32)%test => t_fwd_sp_ra_import
+      testsuite(33)%name = "fwd-sp-resolve-to-ra-pending-npp"
+      testsuite(33)%test => t_fwd_sp_ra_npp
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1394,6 +1402,125 @@ contains
                  'npp broken again: got '//a//' / '//b//' / '//c//' / '//d//' / '//f)
       call close_peer(conn, fd)
    end subroutine t_fwd_rh_npp_again
+
+   !> A forwarded param promise resolves to receiverAnswer naming our own
+   !> export. The forward wrote the promise, so a Disembargo goes first.
+   subroutine t_fwd_sp_ra(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer :: fd
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 4_int64, 0, 2_int64, ['sp'], [6_int64])
+      a = step(conn, fd, 1)
+      call wres(fd, 6_int64, 'ra', 1_int64)
+      b = step(conn, fd, 1)
+      call check(error, index(a, '[rh6]') > 0 .and. index(b, 'DIS I6 sl ') == 1 .and. &
+                 index(b, ' | REL 6 1') > 0, 'resolve to receiverAnswer: got '//a//' / '//b)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_sp_ra
+
+   !> Two param promises merge under one import after the forward wrote
+   !> one of them. Its resolution to our export still needs a Disembargo.
+   subroutine t_written_merge(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer :: fd
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 4_int64, 1, -1_int64, ['sp'], [6_int64])
+      call wcall(fd, 5_int64, 0, 2_int64, ['sp'], [7_int64])
+      a = step(conn, fd, 2)
+      call wres(fd, 7_int64, 'sp', 6_int64)
+      b = step(conn, fd, 1)
+      call wres(fd, 6_int64, 'rh', 1_int64)
+      c = step(conn, fd, 1)
+      call check(error, index(a, '[rh7]') > 0 .and. b == 'REL 7 1' .and. &
+                 index(c, 'DIS I6 sl ') == 1 .and. index(c, ' | REL 6 2') > 0, &
+                 'written merge: got '//a//' / '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_written_merge
+
+   !> A forwarded param promise resolves to receiverAnswer on an answer
+   !> whose cap is the peer's own export. C++ wraps a cap of this
+   !> connection in a TribbleRaceBlocker, so the resolution is reflected
+   !> and the Disembargo goes ahead of the Release.
+   subroutine t_fwd_sp_ra_import(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer :: fd
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 2_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 4_int64, 0, 2_int64, ['sp'], [6_int64])
+      a = step(conn, fd, 1)
+      call wres(fd, 6_int64, 'ra', 2_int64)
+      b = step(conn, fd, 1)
+      call check(error, index(a, '[rh6]') > 0 .and. index(b, 'DIS I6 sl ') == 1 .and. &
+                 index(b, ' | REL 6 1') > 0, 'resolve to reflected import: got '//a//' / '//b)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_sp_ra_import
+
+   !> Two forwarded param promises resolve to receiverAnswer: one on a
+   !> pending noPromisePipelining answer, one on an answer whose cap is
+   !> the peer's export. Only the second is a cap, so only it gets a
+   !> Disembargo ahead of its Release.
+   subroutine t_fwd_sp_ra_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k1, k2, k3
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 2, 1_int64, NOCAPS, NOIDS, npp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k1)
+      call wcall(fd, 5_int64, 0, 1_int64, ['sp'], [6_int64])
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k2)
+      a = drain(fd)
+      call wcall(fd, 7_int64, 0, 1_int64, ['sp'], [8_int64])
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k3)
+      a = drain(fd)
+      call wres(fd, 6_int64, 'ra', 3_int64)
+      b = step(conn, fd, 1)
+      call wres(fd, 8_int64, 'ra', 1_int64)
+      d = step(conn, fd, 1)
+      call wret(fd, k2, .true.)
+      call wret(fd, k1, .false.)
+      a = step(conn, fd, 2)
+      call wfin(fd, 5_int64, .true.)
+      call wfin(fd, 3_int64, .true.)
+      c = step(conn, fd, 2)
+      call check(error, b == 'REL 6 1' .and. index(d, 'DIS I8 sl ') == 1 .and. &
+                 index(d, ' | REL 8 1') > 0 .and. c == 'FIN '//itoa(k2)//' F', &
+                 'resolve to pending npp: got '//b//' / '//d//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_sp_ra_npp
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
