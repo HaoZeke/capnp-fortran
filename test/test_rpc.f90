@@ -132,7 +132,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(113))
+      allocate (testsuite(114))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -347,18 +347,20 @@ contains
       testsuite(106)%test => w_call_promised_answer_outcomes
       testsuite(107)%name = "rpc-call-pending-promised-answer"
       testsuite(107)%test => w_call_pending_promised_answer
-      testsuite(108)%name = "posix-recv-eintr-retried"
-      testsuite(108)%test => t_recv_all_retries_eintr
-      testsuite(109)%name = "rpc-framing-511-accepted"
-      testsuite(109)%test => t_framing_511_accepted
-      testsuite(110)%name = "rpc-framing-512-rejected"
-      testsuite(110)%test => t_framing_512_rejected
-      testsuite(111)%name = "rpc-framing-oversized-rejected"
-      testsuite(111)%test => t_framing_oversized_rejected
-      testsuite(112)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(112)%test => t_framing_negative_traversal_rejected
-      testsuite(113)%name = "rpc-framing-short-and-padded"
-      testsuite(113)%test => t_framing_short_and_padded
+      testsuite(108)%name = "rpc-finish-before-return-answers"
+      testsuite(108)%test => w_finish_before_return_answers
+      testsuite(109)%name = "posix-recv-eintr-retried"
+      testsuite(109)%test => t_recv_all_retries_eintr
+      testsuite(110)%name = "rpc-framing-511-accepted"
+      testsuite(110)%test => t_framing_511_accepted
+      testsuite(111)%name = "rpc-framing-512-rejected"
+      testsuite(111)%test => t_framing_512_rejected
+      testsuite(112)%name = "rpc-framing-oversized-rejected"
+      testsuite(112)%test => t_framing_oversized_rejected
+      testsuite(113)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(113)%test => t_framing_negative_traversal_rejected
+      testsuite(114)%name = "rpc-framing-short-and-padded"
+      testsuite(114)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -705,6 +707,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_call_pending_promised_answer(error)
    end subroutine w_call_pending_promised_answer
+
+   subroutine w_finish_before_return_answers(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_finish_before_return_answers(error)
+   end subroutine w_finish_before_return_answers
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8808,11 +8815,12 @@ contains
 
    !> Read frames on the raw peer socket until the Return for answer
    !> `cq`; `got` is false when none arrives.
-   subroutine pa_await(sconn, cq, got, is_exception, reason)
+   subroutine pa_await(sconn, cq, got, is_exception, reason, tag)
       type(rpc_conn_t), intent(inout), target :: sconn
       integer(int64), intent(in) :: cq
       logical, intent(out) :: got, is_exception
       character(len=:), allocatable, intent(out) :: reason
+      integer, intent(out), optional :: tag
       type(capnp_message_t), target :: reply
       type(message_t) :: msg
       type(return_t) :: r
@@ -8832,6 +8840,7 @@ contains
             r = message_return_get(msg, e)
             if (return_answer_id_get(r) == cq) then
                got = .true.
+               if (present(tag)) tag = return_which(r)
                if (return_which(r) == RETURN_EXCEPTION_TAG) then
                   is_exception = .true.
                   ex = return_exception_get(r, e)
@@ -8990,5 +8999,47 @@ contains
          if (allocated(error)) return
       end do
    end subroutine t_call_pending_promised_answer
+
+   !> Finish before the Return does not cancel a running call. C++ 1.4.0
+   !> drops the task that would send the Return (rpc.c++ 3289-3361), so
+   !> results and an exception alike give Return.canceled when the call
+   !> ends (rpc.c++ 2404-2431).
+   subroutine t_finish_before_return_answers(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      integer(int64) :: qp
+      integer :: e, k, tag
+      logical :: got, is_exception
+      character(len=:), allocatable :: reason
+      integer, parameter :: modes(3) = [1, 2, 0]
+
+      do k = 1, 3
+         pumper = pump_srv_t()
+         pumper%mode = modes(k)
+         srv => local_echo
+         pumper%inner => srv
+         call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+         call rpc_request_cancellation(sconn, qp, e)
+         call rpc_pump_once(cconn, e)
+         tag = -1
+         call pa_await(sconn, qp, got, is_exception, reason, tag)
+         if (modes(k) == 0) then
+            call check_(error, got .and. tag == RETURN_CANCELED_TAG, &
+                        'early Finish: an exception is replaced by Return.canceled')
+         else
+            call check_(error, got .and. tag == RETURN_CANCELED_TAG, &
+                        'early Finish: results are replaced by Return.canceled')
+         end if
+         call check_(error, rpc_conn_alive(cconn), 'early Finish: connection stays up')
+         pumper%conn => null()
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         if (allocated(error)) return
+      end do
+   end subroutine t_finish_before_return_answers
 
 end module test_rpc

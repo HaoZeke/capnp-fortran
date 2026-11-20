@@ -5846,6 +5846,24 @@ contains
       call capnp_message_free(m)
    end subroutine send_results_elsewhere
 
+   subroutine send_canceled_return(conn, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      call capnp_message_init_builder(m, err)
+      if (err /= CAPNP_OK) return
+      msg = message_new_root(m, err)
+      if (err == CAPNP_OK) r = message_return_init(msg, err)
+      if (err == CAPNP_OK) call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
+      if (err == CAPNP_OK) call return_canceled_set(r, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_canceled_return
+
    !> Send the Return and stash a copy in the answers table so pipelined
    !> calls can resolve against it until Finish arrives. `elsewhere`
    !> holds the results and tells the caller they were sent elsewhere.
@@ -5884,6 +5902,17 @@ contains
          do i = 0, ctx%nexp - 1
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
          end do
+         ! The caller still waits for a Return. Finish drops the C++ task
+         ! that would send results or an exception (rpc.c++ 3289-3361), so
+         ! the call ends with canceled, or resultsSentElsewhere for a
+         ! redirect (rpc.c++ 2404-2431).
+         if (.not. conn%dead .and. associated(conn%transport)) then
+            if (hold) then
+               call send_results_elsewhere(conn, qid, herr)
+            else
+               call send_canceled_return(conn, qid, herr)
+            end if
+         end if
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
          call drain_incoming_pipeline(conn, qid, rm, err)
