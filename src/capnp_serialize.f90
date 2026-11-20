@@ -60,6 +60,15 @@ contains
       integer(int64) :: pos, n
       integer :: i, nsegs
       call capnp_message_free(msg)
+      if (size(bytes, kind=int64) == 0_int64) then
+         if (present(traversal_words)) msg%traversal_words = traversal_words
+         if (present(depth_limit)) msg%depth_limit = depth_limit
+         msg%is_builder = .false.
+         msg%nsegs = 0
+         allocate (msg%segs(0))
+         err = CAPNP_OK
+         return
+      end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
       if (present(traversal_words)) msg%traversal_words = traversal_words
@@ -94,6 +103,15 @@ contains
       integer(int64) :: pos, n
       integer :: i, nsegs
       call capnp_message_free(msg)
+      if (size(bytes, kind=int64) == 0_int64) then
+         if (present(traversal_words)) msg%traversal_words = traversal_words
+         if (present(depth_limit)) msg%depth_limit = depth_limit
+         msg%is_builder = .false.
+         msg%nsegs = 0
+         allocate (msg%segs(0))
+         err = CAPNP_OK
+         return
+      end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
       if (present(traversal_words)) msg%traversal_words = traversal_words
