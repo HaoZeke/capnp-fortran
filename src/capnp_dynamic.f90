@@ -537,7 +537,7 @@ contains
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
       err = CAPNP_OK
-      if (depth > 8) then
+      if (depth > DYN_MAX_DEPTH) then
          err = CAPNP_ERR_ARG
          return
       end if

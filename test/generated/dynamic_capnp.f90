@@ -47,6 +47,14 @@ module dynamic_capnp
       type(capnp_ptr_t) :: p
    end type scalars_t
 
+   integer, parameter :: DEEP_GROUPS_DWORDS = 6
+   integer, parameter :: DEEP_GROUPS_PWORDS = 0
+   type :: deep_groups_t
+      type(capnp_ptr_t) :: p
+   end type deep_groups_t
+   integer, parameter :: DEEP_GROUPS_A_TAG = 0
+   integer, parameter :: DEEP_GROUPS_G1_TAG = 1
+
    integer(int64), parameter :: ANNOTATED_SERVICE_INTERFACE_ID = -1406778577523547304_int64
    integer, parameter :: ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE_KIND = 12
    character(len=*), parameter :: ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE = 'ping method'
@@ -552,5 +560,184 @@ contains
       integer, intent(out) :: err
       call capnp_set_data(h%p, 1, b, err)
    end subroutine scalars_blob_set
+
+   function deep_groups_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(deep_groups_t) :: h
+      h%p = capnp_new_struct(msg, DEEP_GROUPS_DWORDS, DEEP_GROUPS_PWORDS, err)
+   end function deep_groups_new
+
+   function deep_groups_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(deep_groups_t) :: h
+      h = deep_groups_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function deep_groups_new_root
+
+   function deep_groups_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(deep_groups_t) :: h
+      h%p = capnp_root(msg, err)
+   end function deep_groups_read_root
+
+   function deep_groups_which(h) result(tag)
+      type(deep_groups_t), intent(in) :: h
+      integer :: tag
+      tag = int(capnp_get_u16(h%p, 4_int64))
+   end function deep_groups_which
+
+   function deep_groups_a_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 0_int64)
+   end function deep_groups_a_get
+
+   subroutine deep_groups_a_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 4_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_i32(h%p, 0_int64, v, err)
+   end subroutine deep_groups_a_set
+
+   subroutine deep_groups_g1_select(h, err)
+      type(deep_groups_t), intent(in) :: h
+      integer, intent(out) :: err
+      call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+   end subroutine deep_groups_g1_select
+
+   function deep_groups_g1_v1_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 0_int64)
+   end function deep_groups_g1_v1_get
+
+   subroutine deep_groups_g1_v1_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 0_int64, v, err)
+   end subroutine deep_groups_g1_v1_set
+
+   function deep_groups_g1_g2_v2_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 8_int64)
+   end function deep_groups_g1_g2_v2_get
+
+   subroutine deep_groups_g1_g2_v2_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 8_int64, v, err)
+   end subroutine deep_groups_g1_g2_v2_set
+
+   function deep_groups_g1_g2_g3_v3_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 12_int64)
+   end function deep_groups_g1_g2_g3_v3_get
+
+   subroutine deep_groups_g1_g2_g3_v3_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 12_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_v3_set
+
+   function deep_groups_g1_g2_g3_g4_v4_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 16_int64)
+   end function deep_groups_g1_g2_g3_g4_v4_get
+
+   subroutine deep_groups_g1_g2_g3_g4_v4_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 16_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_v4_set
+
+   function deep_groups_g1_g2_g3_g4_g5_v5_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 20_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_v5_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_v5_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 20_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_v5_set
+
+   function deep_groups_g1_g2_g3_g4_g5_g6_v6_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 24_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_g6_v6_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_g6_v6_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 24_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_g6_v6_set
+
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 28_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 28_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_set
+
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 32_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 32_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_set
+
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 36_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 36_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_set
+
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_get(h) result(v)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 40_int64)
+   end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_get
+
+   subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_set(h, v, err)
+      type(deep_groups_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 40_int64, v, err)
+   end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_set
 
 end module dynamic_capnp

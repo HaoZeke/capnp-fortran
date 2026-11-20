@@ -31,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(22))
+      allocate (testsuite(23))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -76,6 +76,8 @@ contains
       testsuite(21)%test => run_union_disc
       testsuite(22)%name = "dynamic-bad-handle"
       testsuite(22)%test => run_bad_handle
+      testsuite(23)%name = "dynamic-deep-groups"
+      testsuite(23)%test => run_deep_groups
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1182,6 +1184,51 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_bad_handle
+
+   !> Selecting another union arm clears an arm made of groups nested ten
+   !> deep. dynamic.c++ clears a group arm without a nesting cap.
+   subroutine run_deep_groups(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: path
+      character(len=3) :: num
+      integer :: err, idx, last, i
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'DeepGroups', err)
+      path = 'DeepGroups'
+      do i = 1, 10
+         write (num, '(i0)') i
+         path = path//'.g'//trim(num)
+      end do
+      last = capnp_dyn_find(schema, path, err)
+      call check_(error, idx > 0 .and. last > 0 .and. err == CAPNP_OK, &
+                  'deep-groups: nodes found')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g1', err)
+      call check_(error, err == CAPNP_OK, 'deep-groups: select the group arm')
+      call capnp_dyn_set_int(schema, last, root, 'v10', 77_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, last, root, 'v10', err) == 77_int64, &
+                  'deep-groups: write the innermost field')
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call check_(error, err == CAPNP_OK, 'deep-groups: another arm replaces the groups')
+      call check_(error, capnp_dyn_which(schema, idx, root, err) == 0, &
+                  'deep-groups: the new arm is selected')
+      call check_(error, capnp_dyn_get_int(schema, last, root, 'v10', err) == 0_int64, &
+                  'deep-groups: the innermost field is cleared')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_deep_groups
 
    !> A failed discriminant write is the error the caller sees, and the
    !> value is not stored afterwards.
