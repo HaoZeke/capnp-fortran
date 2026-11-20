@@ -163,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(127))
+      allocate (testsuite(128))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -406,18 +406,20 @@ contains
       testsuite(120)%test => w_early_finish_keeps_queued_call
       testsuite(121)%name = "rpc-disembargo-on-forwarded-answer"
       testsuite(121)%test => w_disembargo_on_forwarded_answer
-      testsuite(122)%name = "posix-recv-eintr-retried"
-      testsuite(122)%test => t_recv_all_retries_eintr
-      testsuite(123)%name = "rpc-framing-511-accepted"
-      testsuite(123)%test => t_framing_511_accepted
-      testsuite(124)%name = "rpc-framing-512-rejected"
-      testsuite(124)%test => t_framing_512_rejected
-      testsuite(125)%name = "rpc-framing-oversized-rejected"
-      testsuite(125)%test => t_framing_oversized_rejected
-      testsuite(126)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(126)%test => t_framing_negative_traversal_rejected
-      testsuite(127)%name = "rpc-framing-short-and-padded"
-      testsuite(127)%test => t_framing_short_and_padded
+      testsuite(122)%name = "rpc-forward-answer-param"
+      testsuite(122)%test => w_forward_answer_param
+      testsuite(123)%name = "posix-recv-eintr-retried"
+      testsuite(123)%test => t_recv_all_retries_eintr
+      testsuite(124)%name = "rpc-framing-511-accepted"
+      testsuite(124)%test => t_framing_511_accepted
+      testsuite(125)%name = "rpc-framing-512-rejected"
+      testsuite(125)%test => t_framing_512_rejected
+      testsuite(126)%name = "rpc-framing-oversized-rejected"
+      testsuite(126)%test => t_framing_oversized_rejected
+      testsuite(127)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(127)%test => t_framing_negative_traversal_rejected
+      testsuite(128)%name = "rpc-framing-short-and-padded"
+      testsuite(128)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -920,6 +922,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_disembargo_on_forwarded_answer(error)
    end subroutine w_disembargo_on_forwarded_answer
+
+   subroutine w_forward_answer_param(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forward_answer_param(error)
+   end subroutine w_forward_answer_param
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10208,5 +10215,94 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_disembargo_on_forwarded_answer
+
+   !> pa_send with params whose content is cap 0, receiverAnswer(`aq`, []).
+   subroutine pa_send_answer_cap(sconn, cq, qid, fields, aq)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: cq, qid, aq
+      integer, intent(in) :: fields(:)
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa, ra
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops, ctab
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      integer :: i, e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, cq, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qid, e)
+      ops = promised_answer_transform_init(pa, int(size(fields), int64), e)
+      do i = 1, size(fields)
+         op%p = capnp_list_get_struct(ops, i - 1, e)
+         call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+      end do
+      params = call_params_init(c, e)
+      call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      ra = cap_descriptor_receiver_answer_init(cd, e)
+      call promised_answer_question_id_set(ra, aq, e)
+      ops = promised_answer_transform_init(ra, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine pa_send_answer_cap
+
+   !> A forwarded call whose param is receiverAnswer on one of our
+   !> answers carries the cap that answer returned. C++ 1.4.0 writes our
+   !> export there as senderHosted, with one more reference.
+   subroutine t_forward_answer_param(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qboot, qadder, eid
+      integer :: e, n, refs
+      logical :: ok, carried
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      refs = cconn%exports(int(eid))%refcount
+      call pa_send_answer_cap(sconn, 30_int64, qadder, [0], qboot)
+      call rpc_pump_once(cconn, e)
+      carried = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            pl = call_params_get(c, e)
+            ctab = payload_cap_table_get(pl, e)
+            if (capnp_list_len(ctab) == 1_int64) then
+               cd%p = capnp_list_get_struct(ctab, 0, e)
+               carried = cap_descriptor_which(cd) == CAP_DESCRIPTOR_SENDER_HOSTED_TAG
+               if (carried) carried = cap_descriptor_sender_hosted_get(cd) == eid
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, rpc_conn_alive(cconn) .and. carried, &
+                  'forward answer param: the param is our export')
+      if (.not. allocated(error)) &
+         call check_(error, cconn%exports(int(eid))%refcount == refs + 1, &
+                     'forward answer param: the export gains a reference')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forward_answer_param
 
 end module test_rpc

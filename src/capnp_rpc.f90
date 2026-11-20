@@ -5122,11 +5122,78 @@ contains
                if (err == CAPNP_OK) call cap_descriptor_receiver_hosted_set( &
                   ocd, third_party_cap_descriptor_vine_id_get(tp), err)
             end block
+         case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+            call forward_answer_param(conn, icd, ocd, err)
          case default
             call cap_descriptor_none_set(ocd, err)
          end select
       end do
    end subroutine copy_forwarded_payload
+
+   !> A receiverAnswer param names a pipeline cap of one of our answers.
+   !> C++ 1.4.0 reads it from the returned answer and writes that cap
+   !> for the peer: our export as senderHosted with one more reference,
+   !> the peer's export as receiverHosted, a pipeline on our live question
+   !> as receiverAnswer. An answer still running or a broken cap is none.
+   subroutine forward_answer_param(conn, icd, ocd, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: icd, ocd
+      integer, intent(out) :: err
+      type(promised_answer_t) :: rpa, opa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      type(rpc_answer_slot_t), pointer :: slot
+      integer, allocatable :: fields(:), qops(:)
+      character(len=:), allocatable :: reason
+      integer(int64) :: id
+      integer :: i, kind, e
+      logical :: found
+      call cap_descriptor_none_set(ocd, err)
+      if (err /= CAPNP_OK) return
+      rpa = cap_descriptor_receiver_answer_get(icd, e)
+      if (e == CAPNP_OK) ops = promised_answer_transform_get(rpa, e)
+      if (e /= CAPNP_OK) return
+      call answer_find(conn, promised_answer_question_id_get(rpa), slot, found)
+      if (found) found = associated(slot)
+      if (found) found = slot%used .and. slot%has_results
+      if (.not. found) return
+      allocate (fields(int(capnp_list_len(ops))))
+      do i = 1, size(fields)
+         op%p = capnp_list_get_struct(ops, i - 1, e)
+         if (e /= CAPNP_OK) return
+         fields(i) = -1
+         if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+            fields(i) = int(promised_answer_op_get_pointer_field_get(op))
+      end do
+      call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, e, &
+                               deferred=.true., qops=qops)
+      if (e /= CAPNP_OK) return
+      select case (kind)
+      case (PIPE_EXPORT)
+         if (.not. eslot_ok(conn, id)) return
+         if (.not. conn%exports(int(id))%used .or. conn%exports(int(id))%refcount <= 0) return
+         conn%exports(int(id))%refcount = conn%exports(int(id))%refcount + 1
+         call cap_descriptor_sender_hosted_set(ocd, id, err)
+      case (PIPE_IMPORT)
+         call cap_descriptor_receiver_hosted_set(ocd, id, err)
+      case (PIPE_QUESTION)
+         if (.not. live_question(conn, id)) return
+         if (.not. allocated(qops)) allocate (qops(0))
+         opa = cap_descriptor_receiver_answer_init(ocd, err)
+         if (err == CAPNP_OK) call promised_answer_question_id_set(opa, id, err)
+         if (err == CAPNP_OK) ops = promised_answer_transform_init(opa, int(size(qops), int64), err)
+         do i = 1, size(qops)
+            if (err /= CAPNP_OK) return
+            op%p = capnp_list_get_struct(ops, i - 1, err)
+            if (err /= CAPNP_OK) return
+            if (qops(i) < 0) then
+               call promised_answer_op_noop_set(op, err)
+            else
+               call promised_answer_op_get_pointer_field_set(op, qops(i), err)
+            end if
+         end do
+      end select
+   end subroutine forward_answer_param
 
    !> Dispatch an incoming Call to export `eid` and answer it, or answer
    !> it with `reason` when the target did not resolve.
