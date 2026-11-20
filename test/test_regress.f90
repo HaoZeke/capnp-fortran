@@ -1822,8 +1822,9 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_json_union_many
 
-   !> Nested groups past the old cap of 8 still clear. The reader nesting
-   !> limit is 64, and this chain is well under it.
+   !> A chain of 100 nested groups still clears. Groups add no pointer
+   !> nesting, so the reader limit of 64 does not apply, and capnp 1.4.0
+   !> compiles the same schema.
    subroutine run_group_clear_depth(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -1844,11 +1845,11 @@ contains
             'struct Deep {'//achar(10)// &
             '  union {'//achar(10)// &
             '    nest :group {'//achar(10)
-      do i = 1, 9
+      do i = 1, 100
          src = src//'      g :group {'//achar(10)
       end do
       src = src//'        n @0 :Int32;'//achar(10)
-      do i = 1, 9
+      do i = 1, 100
          src = src//'      }'//achar(10)
       end do
       src = src//'    }'//achar(10)// &

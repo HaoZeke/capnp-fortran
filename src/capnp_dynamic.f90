@@ -27,6 +27,12 @@ module capnp_dynamic
    public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
    public :: capnp_dyn_method_annotations
 
+   ! Groups share their parent's pointer section, so a chain of them does
+   ! not count toward the reader nesting limit of 64, and capnp 1.4.0
+   ! compiles chains of hundreds. Stop only before a cyclic graph in a
+   ! corrupt schema exhausts the stack.
+   integer, parameter :: SCHEMA_WALK_LIMIT = 4096
+
    !> A loaded compiled schema: the CGR message plus a node index.
    type :: capnp_dyn_schema_t
       type(capnp_message_t) :: cgr
@@ -390,10 +396,7 @@ contains
       which = -1
       id = 0_int64
       err = CAPNP_OK
-      ! Reader nesting is 64 (message.h). Past that, report depth instead
-      ! of a silent unresolved type. Chains the old cap of 8 rejected
-      ! still resolve.
-      if (depth > CAPNP_DEFAULT_DEPTH_LIMIT) then
+      if (depth > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -475,7 +478,7 @@ contains
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
       err = CAPNP_OK
-      if (depth > CAPNP_DEFAULT_DEPTH_LIMIT) then
+      if (depth > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
       end if
