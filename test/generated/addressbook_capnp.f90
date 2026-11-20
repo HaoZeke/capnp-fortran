@@ -67,6 +67,15 @@ contains
       call capnp_set_u32(h%p, 0_int64, v, err)
    end subroutine person_id_set
 
+   function person_name_has(h) result(v)
+      type(person_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_name_has
+
    subroutine person_name_get(h, s, err)
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
@@ -81,6 +90,15 @@ contains
       call capnp_set_text(h%p, 0, s, err)
    end subroutine person_name_set
 
+   function person_email_has(h) result(v)
+      type(person_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_email_has
+
    subroutine person_email_get(h, s, err)
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
@@ -94,6 +112,15 @@ contains
       integer, intent(out) :: err
       call capnp_set_text(h%p, 1, s, err)
    end subroutine person_email_set
+
+   function person_phones_has(h) result(v)
+      type(person_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 2, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_phones_has
 
    function person_phones_get(h, err) result(l)
       type(person_t), intent(in) :: h
@@ -133,6 +160,15 @@ contains
       call capnp_set_u16(h%p, 4_int64, 0_int32, err)
    end subroutine person_employment_unemployed_set
 
+   function person_employment_employer_has(h) result(v)
+      type(person_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 3, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_employment_employer_has
+
    subroutine person_employment_employer_get(h, s, err)
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
@@ -147,6 +183,15 @@ contains
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
       call capnp_set_text(h%p, 3, s, err)
    end subroutine person_employment_employer_set
+
+   function person_employment_school_has(h) result(v)
+      type(person_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 3, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_employment_school_has
 
    subroutine person_employment_school_get(h, s, err)
       type(person_t), intent(in) :: h
@@ -190,6 +235,15 @@ contains
       type(person_phone_number_t) :: h
       h%p = capnp_root(msg, err)
    end function person_phone_number_read_root
+
+   function person_phone_number_number_has(h) result(v)
+      type(person_phone_number_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function person_phone_number_number_has
 
    subroutine person_phone_number_number_get(h, s, err)
       type(person_phone_number_t), intent(in) :: h
@@ -239,6 +293,15 @@ contains
       type(address_book_t) :: h
       h%p = capnp_root(msg, err)
    end function address_book_read_root
+
+   function address_book_people_has(h) result(v)
+      type(address_book_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function address_book_people_has
 
    function address_book_people_get(h, err) result(l)
       type(address_book_t), intent(in) :: h

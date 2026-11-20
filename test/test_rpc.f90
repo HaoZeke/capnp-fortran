@@ -231,7 +231,8 @@ contains
       type(message_t) :: msg
       type(return_t) :: r
       type(payload_t) :: pl
-      type(capnp_ptr_t) :: content, capp
+      type(capnp_ptr_t) :: content
+      type(capability_client_t) :: capp
       type(join_result_t) :: jr
       ansid = -1_int64
       jid = -1_int64
@@ -257,7 +258,7 @@ contains
       jid = join_result_join_id_get(jr)
       succeeded = join_result_succeeded_get(jr)
       capp = join_result_cap_get(jr, e)
-      if (e == CAPNP_OK) has_cap = capp%kind == CAPNP_PK_CAP
+      if (e == CAPNP_OK) has_cap = capp%kind == RPC_CAP_IMPORT
       e = CAPNP_OK
       call capnp_message_free(m)
    end subroutine recv_join_result

@@ -2,7 +2,13 @@
 module schema__streamer_capnp
    use capnp
    use capnp_rpc
-   use rpc_capnp, only: payload_t, payload_content_set
+   use rpc_capnp, only: payload_t, payload_content_set, &
+      cap_descriptor_t, cap_descriptor_which, &
+      cap_descriptor_sender_hosted_get, &
+      cap_descriptor_sender_promise_get, &
+      cap_descriptor_receiver_hosted_get, &
+      cap_descriptor_none_tag, cap_descriptor_sender_hosted_tag, &
+      cap_descriptor_sender_promise_tag, cap_descriptor_receiver_hosted_tag
    use stream_capnp
    implicit none
    public
@@ -77,6 +83,15 @@ contains
       type(writer_write_params_t) :: h
       h%p = capnp_root(msg, err)
    end function writer_write_params_read_root
+
+   function writer_write_params_chunk_has(h) result(v)
+      type(writer_write_params_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function writer_write_params_chunk_has
 
    subroutine writer_write_params_chunk_get(h, b, err)
       type(writer_write_params_t), intent(in) :: h
@@ -173,6 +188,15 @@ contains
       call rpc_result_content(conn, qid, results%p, err)
    end subroutine writer_write_wait
 
+   subroutine writer_write_stream(conn, stream, m, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      type(capnp_message_t), intent(inout) :: m
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      call rpc_stream_send(conn, stream, m, qid, err)
+   end subroutine writer_write_stream
+
    subroutine writer_done_begin(conn, client, m, params, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(writer_client_t), intent(in) :: client
@@ -228,6 +252,38 @@ contains
          err = CAPNP_ERR_ARG
       end select
    end subroutine writer_dispatch
+
+   subroutine cap_resolve(ctab, idx, cap, err)
+      type(capnp_ptr_t), intent(in) :: ctab
+      integer(int64), intent(in) :: idx
+      type(rpc_cap_t), intent(out) :: cap
+      integer, intent(out) :: err
+      type(cap_descriptor_t) :: cd
+      cap%kind = RPC_CAP_NONE
+      cap%id = 0_int64
+      err = CAPNP_OK
+      if (idx < 0_int64 .or. idx >= capnp_list_len(ctab)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(idx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (cap_descriptor_none_tag)
+         cap%kind = RPC_CAP_NONE
+      case (cap_descriptor_sender_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_hosted_get(cd)
+      case (cap_descriptor_sender_promise_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_promise_get(cd)
+      case (cap_descriptor_receiver_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_receiver_hosted_get(cd)
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine cap_resolve
 
 end module schema__streamer_capnp
 

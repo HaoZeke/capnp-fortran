@@ -125,6 +125,15 @@ contains
       call capnp_set_f64(h%p, 8_int64, v, err, default=cp_bits_f64(4612811918334230528_int64))
    end subroutine sink_ratio_set
 
+   function sink_label_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_label_has
+
    subroutine sink_label_get(h, s, err)
       type(sink_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
@@ -145,6 +154,15 @@ contains
       call capnp_set_text(h%p, 0, s, err)
    end subroutine sink_label_set
 
+   function sink_payload_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_payload_has
+
    subroutine sink_payload_get(h, b, err)
       type(sink_t), intent(in) :: h
       integer(int8), allocatable, intent(out) :: b(:)
@@ -164,6 +182,15 @@ contains
       integer, intent(out) :: err
       call capnp_set_data(h%p, 1, b, err)
    end subroutine sink_payload_set
+
+   function sink_origin_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 2, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_origin_has
 
    function sink_origin_get(h, err) result(o)
       type(sink_t), intent(in) :: h
@@ -200,6 +227,15 @@ contains
       if (err == CAPNP_OK) call capnp_setp(h%p, 2, o%p, err)
    end function sink_origin_init
 
+   subroutine sink_origin_set(h, src, err)
+      type(sink_t), intent(in) :: h
+      type(vec3_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: c
+      c = capnp_copy(h%p%msg, src%p, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 2, c, err)
+   end subroutine sink_origin_set
+
    function sink_state_get(h) result(v)
       type(sink_t), intent(in) :: h
       integer :: v
@@ -212,6 +248,15 @@ contains
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 2_int64, int(v, int32), err, default=1_int32)
    end subroutine sink_state_set
+
+   function sink_tags_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 3, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_tags_has
 
    function sink_tags_get(h, err) result(l)
       type(sink_t), intent(in) :: h
@@ -236,7 +281,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 3, err)
+      l = sink_tags_get(h, err)
       if (err == CAPNP_OK) call capnp_list_set_text(l, i, s, err)
    end subroutine sink_tags_set_elem
 
@@ -248,6 +293,15 @@ contains
       l = capnp_new_list(h%p%msg, 6, n, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 3, l, err)
    end function sink_tags_init
+
+   function sink_blobs_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 4, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_blobs_has
 
    function sink_blobs_get(h, err) result(l)
       type(sink_t), intent(in) :: h
@@ -262,7 +316,7 @@ contains
       integer(int8), allocatable, intent(out) :: b(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 4, err)
+      l = sink_blobs_get(h, err)
       if (err == CAPNP_OK) call capnp_get_data(l, i, b, err)
    end subroutine sink_blobs_get_elem
 
@@ -272,7 +326,7 @@ contains
       integer(int8), intent(in) :: b(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 4, err)
+      l = sink_blobs_get(h, err)
       if (err == CAPNP_OK) call capnp_set_data(l, i, b, err)
    end subroutine sink_blobs_set_elem
 
@@ -285,12 +339,40 @@ contains
       if (err == CAPNP_OK) call capnp_setp(h%p, 4, l, err)
    end function sink_blobs_init
 
+   function sink_grid_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 5, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_grid_has
+
    function sink_grid_get(h, err) result(l)
       type(sink_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
       l = capnp_getp(h%p, 5, err)
    end function sink_grid_get
+
+   function sink_grid_get_elem(h, i, err) result(o)
+      type(sink_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: o, l
+      l = sink_grid_get(h, err)
+      if (err == CAPNP_OK) o = capnp_list_getp(l, i, err)
+   end function sink_grid_get_elem
+
+   subroutine sink_grid_set_elem(h, i, q, err)
+      type(sink_t), intent(in) :: h
+      integer, intent(in) :: i
+      type(capnp_ptr_t), intent(in) :: q
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = sink_grid_get(h, err)
+      if (err == CAPNP_OK) call capnp_setp(l, i, q, err)
+   end subroutine sink_grid_set_elem
 
    function sink_grid_init(h, n, err) result(l)
       type(sink_t), intent(in) :: h
@@ -300,6 +382,15 @@ contains
       l = capnp_new_list(h%p%msg, 6, n, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 5, l, err)
    end function sink_grid_init
+
+   function sink_stuff_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 6, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_stuff_has
 
    function sink_stuff_get(h, err) result(q)
       type(sink_t), intent(in) :: h
@@ -314,6 +405,15 @@ contains
       integer, intent(out) :: err
       call capnp_setp(h%p, 6, q, err)
    end subroutine sink_stuff_set
+
+   function sink_spots_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 7, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_spots_has
 
    function sink_spots_get(h, err) result(l)
       type(sink_t), intent(in) :: h
@@ -341,12 +441,22 @@ contains
       if (err == CAPNP_OK) call capnp_setp(h%p, 7, l, err)
    end function sink_spots_init
 
+   function sink_scores_has(h) result(v)
+      type(sink_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 8, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function sink_scores_has
+
    function sink_scores_get(h, err) result(l)
       type(sink_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
       type(capnp_message_t), save, target :: defmsg
       logical, save :: defloaded = .false.
+      type(capnp_ptr_t) :: d
       l = capnp_getp(h%p, 8, err)
       if (err /= CAPNP_OK .or. l%kind /= CAPNP_PK_NULL) return
       if (.not. defloaded) then
@@ -354,16 +464,40 @@ contains
          if (err /= CAPNP_OK) return
          defloaded = .true.
       end if
-      l = capnp_root(defmsg, err)
+      d = capnp_root(defmsg, err)
       if (err /= CAPNP_OK) return
       if (associated(h%p%msg)) then
          if (h%p%msg%is_builder) then
-            l = capnp_copy(h%p%msg, l, err)
+            l = capnp_copy(h%p%msg, d, err)
             if (err == CAPNP_OK) call capnp_setp(h%p, 8, l, err)
             return
          end if
       end if
+      l = d
    end function sink_scores_get
+
+   function sink_scores_get_elem(h, i, err) result(v)
+      type(sink_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      integer(int64) :: v
+      type(capnp_ptr_t) :: l
+      v = 0
+      l = sink_scores_get(h, err)
+      if (err /= CAPNP_OK) return
+      v = capnp_list_get_i64(l, int(i, int64), err)
+   end function sink_scores_get_elem
+
+   subroutine sink_scores_set_elem(h, i, v, err)
+      type(sink_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = sink_scores_get(h, err)
+      if (err /= CAPNP_OK) return
+      call capnp_list_set_i64(l, int(i, int64), v, err)
+   end subroutine sink_scores_set_elem
 
    function sink_scores_init(h, n, err) result(l)
       type(sink_t), intent(in) :: h
