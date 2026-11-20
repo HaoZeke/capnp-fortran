@@ -78,17 +78,18 @@ contains
    ! ------------------------------------------------------------------
 
    !> Resolve the pointer word stored at (seg, byte_off) into an object
-   !> handle, following far pointers. Reader guard: traversal budget is
-   !> charged per resolved object.
-   recursive subroutine resolve_at(msg, seg, byte_off, depth, p, err)
+   !> handle, following a single or double far pointer as in C++
+   !> `WireHelpers::followFars`. Reader guard: traversal budget is charged
+   !> per landing pad and per resolved object.
+   subroutine resolve_at(msg, seg, byte_off, depth, p, err)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: seg
       integer(int64), intent(in) :: byte_off
       integer, intent(in) :: depth
       type(capnp_ptr_t), intent(out) :: p
       integer, intent(out) :: err
-      integer(int64) :: w, base, need_bytes, tseg64, pad_off
-      integer :: k, tseg
+      integer(int64) :: w, w0, base, need_bytes, tseg64, pad_off, pad_bytes
+      integer :: k, tseg, oseg
 
       err = CAPNP_OK
       p = capnp_ptr_t()
@@ -113,59 +114,80 @@ contains
          return
       end if
 
-      k = wp_kind(w)
-      select case (k)
-      case (CAPNP_WK_STRUCT)
-         base = byte_off + 8_int64 + int(wp_offset(w), int64)*8_int64
-         need_bytes = int(wp_struct_dwords(w) + wp_struct_pwords(w), int64)*8_int64
-         if (.not. charge(msg, need_bytes, err)) return
-         if (base < 0_int64 .or. base + need_bytes > msg%segs(seg)%len) then
-            err = CAPNP_ERR_BOUNDS
-            return
-         end if
-         p%kind = CAPNP_PK_STRUCT
-         p%seg = seg
-         p%off = base
-         p%dwords = wp_struct_dwords(w)
-         p%pwords = wp_struct_pwords(w)
-         p%depth = depth
-
-      case (CAPNP_WK_LIST)
-         base = byte_off + 8_int64 + int(wp_offset(w), int64)*8_int64
-         call fill_list(msg, seg, base, w, p, err)
-         if (err == CAPNP_OK) p%depth = depth
-
-      case (CAPNP_WK_FAR)
+      tseg = seg
+      if (wp_kind(w) == CAPNP_WK_FAR) then
          tseg64 = wp_far_seg(w)
          if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) then
             err = CAPNP_ERR_SEGMENT
             return
          end if
          tseg = int(tseg64) + 1
+         if (msg%segs(tseg)%len == 0_int64) then
+            err = CAPNP_ERR_SEGMENT
+            return
+         end if
          pad_off = wp_far_off(w)*8_int64
+         pad_bytes = merge(16_int64, 8_int64, wp_far_two(w))
+         if (pad_off < 0_int64 .or. pad_off + pad_bytes > msg%segs(tseg)%len) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
+         if (.not. charge(msg, pad_bytes, err)) return
          if (.not. wp_far_two(w)) then
-            ! Single far: the landing pad is the final pointer. A second
-            ! far is not a struct (layout.c++ readStructPointer, the
-            ! kind == STRUCT check).
-            if (pad_off < 0_int64 .or. pad_off + 8_int64 > msg%segs(tseg)%len) then
-               err = CAPNP_ERR_BOUNDS
+            ! Single far: landing pad replaces the pointer without re-checking null.
+            w = cp_get_i64(msg%segs(tseg)%bytes, pad_off)
+            base = clamp_target(msg, tseg, pad_off + 8_int64 + int(wp_offset(w), int64)*8_int64)
+         else
+            ! Double far: pad word 0 locates the object, word 1 describes it.
+            w0 = cp_get_i64(msg%segs(tseg)%bytes, pad_off)
+            w = cp_get_i64(msg%segs(tseg)%bytes, pad_off + 8_int64)
+            tseg64 = wp_far_seg(w0)
+            if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) then
+               err = CAPNP_ERR_SEGMENT
                return
             end if
-            ! followFars charges the landing pad before reading it
-            ! (layout.c++:586-587, arena.h:430).
-            if (.not. charge(msg, 8_int64, err)) return
-            if (wp_kind(cp_get_i64(msg%segs(tseg)%bytes, pad_off)) == CAPNP_WK_FAR) then
+            oseg = int(tseg64) + 1
+            if (msg%segs(oseg)%len == 0_int64) then
+               err = CAPNP_ERR_SEGMENT
+               return
+            end if
+            if (wp_kind(w0) /= CAPNP_WK_FAR) then
                err = CAPNP_ERR_KIND
                return
             end if
-            call resolve_at(msg, tseg, pad_off, depth, p, err)
-         else
-            call resolve_double_far(msg, tseg, pad_off, depth, p, err)
+            tseg = oseg
+            base = clamp_target(msg, tseg, wp_far_off(w0)*8_int64)
          end if
+      else
+         base = clamp_target(msg, tseg, byte_off + 8_int64 + int(wp_offset(w), int64)*8_int64)
+      end if
+
+      k = wp_kind(w)
+      select case (k)
+      case (CAPNP_WK_STRUCT)
+         need_bytes = int(wp_struct_dwords(w) + wp_struct_pwords(w), int64)*8_int64
+         if (base + need_bytes > msg%segs(tseg)%len) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
+         if (.not. charge(msg, need_bytes, err)) return
+         p%kind = CAPNP_PK_STRUCT
+         p%seg = tseg
+         p%off = base
+         p%dwords = wp_struct_dwords(w)
+         p%pwords = wp_struct_pwords(w)
+         p%depth = depth
+
+      case (CAPNP_WK_LIST)
+         call fill_list(msg, tseg, base, w, p, err)
+         if (err == CAPNP_OK) p%depth = depth
+
+      case (CAPNP_WK_FAR)
+         err = CAPNP_ERR_KIND
 
       case (CAPNP_WK_CAP)
-         ! layout.c++ WirePointer::isCapability requires the whole low word
-         ! to be OTHER. Any of bits 2-31 set is a reserved pointer.
+         ! `WirePointer::isCapability` requires the whole low word to be
+         ! OTHER. Bits 2 through 31 identify reserved pointer types.
          if (ibits(w, 2, 30) /= 0_int64) then
             err = CAPNP_ERR_KIND
             return
@@ -175,63 +197,6 @@ contains
          p%depth = depth
       end select
    end subroutine resolve_at
-
-   !> Double-far landing pad: word 0 is a one-word far pointer giving the
-   !> object's start; word 1 is a tag (struct/list pointer, offset 0) giving
-   !> its shape.
-   subroutine resolve_double_far(msg, pseg, pad_off, depth, p, err)
-      type(capnp_message_t), intent(inout), target :: msg
-      integer, intent(in) :: pseg, depth
-      integer(int64), intent(in) :: pad_off
-      type(capnp_ptr_t), intent(out) :: p
-      integer, intent(out) :: err
-      integer(int64) :: w0, tag, oseg64, obase, need_bytes
-      integer :: oseg
-
-      err = CAPNP_OK
-      p = capnp_ptr_t()
-      p%msg => msg
-      if (pad_off < 0_int64 .or. pad_off + 16_int64 > msg%segs(pseg)%len) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      ! A double-far pad is two words (layout.c++:586).
-      if (.not. charge(msg, 16_int64, err)) return
-      w0 = cp_get_i64(msg%segs(pseg)%bytes, pad_off)
-      tag = cp_get_i64(msg%segs(pseg)%bytes, pad_off + 8_int64)
-      if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      oseg64 = wp_far_seg(w0)
-      if (oseg64 < 0_int64 .or. oseg64 >= int(msg%nsegs, int64)) then
-         err = CAPNP_ERR_SEGMENT
-         return
-      end if
-      oseg = int(oseg64) + 1
-      obase = wp_far_off(w0)*8_int64
-
-      select case (wp_kind(tag))
-      case (CAPNP_WK_STRUCT)
-         need_bytes = int(wp_struct_dwords(tag) + wp_struct_pwords(tag), int64)*8_int64
-         if (.not. charge(msg, need_bytes, err)) return
-         if (obase + need_bytes > msg%segs(oseg)%len) then
-            err = CAPNP_ERR_BOUNDS
-            return
-         end if
-         p%kind = CAPNP_PK_STRUCT
-         p%seg = oseg
-         p%off = obase
-         p%dwords = wp_struct_dwords(tag)
-         p%pwords = wp_struct_pwords(tag)
-         p%depth = depth
-      case (CAPNP_WK_LIST)
-         call fill_list(msg, oseg, obase, tag, p, err)
-         if (err == CAPNP_OK) p%depth = depth
-      case default
-         err = CAPNP_ERR_KIND
-      end select
-   end subroutine resolve_double_far
 
    !> Populate a list handle from a list pointer word whose content starts at
    !> base (byte offset in seg). Composite lists consume their tag word here.
@@ -253,11 +218,11 @@ contains
 
       if (es == CAPNP_SZ_COMPOSITE) then
          content_bytes = (cnt + 1_int64)*8_int64 ! tag + content words
-         if (.not. charge(msg, content_bytes, err)) return
          if (base < 0_int64 .or. base + content_bytes > msg%segs(seg)%len) then
             err = CAPNP_ERR_BOUNDS
             return
          end if
+         if (.not. charge(msg, content_bytes, err)) return
          tag = cp_get_i64(msg%segs(seg)%bytes, base)
          if (wp_kind(tag) /= CAPNP_WK_STRUCT) then
             err = CAPNP_ERR_KIND
@@ -285,11 +250,11 @@ contains
       else
          sb = capnp_list_step_bits(es)
          content_bytes = (int(sb, int64)*cnt + 7_int64)/8_int64
-         if (.not. charge(msg, word_round(content_bytes), err)) return
          if (base < 0_int64 .or. base + content_bytes > msg%segs(seg)%len) then
             err = CAPNP_ERR_BOUNDS
             return
          end if
+         if (.not. charge(msg, word_round(content_bytes), err)) return
          p%kind = CAPNP_PK_LIST
          p%seg = seg
          p%off = base
@@ -301,6 +266,21 @@ contains
          end if
       end if
    end subroutine fill_list
+
+   !> A target outside its segment becomes the segment's end, so only an
+   !> object of size zero can survive the bounds check that follows (C++
+   !> `SegmentReader::checkOffset`).
+   pure function clamp_target(msg, seg, base) result(r)
+      type(capnp_message_t), intent(in) :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: base
+      integer(int64) :: r
+      if (base < 0_int64 .or. base > msg%segs(seg)%len) then
+         r = msg%segs(seg)%len
+      else
+         r = base
+      end if
+   end function clamp_target
 
    !> Charge the reader traversal budget; builders are exempt.
    function charge(msg, nbytes, err) result(ok)
@@ -345,7 +325,9 @@ contains
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_ptr_t) :: p
+      err = CAPNP_OK
       p = capnp_ptr_t()
+      p%msg => msg
       ! An out-of-range root is not charged (arena.h:430 short-circuits).
       if (msg%nsegs < 1 .or. msg%segs(1)%len < 8_int64) then
          err = CAPNP_ERR_BOUNDS

@@ -44,6 +44,9 @@ contains
            new_unittest("framing-file-limits", test_framing_file_limits), &
            new_unittest("read-empty-file", test_read_empty_file), &
            new_unittest("stream-reader-options", test_stream_reader_options), &
+           new_unittest("amplified-lists", test_amplified_lists), &
+           new_unittest("zero-size-target-clamp", test_zero_size_target_clamp), &
+           new_unittest("far-pointer-parity", test_far_pointer_parity), &
            new_unittest("traversal-limit", test_traversal_limit), &
            new_unittest("traversal-root-words", test_traversal_root_words), &
            new_unittest("traversal-single-far", test_traversal_single_far), &
@@ -1190,6 +1193,219 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_stream_reader_options
+
+   !> Lists of zero-sized elements cost nothing on the wire but are billed
+   !> one word per element (C++ `amplifiedRead`), and a composite tag's
+   !> element count is 29 bits wide.
+   subroutine test_amplified_lists(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int64), parameter :: one = 1_int64
+      integer(int64) :: tag_count
+      integer :: err
+
+      ! Composite list of 5000 zero-sized structs, then a void list of 5000.
+      call probe(ishft(5000_int64, 2), 0_int64, 7, 0_int64, 100000_int64, err)
+      call check(error, err == CAPNP_OK, 'amplified: zero-size composite fits a large budget')
+      if (allocated(error)) return
+      call probe(ishft(5000_int64, 2), 0_int64, 7, 0_int64, 1000_int64, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'amplified: zero-size composite is billed')
+      if (allocated(error)) return
+      call probe(0_int64, 5000_int64, 0, 0_int64, 100000_int64, err)
+      call check(error, err == CAPNP_OK, 'amplified: void list fits a large budget')
+      if (allocated(error)) return
+      call probe(0_int64, 5000_int64, 0, 0_int64, 1000_int64, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'amplified: void list is billed')
+      if (allocated(error)) return
+
+      ! Tag count 2**30 - 1 has bit 29 set; the 29-bit count is 2**29 - 1,
+      ! which cannot fit one content word of one-word elements.
+      tag_count = ishft(ishft(one, 30) - one, 2) + ishft(one, 32)
+      call probe(tag_count, 0_int64, 7, 1_int64, 100000_int64, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, 'amplified: composite count wider than content')
+   contains
+      subroutine probe(tag_low, count, esize, content_words, limit, rc)
+         integer(int64), intent(in) :: tag_low, count, content_words, limit
+         integer, intent(in) :: esize
+         integer, intent(out) :: rc
+         type(capnp_message_t), target :: m
+         type(capnp_ptr_t) :: r, c
+         integer(int8) :: frame(0:63)
+         integer(int64) :: words
+         frame = 0_int8
+         words = 3_int64 + content_words
+         if (esize /= 7) words = 2_int64
+         call cp_put_i32(frame, 4_int64, int(words, int32))
+         call cp_put_i64(frame, 8_int64, ishft(1_int64, 48))
+         if (esize == 7) then
+            call cp_put_i64(frame, 16_int64, 1_int64 + ishft(7_int64, 32) + ishft(content_words, 35))
+            call cp_put_i64(frame, 24_int64, tag_low)
+         else
+            call cp_put_i64(frame, 16_int64, 1_int64 + ishft(int(esize, int64), 32) + ishft(count, 35))
+         end if
+         call capnp_deserialize_bytes(frame(0:8 + words*8 - 1), m, rc, traversal_words=limit)
+         if (rc /= CAPNP_OK) return
+         r = capnp_root(m, rc)
+         if (rc /= CAPNP_OK) return
+         c = capnp_getp(r, 0, rc)
+         call capnp_message_free(m)
+      end subroutine probe
+   end subroutine test_amplified_lists
+
+   !> A pointer whose offset leaves the segment targets the segment's end
+   !> (C++ `SegmentReader::checkOffset`), so an object of size zero reads
+   !> fine there and anything larger is out of bounds.
+   subroutine test_zero_size_target_clamp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: m
+      type(capnp_ptr_t) :: r, c
+      integer(int8) :: frame(0:31)
+      integer :: err
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 3_int32)
+      call cp_put_i64(frame, 8_int64, ishft(2_int64, 48))
+      call cp_put_i64(frame, 16_int64, wp_make_struct(500_int32, 0_int32, 0_int32))
+      call capnp_deserialize_bytes(frame, m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_STRUCT, 'clamp: empty struct far away')
+      if (allocated(error)) return
+      c = capnp_getp(r, 1, err)
+      call check(error, err == CAPNP_OK, 'clamp: null second pointer')
+      if (allocated(error)) return
+      call capnp_message_free(m)
+
+      call cp_put_i64(frame, 16_int64, wp_make_list(500_int32, 2_int32, 0_int64))
+      call capnp_deserialize_bytes(frame, m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_LIST .and. c%nelem == 0_int64, 'clamp: empty list far away')
+      if (allocated(error)) return
+      call capnp_message_free(m)
+
+      call cp_put_i64(frame, 16_int64, wp_make_list(500_int32, 2_int32, 1_int64))
+      call capnp_deserialize_bytes(frame, m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, 'clamp: one byte far away is out of bounds')
+      call capnp_message_free(m)
+   end subroutine test_zero_size_target_clamp
+
+   !> Far-pointer resolution matches C++ `WireHelpers::followFars`:
+   !> zero landing pad is an empty struct, far hops do not consume depth,
+   !> chained single-far pointers fail, double-far out-of-segment targets
+   !> clamp for zero-sized objects, and `capnp_root` bills the root word.
+   subroutine test_far_pointer_parity(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: m
+      type(capnp_ptr_t) :: r, c
+      integer(int8) :: frame(0:47), small(0:15)
+      integer :: err
+
+      ! Single-far to zero landing pad decodes as empty struct (0, 0), not null.
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 3_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, 0_int64)
+      call capnp_deserialize_bytes(frame(0:31), m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_STRUCT .and. &
+                 c%dwords == 0 .and. c%pwords == 0, 'far-parity: zero pad is empty struct')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      ! A far landing pad does not add a level, but the child object does.
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 4_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(frame, 32_int64, 7_int64)
+      call capnp_deserialize_bytes(frame(0:39), m, err, depth_limit=1)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'far-parity: child consumes depth after far')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(frame(0:39), m, err, depth_limit=2)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_STRUCT .and. &
+                 capnp_get_i64(c, 0_int64) == 7_int64, 'far-parity: far hop does not charge depth')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      ! Chained single-far pointer (far -> far -> struct) is rejected.
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 5_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.false., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, wp_make_far(.false., 3_int64, 0_int64))
+      call cp_put_i64(frame, 32_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(frame, 40_int64, 9_int64)
+      call capnp_deserialize_bytes(frame, m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_KIND, 'far-parity: chained single-far rejected')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      ! Double-far with out-of-segment offset clamps to segment end for size 0.
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 4_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.true., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, wp_make_far(.false., 500_int64, 0_int64))
+      call cp_put_i64(frame, 32_int64, wp_make_struct(0_int32, 0_int32, 0_int32))
+      call capnp_deserialize_bytes(frame(0:39), m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_STRUCT, &
+                 'far-parity: double-far clamps empty target')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      ! Double-far pad word 0 matches C++ followFars: double-far bit is ignored
+      ! and segment bounds are checked before kind.
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 5_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.true., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, wp_make_far(.true., 4_int64, 0_int64))
+      call cp_put_i64(frame, 32_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(frame, 40_int64, 4660_int64)
+      call capnp_deserialize_bytes(frame, m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_OK .and. c%kind == CAPNP_PK_STRUCT .and. &
+                 capnp_get_i64(c, 0_int64) == 4660_int64, &
+                 'far-parity: double-far pad ignores double-far bit')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      frame = 0_int8
+      call cp_put_i32(frame, 4_int64, 4_int32)
+      call cp_put_i64(frame, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(frame, 16_int64, wp_make_far(.true., 2_int64, 0_int64))
+      call cp_put_i64(frame, 24_int64, wp_make_struct(0_int32, 5_int32, 0_int32))
+      call cp_put_i64(frame, 32_int64, wp_make_struct(0_int32, 0_int32, 0_int32))
+      call capnp_deserialize_bytes(frame(0:39), m, err)
+      r = capnp_root(m, err)
+      c = capnp_getp(r, 0, err)
+      call check(error, err == CAPNP_ERR_SEGMENT, &
+                 'far-parity: double-far pad checks segment before kind')
+      call capnp_message_free(m)
+      if (allocated(error)) return
+
+      ! Root pointer word itself is billed to traversal_words.
+      small = 0_int8
+      call cp_put_i32(small, 4_int64, 1_int32)
+      call capnp_deserialize_bytes(small, m, err, traversal_words=0_int64)
+      r = capnp_root(m, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'far-parity: root pointer billed')
+      call capnp_message_free(m)
+   end subroutine test_far_pointer_parity
 
    subroutine test_traversal_limit(error)
       type(error_type), allocatable, intent(out) :: error
