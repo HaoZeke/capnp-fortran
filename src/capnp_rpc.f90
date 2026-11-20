@@ -6095,11 +6095,13 @@ contains
    !> Send the Return of deferred call `qid` with the results in its
    !> context, or an exception when `failed` is set. CAPNP_ERR_ARG when
    !> no such call is waiting.
-   recursive subroutine rpc_deferred_return(conn, qid, err, failed)
+   recursive subroutine rpc_deferred_return(conn, qid, err, failed, reason)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
       logical, intent(in), optional :: failed
+      !> Exception reason when `failed`; defaults to the dispatch text.
+      character(len=*), intent(in), optional :: reason
       type(rpc_deferred_t), pointer :: node, prev
       type(message_t) :: msg
       type(return_t) :: r
@@ -6127,7 +6129,11 @@ contains
       if (e == CAPNP_OK) r = message_return_get(msg, e)
       if (bad) then
          call rollback_staged(conn, node%ctx)
-         call fill_exception(r, 'method raised error', e)
+         if (present(reason)) then
+            call fill_exception(r, reason, e)
+         else
+            call fill_exception(r, 'method raised error', e)
+         end if
       else
          call flush_cap_table(conn, node%ctx, e)
          if (e /= CAPNP_OK) then
