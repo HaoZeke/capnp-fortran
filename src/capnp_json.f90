@@ -167,7 +167,7 @@ contains
       type(jval) :: root
       type(capnp_ptr_t) :: obj
       type(scan_t) :: sc
-      integer :: dw, pw
+      integer :: dw, pw, nul
       err = CAPNP_OK
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
@@ -184,7 +184,12 @@ contains
          return
       end if
       sc%s = text
-      sc%n = len(text)
+      nul = index(text, achar(0))
+      if (nul > 0) then
+         sc%n = nul - 1
+      else
+         sc%n = len(text)
+      end if
       sc%i = 1
       call parse_value(sc, root, 0, err)
       if (err /= CAPNP_OK) return
@@ -207,6 +212,7 @@ contains
    end subroutine capnp_json_decode
 
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
+   !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
    subroutine capnp_json_span(text, from, beg, to, err)
       character(len=*), intent(in) :: text
       integer, intent(in) :: from
@@ -218,13 +224,37 @@ contains
       beg = 0
       to = 0
       sc%s = text
-      sc%n = len(text)
       sc%i = max(from, 1)
+      sc%n = len(text)
+      call jskip(sc)
+      ! A NUL ends a message that already finished. Bytes from that NUL up to
+      ! the next object are discarded, including brackets and quotes. A NUL
+      ! before any value has been read stays put and the parse rejects it.
+      if (from > 1 .and. sc%i <= sc%n) then
+         if (sc%s(sc%i:sc%i) == achar(0)) then
+            do while (sc%i <= sc%n)
+               if (sc%s(sc%i:sc%i) == '{') exit
+               sc%i = sc%i + 1
+            end do
+         end if
+      end if
       call jskip(sc)
       if (sc%i > sc%n) return
       beg = sc%i
       call parse_value(sc, dummy, 0, err)
-      if (err == CAPNP_OK) to = sc%i - 1
+      if (err /= CAPNP_OK) return
+      to = sc%i - 1
+      ! Bytes after the value belong to this message until the next object.
+      ! A NUL ends the parser's view, so junk between the NUL and that
+      ! object is discarded by the next span. Other trailing junk is the
+      ! "input remains" failure and must not be reported as a later message.
+      call jskip(sc)
+      if (sc%i > sc%n) return
+      if (sc%s(sc%i:sc%i) == achar(0)) return
+      if (sc%s(sc%i:sc%i) == '{') return
+      err = CAPNP_ERR_ARG
+      beg = 0
+      to = 0
    end subroutine capnp_json_span
 
    recursive subroutine build_struct(schema, idx, p, env, parent_disc, depth, gdepth, jv, err)

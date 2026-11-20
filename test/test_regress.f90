@@ -90,7 +90,8 @@ contains
          new_unittest("group-clear-depth", run_group_clear_depth), &
          new_unittest("packed-zero-cap", run_packed_zero_cap), &
          new_unittest("json-trailing-spaces", run_json_trailing_spaces), &
-         new_unittest("json-union-clear", run_json_union_clear) &
+         new_unittest("json-union-clear", run_json_union_clear), &
+         new_unittest("json-nul-eof", run_json_nul_eof) &
          ]
    end subroutine collect_regress
 
@@ -2269,5 +2270,51 @@ contains
          call capnp_message_free(decoded)
       end subroutine check_case
    end subroutine run_json_union_clear
+
+   !> Cap'n Proto C++ treats a literal NUL byte as end-of-input in JSON:
+   !> trailing NUL (and bytes after it) are accepted, a NUL inside a string
+   !> is rejected, and \u0000 inside a string is decoded to a NUL byte.
+   subroutine run_json_nul_eof(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: out
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'nul-eof: find Sample')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_json_decode(schema, idx, '{"display_name":"ab"}'//achar(0), msg, err)
+      call check_(error, err == CAPNP_OK, 'nul-eof: trailing NUL accepted')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK .and. index(out, '"display_name":"ab"') > 0, &
+                     'nul-eof: trailing NUL value')
+      end if
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"display_name":"ab"}'//achar(0)//'garbage', msg, err)
+      call check_(error, err == CAPNP_OK, 'nul-eof: bytes after NUL ignored')
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"display_name":"a'//achar(0)//'b"}', msg, err)
+      call check_(error, err /= CAPNP_OK, 'nul-eof: literal NUL in string rejected')
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"display_name":"a\u0000b"}', msg, err)
+      call check_(error, err == CAPNP_OK, 'nul-eof: escaped u0000 accepted')
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, achar(0), msg, err)
+      call check_(error, err /= CAPNP_OK, 'nul-eof: bare NUL rejected')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_nul_eof
 
 end module test_regress

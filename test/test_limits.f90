@@ -19,7 +19,8 @@ contains
       testsuite = [ &
          new_unittest("json-audit-depth", run_json_audit_depth), &
          new_unittest("group-encode-depth", run_group_encode_depth), &
-         new_unittest("json-flat-depth", run_json_flat_depth) &
+         new_unittest("json-flat-depth", run_json_flat_depth), &
+         new_unittest("json-nul-stream", run_json_nul_stream) &
          ]
    end subroutine collect_limits
 
@@ -235,5 +236,55 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_flat_depth
+
+   !> A NUL ends one JSON message. Garbage up to the next object is kept
+   !> out of that message, and a leading NUL is not a message boundary.
+   subroutine run_json_nul_stream(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: a, b, gap
+      a = '{"big":"1"}'
+      b = '{"big":"2"}'
+      call expect_two(a//achar(0)//'garbage'//b, a, b)
+      call expect_two(a//' '//achar(0)//'  xx'//b, a, b)
+      call expect_two(a//achar(0)//'gar[bage'//b, a, b)
+      call expect_two(a//achar(0)//achar(0)//'junk'//achar(0)//b, a, b)
+      gap = a//'garbage'//achar(0)//b
+      call expect_fail_first(gap)
+      call expect_fail_first(achar(0)//b)
+      call expect_one(a//achar(0))
+   contains
+      subroutine expect_two(payload, first, second)
+         character(len=*), intent(in) :: payload, first, second
+         integer :: b1, t1, b2, t2, err
+         if (allocated(error)) return
+         call capnp_json_span(payload, 1, b1, t1, err)
+         call check_(error, err == CAPNP_OK .and. b1 > 0, 'nul-stream: first span')
+         if (allocated(error)) return
+         call check_(error, payload(b1:t1) == first, 'nul-stream: first text')
+         call capnp_json_span(payload, t1 + 1, b2, t2, err)
+         call check_(error, err == CAPNP_OK .and. b2 > 0, 'nul-stream: second span')
+         if (allocated(error)) return
+         call check_(error, payload(b2:t2) == second, 'nul-stream: second text')
+      end subroutine expect_two
+
+      subroutine expect_fail_first(payload)
+         character(len=*), intent(in) :: payload
+         integer :: b1, t1, err
+         if (allocated(error)) return
+         call capnp_json_span(payload, 1, b1, t1, err)
+         call check_(error, err /= CAPNP_OK .or. b1 == 0, 'nul-stream: leading nul rejected')
+      end subroutine expect_fail_first
+
+      subroutine expect_one(payload)
+         character(len=*), intent(in) :: payload
+         integer :: b1, t1, b2, t2, err
+         if (allocated(error)) return
+         call capnp_json_span(payload, 1, b1, t1, err)
+         call check_(error, err == CAPNP_OK .and. b1 > 0, 'nul-stream: trailing nul')
+         if (allocated(error)) return
+         call capnp_json_span(payload, t1 + 1, b2, t2, err)
+         call check_(error, err == CAPNP_OK .and. b2 == 0, 'nul-stream: nothing after trailing nul')
+      end subroutine expect_one
+   end subroutine run_json_nul_stream
 
 end module test_limits
