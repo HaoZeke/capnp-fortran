@@ -628,6 +628,8 @@ contains
       end select
    end subroutine enc_element
 
+   !> Zero one inline group so a later assignment replaces it. Wire zeros
+   !> read back as schema defaults.
    recursive subroutine clear_inline_group(schema, idx, p, env, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -704,6 +706,36 @@ contains
       end do
    end subroutine clear_inline_group
 
+   !> Assign the struct or group's first field from one un-named value.
+   recursive subroutine parse_first_field(schema, idx, p, env, sc, depth, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      type(scan_t), intent(inout) :: sc
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f
+      character(len=:), allocatable :: name
+      integer :: fd
+      err = CAPNP_OK
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      if (capnp_list_len(fl) < 1) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      f = capnp_list_get_struct(fl, 0, err)
+      if (err /= CAPNP_OK) return
+      fd = field_discriminant(f)
+      if (fd /= NO_DISCRIMINANT) then
+         call field_name(f, name, err)
+         if (err /= CAPNP_OK) return
+         call capnp_dyn_select(schema, idx, p, name, err)
+         if (err /= CAPNP_OK) return
+      end if
+      call parse_field_value(schema, f, p, env, sc, depth, err)
+   end subroutine parse_first_field
+
    recursive subroutine parse_struct(schema, idx, p, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
@@ -713,7 +745,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f
       character(len=:), allocatable :: name
-      integer :: fd, parens
+      integer :: fd, parens, mark
       err = CAPNP_OK
       if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
@@ -738,10 +770,29 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
+         mark = sc%i
          call read_ident(sc, name, err)
-         if (err /= CAPNP_OK) return
-         call expect_ch(sc, '=', err)
-         if (err /= CAPNP_OK) return
+         if (err == CAPNP_OK) then
+            call skip_ws(sc)
+            if (peek(sc) /= '=') then
+               err = CAPNP_ERR_ARG
+            else
+               sc%i = sc%i + 1
+            end if
+         end if
+         if (err /= CAPNP_OK) then
+            sc%i = mark
+            err = CAPNP_OK
+            call parse_first_field(schema, idx, p, env, sc, depth + 1, err)
+            if (err /= CAPNP_OK) return
+            call skip_ws(sc)
+            if (peek(sc) /= ')') then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            sc%i = sc%i + 1
+            exit
+         end if
          ! `=-1` is one operator, not an equals sign and a unary minus.
          if (is_op_char(peek(sc))) then
             err = CAPNP_ERR_ARG
@@ -789,9 +840,15 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
+         ! init() replaces the previous group, restoring defaults.
          call clear_inline_group(schema, idx, p, env, err)
          if (err /= CAPNP_OK) return
-         call parse_struct(schema, idx, p, env, sc, depth, err)
+         call skip_ws(sc)
+         if (peek(sc) == '(') then
+            call parse_struct(schema, idx, p, env, sc, depth, err)
+         else
+            call parse_first_field(schema, idx, p, env, sc, depth + 1, err)
+         end if
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -818,7 +875,12 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call parse_struct(schema, idx, q, cenv, sc, depth, err)
+         call skip_ws(sc)
+         if (peek(sc) == '(') then
+            call parse_struct(schema, idx, q, cenv, sc, depth, err)
+         else
+            call parse_first_field(schema, idx, q, cenv, sc, depth + 1, err)
+         end if
       case default
          dv = field_slot_default(f, err)
          if (err /= CAPNP_OK) return
@@ -918,7 +980,12 @@ contains
          end if
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
-         call parse_struct(schema, idx, el, cenv, sc, depth, err)
+         call skip_ws(sc)
+         if (peek(sc) == '(') then
+            call parse_struct(schema, idx, el, cenv, sc, depth, err)
+         else
+            call parse_first_field(schema, idx, el, cenv, sc, depth + 1, err)
+         end if
       case (TYPE_TEXT, TYPE_DATA, TYPE_VOID, TYPE_BOOL, TYPE_ENUM, &
             TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64, &

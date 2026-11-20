@@ -94,9 +94,10 @@ contains
          new_unittest("json-nul-eof", run_json_nul_eof), &
          new_unittest("json-nest-limit", run_json_nest_limit), &
          new_unittest("cli-json-stream", run_cli_json_stream), &
+         new_unittest("text-shorthand", run_text_shorthand), &
+         new_unittest("text-group-replace", run_text_group_replace), &
          new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
-         new_unittest("text-inactive-arm", run_text_inactive_arm), &
-         new_unittest("text-group-replace", run_text_group_replace) &
+         new_unittest("text-inactive-arm", run_text_inactive_arm) &
          ]
    end subroutine collect_regress
 
@@ -2397,68 +2398,98 @@ contains
       end subroutine check_stream
    end subroutine run_cli_json_stream
 
-   subroutine run_text_ws_vt_ff(error)
+
+
+   subroutine run_text_shorthand(error)
       type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema
-      integer :: idx, err
+      type(capnp_dyn_schema_t), target :: schema, book
+      integer :: sample, garm, people
       if (.not. have_capnp()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
       call load_codec(error, schema)
       if (allocated(error)) return
-      idx = capnp_dyn_find(schema, 'Sample', err)
-      call one(achar(11)//'(big = -88)', '"-88"')
-      call one('(big = 55, title = "hi", hue ='//achar(12)//'red)', 'display_name')
+      sample = capnp_dyn_find(schema, 'Sample', people)
+      garm = capnp_dyn_find(schema, 'GroupArm', people)
+      call check_(error, sample > 0 .and. garm > 0, 'shorthand: schema')
+      call round_text(schema, garm, '(box = 5)', 'x = 5')
+      call round_text(schema, sample, '(job = void)', 'none = void')
+      call round_text(schema, sample, '(where = "a (b) # c")', 'a (b) # c')
+      call round_text(schema, sample, '(where = ("hi"))', 'city = "hi"')
+      call round_text(schema, garm, '(box = (5))', 'x = 5')
+      call round_text(schema, sample, '(where = (("hi")))', 'city = "hi"')
+      call reject_text(schema, garm, '(box = "no")')
+      call reject_text(schema, garm, '(box = void)')
+      call reject_text(schema, sample, '(where = void)')
+      call reject_text(schema, sample, '(job = "hi")')
+      call reject_text(schema, sample, '(where = (1, 2))')
+      call load_people(error, book, people)
+      call round_text(book, people, '(people = [1, 2])', 'id = 1')
+      call round_text(book, people, '(people = [(1), (2)])', 'id = 2')
+      call reject_text(book, people, '(people = [1, "no"])')
       call capnp_dyn_free(schema)
+      call capnp_dyn_free(book)
    contains
-      subroutine one(text, frag)
+      subroutine round_text(sch, idx, text, frag)
+         type(capnp_dyn_schema_t), intent(in) :: sch
+         integer, intent(in) :: idx
          character(len=*), intent(in) :: text, frag
          type(capnp_message_t) :: msg
          type(capnp_ptr_t) :: root
          character(len=:), allocatable :: out
-         integer :: e2
-         if (allocated(error)) return
-         call capnp_text_decode(schema, idx, text, msg, e2)
-         call check_(error, e2 == CAPNP_OK, 'vt ff decode')
+         integer :: err
+         if (allocated(error) .or. idx <= 0) return
+         call capnp_text_decode(sch, idx, text, msg, err)
+         call check_(error, err == CAPNP_OK, 'shorthand decode '//text)
          if (allocated(error)) then
             call capnp_message_free(msg)
             return
          end if
-         root = capnp_root(msg, e2)
-         call capnp_json_encode(schema, idx, root, out, e2, pretty=.false.)
-         call check_(error, e2 == CAPNP_OK .and. index(out, frag) > 0, 'vt ff json '//frag)
+         root = capnp_root(msg, err)
+         call capnp_text_encode(sch, idx, root, out, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK .and. index(out, frag) > 0, &
+                     'shorthand encode '//text)
          call capnp_message_free(msg)
-      end subroutine one
-   end subroutine run_text_ws_vt_ff
+      end subroutine round_text
 
-   subroutine run_text_inactive_arm(error)
-      type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema
-      type(capnp_message_t) :: msg
-      type(capnp_ptr_t) :: root
-      character(len=:), allocatable :: out
-      integer(int8) :: raw(0:31)
-      integer :: idx, err
-      if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+      subroutine reject_text(sch, idx, text)
+         type(capnp_dyn_schema_t), intent(in) :: sch
+         integer, intent(in) :: idx
+         character(len=*), intent(in) :: text
+         type(capnp_message_t) :: msg
+         integer :: err
+         if (allocated(error) .or. idx <= 0) return
+         call capnp_text_decode(sch, idx, text, msg, err)
+         call check_(error, err /= CAPNP_OK, 'shorthand reject '//text)
+         call capnp_message_free(msg)
+      end subroutine reject_text
+   end subroutine run_text_shorthand
+
+
+   subroutine load_people(error, schema, idx)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(out) :: schema
+      integer, intent(out) :: idx
+      character(len=:), allocatable :: src
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      idx = 0
+      if (allocated(error)) return
+      src = '@0x9eb32e19f86ee174;'//achar(10)// &
+            'struct Person { id @0 :UInt32; name @1 :Text; }'//achar(10)// &
+            'struct Book { people @0 :List(Person); }'//achar(10)
+      call spit(tmp//'/people.capnp', src, err)
+      if (.not. sh('capnp compile -o- '//tmp//'/people.capnp > '//tmp//'/people.cgr')) then
+         call test_failed(error, 'shorthand: compile people')
          return
       end if
-      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
-             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
-             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
-             31_int8, 0_int8, 0_int8, 0_int8, -1_int8, -1_int8, -1_int8, -1_int8]
-      call load_codec(error, schema)
-      if (allocated(error)) return
-      idx = capnp_dyn_find(schema, 'InnerDisc', err)
-      call capnp_deserialize_bytes(raw, msg, err)
-      root = capnp_root(msg, err)
-      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
-      call check_(error, err == CAPNP_OK, 'inactive arm encodes')
-      call check_(error, index(out, 'a = 0') > 0, 'inactive arm text')
-      call capnp_message_free(msg)
-      call capnp_dyn_free(schema)
-   end subroutine run_text_inactive_arm
+      call capnp_read_file(tmp//'/people.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Book', err)
+      if (err /= CAPNP_OK .or. idx <= 0) call test_failed(error, 'shorthand: book')
+   end subroutine load_people
+
 
    subroutine run_text_group_replace(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2522,4 +2553,68 @@ contains
       end subroutine render
    end subroutine run_text_group_replace
 
+
+   subroutine run_text_ws_vt_ff(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call one(achar(11)//'(big = -88)', '"-88"')
+      call one('(big = 55, title = "hi", hue ='//achar(12)//'red)', 'display_name')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine one(text, frag)
+         character(len=*), intent(in) :: text, frag
+         type(capnp_message_t) :: msg
+         type(capnp_ptr_t) :: root
+         character(len=:), allocatable :: out
+         integer :: e2
+         if (allocated(error)) return
+         call capnp_text_decode(schema, idx, text, msg, e2)
+         call check_(error, e2 == CAPNP_OK, 'vt ff decode')
+         if (allocated(error)) then
+            call capnp_message_free(msg)
+            return
+         end if
+         root = capnp_root(msg, e2)
+         call capnp_json_encode(schema, idx, root, out, e2, pretty=.false.)
+         call check_(error, e2 == CAPNP_OK .and. index(out, frag) > 0, 'vt ff json '//frag)
+         call capnp_message_free(msg)
+      end subroutine one
+   end subroutine run_text_ws_vt_ff
+
+
+   subroutine run_text_inactive_arm(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: out
+      integer(int8) :: raw(0:31)
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
+             31_int8, 0_int8, 0_int8, 0_int8, -1_int8, -1_int8, -1_int8, -1_int8]
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'InnerDisc', err)
+      call capnp_deserialize_bytes(raw, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK, 'inactive arm encodes')
+      call check_(error, index(out, 'a = 0') > 0, 'inactive arm text')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_inactive_arm
 end module test_regress
