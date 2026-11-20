@@ -56,7 +56,7 @@ contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(6))
+      allocate (testsuite(7))
       testsuite(1)%name = "handoff"
       testsuite(1)%test => run_handoff
       testsuite(2)%name = "handoff membrane ref"
@@ -69,6 +69,8 @@ contains
       testsuite(5)%test => run_membrane_owned_twice
       testsuite(6)%name = "membrane handoff leaves no shared owner entry"
       testsuite(6)%test => run_membrane_owned_handoff
+      testsuite(7)%name = "handoff records every introduction"
+      testsuite(7)%test => run_introduction_capacity
    end subroutine collect_rpc_handoff
 
    subroutine allow_inbound(self, interface_id, method_id, err)
@@ -145,11 +147,12 @@ contains
 
    !> Alice -> Carol: a call whose params name the capability Bob hosts.
    !> Alice is the introducer, so she writes the descriptor.
-   subroutine tell_where_to_go(fd, qid, host, port, nonce, vine, e)
+   subroutine tell_where_to_go(fd, qid, host, port, nonce, vine, e, count)
       integer, intent(in) :: fd, port
       integer(int64), intent(in) :: qid, nonce, vine
       character(len=*), intent(in) :: host
       integer, intent(out) :: e
+      integer, intent(in), optional :: count
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -157,6 +160,9 @@ contains
       type(payload_t) :: params
       type(cap_descriptor_t) :: cd
       type(capnp_ptr_t) :: ctab
+      integer :: i, n
+      n = 1
+      if (present(count)) n = count
       call capnp_message_init_builder(m, e)
       if (e /= CAPNP_OK) return
       msg = message_new_root(m, e)
@@ -177,15 +183,42 @@ contains
       if (e /= CAPNP_OK) return
       call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
       if (e /= CAPNP_OK) return
-      ctab = payload_cap_table_init(params, 1_int64, e)
+      ctab = payload_cap_table_init(params, int(n, int64), e)
       if (e /= CAPNP_OK) return
-      cd%p = capnp_list_get_struct(ctab, 0, e)
-      if (e /= CAPNP_OK) return
-      call rpc_write_third_party_cap(cd, host, port, nonce, vine, e)
-      if (e /= CAPNP_OK) return
+      do i = 0, n - 1
+         cd%p = capnp_list_get_struct(ctab, i, e)
+         if (e /= CAPNP_OK) return
+         call rpc_write_third_party_cap(cd, host, port, nonce + int(i, int64), &
+                                        vine + int(i, int64), e)
+         if (e /= CAPNP_OK) return
+      end do
       call rpc_send_message(fd, m, e)
       call capnp_message_free(m)
    end subroutine tell_where_to_go
+
+   subroutine run_introduction_capacity(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: receiver
+      type(rpc_introduction_t) :: learned(9)
+      class(rpc_server_t), pointer :: boot
+      integer :: sender_fd, receiver_fd, err, n
+
+      call px_socketpair(sender_fd, receiver_fd, err)
+      call check_(error, err == CAPNP_OK, 'introduction capacity: socket pair')
+      if (allocated(error)) return
+      boot => null()
+      call rpc_conn_init(receiver, receiver_fd, boot)
+      call tell_where_to_go(sender_fd, 91_int64, '127.0.0.1', 1, 300_int64, &
+                            700_int64, err, count=9)
+      call check_(error, err == CAPNP_OK, 'introduction capacity: message sent')
+      if (.not. allocated(error)) then
+         call rpc_pump_once(receiver, err)
+         n = rpc_pending_introductions(receiver, learned)
+         call check_(error, n == 9, 'introduction capacity: all entries recorded')
+      end if
+      call rpc_conn_close(receiver)
+      call px_close(sender_fd)
+   end subroutine run_introduction_capacity
 
    subroutine run_handoff(error)
       type(error_type), allocatable, intent(out) :: error

@@ -471,7 +471,7 @@ module capnp_rpc
       !> otherwise `own_vat` below.
       type(rpc_vat_t), pointer :: vat => null()
       type(rpc_vat_t) :: own_vat
-      type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
+      type(rpc_introduction_t), allocatable :: introductions(:)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
       !> Null denies every dial. A hook must allow the host before connect.
@@ -498,6 +498,8 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
+      if (allocated(conn%introductions)) deallocate (conn%introductions)
+      allocate (conn%introductions(0:MAXINTRO - 1))
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -527,6 +529,8 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
+      if (allocated(conn%introductions)) deallocate (conn%introductions)
+      allocate (conn%introductions(0:MAXINTRO - 1))
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -2375,7 +2379,7 @@ contains
       integer(int64), intent(in) :: qid
       logical, intent(in) :: retain_caps
       integer :: i
-      do i = 0, MAXINTRO - 1
+      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%qid /= qid) cycle
          conn%introductions(i)%qid = -1_int64
@@ -4235,34 +4239,66 @@ contains
          ! truncated address names a different vat.
          if (len(host) > MAXHOST) cycle
 
-         do j = 0, MAXINTRO - 1
-            if (conn%introductions(j)%used) cycle
-            conn%introductions(j)%used = .true.
-            conn%introductions(j)%nonce = third_party_cap_id_nonce_get(id)
-            conn%introductions(j)%vine_id = &
-               third_party_cap_descriptor_vine_id_get(tp)
-            conn%introductions(j)%vine_handle = -1_int64
-            conn%introductions(j)%has_handle = .false.
-            if (present(handles) .and. present(nhandles)) then
-               if (i < nhandles) then
-                  if (handles(i) /= -1_int64) then
-                     conn%introductions(j)%vine_handle = handles(i)
-                     conn%introductions(j)%has_handle = .true.
-                  end if
+         call reserve_introduction(conn, j, err)
+         if (err /= CAPNP_OK) return
+         conn%introductions(j)%used = .true.
+         conn%introductions(j)%nonce = third_party_cap_id_nonce_get(id)
+         conn%introductions(j)%vine_id = third_party_cap_descriptor_vine_id_get(tp)
+         conn%introductions(j)%vine_handle = -1_int64
+         conn%introductions(j)%has_handle = .false.
+         if (present(handles) .and. present(nhandles)) then
+            if (i < nhandles) then
+               if (handles(i) /= -1_int64) then
+                  conn%introductions(j)%vine_handle = handles(i)
+                  conn%introductions(j)%has_handle = .true.
                end if
             end if
-            if (present(qid)) then
-               conn%introductions(j)%qid = qid
-               conn%introductions(j)%capidx = i
-            end if
-            conn%introductions(j)%port = int(vat_id_port_get(vat))
-            conn%introductions(j)%host = host
-            conn%introductions(j)%host_len = len(host)
-            exit
-         end do
+         end if
+         if (present(qid)) then
+            conn%introductions(j)%qid = qid
+            conn%introductions(j)%capidx = i
+         end if
+         conn%introductions(j)%port = int(vat_id_port_get(vat))
+         conn%introductions(j)%host = host
+         conn%introductions(j)%host_len = len(host)
       end do
       err = CAPNP_OK
    end subroutine note_introductions
+
+   subroutine reserve_introduction(conn, slot, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(out) :: slot
+      integer, intent(out) :: err
+      type(rpc_introduction_t), allocatable :: grown(:)
+      integer :: i, n, stat
+
+      slot = -1
+      err = CAPNP_OK
+      if (.not. allocated(conn%introductions)) then
+         allocate (conn%introductions(0:MAXINTRO - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         conn%introductions = rpc_introduction_t()
+      end if
+      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
+         if (.not. conn%introductions(i)%used) then
+            slot = i
+            return
+         end if
+      end do
+      n = size(conn%introductions)
+      allocate (grown(0:max(2 * n, MAXINTRO) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      grown = rpc_introduction_t()
+      grown(0:n - 1) = conn%introductions
+      call move_alloc(grown, conn%introductions)
+      slot = n
+   end subroutine reserve_introduction
 
    !> Introductions handed to us and not yet picked up.
    function rpc_pending_introductions(conn, out) result(n)
@@ -4270,7 +4306,8 @@ contains
       type(rpc_introduction_t), intent(out), optional :: out(:)
       integer :: n, i
       n = 0
-      do i = 0, MAXINTRO - 1
+      if (.not. allocated(conn%introductions)) return
+      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
          if (.not. conn%introductions(i)%used) cycle
          if (present(out)) then
             if (n < size(out)) out(n + 1) = conn%introductions(i)
@@ -4292,7 +4329,8 @@ contains
       integer :: fd, i
       logical :: allow
       err = CAPNP_ERR_BOUNDS
-      do i = 0, MAXINTRO - 1
+      if (.not. allocated(conn%introductions)) return
+      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
          allow = .false.
@@ -4325,7 +4363,8 @@ contains
       type(rpc_cap_t) :: vine
       integer :: i
       err = CAPNP_ERR_BOUNDS
-      do i = 0, MAXINTRO - 1
+      if (.not. allocated(conn%introductions)) return
+      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
          call note_result_released(conn, conn%introductions(i))
