@@ -41,7 +41,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(22))
+      allocate (testsuite(24))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -86,6 +86,10 @@ contains
       testsuite(21)%test => run_provision_over_release
       testsuite(22)%name = "mixed-owned partial flush releases both staged servers"
       testsuite(22)%test => run_partial_mixed_owned
+      testsuite(23)%name = "call on pin-only export aborts"
+      testsuite(23)%test => run_pin_only_call_aborts
+      testsuite(24)%name = "release and disembargo on pin-only export abort"
+      testsuite(24)%test => run_pin_only_release_aborts
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -1253,5 +1257,179 @@ contains
          call check_(error, final_count == nlive + 2, &
                      'mixed-owned partial flush: close frees remaining exports')
    end subroutine run_partial_mixed_owned
+
+   !> Once a peer releases its last wire reference to a provisioned
+   !> export, the export id is gone on the wire even though the
+   !> provision still pins the server locally. A Call naming that id
+   !> must abort without dispatching.
+   subroutine run_pin_only_call_aborts(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: intro, prov_a
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: boot_cap, owned_cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: s
+      integer(int64) :: qboot, qown, pq
+      integer :: ia, pa, err
+      final_count = 0
+      touched = 0
+      call px_socketpair(ia, pa, err)
+      boot => factory
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_bootstrap_send(intro, boot_cap, err)
+      qboot = boot_cap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qboot, err)
+      call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+      call check_(error, err == CAPNP_OK, 'pin-only call: bootstrap')
+      if (.not. allocated(error)) then
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'pin-only call: owned result exported')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, 73_int64, pq, err)
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, pq, err)
+         call check_(error, err == CAPNP_OK, 'pin-only call: provide')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_release_send(intro, owned_cap, err)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, final_count == 0 .and. rpc_conn_alive(prov_a), &
+                     'pin-only call: release leaves provision pin')
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         c = message_call_init(msg, err)
+         call call_question_id_set(c, 500_int64, err)
+         tgt = call_target_init(c, err)
+         call message_target_imported_cap_set(tgt, owned_cap%id, err)
+         call call_interface_id_set(c, LIFE_IFACE, err)
+         call call_method_id_set(c, 0, err)
+         pl = call_params_init(c, err)
+         s = capnp_new_struct(m, 0, 0, err)
+         call payload_content_set(pl, s, err)
+         call rpc_send_message(intro%fd, m, err)
+         call capnp_message_free(m)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, .not. rpc_conn_alive(prov_a) .and. touched == 0, &
+                     'pin-only call: aborts without dispatching')
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(prov_a)
+      if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                              'pin-only call: freed once at close')
+   end subroutine run_pin_only_call_aborts
+
+   !> Release(id, 0) and Disembargo(senderLoopback) targeting a pin-only
+   !> export must both abort with invalid export id errors.
+   subroutine run_pin_only_release_aborts(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat1, vat2
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: intro, prov_a
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: boot_cap, owned_cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer(int64) :: qboot, qown, pq
+      integer :: ia, pa, err
+
+      ! Case 1: Release(id, 0) on pin-only export
+      final_count = 0
+      call px_socketpair(ia, pa, err)
+      boot => factory
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_set_vat(prov_a, vat1)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_bootstrap_send(intro, boot_cap, err)
+      qboot = boot_cap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qboot, err)
+      call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+      if (.not. allocated(error)) then
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, 74_int64, pq, err)
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, pq, err)
+         call rpc_release_send(intro, owned_cap, err)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, final_count == 0 .and. rpc_conn_alive(prov_a), &
+                     'pin-only release: provision pin alive')
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         rel = message_release_init(msg, err)
+         call release_id_set(rel, owned_cap%id, err)
+         call release_reference_count_set(rel, 0_int64, err)
+         call rpc_send_message(intro%fd, m, err)
+         call capnp_message_free(m)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, .not. rpc_conn_alive(prov_a), &
+                     'pin-only release: zero-count Release aborts')
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(prov_a)
+      if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                              'pin-only release: freed once')
+
+      ! Case 2: Disembargo(senderLoopback) on pin-only export
+      if (.not. allocated(error)) then
+         final_count = 0
+         call px_socketpair(ia, pa, err)
+         boot => factory
+         call rpc_conn_init(prov_a, pa, boot)
+         call rpc_conn_set_vat(prov_a, vat2)
+         boot => null()
+         call rpc_conn_init(intro, ia, boot)
+         call rpc_bootstrap_send(intro, boot_cap, err)
+         qboot = boot_cap%id
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, qboot, err)
+         call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, 75_int64, pq, err)
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, pq, err)
+         call rpc_release_send(intro, owned_cap, err)
+         call rpc_pump_once(prov_a, err)
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         d = message_disembargo_init(msg, err)
+         tgt = disembargo_target_init(d, err)
+         call message_target_imported_cap_set(tgt, owned_cap%id, err)
+         call disembargo_context_sender_loopback_set(d, 1_int64, err)
+         call rpc_send_message(intro%fd, m, err)
+         call capnp_message_free(m)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, .not. rpc_conn_alive(prov_a) .and. &
+                     rpc_conn_reason(prov_a) == &
+                     'Message target is not a current export ID.', &
+                     'pin-only disembargo: aborts as missing export id')
+         call rpc_conn_close(intro)
+         call rpc_conn_close(prov_a)
+         if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                                 'pin-only disembargo: freed once')
+      end if
+   end subroutine run_pin_only_release_aborts
 
 end module test_rpc_lifetime

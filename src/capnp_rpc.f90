@@ -1374,8 +1374,9 @@ contains
       end if
       c = message_call_get(cmsg, err)
       params = call_params_get(c, err)
-      if (export_id < 0 .or. export_id >= MAXE .or. &
-          .not. conn%exports(export_id)%used) then
+      if (export_id < 0 .or. export_id >= MAXE) then
+         call fill_exception(r, 'no such capability', err)
+      else if (.not. conn%exports(export_id)%used) then
          call fill_exception(r, 'no such capability', err)
       else
          ctx%interface_id = call_interface_id_get(c)
@@ -2749,15 +2750,22 @@ contains
       logical :: held
       err = CAPNP_OK
       held = node%refs > 0 .and. .not. node%released
-      node%resolved_id = local_id
       ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
-      ! Without that ref a Release from the peer frees the object before
-      ! the local call runs.
-      if (held .and. local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
-         if (conn%exports(int(local_id))%used) then
-            call pin_export(conn, int(local_id))
-            node%pinned = .true.
+      ! Reject pin-only exports: once wire refcount drops to 0, C++ has
+      ! erased the export ID from its table.
+      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
+         if (conn%exports(int(local_id))%used .and. &
+             conn%exports(int(local_id))%refcount > 0) then
+            node%resolved_id = local_id
+            if (held) then
+               call pin_export(conn, int(local_id))
+               node%pinned = .true.
+            end if
+         else
+            node%resolved_id = -1_int64
          end if
+      else
+         node%resolved_id = -1_int64
       end if
       if (.not. node%received_call) then
          node%state = IMP_LOCAL
@@ -3701,7 +3709,8 @@ contains
             err = CAPNP_ERR_BOUNDS
             return
          end if
-         if (conn%exports(int(eid))%used) out_eid = int(eid)
+         if (conn%exports(int(eid))%used .and. &
+             conn%exports(int(eid))%refcount > 0) out_eid = int(eid)
       case (MESSAGE_TARGET_PROMISED_ANSWER_TAG)
          pa = message_target_promised_answer_get(tgt, err)
          if (err /= CAPNP_OK) return
@@ -4881,7 +4890,7 @@ contains
          return
       end if
       id = int(eid)
-      if (.not. conn%exports(id)%used) then
+      if (.not. conn%exports(id)%used .or. conn%exports(id)%refcount <= 0) then
          call abort_conn(conn, 'Tried to release invalid export ID.', err)
          return
       end if
@@ -5102,7 +5111,8 @@ contains
             call abort_conn(conn, 'Message target is not a current export ID.', err)
             return
          end if
-         if (.not. conn%exports(int(embargo_id))%used) then
+         if (.not. conn%exports(int(embargo_id))%used .or. &
+             conn%exports(int(embargo_id))%refcount <= 0) then
             call abort_conn(conn, 'Message target is not a current export ID.', err)
             return
          end if
@@ -5153,8 +5163,12 @@ contains
             call abort_conn(conn, 'unknown CapDescriptor type', err)
             return
          end select
-         if (id < 0_int64 .or. id >= int(MAXE, int64) .or. &
-             .not. conn%exports(int(id))%used) then
+         if (id < 0_int64 .or. id >= int(MAXE, int64)) then
+            call abort_conn(conn, 'Tried to release invalid export ID.', err)
+            return
+         end if
+         if (.not. conn%exports(int(id))%used .or. &
+             conn%exports(int(id))%refcount <= 0) then
             call abort_conn(conn, 'Tried to release invalid export ID.', err)
             return
          end if
