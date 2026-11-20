@@ -1639,6 +1639,8 @@ contains
       call recv_answer(ansid, is_exc, kind, err)
       call check_(error, rpc_pending_introductions(srv) == before, &
                   'intro: overlong host refused')
+      call check_(error, next_is_release_of(79_int64, err) .and. err == CAPNP_OK, &
+                  'intro: refused vine released with the params')
    end subroutine t_overlong_host_refused
 
    !> The frame the reference encoder writes, rather than one this

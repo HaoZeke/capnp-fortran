@@ -67,7 +67,7 @@ module capnp_rpc
    public :: rpc_vat_t, rpc_conn_set_vat
    public :: rpc_provide_send, rpc_accept_send, rpc_disembargo_provide_send
    public :: rpc_join_send, rpc_join_wait
-   public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST
+   public :: rpc_introduction_t, rpc_pending_introductions, MAXHOST, MAXINTRO_HELD
    public :: rpc_introduction_done, rpc_write_third_party_cap
    public :: rpc_introduction_dial
    public :: RPC_CAP_NONE, RPC_CAP_IMPORT, RPC_CAP_PIPELINE, RPC_CAP_LOCAL
@@ -103,6 +103,10 @@ module capnp_rpc
    integer, parameter :: MAXCAPS = 16 ! caps per payload
    integer, parameter :: MAXPROV = 32       ! capabilities held for a third vat
    integer, parameter :: MAXINTRO = 8       ! introductions handed to us
+   !> Introductions a connection keeps for pickup. A descriptor past
+   !> this falls back to its vine alone, as for a receiver without
+   !> third-party support.
+   integer, parameter :: MAXINTRO_HELD = 256
    !> Long enough for a hostname; a longer one is refused, not truncated.
    integer, parameter :: MAXHOST = 64
    integer, parameter :: MAXJOINS = 8       ! concurrent joins (level 4)
@@ -413,6 +417,7 @@ module capnp_rpc
       integer :: port = 0
       character(len=MAXHOST) :: host = ''
       integer :: host_len = 0
+      integer :: next_free = -1
    end type rpc_introduction_t
 
    !> One in-flight Join (level 4), keyed by the sender's joinId.
@@ -486,6 +491,8 @@ module capnp_rpc
       type(rpc_vat_t), pointer :: vat => null()
       type(rpc_vat_t) :: own_vat
       type(rpc_introduction_t), allocatable :: introductions(:)
+      integer :: intro_free = -1
+      integer :: intro_used = 0
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
       integer(int64) :: next_qid = 0_int64
       !> Null denies every dial. A hook must allow the host before connect.
@@ -512,9 +519,7 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
-      if (allocated(conn%introductions)) deallocate (conn%introductions)
-      allocate (conn%introductions(0:MAXINTRO - 1))
-      conn%introductions = rpc_introduction_t()
+      call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
       conn%next_embargo = 0_int64
@@ -543,9 +548,7 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
-      if (allocated(conn%introductions)) deallocate (conn%introductions)
-      allocate (conn%introductions(0:MAXINTRO - 1))
-      conn%introductions = rpc_introduction_t()
+      call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
       conn%next_embargo = 0_int64
@@ -4359,6 +4362,7 @@ contains
       integer :: derr, eid
       logical :: dispatched, elsewhere
       character(len=:), allocatable :: reason
+      integer(int64), allocatable :: spill(:)
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
@@ -4381,7 +4385,7 @@ contains
       ! this vat cannot route still told us where a third party's
       ! capability lives.
       params = call_params_get(c, err)
-      if (err == CAPNP_OK) call note_introductions(conn, params, err)
+      if (err == CAPNP_OK) call note_introductions(conn, params, err, spill=spill)
       if (err == CAPNP_OK) call note_payload_imports(conn, params, .false., err)
       if (conn%dead .or. err /= CAPNP_OK) then
          call capnp_message_free(rm)
@@ -4412,6 +4416,7 @@ contains
          call release_unflushed(conn, ctx)
          call fill_exception(r, reason, err)
          call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
+         call release_spilled_vines(conn, spill, err)
          return
       end if
       ctx%interface_id = call_interface_id_get(c)
@@ -4448,7 +4453,24 @@ contains
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
       call drop_export_pin(conn, eid)
       call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
+      call release_spilled_vines(conn, spill, err)
    end subroutine handle_call
+
+   subroutine release_spilled_vines(conn, spill, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), allocatable, intent(in) :: spill(:)
+      integer, intent(inout) :: err
+      integer :: i, e
+      if (.not. allocated(spill)) return
+      if (conn%dead .or. .not. associated(conn%transport)) return
+      do i = 1, size(spill)
+         call send_release(conn, spill(i), 1_int64, e)
+         if (e /= CAPNP_OK) then
+            if (err == CAPNP_OK) err = e
+            return
+         end if
+      end do
+   end subroutine release_spilled_vines
 
    !> Find the export id a Call's target names: a direct export, or a
    !> promised answer resolved through a stored answer's capTable.
@@ -4574,13 +4596,19 @@ contains
    !> outlive the pickup. Dialling the third vat belongs to the network
    !> layer, so the arrangement is recorded and handed over rather than
    !> acted on here.
-   subroutine note_introductions(conn, pl, err, handles, nhandles, qid)
+   !> Past MAXINTRO_HELD an entry is not kept. A result's vine is then an
+   !> ordinary import of that result; a call's vine is appended to
+   !> `spill`, for the caller to release once the call is done, as C++
+   !> 1.4.0 drops it with the params (rpc.c++ 1628-1630).
+   subroutine note_introductions(conn, pl, err, handles, nhandles, qid, spill)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
       integer, intent(out) :: err
       integer(int64), intent(in), optional :: handles(0:)
       integer, intent(in), optional :: nhandles
       integer(int64), intent(in), optional :: qid
+      integer(int64), allocatable, intent(inout), optional :: spill(:)
+      integer(int64) :: vine
       type(capnp_ptr_t) :: ctab, idp
       type(cap_descriptor_t) :: cd
       type(third_party_cap_descriptor_t) :: tp
@@ -4602,19 +4630,38 @@ contains
          if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG) cycle
          tp = cap_descriptor_third_party_hosted_get(cd, err)
          if (err /= CAPNP_OK .or. tp%p%kind /= CAPNP_PK_STRUCT) cycle
+         ! C++ imports the vine of a call's descriptor whether or not the
+         ! rest of it is usable, and drops it with the params.
+         vine = third_party_cap_descriptor_vine_id_get(tp)
          idp = third_party_cap_descriptor_id_get(tp, err)
-         if (err /= CAPNP_OK .or. idp%kind /= CAPNP_PK_STRUCT) cycle
+         if (err /= CAPNP_OK .or. idp%kind /= CAPNP_PK_STRUCT) then
+            call spill_vine(spill, vine)
+            cycle
+         end if
          id%p = idp
          vat = third_party_cap_id_vat_get(id, err)
-         if (err /= CAPNP_OK .or. vat%p%kind /= CAPNP_PK_STRUCT) cycle
+         if (err /= CAPNP_OK .or. vat%p%kind /= CAPNP_PK_STRUCT) then
+            call spill_vine(spill, vine)
+            cycle
+         end if
          call vat_id_host_get(vat, host, err)
-         if (err /= CAPNP_OK .or. .not. allocated(host)) cycle
+         if (err /= CAPNP_OK .or. .not. allocated(host)) then
+            call spill_vine(spill, vine)
+            cycle
+         end if
          ! A host that will not fit is refused rather than truncated: a
          ! truncated address names a different vat.
-         if (len(host) > MAXHOST) cycle
+         if (len(host) > MAXHOST) then
+            call spill_vine(spill, vine)
+            cycle
+         end if
 
          call reserve_introduction(conn, j, err)
          if (err /= CAPNP_OK) return
+         if (j < 0) then
+            call spill_vine(spill, vine)
+            cycle
+         end if
          conn%introductions(j)%used = .true.
          conn%introductions(j)%nonce = third_party_cap_id_nonce_get(id)
          conn%introductions(j)%vine_id = third_party_cap_descriptor_vine_id_get(tp)
@@ -4639,6 +4686,29 @@ contains
       err = CAPNP_OK
    end subroutine note_introductions
 
+   !> Add `vine` to a call's spill list, when the caller keeps one.
+   subroutine spill_vine(spill, vine)
+      integer(int64), allocatable, intent(inout), optional :: spill(:)
+      integer(int64), intent(in) :: vine
+      if (.not. present(spill)) return
+      if (.not. allocated(spill)) allocate (spill(0))
+      spill = [spill, vine]
+   end subroutine spill_vine
+
+   subroutine intro_table_reset(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer :: i
+      if (allocated(conn%introductions)) deallocate (conn%introductions)
+      allocate (conn%introductions(0:MAXINTRO - 1))
+      conn%introductions = rpc_introduction_t()
+      do i = 0, MAXINTRO - 2
+         conn%introductions(i)%next_free = i + 1
+      end do
+      conn%intro_free = 0
+      conn%intro_used = 0
+   end subroutine intro_table_reset
+
+   !> A free introduction slot, or slot = -1 once MAXINTRO_HELD are kept.
    subroutine reserve_introduction(conn, slot, err)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(out) :: slot
@@ -4648,31 +4718,37 @@ contains
 
       slot = -1
       err = CAPNP_OK
-      if (.not. allocated(conn%introductions)) then
-         allocate (conn%introductions(0:MAXINTRO - 1), stat=stat)
+      if (.not. allocated(conn%introductions)) call intro_table_reset(conn)
+      if (conn%intro_used >= MAXINTRO_HELD) return
+      if (conn%intro_free < 0) then
+         n = size(conn%introductions)
+         allocate (grown(0:min(2 * n, MAXINTRO_HELD) - 1), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
-         conn%introductions = rpc_introduction_t()
+         grown = rpc_introduction_t()
+         grown(0:n - 1) = conn%introductions
+         do i = n, ubound(grown, 1) - 1
+            grown(i)%next_free = i + 1
+         end do
+         call move_alloc(grown, conn%introductions)
+         conn%intro_free = n
       end if
-      do i = lbound(conn%introductions, 1), ubound(conn%introductions, 1)
-         if (.not. conn%introductions(i)%used) then
-            slot = i
-            return
-         end if
-      end do
-      n = size(conn%introductions)
-      allocate (grown(0:max(2 * n, MAXINTRO) - 1), stat=stat)
-      if (stat /= 0) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
-      grown = rpc_introduction_t()
-      grown(0:n - 1) = conn%introductions
-      call move_alloc(grown, conn%introductions)
-      slot = n
+      slot = conn%intro_free
+      conn%intro_free = conn%introductions(slot)%next_free
+      conn%introductions(slot)%next_free = -1
+      conn%intro_used = conn%intro_used + 1
    end subroutine reserve_introduction
+
+   subroutine free_introduction(conn, slot)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: slot
+      conn%introductions(slot) = rpc_introduction_t()
+      conn%introductions(slot)%next_free = conn%intro_free
+      conn%intro_free = slot
+      conn%intro_used = conn%intro_used - 1
+   end subroutine free_introduction
 
    !> Introductions handed to us and not yet picked up.
    function rpc_pending_introductions(conn, out) result(n)
@@ -4751,7 +4827,7 @@ contains
          else
             call send_release(conn, conn%introductions(i)%vine_id, 1_int64, err)
          end if
-         conn%introductions(i) = rpc_introduction_t()
+         call free_introduction(conn, i)
          return
       end do
    end subroutine rpc_introduction_done

@@ -56,7 +56,7 @@ contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(7))
+      allocate (testsuite(8))
       testsuite(1)%name = "handoff"
       testsuite(1)%test => run_handoff
       testsuite(2)%name = "handoff membrane ref"
@@ -71,6 +71,8 @@ contains
       testsuite(6)%test => run_membrane_owned_handoff
       testsuite(7)%name = "handoff records every introduction"
       testsuite(7)%test => run_introduction_capacity
+      testsuite(8)%name = "introductions past the bound fall back to the vine"
+      testsuite(8)%test => run_introduction_bound
    end subroutine collect_rpc_handoff
 
    subroutine allow_inbound(self, interface_id, method_id, err)
@@ -219,6 +221,104 @@ contains
       call rpc_conn_close(receiver)
       call px_close(sender_fd)
    end subroutine run_introduction_capacity
+
+   !> A peer can name any number of third-party caps. Past MAXINTRO_HELD
+   !> the receiver keeps only the vine, as C++ 1.4.0 does for every one:
+   !> a call's vine is released once the call is answered. A finished
+   !> pickup frees its entry for the next introduction.
+   subroutine run_introduction_bound(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: receiver, sender
+      type(echo_srv_t), target :: hosted
+      type(rpc_introduction_t) :: learned(MAXINTRO_HELD)
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: bootcap
+      integer(int64), allocatable :: released(:)
+      integer :: sender_fd, receiver_fd, err, n, i, returns
+      logical :: found
+
+      call px_socketpair(sender_fd, receiver_fd, err)
+      call check_(error, err == CAPNP_OK, 'introduction bound: socket pair')
+      if (allocated(error)) return
+      boot => hosted
+      call rpc_conn_init(receiver, receiver_fd, boot)
+      boot => null()
+      call rpc_conn_init(sender, sender_fd, boot)
+      call rpc_bootstrap_send(sender, bootcap, err)
+      call rpc_pump_once(receiver, err)
+      call rpc_wait(sender, bootcap%id, err)
+      call check_(error, err == CAPNP_OK, 'introduction bound: bootstrapped')
+
+      if (.not. allocated(error)) then
+         call tell_where_to_go(sender_fd, 91_int64, '127.0.0.1', 1, 300_int64, &
+                               700_int64, err, count=MAXINTRO_HELD + 3)
+         call rpc_pump_once(receiver, err)
+         n = rpc_pending_introductions(receiver)
+         call check_(error, rpc_conn_alive(receiver) .and. n == MAXINTRO_HELD, &
+                     'introduction bound: entries kept up to the bound')
+      end if
+      if (.not. allocated(error)) then
+         call drain_releases(sender_fd, released, returns)
+         call check_(error, returns == 1 .and. size(released) == 3, &
+                     'introduction bound: the call is answered and the rest released')
+      end if
+      if (.not. allocated(error)) then
+         do i = 1, 3
+            call check_(error, released(i) == 700_int64 + int(MAXINTRO_HELD + i - 1, int64), &
+                        'introduction bound: vines past the bound released')
+         end do
+      end if
+      if (.not. allocated(error)) then
+         call rpc_introduction_done(receiver, 300_int64, err)
+         call drain_releases(sender_fd, released, returns)
+         call check_(error, err == CAPNP_OK .and. size(released) == 1, &
+                     'introduction bound: pickup releases its vine')
+      end if
+      if (.not. allocated(error)) then
+         call tell_where_to_go(sender_fd, 92_int64, '127.0.0.1', 1, 5000_int64, &
+                               9000_int64, err)
+         call rpc_pump_once(receiver, err)
+         n = rpc_pending_introductions(receiver, learned)
+         found = .false.
+         do i = 1, min(n, size(learned))
+            if (learned(i)%nonce == 5000_int64) found = .true.
+         end do
+         call drain_releases(sender_fd, released, returns)
+         call check_(error, n == MAXINTRO_HELD .and. found .and. size(released) == 0, &
+                     'introduction bound: a freed entry takes the next introduction')
+      end if
+      call rpc_conn_close(receiver)
+      call rpc_conn_close(sender)
+   end subroutine run_introduction_bound
+
+   !> Read what the receiver sent: Release ids in order and the number
+   !> of Returns.
+   subroutine drain_releases(fd, released, returns)
+      integer, intent(in) :: fd
+      integer(int64), allocatable, intent(out) :: released(:)
+      integer, intent(out) :: returns
+      type(capnp_message_t), target :: reply
+      type(message_t) :: rmsg
+      type(release_t) :: rel
+      logical :: got
+      integer :: e
+      allocate (released(0))
+      returns = 0
+      do
+         call px_poll_in(fd, 100, got, e)
+         if (e /= CAPNP_OK .or. .not. got) exit
+         call rpc_recv_message(fd, reply, e)
+         if (e /= CAPNP_OK) exit
+         rmsg = message_read_root(reply, e)
+         if (message_which(rmsg) == MESSAGE_RETURN_TAG) returns = returns + 1
+         if (message_which(rmsg) == MESSAGE_RELEASE_TAG) then
+            rel = message_release_get(rmsg, e)
+            if (release_reference_count_get(rel) == 1_int64) &
+               released = [released, release_id_get(rel)]
+         end if
+         call capnp_message_free(reply)
+      end do
+   end subroutine drain_releases
 
    subroutine run_handoff(error)
       type(error_type), allocatable, intent(out) :: error

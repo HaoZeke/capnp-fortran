@@ -136,7 +136,10 @@ address, and `rpc_introduction_done` releases the vine after a successful
 cannot choose the address that gets connected. Applications using DNS
 or a directory can resolve the VatId before supplying their own
 connection adapter, and a hook that allows the host is what permits
-`rpc_introduction_dial` to connect.
+`rpc_introduction_dial` to connect. A connection keeps at most
+`MAXINTRO_HELD` introductions; past that a descriptor is only its vine,
+as in Cap'n Proto C++, and a vine from call params is released once the
+call is answered.
 
 `Accept.embargo` is honoured: an embargoed Accept claims the capability
 but is not answered until the introducer sends `Disembargo` with
