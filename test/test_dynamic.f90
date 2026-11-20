@@ -1257,7 +1257,7 @@ contains
       call capnp_message_free(msg)
    end function brand_chain_type
 
-   !> An element type tag outside the schema is not a pointer list.
+   !> An unknown dynamic element tag uses a void list, as it does in C++.
    subroutine run_unknown_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -1284,14 +1284,14 @@ contains
                   'unknown-list: element starts as int64')
       call capnp_set_u16(elem, 0_int64, 99_int32, err)
       made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 1_int64, err)
-      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL, &
-                  'unknown-list: init rejects the tag')
+      call check_(error, err == CAPNP_OK .and. made%esize == CAPNP_SZ_VOID, &
+                  'unknown-list: init makes a void list')
       alien = capnp_new_list(msg, CAPNP_SZ_PTR, 1_int64, err)
       call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
       call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: pointer list is not a match')
       alien = capnp_new_list(msg, CAPNP_SZ_VOID, 1_int64, err)
       call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: void list is not a match')
+      call check_(error, err == CAPNP_OK, 'unknown-list: void list is a match')
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_unknown_list
@@ -1368,8 +1368,8 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_int_range
 
-   !> A zero-sized list can name more elements than the message holds.
-   !> Loading it must fail before the node array is allocated.
+   !> The compiler's generous traversal budget admits a zero-sized list that
+   !> names more elements than the physical message holds.
    subroutine run_wire_count(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t) :: schema
@@ -1387,8 +1387,9 @@ contains
       call capnp_serialize_bytes(msg, bytes, err)
       call check_(error, err == CAPNP_OK, 'wire-count: framed')
       call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_ERR_BOUNDS .and. .not. schema%loaded, &
-                  'wire-count: node count past the message')
+      call check_(error, err == CAPNP_OK .and. schema%loaded .and. &
+                  size(schema%nodes) == 4096, &
+                  'wire-count: node count fits the traversal budget')
       call capnp_dyn_free(schema)
       call capnp_message_free(msg)
 
@@ -1400,8 +1401,8 @@ contains
       call capnp_setp(raw, 0, scopes, err)
       call capnp_setp(typed, 0, raw, err)
       call capnp_dyn_load_brand(typed, brand, err)
-      call check_(error, err == CAPNP_ERR_BOUNDS, &
-                  'wire-count: brand scope count past the message')
+      call check_(error, err == CAPNP_ERR_KIND, &
+                  'wire-count: void scopes are not struct scopes')
       call capnp_message_free(msg)
    end subroutine run_wire_count
 

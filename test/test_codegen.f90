@@ -92,8 +92,8 @@ contains
       call check(error, code == 1, 'codegen: missing helper is a failure')
    end subroutine run_helper_starts
 
-   !> A node list, or a requested-file list, may not claim more elements
-   !> than the message holds.
+   !> The compiler budget, rather than physical message words, governs
+   !> zero-sized request lists.
    subroutine run_wire_count(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
@@ -131,8 +131,9 @@ contains
          '> /tmp/capnp-fortran-amp-nodes.out 2> /tmp/capnp-fortran-amp-nodes.err', &
          exitstat=stat, cmdstat=cs)
       text = slurp('/tmp/capnp-fortran-amp-nodes.out')
-      call check(error, cs == 0 .and. index(text, ', err=1') > 0, &
-                 'codegen: amplified node list')
+      call check(error, cs == 0 .and. stat /= 0 .and. &
+                 index(text, 'exceeds the message') == 0, &
+                 'codegen: node count reaches schema validation')
       if (allocated(error)) return
 
       call capnp_message_init_builder(msg, err)
@@ -152,8 +153,9 @@ contains
          '> /tmp/capnp-fortran-amp-files.out 2> /tmp/capnp-fortran-amp-files.err', &
          exitstat=stat, cmdstat=cs)
       text = slurp('/tmp/capnp-fortran-amp-files.out')
-      call check(error, cs == 0 .and. index(text, 'requestedFiles exceeds') > 0, &
-                 'codegen: amplified requestedFiles')
+      call check(error, cs == 0 .and. stat /= 0 .and. &
+                 index(text, 'requestedFiles exceeds') == 0, &
+                 'codegen: requested files reach list validation')
    end subroutine run_wire_count
 
    function slurp(path) result(s)

@@ -292,7 +292,8 @@ contains
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       ! Brand is a pointer on struct, enum and interface only. Text, lists
@@ -301,13 +302,15 @@ contains
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
       case default
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end select
       raw = type_brand(t, err)
       if (err /= CAPNP_OK) return
       if (raw%kind == CAPNP_PK_NULL) then
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       scopes = brand_scopes(raw, err)
@@ -327,7 +330,11 @@ contains
          select case (scope_which(scope))
          case (SCOPE_INHERIT)
             brand%scopes(i + 1)%inherited = .true.
-            allocate (brand%scopes(i + 1)%bindings(0))
+            allocate (brand%scopes(i + 1)%bindings(0), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
             cycle
          case (SCOPE_BIND)
             brand%scopes(i + 1)%inherited = .false.
@@ -1152,7 +1159,7 @@ contains
       integer(int64), allocatable :: grown_slot(:)
       type(capnp_ptr_t), allocatable :: grown_view(:)
       integer(int64) :: sid
-      integer :: i, n
+      integer :: i, n, stat
       err = CAPNP_OK
       if (q%kind == CAPNP_PK_NULL) return
       if (allocated(schema%ro_node)) then
@@ -1175,9 +1182,17 @@ contains
       copied%frozen = .true.
       n = schema%n_ro
       if (.not. allocated(schema%ro_node)) then
-         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
       else if (n >= size(schema%ro_node)) then
-         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
+         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          grown_node(1:n) = schema%ro_node(1:n)
          grown_slot(1:n) = schema%ro_slot(1:n)
          grown_view(1:n) = schema%ro_view(1:n)
@@ -1561,9 +1576,9 @@ contains
             if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) ok = .false.
          end if
       case default
-         ! dynamic.c++ elementSizeFor (94) does not treat an unknown
-         ! element tag as a pointer. A list of that tag matches nothing.
-         ok = .false.
+         ! dynamic.c++ elementSizeFor (70-97) maps an unknown tag to
+         ! ElementSize::VOID, rather than treating it as a pointer.
+         ok = value%esize == CAPNP_SZ_VOID
       end select
    end function dyn_list_ok
 
@@ -1842,10 +1857,9 @@ contains
          case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
             esize = CAPNP_SZ_PTR
          case default
-            ! dynamic.c++ elementSizeFor (94) does not turn an unknown
-            ! element tag into a pointer list.
-            err = CAPNP_ERR_KIND
-            return
+            ! Unknown dynamic element tags are forward-compatible void lists
+            ! in Cap'n Proto C++ 1.4.0.
+            esize = CAPNP_SZ_VOID
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
