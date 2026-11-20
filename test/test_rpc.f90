@@ -125,7 +125,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(108))
+      allocate (testsuite(109))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -330,18 +330,20 @@ contains
       testsuite(101)%test => w_resolve_receiver_answer_bad_cap_index
       testsuite(102)%name = "rpc-finish-released-result-export"
       testsuite(102)%test => w_finish_released_result_export
-      testsuite(103)%name = "posix-recv-eintr-retried"
-      testsuite(103)%test => t_recv_all_retries_eintr
-      testsuite(104)%name = "rpc-framing-511-accepted"
-      testsuite(104)%test => t_framing_511_accepted
-      testsuite(105)%name = "rpc-framing-512-rejected"
-      testsuite(105)%test => t_framing_512_rejected
-      testsuite(106)%name = "rpc-framing-oversized-rejected"
-      testsuite(106)%test => t_framing_oversized_rejected
-      testsuite(107)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(107)%test => t_framing_negative_traversal_rejected
-      testsuite(108)%name = "rpc-framing-short-and-padded"
-      testsuite(108)%test => t_framing_short_and_padded
+      testsuite(103)%name = "rpc-resolve-unknown-receiver-answer"
+      testsuite(103)%test => w_resolve_unknown_receiver_answer
+      testsuite(104)%name = "posix-recv-eintr-retried"
+      testsuite(104)%test => t_recv_all_retries_eintr
+      testsuite(105)%name = "rpc-framing-511-accepted"
+      testsuite(105)%test => t_framing_511_accepted
+      testsuite(106)%name = "rpc-framing-512-rejected"
+      testsuite(106)%test => t_framing_512_rejected
+      testsuite(107)%name = "rpc-framing-oversized-rejected"
+      testsuite(107)%test => t_framing_oversized_rejected
+      testsuite(108)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(108)%test => t_framing_negative_traversal_rejected
+      testsuite(109)%name = "rpc-framing-short-and-padded"
+      testsuite(109)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -633,6 +635,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_released_result_export(error)
    end subroutine w_finish_released_result_export
+
+   subroutine w_resolve_unknown_receiver_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_unknown_receiver_answer(error)
+   end subroutine w_resolve_unknown_receiver_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8357,5 +8364,35 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_finish_released_result_export
+
+   !> A receiverAnswer naming an answer id this vat never issued, in the
+   !> overflow range where no slot exists, is a broken capability and the
+   !> promise is released (rpc.c++ 1606-1627).
+   subroutine t_resolve_unknown_receiver_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qboot, qadder, eid, qc
+      integer :: e
+      logical :: released, disembargo
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call ra_resolve(cconn, sconn, 4_int64, 700_int64, [-1, 0])
+      call ra_drain(sconn, 4_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                  'receiverAnswer: unknown answer releases the promise')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  rpc_conn_reason(cconn) == "invalid 'receiverAnswer'", &
+                  'receiverAnswer: unknown answer breaks the promise')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_unknown_receiver_answer
 
 end module test_rpc

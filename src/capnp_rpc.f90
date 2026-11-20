@@ -3410,7 +3410,7 @@ contains
       type(payload_t) :: apl
       type(cap_descriptor_t) :: acd
       type(rpc_answer_slot_t), pointer :: slot
-      logical :: active
+      logical :: active, pending
       integer(int64) :: aqid
       integer :: i, n
       integer, allocatable :: fields(:)
@@ -3450,7 +3450,9 @@ contains
             active = .false.
          end if
       end if
-      if (active .and. .not. slot%has_results) then
+      pending = .false.
+      if (active) pending = .not. slot%has_results
+      if (pending) then
          node%state = IMP_ANSWER
          node%answer_qid = aqid
          if (allocated(node%answer_ops)) deallocate (node%answer_ops)
