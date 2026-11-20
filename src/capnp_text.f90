@@ -333,13 +333,15 @@ contains
          f = capnp_list_get_struct(fl, i, err)
          if (err /= CAPNP_OK) return
          fd = field_discriminant(f)
-         show = capnp_codec_field_present(f, p, err)
-         if (err /= CAPNP_OK) return
          if (fd /= NO_DISCRIMINANT) then
             if (fd /= active) cycle
+            show = capnp_codec_field_present(f, p, err)
+            if (err /= CAPNP_OK) return
             if (fd == 0 .and. .not. show) cycle
-         else if (.not. show) then
-            cycle
+         else
+            show = capnp_codec_field_present(f, p, err)
+            if (err /= CAPNP_OK) return
+            if (.not. show) cycle
          end if
          call field_name(f, nm, err)
          if (err /= CAPNP_OK) return

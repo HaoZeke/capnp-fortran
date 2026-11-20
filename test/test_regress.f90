@@ -94,7 +94,8 @@ contains
          new_unittest("json-nul-eof", run_json_nul_eof), &
          new_unittest("json-nest-limit", run_json_nest_limit), &
          new_unittest("cli-json-stream", run_cli_json_stream), &
-         new_unittest("text-ws-vt-ff", run_text_ws_vt_ff) &
+         new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
+         new_unittest("text-inactive-arm", run_text_inactive_arm) &
          ]
    end subroutine collect_regress
 
@@ -2429,5 +2430,33 @@ contains
          call capnp_message_free(msg)
       end subroutine one
    end subroutine run_text_ws_vt_ff
+
+   subroutine run_text_inactive_arm(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: out
+      integer(int8) :: raw(0:31)
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
+             31_int8, 0_int8, 0_int8, 0_int8, -1_int8, -1_int8, -1_int8, -1_int8]
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'InnerDisc', err)
+      call capnp_deserialize_bytes(raw, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK, 'inactive arm encodes')
+      call check_(error, index(out, 'a = 0') > 0, 'inactive arm text')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_inactive_arm
 
 end module test_regress
