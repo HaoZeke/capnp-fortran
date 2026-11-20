@@ -38,7 +38,9 @@ contains
            new_unittest("framing-errors", test_framing_errors), &
            new_unittest("traversal-limit", test_traversal_limit), &
            new_unittest("depth-limit", test_depth_limit), &
-           new_unittest("depth-limit-nested", test_depth_limit_nested)]
+           new_unittest("depth-limit-nested", test_depth_limit_nested), &
+           new_unittest("nest-limit-64", test_nest_limit_64), &
+           new_unittest("far-depth-one", test_far_depth_one)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -931,8 +933,8 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_traversal_limit
-   !> Pointer resolution charges nesting depth; a zero depth_limit still
-   !> allows the root (depth 0) but fails the first capnp_getp (depth 1).
+   !> nestingLimit must be greater than zero to read the root
+   !> (layout.c++:2186). Limit 1 allows the root and rejects the first getp.
    subroutine test_depth_limit(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -946,10 +948,10 @@ contains
       call capnp_setp(root, 0, kid, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
-      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=0)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=1)
       root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
-                  'guards: root at depth 0 allowed')
+                  'guards: root within limit 1')
       if (allocated(error)) return
       q = capnp_getp(root, 0, err)
       call check(error, err == CAPNP_ERR_DEPTH, 'guards: depth limit on getp')
@@ -957,8 +959,8 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_depth_limit
-   !> Nested walks accumulate depth on the handle: with depth_limit=1 a
-   !> two-hop chain (root -> a -> b) allows the first getp and fails the second.
+   !> With depth_limit=2 the first nested struct is readable and the next
+   !> getp hits the limit. The root itself consumes one level.
    subroutine test_depth_limit_nested(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -974,7 +976,7 @@ contains
       call capnp_setp(root, 0, a, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
-      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=1)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
       root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_OK, 'guards: nested root ok')
       if (allocated(error)) return
@@ -990,5 +992,75 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_depth_limit_nested
+   !> Default nesting limit is 64. A chain of 64 structs is readable; the
+   !> 65th struct is rejected (layout.c++:2186).
+   subroutine test_nest_limit_64(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: node, prev, p
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, i, n, last, hops
+      do n = 64, 65
+         call capnp_message_init_builder(msg, err)
+         prev = capnp_ptr_t()
+         do i = n, 1, -1
+            node = capnp_new_struct(msg, 1, 1, err)
+            call capnp_set_i32(node, 0_int64, int(i, int32), err)
+            if (i /= n) call capnp_setp(node, 0, prev, err)
+            prev = node
+         end do
+         call capnp_set_root(msg, prev, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=64)
+         p = capnp_root(rmsg, err)
+         last = 0
+         hops = 0
+         do
+            if (err /= CAPNP_OK .or. p%kind /= CAPNP_PK_STRUCT) exit
+            last = int(capnp_get_i32(p, 0_int64))
+            hops = hops + 1
+            p = capnp_getp(p, 0, err)
+         end do
+         if (n == 64) then
+            call check(error, err == CAPNP_OK .and. last == 64 .and. hops == 64, &
+                        'nest-64: chain of 64 is readable')
+         else
+            call check(error, err == CAPNP_ERR_DEPTH .and. last == 64, &
+                        'nest-65: 65th struct is past the limit')
+         end if
+         if (allocated(error)) return
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+      end do
+   end subroutine test_nest_limit_64
+   !> A far landing pad does not consume a nesting level. With depth_limit=1
+   !> the far root is depth 0 and its data is readable (layout.c++ followFars).
+   subroutine test_far_depth_one(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 1_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 32_int64, 77_int64)
+      call capnp_deserialize_bytes(buf, msg, err, depth_limit=0)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'far-depth: limit 0 rejects the root')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, depth_limit=1)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%depth == 0 .and. &
+                  capnp_get_i64(root, 0_int64) == 77_int64, &
+                  'far-depth: limit 1 reads val 77 at depth 0')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_far_depth_one
 
 end module test_wire

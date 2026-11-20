@@ -90,10 +90,6 @@ contains
       p = capnp_ptr_t()
       p%msg => msg
 
-      if (depth > msg%depth_limit) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
       if (seg < 1 .or. seg > msg%nsegs) then
          err = CAPNP_ERR_SEGMENT
          return
@@ -104,7 +100,14 @@ contains
       end if
 
       w = cp_get_i64(msg%segs(seg)%bytes, byte_off)
-      if (w == 0_int64) return ! null: default-valued handle
+      ! A null pointer returns before the nesting check (layout.c++:2174).
+      if (w == 0_int64) return
+      ! readStructPointer requires nestingLimit > 0, then stores limit-1.
+      ! followFars does not consume a level (layout.c++:2186, 2215).
+      if (depth >= msg%depth_limit) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
 
       k = wp_kind(w)
       select case (k)
@@ -148,7 +151,7 @@ contains
                err = CAPNP_ERR_KIND
                return
             end if
-            call resolve_at(msg, tseg, pad_off, depth + 1, p, err)
+            call resolve_at(msg, tseg, pad_off, depth, p, err)
          else
             call resolve_double_far(msg, tseg, pad_off, depth, p, err)
          end if
@@ -181,10 +184,6 @@ contains
       err = CAPNP_OK
       p = capnp_ptr_t()
       p%msg => msg
-      if (depth + 1 > msg%depth_limit) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
       if (pad_off < 0_int64 .or. pad_off + 16_int64 > msg%segs(pseg)%len) then
          err = CAPNP_ERR_BOUNDS
          return
@@ -216,10 +215,10 @@ contains
          p%off = obase
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
-         p%depth = depth + 1
+         p%depth = depth
       case (CAPNP_WK_LIST)
          call fill_list(msg, oseg, obase, tag, p, err)
-         if (err == CAPNP_OK) p%depth = depth + 1
+         if (err == CAPNP_OK) p%depth = depth
       case default
          err = CAPNP_ERR_KIND
       end select
