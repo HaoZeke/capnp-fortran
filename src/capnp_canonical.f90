@@ -32,6 +32,25 @@ contains
       root = capnp_root(msg, err)
       if (err /= CAPNP_OK) return
 
+      ! A null root is still a struct. capnp 1.4.0 canonicalizes it to an
+      ! empty struct pointer whose offset is -1, which is distinct from null.
+      if (root%kind == CAPNP_PK_NULL) then
+         allocate (bytes(0:7), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         bytes(0) = -4_int8
+         bytes(1) = -1_int8
+         bytes(2) = -1_int8
+         bytes(3) = -1_int8
+         bytes(4) = 0_int8
+         bytes(5) = 0_int8
+         bytes(6) = 0_int8
+         bytes(7) = 0_int8
+         return
+      end if
+
       ! Measure with the live traversal budget so amplified DAGs abort immediately.
       remaining = msg%traversal_words
       need = 1_int64 + measure(root, 0, err) ! + root pointer word

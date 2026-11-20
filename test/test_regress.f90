@@ -97,9 +97,10 @@ contains
          new_unittest("text-shorthand", run_text_shorthand), &
          new_unittest("text-group-replace", run_text_group_replace), &
          new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
-         new_unittest("text-inactive-arm", run_text_inactive_arm), &
          new_unittest("json-dup-bad", run_json_dup_bad), &
-         new_unittest("json-ptr-kind", run_json_ptr_kind) &
+         new_unittest("canonical-null-root", run_canonical_null_root), &
+         new_unittest("json-ptr-kind", run_json_ptr_kind), &
+         new_unittest("text-inactive-arm", run_text_inactive_arm) &
          ]
    end subroutine collect_regress
 
@@ -2400,8 +2401,6 @@ contains
       end subroutine check_stream
    end subroutine run_cli_json_stream
 
-
-
    subroutine run_text_shorthand(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema, book
@@ -2468,7 +2467,6 @@ contains
       end subroutine reject_text
    end subroutine run_text_shorthand
 
-
    subroutine load_people(error, schema, idx)
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_dyn_schema_t), intent(out) :: schema
@@ -2491,7 +2489,6 @@ contains
       idx = capnp_dyn_find(schema, 'Book', err)
       if (err /= CAPNP_OK .or. idx <= 0) call test_failed(error, 'shorthand: book')
    end subroutine load_people
-
 
    subroutine run_text_group_replace(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2555,7 +2552,6 @@ contains
       end subroutine render
    end subroutine run_text_group_replace
 
-
    subroutine run_text_ws_vt_ff(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -2590,36 +2586,6 @@ contains
          call capnp_message_free(msg)
       end subroutine one
    end subroutine run_text_ws_vt_ff
-
-
-   subroutine run_text_inactive_arm(error)
-      type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema
-      type(capnp_message_t) :: msg
-      type(capnp_ptr_t) :: root
-      character(len=:), allocatable :: out
-      integer(int8) :: raw(0:31)
-      integer :: idx, err
-      if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
-         return
-      end if
-      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
-             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
-             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
-             31_int8, 0_int8, 0_int8, 0_int8, -1_int8, -1_int8, -1_int8, -1_int8]
-      call load_codec(error, schema)
-      if (allocated(error)) return
-      idx = capnp_dyn_find(schema, 'InnerDisc', err)
-      call capnp_deserialize_bytes(raw, msg, err)
-      root = capnp_root(msg, err)
-      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
-      call check_(error, err == CAPNP_OK, 'inactive arm encodes')
-      call check_(error, index(out, 'a = 0') > 0, 'inactive arm text')
-      call capnp_message_free(msg)
-      call capnp_dyn_free(schema)
-   end subroutine run_text_inactive_arm
-
 
    subroutine run_json_dup_bad(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2664,6 +2630,24 @@ contains
       end subroutine check_dup
    end subroutine run_json_dup_bad
 
+   subroutine run_canonical_null_root(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t) :: msg
+      integer(int8), allocatable :: bytes(:)
+      integer(int8) :: raw(0:15), want(0:7)
+      integer :: err
+      raw = [0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 0_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8]
+      want = [-4_int8, -1_int8, -1_int8, -1_int8, 0_int8, 0_int8, 0_int8, 0_int8]
+      call capnp_deserialize_bytes(raw, msg, err)
+      call capnp_canonicalize(msg, bytes, err)
+      call check_(error, err == CAPNP_OK .and. allocated(bytes), 'null root canonical')
+      if (.not. allocated(error) .and. allocated(bytes)) then
+         call check_(error, size(bytes) == 8 .and. all(bytes == want), &
+                     'null root bytes')
+      end if
+      call capnp_message_free(msg)
+   end subroutine run_canonical_null_root
 
    subroutine run_json_ptr_kind(error)
       type(error_type), allocatable, intent(out) :: error
@@ -2693,4 +2677,33 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_ptr_kind
+
+   subroutine run_text_inactive_arm(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: out
+      integer(int8) :: raw(0:31)
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 1_int8, 0_int8, &
+             0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
+             31_int8, 0_int8, 0_int8, 0_int8, -1_int8, -1_int8, -1_int8, -1_int8]
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'InnerDisc', err)
+      call capnp_deserialize_bytes(raw, msg, err)
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK, 'inactive arm encodes')
+      call check_(error, index(out, 'a = 0') > 0, 'inactive arm text')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_inactive_arm
+
 end module test_regress
