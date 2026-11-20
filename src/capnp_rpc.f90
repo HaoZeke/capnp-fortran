@@ -3118,28 +3118,33 @@ contains
       integer, intent(out) :: err
       type(rpc_embargo_node_t), pointer :: emb
       integer(int64) :: eid
-      logical :: held
+      logical :: held, valid
       integer :: nheld
       err = CAPNP_OK
       held = node%refs > 0 .and. .not. node%released
       nheld = merge(node%refs, 0, held)
-      node%local_refs = nheld
       ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
-      ! Reject pin-only exports: once wire refcount drops to 0, C++ has
-      ! erased the export ID from its table.
+      ! A pin-only export counts as missing: once the wire refcount drops
+      ! to 0, C++ has erased the id from its table. A missing export is a
+      ! broken capability, so no Disembargo follows (rpc.c++ 1171-1181).
+      valid = .false.
       if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
-         if (conn%exports(int(local_id))%used .and. &
-             conn%exports(int(local_id))%refcount > 0) then
-            node%resolved_id = local_id
-            if (held) then
-               call pin_export(conn, int(local_id))
-               node%pinned = .true.
-            end if
-         else
-            node%resolved_id = -1_int64
-         end if
-      else
+         valid = conn%exports(int(local_id))%used .and. &
+                 conn%exports(int(local_id))%refcount > 0
+      end if
+      if (.not. valid) then
+         call release_all_import(conn, node, err)
+         if (err /= CAPNP_OK) return
          node%resolved_id = -1_int64
+         node%state = IMP_BROKEN
+         node%reason = "invalid 'receiverHosted' export ID"
+         return
+      end if
+      node%local_refs = nheld
+      node%resolved_id = local_id
+      if (held) then
+         call pin_export(conn, int(local_id))
+         node%pinned = .true.
       end if
       if (.not. held .or. .not. node%received_call) then
          node%state = IMP_LOCAL

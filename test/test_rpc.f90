@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(101))
+      allocate (testsuite(102))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -308,18 +308,20 @@ contains
       testsuite(94)%test => w_vine_done_shared_id_finish
       testsuite(95)%name = "rpc-vine-past-sixteen-caps"
       testsuite(95)%test => w_vine_past_sixteen_caps
-      testsuite(96)%name = "posix-recv-eintr-retried"
-      testsuite(96)%test => t_recv_all_retries_eintr
-      testsuite(97)%name = "rpc-framing-511-accepted"
-      testsuite(97)%test => t_framing_511_accepted
-      testsuite(98)%name = "rpc-framing-512-rejected"
-      testsuite(98)%test => t_framing_512_rejected
-      testsuite(99)%name = "rpc-framing-oversized-rejected"
-      testsuite(99)%test => t_framing_oversized_rejected
-      testsuite(100)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(100)%test => t_framing_negative_traversal_rejected
-      testsuite(101)%name = "rpc-framing-short-and-padded"
-      testsuite(101)%test => t_framing_short_and_padded
+      testsuite(96)%name = "rpc-resolve-invalid-receiver-hosted"
+      testsuite(96)%test => w_resolve_invalid_receiver_hosted
+      testsuite(97)%name = "posix-recv-eintr-retried"
+      testsuite(97)%test => t_recv_all_retries_eintr
+      testsuite(98)%name = "rpc-framing-511-accepted"
+      testsuite(98)%test => t_framing_511_accepted
+      testsuite(99)%name = "rpc-framing-512-rejected"
+      testsuite(99)%test => t_framing_512_rejected
+      testsuite(100)%name = "rpc-framing-oversized-rejected"
+      testsuite(100)%test => t_framing_oversized_rejected
+      testsuite(101)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(101)%test => t_framing_negative_traversal_rejected
+      testsuite(102)%name = "rpc-framing-short-and-padded"
+      testsuite(102)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -567,6 +569,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_vine_past_sixteen_caps(error)
    end subroutine w_vine_past_sixteen_caps
+
+   subroutine w_resolve_invalid_receiver_hosted(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_invalid_receiver_hosted(error)
+   end subroutine w_resolve_invalid_receiver_hosted
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -4683,6 +4690,10 @@ contains
       call rpc_conn_init(sconn, fb, boot)
       boot => null()
       call rpc_conn_init(cconn, fa, boot)
+      ! receiverHosted 0 names this export; a missing id would be broken.
+      cconn%exports(0)%used = .true.
+      cconn%exports(0)%refcount = 1
+      cconn%exports(0)%srv => local_echo
       call rpc_bootstrap_send(cconn, echo_cap, e)
       qboot = echo_cap%id
       call rpc_pump_once(sconn, e)
@@ -7504,11 +7515,13 @@ contains
 
    !> Return `ncaps` results for `qid`, pointer field i holding cap i.
    !> Cap i is senderHosted `id0 + i`, except index `vine_at`, which is
-   !> thirdPartyHosted with that id as its vine and `nonce`.
-   subroutine scripted_caps_return(cconn, sconn, qid, ncaps, vine_at, id0, nonce)
+   !> thirdPartyHosted with that id as its vine and `nonce`, and index
+   !> `promise_at`, which is senderPromise.
+   subroutine scripted_caps_return(cconn, sconn, qid, ncaps, vine_at, id0, nonce, promise_at)
       type(rpc_conn_t), intent(inout), target :: cconn, sconn
       integer(int64), intent(in) :: qid, id0, nonce
       integer, intent(in) :: ncaps, vine_at
+      integer, intent(in), optional :: promise_at
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(return_t) :: r
@@ -7531,6 +7544,12 @@ contains
          cd%p = capnp_list_get_struct(ctab, i, e)
          if (i == vine_at) then
             call rpc_write_third_party_cap(cd, '10.1.0.4', 5004, nonce, id0 + i, e)
+         else if (present(promise_at)) then
+            if (i == promise_at) then
+               call cap_descriptor_sender_promise_set(cd, id0 + i, e)
+            else
+               call cap_descriptor_sender_hosted_set(cd, id0 + i, e)
+            end if
          else
             call cap_descriptor_sender_hosted_set(cd, id0 + i, e)
          end if
@@ -7725,5 +7744,99 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_vine_past_sixteen_caps
+
+   !> Promise `pid` from the scripted peer, with one call already sent
+   !> through it, so a reflected resolution would need an embargo.
+   subroutine scripted_called_promise(cconn, sconn, cap, pid, promised)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      type(rpc_cap_t), intent(in) :: cap
+      integer(int64), intent(in) :: pid
+      type(rpc_cap_t), intent(out) :: promised
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: q, qc, a, b
+      integer :: e, tag
+      logical :: got
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q, e)
+      call capnp_message_free(m)
+      call scripted_caps_return(cconn, sconn, q, 1, -1, pid, 0_int64, promise_at=0)
+      call rpc_result_cap(cconn, q, [0], promised, e)
+      call rpc_finish_send(cconn, q, .true., e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call rpc_call_begin(cconn, promised, 1_int64, 0, m, params, qc, e)
+      call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+      call rpc_call_send(cconn, m, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+   end subroutine scripted_called_promise
+
+   subroutine scripted_resolve_receiver_hosted(cconn, sconn, pid, eid)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: pid, eid
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, pid, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, eid, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+   end subroutine scripted_resolve_receiver_hosted
+
+   !> A called promise that resolves to an export this vat does not have
+   !> on the wire, missing or pin-only, is broken: C++ releases the promise
+   !> and sends no Disembargo (rpc.c++ 1171-1181).
+   subroutine t_resolve_invalid_receiver_hosted(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo, pinned_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: cap, promised
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qc, a, b
+      integer :: e, tag
+      logical :: got
+      character(len=*), parameter :: why = "invalid 'receiverHosted' export ID"
+      srv => local_echo
+      call scripted_pair(cconn, sconn, srv, cap)
+
+      call scripted_called_promise(cconn, sconn, cap, 4_int64, promised)
+      call scripted_resolve_receiver_hosted(cconn, sconn, 4_int64, 999_int64)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_RELEASE_TAG .and. a == 4_int64 .and. &
+                  b == 1_int64, 'invalid receiverHosted: promise released')
+      call scripted_frame(sconn, 50, got, tag, a, b)
+      call check_(error, .not. got, 'invalid receiverHosted: no Disembargo')
+      call rpc_call_begin(cconn, promised, 1_int64, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. rpc_conn_reason(cconn) == why, &
+                  'invalid receiverHosted: calls fail as broken')
+
+      srv => pinned_echo
+      cconn%exports(5)%used = .true.
+      cconn%exports(5)%refcount = 0
+      cconn%exports(5)%pins = 1
+      cconn%exports(5)%srv => srv
+      call scripted_called_promise(cconn, sconn, cap, 6_int64, promised)
+      call scripted_resolve_receiver_hosted(cconn, sconn, 6_int64, 5_int64)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, got .and. tag == MESSAGE_RELEASE_TAG .and. a == 6_int64 .and. &
+                  b == 1_int64, 'pin-only receiverHosted: promise released')
+      call scripted_frame(sconn, 50, got, tag, a, b)
+      call check_(error, .not. got, 'pin-only receiverHosted: no Disembargo')
+      call check_(error, cconn%exports(5)%pins == 1, &
+                  'pin-only receiverHosted: export gains no pin')
+      call check_(error, rpc_conn_alive(cconn), 'receiverHosted: connection stays up')
+      cconn%exports(5)%used = .false.
+      cconn%exports(5)%pins = 0
+      cconn%exports(5)%srv => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_invalid_receiver_hosted
 
 end module test_rpc
