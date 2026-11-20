@@ -2,7 +2,7 @@
 !> connect that is still in progress.
 module test_net
    use testdrive, only: unittest_type, error_type, check, skip_test
-   use capnp, only: CAPNP_OK
+   use capnp, only: CAPNP_OK, int8
    use capnp_posix
    implicit none
    private
@@ -12,11 +12,13 @@ contains
 
    subroutine collect_net(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(2))
+      allocate (testsuite(3))
       testsuite(1)%name = "connect-completes"
       testsuite(1)%test => run_connect_ok
       testsuite(2)%name = "connect-unreach"
       testsuite(2)%test => run_connect_unreach
+      testsuite(3)%name = "send-to-closed-peer"
+      testsuite(3)%test => run_send_closed
    end subroutine collect_net
 
    subroutine check_(error, cond, name)
@@ -77,6 +79,25 @@ contains
       end if
       call check_(error, stat == 0, 'connect: unreachable network is an error')
    end subroutine run_connect_unreach
+
+   !> A write to a peer that has gone away is an I/O error, not SIGPIPE.
+   !> KJ ignores the signal, so a C++ peer sees the same write fail and
+   !> carries on (async-unix.c++ 218-229).
+   subroutine run_send_closed(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer :: a, b, err, k
+      integer(int8) :: bytes(64)
+      call px_socketpair(a, b, err)
+      call check_(error, err == CAPNP_OK, 'send: socketpair')
+      if (allocated(error)) return
+      call px_close(b)
+      bytes = 0_int8
+      do k = 1, 2
+         call px_send_all(a, bytes, err)
+      end do
+      call check_(error, err /= CAPNP_OK, 'send: a closed peer is an I/O error')
+      call px_close(a)
+   end subroutine run_send_closed
 
    function source_has_find() result(found)
       logical :: found

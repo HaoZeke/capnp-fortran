@@ -3,8 +3,9 @@
 !> socketpair loopbacks for tests, and poll-based readiness.
 !>
 !> O_NONBLOCK, EINTR, and EINPROGRESS come from the host C library,
-!> because those numbers are not portable. The other values below are
-!> the POSIX ones.
+!> because those numbers are not portable, and so does the send that
+!> turns a closed peer into an error rather than SIGPIPE. The other
+!> values below are the POSIX ones.
 module capnp_posix
    use iso_c_binding
    use capnp_kinds, only: int8, int64, CAPNP_OK, CAPNP_ERR_IO
@@ -88,9 +89,9 @@ module capnp_posix
          integer(c_int) :: rc
       end function c_shutdown
 
-      function c_send(fd, buf, n, flags) bind(c, name='send') result(sent)
+      function c_send(fd, buf, n) bind(c, name='capnp_posix_send') result(sent)
          import :: c_int, c_size_t, c_ptr, c_long
-         integer(c_int), value :: fd, flags
+         integer(c_int), value :: fd
          type(c_ptr), value :: buf
          integer(c_size_t), value :: n
          integer(c_long) :: sent
@@ -234,7 +235,7 @@ contains
       off = 0_int64
       do while (off < n)
          sent = c_send(int(fd, c_int), c_loc(bytes(lbound(bytes, 1) + off)), &
-                       int(n - off, c_size_t), 0_c_int)
+                       int(n - off, c_size_t))
          if (sent <= 0_c_long) then
             err = CAPNP_ERR_IO
             return
