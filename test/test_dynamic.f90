@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(24))
+      allocate (testsuite(25))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -79,6 +79,8 @@ contains
       testsuite(23)%test => run_int_range
       testsuite(24)%name = "dynamic-unknown-list"
       testsuite(24)%test => run_unknown_list
+      testsuite(25)%name = "dynamic-brand-depth"
+      testsuite(25)%test => run_brand_depth
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1469,5 +1471,75 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_unknown_list
+
+   !> A parameter binding that points at itself stops with a depth error.
+   subroutine run_brand_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_ptr_t) :: raw
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: scope_id, bound
+      integer :: err, box_idx, tw
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      raw = capnp_dyn_field_schema(schema, box_idx, 'value', err)
+      scope_id = type_param_scope_id(raw)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. scope_id /= 0_int64, &
+                  'depth: box parameter')
+      allocate (brand%scopes(1))
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%inherited = .false.
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .false.
+      brand%scopes(1)%bindings(1)%type = raw
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      call check_(error, err == CAPNP_ERR_DEPTH .and. tw == -1 .and. bound == 0_int64, &
+                  'depth: cyclic parameter is an error')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 12) == TYPE_LIST, &
+                  'depth: twelve nested lists resolve')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 300) == TYPE_LIST, &
+                  'depth: three hundred nested lists resolve')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 4100) == -1, &
+                  'depth: a chain past the limit is an error')
+      call capnp_dyn_free(schema)
+   end subroutine run_brand_depth
+
+   !> Bind the parameter of Box to List(...List(Text)) nested n deep and
+   !> return the resolved type, or -1 with the error left in the check.
+   function brand_chain_type(schema, box_idx, brand, scope_id, n) result(tw)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: box_idx, n
+      type(capnp_dyn_brand_t), intent(inout) :: brand
+      integer(int64), intent(in) :: scope_id
+      integer :: tw
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: inner, outer
+      integer(int64) :: bound
+      integer :: err, i
+
+      call capnp_message_init_builder(msg, err)
+      inner = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(inner, 0_int64, int(TYPE_TEXT, int32), err)
+      do i = 1, n
+         outer = capnp_new_struct(msg, 3, 1, err)
+         call capnp_set_u16(outer, 0_int64, int(TYPE_LIST, int32), err)
+         call capnp_setp(outer, 0, inner, err)
+         inner = outer
+      end do
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%bindings(1)%type = inner
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      if (err /= CAPNP_OK) tw = -1
+      call capnp_message_free(msg)
+   end function brand_chain_type
 
 end module test_dynamic
