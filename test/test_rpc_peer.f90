@@ -30,7 +30,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(8))
+      allocate (testsuite(10))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -47,6 +47,10 @@ contains
       testsuite(7)%test => t_fin_plain_npp
       testsuite(8)%name = "finish-plain-fwd-yourself"
       testsuite(8)%test => t_fin_plain_yourself
+      testsuite(9)%name = "fwd-ra-plain-pending"
+      testsuite(9)%test => t_fwd_ra_plain
+      testsuite(10)%name = "proxy-early-finish"
+      testsuite(10)%test => t_proxy_early_finish
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -678,6 +682,80 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call fin_plain_case(error, .false., 'finish plain yourself')
    end subroutine t_fin_plain_yourself
+
+   !> A forwarded receiverAnswer param names an answer whose call went on
+   !> as a plain call and is still pending. C++ exports a hosted cap that
+   !> keeps the import the plain call returns until it is released.
+   subroutine t_fwd_ra_plain(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d, f
+      integer(int64) :: k1, k2
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 2, 1_int64, NOCAPS, NOIDS, yourself=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k1)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [3_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k2)
+      a = drain(fd)
+      call wret(fd, k2, .true.)
+      call wret(fd, k1, .false., 9_int64)
+      c = step(conn, fd, 2)
+      call wfin(fd, 5_int64, .true.)
+      call wfin(fd, 3_int64, .true.)
+      d = step(conn, fd, 2)
+      call wrel(fd, 1_int64, 1_int64)
+      f = step(conn, fd, 1)
+      call check(error, index(b, ' I4 y [sh1]') > 0 .and. c == '' .and. &
+                 d == 'FIN '//itoa(k2)//' F | RET 3 else | FIN '//itoa(k1)//' F' .and. &
+                 f == 'REL 9 1', 'plain pending: got '//b//' / '//c//' / '//d//' / '//f)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_ra_plain
+
+   !> A Finish on a plain forward whose answer a forwarded receiverAnswer
+   !> param still uses. The proxy keeps the question and its result cap.
+   subroutine t_proxy_early_finish(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d, f, g
+      integer(int64) :: k1, k2
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 2, 1_int64, NOCAPS, NOIDS, yourself=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k1)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [3_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k2)
+      a = drain(fd)
+      call wret(fd, k2, .true.)
+      a = step(conn, fd, 1)
+      call wfin(fd, 3_int64, .true.)
+      c = step(conn, fd, 1)
+      call wret(fd, k1, .false., 9_int64)
+      d = step(conn, fd, 1)
+      call wfin(fd, 5_int64, .true.)
+      f = step(conn, fd, 1)
+      call wrel(fd, 1_int64, 1_int64)
+      g = step(conn, fd, 1)
+      call check(error, index(b, ' I4 y [sh1]') > 0 .and. c == 'RET 3 else' .and. &
+                 d == 'FIN '//itoa(k1)//' F' .and. f == 'FIN '//itoa(k2)//' F' .and. &
+                 g == 'REL 9 1', 'proxy early finish: got '//b//' / '//c//' / '//d// &
+                 ' / '//f//' / '//g)
+      call close_peer(conn, fd)
+   end subroutine t_proxy_early_finish
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

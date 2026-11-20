@@ -248,6 +248,19 @@ module capnp_rpc
       integer :: dispatching = 0
    end type rpc_export_slot_t
 
+   !> The server of an export that stands for the pipeline `ops` of our
+   !> question `qid`, a plain forward still running. C++ exports that
+   !> cap as hosted. Once the question returns it reaches the cap the
+   !> Return named: our import `import` or our export `eid`.
+   type :: rpc_pipe_proxy_t
+      integer(int64) :: qid = -1_int64
+      integer, allocatable :: ops(:)
+      logical :: settled = .false.
+      integer(int64) :: import = -1_int64
+      integer :: eid = -1
+      character(len=:), allocatable :: reason
+   end type rpc_pipe_proxy_t
+
    !> Owners of a server that a handoff exported on two connections.
    type :: rpc_shared_owner_t
       class(*), pointer :: srv => null()
@@ -390,6 +403,10 @@ module capnp_rpc
       !> With `borrowed`, forwards to the pipeline `answer_ops` of our
       !> question `fwd_qid` instead of to an import.
       integer(int64) :: fwd_qid = -1_int64
+      !> Proxy exports that reach this import. While any remain, the
+      !> Releases its other users make wait in `owed`.
+      integer :: holds = 0
+      integer :: owed = 0
       !> Answers whose Return wrote this import. C++ keeps the innermost
       !> client of each returned cap until the answer's Finish
       !> (rpc.c++ resolutionsAtReturnTime), so a Resolve releases the
@@ -4326,6 +4343,14 @@ contains
       live_question = conn%questions(int(q))%used .and. .not. conn%questions(int(q))%canceled
    end function live_question
 
+   logical function live_export(conn, id)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: id
+      live_export = .false.
+      if (.not. eslot_ok(conn, id)) return
+      live_export = conn%exports(int(id))%used .and. conn%exports(int(id))%refcount > 0
+   end function live_export
+
    !> Point a call begun on a promise at the import the promise now
    !> forwards to, so it can go on the wire.
    subroutine retarget_call(conn, m, qid, handle, e)
@@ -4608,8 +4633,127 @@ contains
          return
       end if
       if (node%state == IMP_BROKEN) return
+      if (node%holds > 0) then
+         node%owed = node%owed + 1
+         return
+      end if
       call release_one_import(conn, node, err)
    end subroutine rpc_release_send
+
+   !> A proxy export goes. An import it reached sends the Releases that
+   !> waited for it, at once as C++ does when the ImportClient goes. The
+   !> last proxy on a question whose answer is finished ends it.
+   recursive subroutine drop_proxy(conn, srv)
+      type(rpc_conn_t), intent(inout), target :: conn
+      class(*), pointer, intent(in) :: srv
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      integer :: n, e, q
+      if (.not. associated(srv)) return
+      select type (srv)
+      type is (rpc_pipe_proxy_t)
+         if (.not. srv%settled .and. srv%qid >= 0_int64) then
+            srv%settled = .true.
+            if (qslot_ok(conn, srv%qid)) then
+               q = int(srv%qid)
+               if (plain_question_orphaned(conn, q)) call end_plain_question(conn, q)
+            end if
+         end if
+         if (srv%eid >= 0) then
+            call drop_export_pin(conn, srv%eid)
+            srv%eid = -1
+         end if
+         if (srv%import < 0_int64) return
+         call import_find(conn, srv%import, node, found)
+         srv%import = -1_int64
+         if (.not. found) return
+         node%holds = node%holds - 1
+         if (node%holds > 0 .or. node%owed <= 0) return
+         n = min(node%owed, node%refs)
+         node%owed = 0
+         if (node%released .or. n <= 0) return
+         node%refs = node%refs - n
+         if (node%refs == 0) node%released = .true.
+         if (conn%dead .or. .not. associated(conn%transport)) return
+         call send_release(conn, node%wire_id, int(n, int64), e)
+      end select
+   end subroutine drop_proxy
+
+   !> Some proxy export still waits on plain forward question `q`.
+   logical function question_has_proxies(conn, q) result(any)
+      type(rpc_conn_t), intent(in) :: conn
+      integer, intent(in) :: q
+      integer :: i
+      any = .false.
+      if (.not. allocated(conn%exports)) return
+      do i = 0, size(conn%exports) - 1
+         if (.not. conn%exports(i)%used) cycle
+         select type (px => conn%exports(i)%srv)
+         type is (rpc_pipe_proxy_t)
+            if (px%qid == int(q, int64) .and. .not. px%settled) any = .true.
+         end select
+         if (any) return
+      end do
+   end function question_has_proxies
+
+   !> Plain forward question `q` is still out, its answer is finished,
+   !> and nothing else waits on it.
+   logical function plain_question_orphaned(conn, q) result(orphan)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      orphan = .false.
+      if (.not. conn%questions(q)%used .or. conn%questions(q)%returned) return
+      if (conn%questions(q)%plain_answer < 0_int64) return
+      call answer_find(conn, conn%questions(q)%plain_answer, slot, found)
+      if (found) found = associated(slot)
+      if (found) then
+         if (slot%used .and. slot%plain_qid == int(q, int64)) return
+      end if
+      if (question_has_proxies(conn, q)) return
+      orphan = .true.
+   end function plain_question_orphaned
+
+   !> The plain forward question `q` returned. Each proxy export on its
+   !> pipeline now reaches the cap the Return named.
+   subroutine settle_proxies(conn, q)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      type(rpc_import_node_t), pointer :: node
+      character(len=:), allocatable :: why
+      integer(int64) :: id
+      integer :: i, kind, e
+      logical :: found
+      if (.not. allocated(conn%exports)) return
+      if (.not. conn%questions(q)%returned) return
+      do i = 0, size(conn%exports) - 1
+         if (.not. conn%exports(i)%used) cycle
+         select type (px => conn%exports(i)%srv)
+         type is (rpc_pipe_proxy_t)
+            if (px%qid /= int(q, int64) .or. px%settled) cycle
+            px%settled = .true.
+            call answer_pipeline_cap(conn, conn%questions(q)%retmsg, px%ops, kind, id, why, e, &
+                                     deferred=.true.)
+            px%reason = why
+            select case (kind)
+            case (PIPE_EXPORT)
+               call import_find_live(conn, id, node, found)
+               if (found) then
+                  node%holds = node%holds + 1
+                  px%import = node%id
+               end if
+            case (PIPE_IMPORT)
+               if (eslot_ok(conn, id)) then
+                  if (conn%exports(int(id))%used) then
+                     call pin_export(conn, int(id))
+                     px%eid = int(id)
+                  end if
+               end if
+            end select
+         end select
+      end do
+   end subroutine settle_proxies
 
    ! ------------------------------------------------------------------
    ! Streaming (client side)
@@ -5187,7 +5331,7 @@ contains
          tgt = call_target_get(c, e)
          if (e == CAPNP_OK) then
             if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
-                eid < 0) then
+                .not. live_export(conn, message_target_imported_cap_get(tgt))) then
                call abort_conn(conn, &
                                'Message target is not a current export ID.', err)
                return
@@ -5456,7 +5600,8 @@ contains
    !> C++ 1.4.0 reads it from the returned answer and writes that cap
    !> for the peer: our export as senderHosted with one more reference,
    !> the peer's export as receiverHosted, a pipeline on our live question
-   !> as receiverAnswer. An answer still running or a broken cap is none.
+   !> as receiverAnswer. A plain forward still running gives a proxy
+   !> export. Any other answer still running, or a broken cap, is none.
    subroutine forward_answer_param(conn, icd, ocd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: icd, ocd
@@ -5475,10 +5620,6 @@ contains
       rpa = cap_descriptor_receiver_answer_get(icd, e)
       if (e == CAPNP_OK) ops = promised_answer_transform_get(rpa, e)
       if (e /= CAPNP_OK) return
-      call answer_find(conn, promised_answer_question_id_get(rpa), slot, found)
-      if (found) found = associated(slot)
-      if (found) found = slot%used .and. slot%has_results
-      if (.not. found) return
       allocate (fields(int(capnp_list_len(ops))))
       do i = 1, size(fields)
          op%p = capnp_list_get_struct(ops, i - 1, e)
@@ -5487,6 +5628,32 @@ contains
          if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
             fields(i) = int(promised_answer_op_get_pointer_field_get(op))
       end do
+      call answer_find(conn, promised_answer_question_id_get(rpa), slot, found)
+      if (found) found = associated(slot)
+      if (found) found = slot%used
+      if (.not. found) return
+      ! A plain forward still running serves its pipeline from its
+      ! question. C++ exports that pipeline cap as a hosted cap.
+      if (.not. slot%has_results) then
+         if (slot%finished .or. slot%no_pipeline .or. slot%plain_qid < 0_int64) return
+         if (.not. live_question(conn, slot%plain_qid)) return
+         block
+            type(rpc_pipe_proxy_t), pointer :: px
+            class(*), pointer :: srv
+            integer :: peid
+            allocate (px)
+            px%qid = slot%plain_qid
+            px%ops = fields
+            srv => px
+            peid = export_server(conn, srv, owned=.true.)
+            if (peid < 0) then
+               deallocate (px)
+               return
+            end if
+            call cap_descriptor_sender_hosted_set(ocd, int(peid, int64), err)
+         end block
+         return
+      end if
       call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, e, &
                                deferred=.true., qops=qops)
       if (e /= CAPNP_OK) return
@@ -5984,6 +6151,35 @@ contains
          end if
          if (conn%exports(int(eid))%used .and. &
              conn%exports(int(eid))%refcount > 0) out_eid = int(eid)
+         if (out_eid >= 0) then
+            select type (px => conn%exports(out_eid)%srv)
+            type is (rpc_pipe_proxy_t)
+               out_eid = -1
+               if (px%eid >= 0) then
+                  if (eslot_ok(conn, int(px%eid, int64))) then
+                     if (conn%exports(px%eid)%used) out_eid = px%eid
+                  end if
+               else if (px%import >= 0_int64) then
+                  block
+                     type(rpc_import_node_t), pointer :: inode
+                     logical :: ifound
+                     call import_find(conn, px%import, inode, ifound)
+                     if (ifound) then
+                        if (present(fwd_kind)) fwd_kind = PIPE_IMPORT
+                        if (present(fwd_id)) fwd_id = inode%wire_id
+                        if (present(fwd_ops)) allocate (fwd_ops(0))
+                     end if
+                  end block
+               else if (.not. px%settled .and. live_question(conn, px%qid)) then
+                  if (present(fwd_kind)) fwd_kind = PIPE_QUESTION
+                  if (present(fwd_id)) fwd_id = px%qid
+                  if (present(fwd_ops)) fwd_ops = px%ops
+               else if (present(reason)) then
+                  reason = 'no such capability'
+                  if (allocated(px%reason)) reason = px%reason
+               end if
+            end select
+         end if
       case (MESSAGE_TARGET_PROMISED_ANSWER_TAG)
          pa = message_target_promised_answer_get(tgt, err)
          if (err /= CAPNP_OK) return
@@ -7498,6 +7694,7 @@ contains
       logical :: found, yourself, finished, npp, ignored
       integer :: e
       err = CAPNP_OK
+      call settle_proxies(conn, q)
       aqid = conn%questions(q)%plain_answer
       call answer_find(conn, aqid, slot, found)
       if (found) found = associated(slot)
@@ -7995,7 +8192,7 @@ contains
       integer(int64) :: qid
       integer :: i, k, eid, jerr
       type(rpc_answer_slot_t), pointer :: jslot
-      logical :: jfound, gone
+      logical :: jfound, gone, keep
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
@@ -8053,9 +8250,13 @@ contains
                call send_results_elsewhere(conn, qid, jerr)
                if (jerr /= CAPNP_OK) err = jerr
             end if
+            ! A proxy export on the pipeline keeps the question until it
+            ! returns, as C++ holds the pipelined cap it reaches.
             if (qslot_ok(conn, jslot%plain_qid)) then
-               if (conn%questions(int(jslot%plain_qid))%plain_answer == qid) &
-                  call end_plain_question(conn, int(jslot%plain_qid))
+               if (conn%questions(int(jslot%plain_qid))%plain_answer == qid) then
+                  keep = question_has_proxies(conn, int(jslot%plain_qid))
+                  if (.not. keep) call end_plain_question(conn, int(jslot%plain_qid))
+               end if
             end if
             if (.not. jslot%plain_elsewhere .and. .not. jslot%plain_opp .and. &
                 .not. conn%dead .and. associated(conn%transport)) then
@@ -8400,8 +8601,8 @@ contains
       held => null()
    end subroutine free_owned_export
 
-   subroutine drop_export_pin(conn, eid)
-      type(rpc_conn_t), intent(inout) :: conn
+   recursive subroutine drop_export_pin(conn, eid)
+      type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: eid
       class(*), pointer :: held
       if (.not. eslot_ok(conn, int(eid, int64))) return
@@ -8410,6 +8611,7 @@ contains
       conn%exports(eid)%pins = conn%exports(eid)%pins - 1
       if (conn%exports(eid)%refcount > 0 .or. conn%exports(eid)%pins > 0) return
       held => conn%exports(eid)%srv
+      call drop_proxy(conn, held)
       select type (held)
       type is (rpc_membrane_server_t)
       class default
@@ -8427,8 +8629,8 @@ contains
       call release_server(held)
    end subroutine drop_export_pin
 
-   subroutine drop_export(conn, eid, count)
-      type(rpc_conn_t), intent(inout) :: conn
+   recursive subroutine drop_export(conn, eid, count)
+      type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: eid, count
       integer :: left
       class(*), pointer :: held
@@ -8439,6 +8641,7 @@ contains
       conn%exports(eid)%refcount = left
       if (conn%exports(eid)%refcount <= 0 .and. conn%exports(eid)%pins <= 0) then
          held => conn%exports(eid)%srv
+         call drop_proxy(conn, held)
          ! Membranes use their own refcount. Any other owned export is
          ! freed here so close drops a server the peer never Releases.
          select type (held)
