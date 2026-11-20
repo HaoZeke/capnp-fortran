@@ -163,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(128))
+      allocate (testsuite(130))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -408,18 +408,22 @@ contains
       testsuite(121)%test => w_disembargo_on_forwarded_answer
       testsuite(122)%name = "rpc-forward-answer-param"
       testsuite(122)%test => w_forward_answer_param
-      testsuite(123)%name = "posix-recv-eintr-retried"
-      testsuite(123)%test => t_recv_all_retries_eintr
-      testsuite(124)%name = "rpc-framing-511-accepted"
-      testsuite(124)%test => t_framing_511_accepted
-      testsuite(125)%name = "rpc-framing-512-rejected"
-      testsuite(125)%test => t_framing_512_rejected
-      testsuite(126)%name = "rpc-framing-oversized-rejected"
-      testsuite(126)%test => t_framing_oversized_rejected
-      testsuite(127)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(127)%test => t_framing_negative_traversal_rejected
-      testsuite(128)%name = "rpc-framing-short-and-padded"
-      testsuite(128)%test => t_framing_short_and_padded
+      testsuite(123)%name = "rpc-forward-releases-param-caps"
+      testsuite(123)%test => w_forward_releases_param_caps
+      testsuite(124)%name = "rpc-forward-opp-keeps-param-caps"
+      testsuite(124)%test => w_forward_opp_keeps_param_caps
+      testsuite(125)%name = "posix-recv-eintr-retried"
+      testsuite(125)%test => t_recv_all_retries_eintr
+      testsuite(126)%name = "rpc-framing-511-accepted"
+      testsuite(126)%test => t_framing_511_accepted
+      testsuite(127)%name = "rpc-framing-512-rejected"
+      testsuite(127)%test => t_framing_512_rejected
+      testsuite(128)%name = "rpc-framing-oversized-rejected"
+      testsuite(128)%test => t_framing_oversized_rejected
+      testsuite(129)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(129)%test => t_framing_negative_traversal_rejected
+      testsuite(130)%name = "rpc-framing-short-and-padded"
+      testsuite(130)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -927,6 +931,16 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_forward_answer_param(error)
    end subroutine w_forward_answer_param
+
+   subroutine w_forward_releases_param_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forward_releases_param_caps(error)
+   end subroutine w_forward_releases_param_caps
+
+   subroutine w_forward_opp_keeps_param_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forward_opp_keeps_param_caps(error)
+   end subroutine w_forward_opp_keeps_param_caps
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10304,5 +10318,189 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_forward_answer_param
+
+   !> A forwarded call's senderHosted param goes back as receiverHosted.
+   !> C++ 1.4.0 holds the import for the original call and releases it
+   !> once that call ends, here when the forwarded question returns.
+   subroutine t_forward_releases_param_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply, m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(return_t) :: r
+      type(release_t) :: rel
+      integer(int64) :: qboot, qadder, eid, tq
+      integer :: e, n
+      logical :: ok, early, released
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send_cap(sconn, 30_int64, qadder, [0], 55_int64)
+      call rpc_pump_once(cconn, e)
+      tq = -1_int64
+      early = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) &
+               tq = call_question_id_get(c)
+         else if (message_which(msg) == MESSAGE_RELEASE_TAG) then
+            early = .true.
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, tq >= 0_int64 .and. .not. early, &
+                  'forward params: forwarded and nothing released yet')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, tq, e)
+      call return_results_sent_elsewhere_set(r, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      released = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_RELEASE_TAG) then
+            rel = message_release_get(msg, e)
+            released = release_id_get(rel) == 55_int64 .and. &
+                       release_reference_count_get(rel) == 1_int64
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, rpc_conn_alive(cconn) .and. released, &
+                  'forward params: the param cap is released when the call ends')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forward_releases_param_caps
+
+   !> A forwarded call that hinted onlyPromisePipeline. C++ 1.4.0 attaches
+   !> its context to the answer, so the param import lasts until the
+   !> Finish and its Release follows the Finish of the forwarded question.
+   subroutine t_forward_opp_keeps_param_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply, m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(return_t) :: r
+      type(finish_t) :: f
+      type(release_t) :: rel
+      integer(int64) :: qboot, qadder, eid, tq
+      integer :: e, n, fin_at, rel_at
+      logical :: ok, early
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send_cap_opp(sconn, 30_int64, qadder, 55_int64)
+      call rpc_pump_once(cconn, e)
+      tq = -1_int64
+      early = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) &
+               tq = call_question_id_get(c)
+         else if (message_which(msg) == MESSAGE_RELEASE_TAG) then
+            early = .true.
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, tq >= 0_int64 .and. .not. early, &
+                  'forward opp params: forwarded and nothing released yet')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, tq, e)
+      call return_results_sent_elsewhere_set(r, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_RELEASE_TAG) early = .true.
+         call capnp_message_free(reply)
+      end do
+      call check_(error, .not. early, &
+                  'forward opp params: the Return releases nothing')
+      if (allocated(error)) return
+
+      call raw_finish_only(sconn, 30_int64, .true.)
+      call rpc_pump_once(cconn, e)
+      fin_at = 0
+      rel_at = 0
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_FINISH_TAG) then
+            f = message_finish_get(msg, e)
+            if (finish_question_id_get(f) == tq) fin_at = n
+         else if (message_which(msg) == MESSAGE_RELEASE_TAG) then
+            rel = message_release_get(msg, e)
+            if (release_id_get(rel) == 55_int64 .and. &
+                release_reference_count_get(rel) == 1_int64) rel_at = n
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, rpc_conn_alive(cconn) .and. fin_at > 0 .and. rel_at > fin_at, &
+                  'forward opp params: the Release follows the Finish')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forward_opp_keeps_param_caps
+
+   !> A Call on pa(qid, [0]) that hints onlyPromisePipeline, with one
+   !> senderHosted `hosted` param.
+   subroutine pa_send_cap_opp(sconn, cq, qid, hosted)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: cq, qid, hosted
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops, ctab
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, cq, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      call call_only_promise_pipeline_set(c, .true., e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, qid, e)
+      ops = promised_answer_transform_init(pa, 1_int64, e)
+      op%p = capnp_list_get_struct(ops, 0, e)
+      call promised_answer_op_get_pointer_field_set(op, 0_int32, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, hosted, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+   end subroutine pa_send_cap_opp
 
 end module test_rpc

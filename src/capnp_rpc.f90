@@ -257,6 +257,13 @@ module capnp_rpc
       !> The answer whose Return took its results from this question,
       !> when this vat forwarded that answer's call back to the peer.
       integer(int64) :: tail_answer = -1_int64
+      !> That answer's call hinted onlyPromisePipeline. C++ attaches its
+      !> context to the answer task, so the params live until Finish.
+      logical :: tail_opp = .false.
+      !> senderHosted and senderPromise ids in the params of the call that
+      !> was forwarded as this question. C++ holds them as imports until
+      !> the original call ends, then releases them.
+      integer(int64), allocatable :: param_ids(:)
       !> The call was delivered to a local capability, not sent on the wire.
       logical :: local_call = .false.
       !> Caps in retmsg are exports this vat hosts, not imports.
@@ -1074,6 +1081,8 @@ contains
             conn%questions(k)%canceled = .false.
             conn%questions(k)%tail_call = .false.
             conn%questions(k)%tail_answer = -1_int64
+            conn%questions(k)%tail_opp = .false.
+            if (allocated(conn%questions(k)%param_ids)) deallocate (conn%questions(k)%param_ids)
             conn%questions(k)%local_call = .false.
             conn%questions(k)%local_results = .false.
             conn%questions(k)%local_export = -1
@@ -2943,6 +2952,8 @@ contains
       slot%canceled = .false.
       slot%tail_call = .false.
       slot%tail_answer = -1_int64
+      slot%tail_opp = .false.
+      if (allocated(slot%param_ids)) deallocate (slot%param_ids)
       slot%local_call = .false.
       slot%local_results = .false.
       slot%local_export = -1
@@ -4997,6 +5008,7 @@ contains
       type(rpc_answer_slot_t), pointer :: slot
       integer(int64) :: tq
       integer(int8), allocatable :: bytes(:)
+      integer(int64), allocatable :: held(:)
       logical :: found
       integer :: i
       tq = alloc_qid(conn)
@@ -5006,6 +5018,7 @@ contains
       end if
       conn%questions(int(tq))%tail_call = .true.
       conn%questions(int(tq))%tail_answer = qid
+      conn%questions(int(tq))%tail_opp = call_only_promise_pipeline_get(c)
       call capnp_message_init_builder(cm, err)
       if (err == CAPNP_OK) cmsg = message_new_root(cm, err)
       if (err == CAPNP_OK) fc = message_call_init(cmsg, err)
@@ -5038,13 +5051,14 @@ contains
       if (err == CAPNP_OK) call call_send_results_to_yourself_set(fc, err)
       if (err == CAPNP_OK) inp = call_params_get(c, err)
       if (err == CAPNP_OK) outp = call_params_init(fc, err)
-      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err)
+      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, held, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, cm, err)
       call capnp_message_free(cm)
       if (err /= CAPNP_OK) then
          call release_question(conn, tq)
          return
       end if
+      if (size(held) > 0) call move_alloc(held, conn%questions(int(tq))%param_ids)
       call capnp_message_init_builder(rm, err)
       if (err == CAPNP_OK) rmsg = message_new_root(rm, err)
       if (err == CAPNP_OK) r = message_return_init(rmsg, err)
@@ -5072,17 +5086,21 @@ contains
    !> capability is written as C++ 1.4.0 writeDescriptor writes it for
    !> that connection: the peer's own export as receiverHosted, ours as
    !> senderHosted with one more reference, a vine as the import it is.
-   subroutine copy_forwarded_payload(conn, inp, outp, m, err)
+   !> `held` lists the senderHosted and senderPromise ids the params
+   !> named, which the caller still owes the peer a Release for.
+   subroutine copy_forwarded_payload(conn, inp, outp, m, held, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: inp
       type(payload_t), intent(inout) :: outp
       type(capnp_message_t), intent(inout), target :: m
+      integer(int64), allocatable, intent(out) :: held(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
       integer :: i, n, eid
       integer(int64) :: id
       err = CAPNP_OK
+      allocate (held(0))
       if (inp%p%kind /= CAPNP_PK_STRUCT) return
       content = payload_content_get(inp, err)
       if (err /= CAPNP_OK) return
@@ -5103,8 +5121,10 @@ contains
          select case (cap_descriptor_which(icd))
          case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_hosted_get(icd), err)
+            held = [held, cap_descriptor_sender_hosted_get(icd)]
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_promise_get(icd), err)
+            held = [held, cap_descriptor_sender_promise_get(icd)]
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
             id = cap_descriptor_receiver_hosted_get(icd)
             call cap_descriptor_none_set(ocd, err)
@@ -6920,9 +6940,28 @@ contains
          conn%questions(q)%returned = .true.
       end if
       call capnp_message_free(m)
-      if (err == CAPNP_OK .and. conn%questions(q)%tail_answer >= 0_int64) &
-         call settle_forwarded_question(conn, q, err)
+      if (err == CAPNP_OK .and. conn%questions(q)%tail_answer >= 0_int64) then
+         if (.not. conn%questions(q)%tail_opp) call release_forwarded_params(conn, q, err)
+         if (err == CAPNP_OK) call settle_forwarded_question(conn, q, err)
+      end if
    end subroutine handle_return
+
+   !> The forwarded question returned or its answer finished, so the
+   !> original call is over. C++ drops its params then, which releases
+   !> each cap the caller passed (rpc.c++ ~RpcCallContext).
+   subroutine release_forwarded_params(conn, q, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      integer, intent(inout) :: err
+      integer(int64), allocatable :: ids(:)
+      integer :: i, e
+      if (.not. allocated(conn%questions(q)%param_ids)) return
+      call move_alloc(conn%questions(q)%param_ids, ids)
+      do i = 1, size(ids)
+         call send_release(conn, ids(i), 1_int64, e)
+         if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+      end do
+   end subroutine release_forwarded_params
 
    !> The question a forwarded answer took its results from is finished
    !> once both its Return and the answer's Finish are in, as the C++
@@ -6939,6 +6978,7 @@ contains
       if (found) found = slot%used .and. slot%forward_qid == int(q, int64)
       if (found) return
       call send_question_finish(conn, int(q, int64), .false., err)
+      call release_forwarded_params(conn, q, err)
       call question_slot_clear(conn%questions(q))
    end subroutine settle_forwarded_question
 
@@ -6955,7 +6995,14 @@ contains
       q = int(tq)
       if (.not. conn%questions(q)%used) return
       if (conn%questions(q)%tail_answer /= aqid) return
-      call send_question_finish(conn, tq, .not. conn%questions(q)%returned, err)
+      if (conn%questions(q)%tail_opp) then
+         ! The attached context goes after the tail call's promise.
+         call send_question_finish(conn, tq, .not. conn%questions(q)%returned, err)
+         call release_forwarded_params(conn, q, err)
+      else
+         call release_forwarded_params(conn, q, err)
+         call send_question_finish(conn, tq, .not. conn%questions(q)%returned, err)
+      end if
       if (conn%questions(q)%returned) then
          call question_slot_clear(conn%questions(q))
       else
