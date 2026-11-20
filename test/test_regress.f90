@@ -662,6 +662,7 @@ contains
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"message","message":5}')
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"message","message":"hi"}')
       call udiff(error, schema, n, 'TaggedEvent', '{"message":"hi"}')
+      call udiff(error, schema, n, 'TaggedEvent', '{"count":287454020,"idle":null}')
       call udiff(error, schema, n, 'TaggedEvent', '{"idle":5}')
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"idle"}')
       call udiff(error, schema, n, 'TaggedEvent', '{"kind":"count","kind":"idle"}')
@@ -755,7 +756,7 @@ contains
       call tdiff(error, schema, n, 'GroupArm', '(n = 5, box = (y = 1))')
       call tdiff(error, schema, n, 'GroupArm', '(n = 5, box = ())')
       call tdiff(error, schema, n, 'GroupUnion', '(n = 5, gu = (p = 1))')
-      call check_(error, n == 90, 'union-diff: case count')
+      call check_(error, n == 91, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
