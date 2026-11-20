@@ -2404,8 +2404,8 @@ contains
 
    subroutine run_text_shorthand(error)
       type(error_type), allocatable, intent(out) :: error
-      type(capnp_dyn_schema_t), target :: schema, book
-      integer :: sample, garm, people
+      type(capnp_dyn_schema_t), target :: schema, book, extra
+      integer :: sample, garm, people, place, onefield, deepi, holdi, wrapi
       if (.not. have_capnp()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
@@ -2421,15 +2421,43 @@ contains
       call round_text(schema, sample, '(where = ("hi"))', 'city = "hi"')
       call round_text(schema, garm, '(box = (5))', 'x = 5')
       call round_text(schema, sample, '(where = (("hi")))', 'city = "hi"')
+      call round_text(schema, sample, '(where = ("hi",))', 'city = "hi"')
+      call round_text(schema, sample, '(where = (("hi",)))', 'city = "hi"')
+      call round_text(schema, sample, '(where = (city = "a", zip = 9), where = ("b",))', 'city = "b"')
+      call round_text(schema, sample, '(job = (label = "hi"), job = (void,))', 'none = void')
+      call round_text(schema, garm, '(box = (5,))', 'x = 5')
       call reject_text(schema, garm, '(box = "no")')
       call reject_text(schema, garm, '(box = void)')
       call reject_text(schema, sample, '(where = void)')
       call reject_text(schema, sample, '(job = "hi")')
       call reject_text(schema, sample, '(where = (1, 2))')
+      call reject_text(schema, sample, '(where = (zip = 5, "hi"))')
+      call reject_text(schema, sample, '(ubig = 2, 1)')
+      call reject_text(schema, sample, '(big = 1, 2)')
+      call reject_text(schema, garm, '(box = (y = 7, 5))')
+      call reject_text(schema, sample, '(1)')
+      call reject_text(schema, garm, '(-1)')
+      place = capnp_dyn_find(schema, 'Place', people)
+      call reject_text(schema, place, '(("a (b) # c"),)')
       call load_people(error, book, people)
       call round_text(book, people, '(people = [1, 2])', 'id = 1')
       call round_text(book, people, '(people = [(1), (2)])', 'id = 2')
+      call round_text(book, people, '(people = [(1,)])', 'id = 1')
+      call round_text(book, people, '(people = [((1,))])', 'id = 1')
       call reject_text(book, people, '(people = [1, "no"])')
+      call reject_text(book, people, '(people = [(name = "A", 1)])')
+      call load_short_extra(error)
+      call reject_text(extra, onefield, '(5)')
+      call reject_text(extra, deepi, '(deep = 5)')
+      call reject_text(extra, deepi, '(deep = (5))')
+      call round_text(extra, deepi, '(deep = (inner = (v = 5)))', 'v = 5')
+      call reject_text(extra, holdi, '(nu = 5)')
+      call round_text(extra, holdi, '(nu = (u = (a = 5)))', 'a = 5')
+      call round_text(extra, wrapi, '(g = (5,))', 'v = 5')
+      call round_text(extra, wrapi, '(s = (5,))', 's = (v = 5)')
+      call round_text(extra, wrapi, '(o = (5,))', 'o = (v = 5)')
+      call round_text(extra, wrapi, '(g = 5)', 'v = 5')
+      call capnp_dyn_free(extra)
       call capnp_dyn_free(schema)
       call capnp_dyn_free(book)
    contains
@@ -2466,6 +2494,33 @@ contains
          call check_(error, err /= CAPNP_OK, 'shorthand reject '//text)
          call capnp_message_free(msg)
       end subroutine reject_text
+
+      subroutine load_short_extra(err_out)
+         type(error_type), allocatable, intent(inout) :: err_out
+         character(len=:), allocatable :: src
+         integer(int8), allocatable :: bytes(:)
+         integer :: err
+         if (allocated(err_out)) return
+         src = '@0x8122334455667788;'//achar(10)// &
+               'struct OneField { v @0 :Int32; }'//achar(10)// &
+               'struct Deep { deep :group { inner :group { v @0 :Int32; } } }'//achar(10)// &
+               'struct Named { u :union { a @0 :Int32; b @1 :Text; } }'//achar(10)// &
+               'struct Hold { nu @0 :Named; }'//achar(10)// &
+               'struct Wrap { g :group { v @0 :Int32; } s @1 :OneField; o @2 :OneField; }'//achar(10)
+         call spit(tmp//'/short.capnp', src, err)
+         if (.not. sh('capnp compile -o- '//tmp//'/short.capnp > '//tmp//'/short.cgr')) then
+            call test_failed(err_out, 'shorthand: compile extra')
+            return
+         end if
+         call capnp_read_file(tmp//'/short.cgr', bytes, err)
+         call capnp_dyn_load(extra, bytes, err)
+         onefield = capnp_dyn_find(extra, 'OneField', err)
+         deepi = capnp_dyn_find(extra, 'Deep', err)
+         holdi = capnp_dyn_find(extra, 'Hold', err)
+         wrapi = capnp_dyn_find(extra, 'Wrap', err)
+         call check_(err_out, onefield > 0 .and. deepi > 0 .and. holdi > 0 .and. wrapi > 0, &
+                     'shorthand: extra schema')
+      end subroutine load_short_extra
    end subroutine run_text_shorthand
 
    subroutine load_people(error, schema, idx)

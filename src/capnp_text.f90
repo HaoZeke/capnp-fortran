@@ -151,7 +151,7 @@ contains
       sc%s = text
       sc%n = len(text)
       sc%i = 1
-      call parse_struct(schema, idx, root, env, sc, 0, err)
+      call parse_struct(schema, idx, root, env, sc, 0, err, .false.)
       if (err /= CAPNP_OK) return
       call skip_ws(sc)
       if (sc%i <= sc%n) err = CAPNP_ERR_ARG
@@ -726,6 +726,11 @@ contains
       end if
       f = capnp_list_get_struct(fl, 0, err)
       if (err /= CAPNP_OK) return
+      ! One level only. A group or a named union needs its own literal.
+      if (field_which(f) == FIELD_GROUP) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       fd = field_discriminant(f)
       if (fd /= NO_DISCRIMINANT) then
          call field_name(f, name, err)
@@ -736,16 +741,18 @@ contains
       call parse_field_value(schema, f, p, env, sc, depth, err)
    end subroutine parse_first_field
 
-   recursive subroutine parse_struct(schema, idx, p, env, sc, depth, err)
+   recursive subroutine parse_struct(schema, idx, p, env, sc, depth, err, allow_short)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
       type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(out) :: err
+      logical, intent(in) :: allow_short
       type(capnp_ptr_t) :: f
       character(len=:), allocatable :: name
       integer :: fd, parens, mark
+      logical :: saw_named
       err = CAPNP_OK
       if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
@@ -754,6 +761,7 @@ contains
       call expect_ch(sc, '(', err)
       if (err /= CAPNP_OK) return
       parens = 0
+      saw_named = .false.
       call skip_ws(sc)
       do while (peek(sc) == '(')
          sc%i = sc%i + 1
@@ -781,11 +789,21 @@ contains
             end if
          end if
          if (err /= CAPNP_OK) then
+            ! A single positional value, with an optional trailing comma.
+            ! The root message and any later value still need a field name.
+            if (.not. allow_short .or. saw_named) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
             sc%i = mark
             err = CAPNP_OK
             call parse_first_field(schema, idx, p, env, sc, depth + 1, err)
             if (err /= CAPNP_OK) return
             call skip_ws(sc)
+            if (peek(sc) == ',') then
+               sc%i = sc%i + 1
+               call skip_ws(sc)
+            end if
             if (peek(sc) /= ')') then
                err = CAPNP_ERR_ARG
                return
@@ -793,6 +811,7 @@ contains
             sc%i = sc%i + 1
             exit
          end if
+         saw_named = .true.
          ! `=-1` is one operator, not an equals sign and a unary minus.
          if (is_op_char(peek(sc))) then
             err = CAPNP_ERR_ARG
@@ -845,7 +864,7 @@ contains
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (peek(sc) == '(') then
-            call parse_struct(schema, idx, p, env, sc, depth, err)
+            call parse_struct(schema, idx, p, env, sc, depth, err, .true.)
          else
             call parse_first_field(schema, idx, p, env, sc, depth + 1, err)
          end if
@@ -877,7 +896,7 @@ contains
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (peek(sc) == '(') then
-            call parse_struct(schema, idx, q, cenv, sc, depth, err)
+            call parse_struct(schema, idx, q, cenv, sc, depth, err, .true.)
          else
             call parse_first_field(schema, idx, q, cenv, sc, depth + 1, err)
          end if
@@ -982,7 +1001,7 @@ contains
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (peek(sc) == '(') then
-            call parse_struct(schema, idx, el, cenv, sc, depth, err)
+            call parse_struct(schema, idx, el, cenv, sc, depth, err, .true.)
          else
             call parse_first_field(schema, idx, el, cenv, sc, depth + 1, err)
          end if
