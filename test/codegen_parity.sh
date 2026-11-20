@@ -234,12 +234,30 @@ EOF
   echo "g5 ok"
 }
 
+g6() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > generics.capnp << 'EOF'
+@0x8666666666666601;
+struct Item { text @0 :Text; }
+struct Five(A, B, C, D, E) { a @0 :A; e @1 :E; }
+struct Uses { five @0 :Five(Text, Text, Text, Text, Item); }
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" generics.capnp
+  grep -q 'five_text_text_text_text_t' generics_capnp.f90
+  capnp compile "${CAPNP_INC[@]}" -oc++ generics.capnp
+  grep -q 'template <typename A, typename B, typename C, typename D, typename E>' generics.capnp.h
+  echo "g6 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
   g3) g34 g3 ;;
   g4) g34 g4 ;;
   g5) g5 ;;
-  all) g1; g2; g34 g3; g34 g4; g5 ;;
+  g6) g6 ;;
+  all) g1; g2; g34 g3; g34 g4; g5; g6 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac

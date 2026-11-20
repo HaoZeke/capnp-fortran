@@ -39,7 +39,13 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      type(capnp_ptr_t) :: bindings(0:3)
+      !> Identifies the instantiation: the generic node and the node id of
+      !> every binding, so two nodes that share a name stay apart.
+      character(len=:), allocatable :: full
+      !> 0-based binding list. Sized to the brand, so arity is not capped.
+      type(capnp_ptr_t), allocatable :: bindings(:)
+      !> The instantiation whose parameters each binding refers to, or 0.
+      integer, allocatable :: bctx(:)
       integer :: nbind = 0
    end type inst_t
    type(inst_t) :: g_insts(64)
@@ -218,6 +224,16 @@ contains
       ! Final clamp in case the fixed form still grows via suffixes elsewhere.
       o = ident_fit(o, F_IDENT_MAX - F_IDENT_SUFFIX)
    end subroutine node_fname
+
+   pure function lowcase(s) result(o)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: o
+      integer :: i
+      o = s
+      do i = 1, len(o)
+         if (o(i:i) >= 'A' .and. o(i:i) <= 'Z') o(i:i) = achar(iachar(o(i:i)) + 32)
+      end do
+   end function lowcase
 
    pure function upcase(s) result(o)
       character(len=*), intent(in) :: s
@@ -841,7 +857,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: t, dv
       character(len=:), allocatable :: fn, an, gset
-      integer :: disc, gidx
+      integer :: disc, gidx, ctx, saved
       integer(int64) :: off
 
       call field_name(f, fn, err)
@@ -878,6 +894,8 @@ contains
       if (err /= CAPNP_OK) return
       ! Inside a brand instantiation, generic parameters of the current
       ! generic scope resolve to their bound types.
+      ! The bound type is read in the instantiation it was written in.
+      ctx = g_cur_inst
       if (g_cur_inst > 0) then
          if (type_which(t) == TYPE_ANY_POINTER) then
             if (type_anyptr_which(t) == ANYPTR_PARAMETER) then
@@ -886,8 +904,10 @@ contains
                   if (type_param_index(t) < g_insts(g_cur_inst)%nbind) then
                      ! Unbound parameters keep their AnyPointer accessors.
                      if (g_insts(g_cur_inst)%bindings(type_param_index(t))%kind &
-                         /= CAPNP_PK_NULL) &
+                         /= CAPNP_PK_NULL) then
+                        ctx = g_insts(g_cur_inst)%bctx(type_param_index(t))
                         t = g_insts(g_cur_inst)%bindings(type_param_index(t))
+                     end if
                   end if
                end if
             end if
@@ -897,6 +917,8 @@ contains
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
 
+      saved = g_cur_inst
+      g_cur_inst = ctx
       select case (type_which(t))
       case (TYPE_VOID)
          if (disc /= NO_DISCRIMINANT) then
@@ -935,6 +957,7 @@ contains
                 itoa(int(type_which(t), int64)))
          call w('')
       end select
+      g_cur_inst = saved
    end subroutine emit_field
 
    !> Serialize a Value's default object into a standalone message blob and
@@ -1462,15 +1485,32 @@ contains
       integer, intent(in) :: gidx
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: b, scopes, sc, binds, bd
-      type(capnp_ptr_t) :: btypes(0:3)
-      character(len=:), allocatable :: gname, part
-      integer(int64) :: i, j
-      integer :: n, k, bidx
+      type(capnp_ptr_t) :: b
       err = CAPNP_OK
       o = ''
       b = type_brand(t, err)
       if (err /= CAPNP_OK) return
+      call inst_from_brand(gidx, b, o, err)
+   end subroutine inst_name_for
+
+   !> Register one (generic node, brand) instantiation. Bindings are kept
+   !> in full: capnpc-c++.c++ emits one template parameter per schema
+   !> parameter, with no fixed arity.
+   recursive subroutine inst_from_brand(gidx, b, o, err, key)
+      integer, intent(in) :: gidx
+      type(capnp_ptr_t), intent(in) :: b
+      character(len=:), allocatable, intent(out) :: o
+      integer, intent(out) :: err
+      character(len=:), allocatable, intent(out), optional :: key
+      type(capnp_ptr_t) :: scopes, sc, binds, bd
+      type(capnp_ptr_t), allocatable :: btypes(:)
+      integer, allocatable :: bctx(:)
+      character(len=:), allocatable :: gname, part, kpart, ikey
+      integer(int64) :: i, j
+      integer :: n, k, prev
+      err = CAPNP_OK
+      o = ''
+      if (present(key)) key = ''
       if (b%kind == CAPNP_PK_NULL) return
       scopes = brand_scopes(b, err)
       if (err /= CAPNP_OK) return
@@ -1482,22 +1522,30 @@ contains
          if (scope_which(sc) /= SCOPE_BIND) cycle
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
-         do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
+         if (allocated(btypes)) deallocate (btypes)
+         if (allocated(bctx)) deallocate (bctx)
+         allocate (btypes(0:capnp_list_len(binds) - 1_int64), &
+                   bctx(0:capnp_list_len(binds) - 1_int64))
+         do j = 0_int64, capnp_list_len(binds) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)
             if (err /= CAPNP_OK) return
+            bctx(n) = g_cur_inst
             if (binding_which(bd) == BINDING_BOUND_TYPE) then
                btypes(n) = binding_type(bd, err)
                if (err /= CAPNP_OK) return
                ! A binding that is itself a parameter of the generic being
                ! instantiated resolves through the current instantiation,
-               ! so nested branded uses (Box(T) inside Nest(T)) settle.
+               ! so nested branded uses (Box(T) inside Nest(T)) settle. The
+               ! binding it finds keeps the context it was written in.
                if (g_cur_inst > 0) then
                   if (type_which(btypes(n)) == TYPE_ANY_POINTER) then
                      if (type_anyptr_which(btypes(n)) == ANYPTR_PARAMETER) then
                         if (type_param_scope_id(btypes(n)) == &
                             g_nodes(g_insts(g_cur_inst)%gidx)%id .and. &
-                            type_param_index(btypes(n)) < g_insts(g_cur_inst)%nbind) &
+                            type_param_index(btypes(n)) < g_insts(g_cur_inst)%nbind) then
+                           bctx(n) = g_insts(g_cur_inst)%bctx(type_param_index(btypes(n)))
                            btypes(n) = g_insts(g_cur_inst)%bindings(type_param_index(btypes(n)))
+                        end if
                      end if
                   end if
                end if
@@ -1511,13 +1559,63 @@ contains
       call node_fname(g_nodes(gidx)%p, gname, err)
       if (err /= CAPNP_OK) return
       o = gname
+      ikey = itoa(g_nodes(gidx)%id)//'<'
+      prev = g_cur_inst
       do k = 0, n - 1
-         call inst_suffix(btypes(k), part, err)
+         g_cur_inst = bctx(k)
+         call inst_suffix(btypes(k), part, kpart, err)
+         g_cur_inst = prev
          if (err /= CAPNP_OK) return
-         o = o//'_'//part
+         if (k < 4) o = o//'_'//part
+         ikey = ikey//kpart//','
       end do
-      ! Long names truncate deterministically (content checksum), so a
-      ! second sighting of the same instantiation dedups to one entry.
+      ikey = ikey//'>'
+      call register_inst(gidx, n, btypes, bctx, o, ikey, err)
+      if (present(key)) key = ikey
+   end subroutine inst_from_brand
+
+   !> Whether a node of this file takes the name. A struct instantiation
+   !> only meets another struct: other kinds, and a group, never declare
+   !> its `_t` type.
+   function names_a_node(name, any_kind) result(yes)
+      character(len=*), intent(in) :: name
+      logical, intent(in) :: any_kind
+      logical :: yes
+      character(len=:), allocatable :: dn, fn
+      integer :: i, err
+      yes = .false.
+      do i = 1, size(g_nodes)
+         call node_display_name(g_nodes(i)%p, dn, err)
+         if (err /= CAPNP_OK) cycle
+         if (.not. (len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1)) cycle
+         if (.not. any_kind) then
+            if (node_which(g_nodes(i)%p) /= NODE_STRUCT) cycle
+            if (node_struct_is_group(g_nodes(i)%p)) cycle
+         end if
+         call node_fname(g_nodes(i)%p, fn, err)
+         if (err /= CAPNP_OK) cycle
+         if (lowcase(fn) == lowcase(name)) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function names_a_node
+
+   !> Register an instantiation under the name o built from its bindings.
+   !> A long name truncates deterministically, a second sighting of the
+   !> same instantiation finds its entry, and a different instantiation
+   !> that truncates to a taken name gets a counter.
+   subroutine register_inst(gidx, n, btypes, bctx, o, full, err)
+      integer, intent(in) :: gidx, n
+      type(capnp_ptr_t), intent(in) :: btypes(0:)
+      integer, intent(in) :: bctx(0:)
+      character(len=:), allocatable, intent(inout) :: o
+      character(len=*), intent(in) :: full
+      integer, intent(out) :: err
+      character(len=:), allocatable :: base
+      integer :: k, j, bidx
+      logical :: taken
+      err = CAPNP_OK
       if (len(o) > 32) then
          bidx = 0
          do k = 1, len(o)
@@ -1526,7 +1624,22 @@ contains
          o = o(1:28)//'_'//itoa(int(bidx, int64))
       end if
       do k = 1, g_ninsts
-         if (g_insts(k)%name == o) return
+         if (g_insts(k)%gidx == gidx .and. g_insts(k)%full == full) then
+            o = g_insts(k)%name
+            return
+         end if
+      end do
+      base = o
+      j = 1
+      do
+         taken = .false.
+         do k = 1, g_ninsts
+            if (g_insts(k)%name == o) taken = .true.
+         end do
+         if (.not. taken) taken = names_a_node(o, node_which(g_nodes(gidx)%p) == NODE_INTERFACE)
+         if (.not. taken) exit
+         j = j + 1
+         o = base//'_'//itoa(int(j, int64))
       end do
       if (g_ninsts >= size(g_insts)) then
          err = CAPNP_ERR_ALLOC
@@ -1535,24 +1648,32 @@ contains
       g_ninsts = g_ninsts + 1
       g_insts(g_ninsts)%gidx = gidx
       g_insts(g_ninsts)%name = o
+      g_insts(g_ninsts)%full = full
       g_insts(g_ninsts)%nbind = n
+      if (allocated(g_insts(g_ninsts)%bindings)) &
+         deallocate (g_insts(g_ninsts)%bindings)
+      allocate (g_insts(g_ninsts)%bindings(0:n - 1))
+      if (allocated(g_insts(g_ninsts)%bctx)) deallocate (g_insts(g_ninsts)%bctx)
+      allocate (g_insts(g_ninsts)%bctx(0:n - 1))
       do k = 0, n - 1
          g_insts(g_ninsts)%bindings(k) = btypes(k)
+         g_insts(g_ninsts)%bctx(k) = bctx(k)
       end do
-   end subroutine inst_name_for
+   end subroutine register_inst
 
    !> Name fragment for one binding type. Lists recurse into their
    !> element so distinct list bindings get distinct instantiations.
-   recursive subroutine inst_suffix(bt, part, err)
+   recursive subroutine inst_suffix(bt, part, key, err)
       type(capnp_ptr_t), intent(in) :: bt
-      character(len=:), allocatable, intent(out) :: part
+      character(len=:), allocatable, intent(out) :: part, key
       integer, intent(out) :: err
       type(capnp_ptr_t) :: et
-      character(len=:), allocatable :: ep
+      character(len=:), allocatable :: ep, ek
       integer :: idx
       err = CAPNP_OK
       if (bt%kind == CAPNP_PK_NULL) then
          part = 'any'
+         key = part
          return
       end if
       select case (type_which(bt))
@@ -1573,9 +1694,11 @@ contains
       case (TYPE_LIST)
          et = type_list_element(bt, err)
          if (err /= CAPNP_OK) return
-         call inst_suffix(et, ep, err)
+         call inst_suffix(et, ep, ek, err)
          if (err /= CAPNP_OK) return
          part = 'list_'//ep
+         key = 'list_'//ek
+         return
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
          idx = find_node(type_type_id(bt))
          if (idx == 0) then
@@ -1585,9 +1708,25 @@ contains
          call note_import(idx, err)
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(idx)%p, part, err)
+         if (err /= CAPNP_OK) return
+         key = 'n'//itoa(g_nodes(idx)%id)
+         ! A branded argument is its own instantiation: Box(Text) and
+         ! Box(Data) must give distinct suffixes.
+         if (type_which(bt) /= TYPE_ENUM) then
+            et = type_brand(bt, err)
+            if (err /= CAPNP_OK) return
+            call inst_from_brand(idx, et, ep, err, ek)
+            if (err /= CAPNP_OK) return
+            if (len(ep) > 0) then
+               part = ep
+               key = ek
+            end if
+         end if
+         return
       case default
          part = 'any'
       end select
+      key = part
    end subroutine inst_suffix
 
    !> Handle types and size parameters for every instantiation.
