@@ -33,6 +33,7 @@ contains
            new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
            new_unittest("far-landing-pad-zero", test_far_landing_pad_zero), &
            new_unittest("cross-message-copy-clears-slot", test_cross_message_copy_clears_slot), &
+           new_unittest("overwrite-zeroing", test_overwrite_zeroing), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -793,6 +794,86 @@ contains
       call capnp_message_free(src)
       call capnp_message_free(rsrc)
    end subroutine test_cross_message_copy_clears_slot
+
+   subroutine test_overwrite_zeroing(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, child
+      integer(int64) :: slot, far_w, pad_off
+      integer :: err, pad_seg
+
+      ! Recursive zeroing: overwriting root clears child body.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 1, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 123_int64, err)
+      call capnp_setp(root, 0, child, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(child%seg)%bytes, child%off) == 0_int64, &
+                 'overwrite: recursive target is zeroed')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Same-segment self-alias guard: writing the same target retains it.
+      root = capnp_new_struct(msg, 1, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 456_int64, err)
+      call capnp_setp(root, 0, child, err)
+      call capnp_setp(root, 0, child, err)
+      call check(error, err == CAPNP_OK .and. &
+                 capnp_get_i64(child, 0_int64) == 456_int64, &
+                 'overwrite: self-alias retains the target')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! Cross-segment far overwrite: zeroes both remote body and landing pad.
+      call capnp_message_init_builder(msg, err, first_words=2_int64)
+      root = capnp_new_struct(msg, 0, 1, err)
+      call capnp_set_root(msg, root, err)
+      child = capnp_new_struct(msg, 2, 0, err)
+      call check(error, child%seg /= root%seg, 'overwrite: child on second segment')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+      call capnp_set_i64(child, 0_int64, 789_int64, err)
+      call capnp_setp(root, 0, child, err)
+      slot = root%off + int(root%dwords, int64)*8_int64
+      far_w = cp_get_i64(msg%segs(root%seg)%bytes, slot)
+      call check(error, wp_kind(far_w) == CAPNP_WK_FAR .and. .not. wp_far_two(far_w), &
+                 'overwrite: cross-segment slot encodes single far pointer')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+      pad_seg = int(wp_far_seg(far_w)) + 1
+      pad_off = wp_far_off(far_w)*8_int64
+
+      ! Cross-segment far self-alias guard retains remote target.
+      call capnp_setp(root, 0, child, err)
+      call check(error, err == CAPNP_OK .and. &
+                 capnp_get_i64(child, 0_int64) == 789_int64, &
+                 'overwrite: far self-alias retains the target')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         return
+      end if
+
+      ! Overwriting far slot with null zeroes landing pad and remote body.
+      far_w = cp_get_i64(msg%segs(root%seg)%bytes, slot)
+      pad_seg = int(wp_far_seg(far_w)) + 1
+      pad_off = wp_far_off(far_w)*8_int64
+      call capnp_setp(root, 0, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(child%seg)%bytes, child%off) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(pad_seg)%bytes, pad_off) == 0_int64, &
+                 'overwrite: far overwrite zeroes target and landing pad')
+      call capnp_message_free(msg)
+   end subroutine test_overwrite_zeroing
    !> A single far whose landing pad is another far is not a struct.
    !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
    subroutine test_far_chain_rejected(error)
