@@ -2752,7 +2752,7 @@ contains
       call capnp_message_free(owner_msg)
    end subroutine t_persistent_save
 
-   !> An unknown Resolve is ignored. sendResultsTo.yourself holds the
+   !> An unknown Resolve releases its incoming capability. sendResultsTo.yourself holds the
    !> results and returns resultsSentElsewhere.
    subroutine t_resolve_and_tail_calls(error)
       type(error_type), allocatable, intent(inout) :: error
@@ -2768,8 +2768,8 @@ contains
       integer(int64) :: qb, qy
       logical :: readable
 
-      ! A Resolve for an import this vat has never seen is ignored.
-      ! Nothing is written back, so the client must not wait for one.
+      ! A Resolve for an import this vat has never seen drops the incoming
+      ! senderHosted capability, so its sender receives Release(id, 1).
       call capnp_message_init_builder(m, err)
       msg = message_new_root(m, err)
       rv = message_resolve_init(msg, err)
@@ -2781,9 +2781,8 @@ contains
       call rpc_pump_once(srv, err)
       call check_(error, err == CAPNP_OK .and. rpc_conn_alive(srv), &
                   'rpc: unknown resolve is ignored')
-      call px_poll_in(cli%fd, 0, readable, err)
-      call check_(error, err == CAPNP_OK .and. .not. readable, &
-                  'rpc: unknown resolve sends nothing')
+      call check_(error, next_is_release_of(0_int64, err), &
+                  'rpc: unknown resolve releases incoming capability')
 
       ! sendResultsTo.yourself runs the call and holds the results.
       ! Nothing is written until a takeFrom names that answer.
@@ -5345,7 +5344,8 @@ contains
       call rpc_conn_close(sconn)
    end subroutine t_tail_return_with_exception
 
-   !> A second Resolve for a promise that already resolved is ignored.
+   !> A second Resolve for a promise that already resolved releases the
+   !> capability it carries without retargeting the original promise.
    subroutine t_resolve_second_ignored(error)
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cconn, sconn
@@ -5375,9 +5375,8 @@ contains
       call send_resolve_hosted(sconn%fd, 4_int64, 2_int64, e)
       call rpc_pump_once(cconn, e)
       call check_(error, rpc_conn_alive(cconn), 'resolve: second resolve is ignored')
-      call px_poll_in(sconn%fd, 0, readable, e)
-      call check_(error, e == CAPNP_OK .and. .not. readable, &
-                  'resolve: second resolve sends nothing')
+      call drain_one(sconn%fd, error, &
+                     'resolve: second resolve releases incoming capability')
       call rpc_call_begin(cconn, pcap, ECHO_IFACE, 0, m, params, qcall, e)
       s = capnp_new_struct(m, 1, 1, e)
       call capnp_set_i64(s, 0_int64, 4_int64, e)

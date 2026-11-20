@@ -665,6 +665,15 @@ contains
          trim(rpc_conn_reason(conn))
       call check_(back .and. e == CAPNP_OK .and. val == 42_int32 .and. .not. conn%dead, &
                   'tail worker ping is 42')
+      if (nfail > 0) return
+      call rpc_finish_send(conn, qping, .true., e)
+      if (e == CAPNP_OK) call drain(1)
+      call rpc_finish_send(conn, q, .false., e)
+      if (e == CAPNP_OK) call drain(1)
+      call check_(e == CAPNP_OK .and. got%id >= 0_int64 .and. &
+                  got%id < int(size(conn%exports), int64) .and. &
+                  .not. conn%exports(int(got%id))%used, &
+                  'tail worker Finish releases returned export')
    end subroutine scenario_tail_worker
 
 end program probe_client

@@ -170,6 +170,7 @@ module capnp_rpc
       class(rpc_membrane_policy_t), pointer :: policy => null()
       logical :: reverse = .false.
       logical :: owned = .false.
+      logical :: inner_owned = .false.
       !> Live export slots and provisions holding this owned wrapper.
       integer :: refs = 0
    contains
@@ -208,14 +209,29 @@ module capnp_rpc
 
    type :: rpc_export_slot_t
       logical :: used = .false.
+      !> References the peer may release on the wire.
       integer :: refcount = 0
+      !> Internal holds such as dispatch, reflected resolution, and Provide.
+      integer :: pins = 0
       class(*), pointer :: srv => null()
       !> True when dropping the last reference must deallocate srv.
       logical :: owned = .false.
+      !> True when another connection's export also owns srv after a
+      !> handoff. srv is deallocated when the last of them is dropped.
+      logical :: shared = .false.
       !> Dispatches of this server that have been entered and not left.
       !> drop_export will not deallocate while this is positive.
       integer :: dispatching = 0
    end type rpc_export_slot_t
+
+   !> Owners of a server that a handoff exported on two connections.
+   type :: rpc_shared_owner_t
+      class(*), pointer :: srv => null()
+      integer :: owners = 0
+      type(rpc_shared_owner_t), pointer :: next => null()
+   end type rpc_shared_owner_t
+
+   type(rpc_shared_owner_t), pointer :: g_shared_owners => null()
 
    type :: rpc_question_slot_t
       logical :: used = .false.
@@ -239,6 +255,8 @@ module capnp_rpc
    type :: rpc_answer_slot_t
       logical :: used = .false.
       logical :: has_results = .false.
+      !> Finish arrived while dispatch was still producing this answer.
+      logical :: finished = .false.
       !> Set only for a sendResultsTo.yourself call whose results are
       !> held for a later takeFromOtherQuestion.
       logical :: redirected = .false.
@@ -499,16 +517,12 @@ contains
       conn%transport => null()
       conn%fd = PX_BAD_FD
       conn%dead = .true.
-      ! The peer will not Release what it still imports. An export whose
-      ! dispatch is on the stack keeps that call's reference and is freed
-      ! when the call returns. Every other owned server is freed here.
+      ! The peer will not Release what it still imports. Internal pins keep
+      ! a dispatch, reflected capability, or provision alive independently
+      ! of the wire reference count.
       do i = 0, MAXE - 1
          if (.not. conn%exports(i)%used) cycle
-         if (conn%exports(i)%dispatching > 0) then
-            conn%exports(i)%refcount = conn%exports(i)%dispatching
-         else
-            call drop_export(conn, i, conn%exports(i)%refcount)
-         end if
+         call drop_export(conn, i, conn%exports(i)%refcount)
       end do
       do i = 0, MAXQ - 1
          if (conn%questions(i)%used) call capnp_message_free(conn%questions(i)%retmsg)
@@ -519,9 +533,6 @@ contains
       call free_hi_answers(conn)
       call free_imports(conn)
       if (associated(conn%vat)) call release_hosted_provisions(conn)
-      do i = 0, MAXE - 1
-         if (conn%exports(i)%used) call drop_export(conn, i, conn%exports(i)%refcount)
-      end do
       call free_pipe_waits(conn)
       call clear_joins(conn)
    end subroutine rpc_conn_close
@@ -563,24 +574,36 @@ contains
       class(rpc_membrane_policy_t), pointer, intent(in) :: policy
       logical, intent(in), optional :: reverse
       type(rpc_cap_t) :: wrapped
+      logical :: direction
       wrapped = cap
+      direction = .false.
+      if (present(reverse)) direction = reverse
+      if (associated(cap%membrane, policy)) then
+         if (cap%membrane_reverse .neqv. direction) then
+            wrapped%membrane => null()
+            wrapped%membrane_reverse = .false.
+         end if
+         return
+      end if
       wrapped%membrane => policy
-      wrapped%membrane_reverse = .false.
-      if (present(reverse)) wrapped%membrane_reverse = reverse
+      wrapped%membrane_reverse = direction
    end function rpc_membrane_cap
 
    !> Initialize a server wrapper. `inner` and `policy` must outlive the
    !> wrapper and every result capability exported through it.
-   subroutine rpc_membrane_server_init(wrapper, inner, policy, reverse)
+   subroutine rpc_membrane_server_init(wrapper, inner, policy, reverse, inner_owned)
       type(rpc_membrane_server_t), intent(out) :: wrapper
       class(rpc_server_t), pointer, intent(in) :: inner
       class(rpc_membrane_policy_t), pointer, intent(in) :: policy
       logical, intent(in), optional :: reverse
+      logical, intent(in), optional :: inner_owned
       wrapper%inner => inner
       wrapper%policy => policy
       wrapper%reverse = .false.
       wrapper%owned = .false.
+      wrapper%inner_owned = .false.
       if (present(reverse)) wrapper%reverse = reverse
+      if (present(inner_owned)) wrapper%inner_owned = inner_owned
    end subroutine rpc_membrane_server_init
 
    !> Revoke every client and server wrapper sharing this policy.
@@ -629,7 +652,7 @@ contains
       if (err /= CAPNP_OK) return
       do i = 0, ctx%nexp - 1
          call membrane_wrap_server_ref(ctx%staged(i)%s, self%policy, &
-                                       self%reverse, err)
+                                       self%reverse, err, ctx%staged(i)%owned)
          if (err /= CAPNP_OK) then
             call discard_unexported_wrappers(ctx)
             return
@@ -639,11 +662,12 @@ contains
 
    !> Wrap a result capability crossing the membrane. A wrapper crossing
    !> back through the same policy is unwrapped instead of doubled.
-   subroutine membrane_wrap_server_ref(srv, policy, reverse, err)
+   subroutine membrane_wrap_server_ref(srv, policy, reverse, err, inner_owned)
       class(*), pointer, intent(inout) :: srv
       class(rpc_membrane_policy_t), pointer, intent(in) :: policy
       logical, intent(in) :: reverse
       integer, intent(out) :: err
+      logical, intent(in), optional :: inner_owned
       type(rpc_membrane_server_t), pointer :: wrapper
       class(rpc_server_t), pointer :: inner
       err = CAPNP_OK
@@ -655,7 +679,10 @@ contains
             ! This pointer is the only holder of an owned wrapper that
             ! was never exported. Dropping it on the floor leaks the
             ! wrapper, and a later use of that memory is not the inner.
-            if (existing%owned .and. existing%refs <= 0) deallocate (existing)
+            if (existing%owned .and. existing%refs <= 0) then
+               existing%inner_owned = .false.
+               deallocate (existing)
+            end if
             srv => inner
             return
          end if
@@ -668,7 +695,7 @@ contains
          return
       end select
       allocate (wrapper)
-      call rpc_membrane_server_init(wrapper, inner, policy, reverse)
+      call rpc_membrane_server_init(wrapper, inner, policy, reverse, inner_owned)
       wrapper%owned = .true.
       wrapper%refs = 0
       g_membrane_owned_live = g_membrane_owned_live + 1
@@ -703,7 +730,11 @@ contains
       type is (rpc_membrane_server_t)
          if (srv%owned) then
             srv%refs = srv%refs - 1
-            if (srv%refs <= 0) deallocate (srv)
+            if (srv%refs <= 0) then
+               if (srv%inner_owned .and. associated(srv%inner)) deallocate (srv%inner)
+               srv%inner => null()
+               deallocate (srv)
+            end if
          end if
       end select
       srv => null()
@@ -717,6 +748,8 @@ contains
       select type (srv)
       type is (rpc_membrane_server_t)
          if (srv%owned .and. srv%refs <= 0) then
+            if (srv%inner_owned .and. associated(srv%inner)) deallocate (srv%inner)
+            srv%inner => null()
             deallocate (srv)
             srv => null()
          end if
@@ -748,17 +781,14 @@ contains
       ctx%nexp = 0
    end subroutine rollback_staged
 
-   !> Drop both pins a provision took in handle_provide.
+   !> Drop the internal provision pin without changing wire references.
    subroutine release_provision_pin(slot)
       type(rpc_provision_slot_t), intent(inout) :: slot
-      class(*), pointer :: held
       if (associated(slot%host) .and. slot%source_eid >= 0 .and. &
           slot%source_eid < MAXE) then
-         call drop_export(slot%host, slot%source_eid, 1)
+         call drop_export_pin(slot%host, slot%source_eid)
       end if
-      held => slot%srv
       slot%srv => null()
-      call release_server(held)
       slot%host => null()
       slot%source_eid = -1
    end subroutine release_provision_pin
@@ -1257,17 +1287,32 @@ contains
          ctx%results = return_results_init(r, err)
          dispatched = .false.
          derr = CAPNP_ERR_KIND
+         ! Match wire dispatch: keep the export alive while application code
+         ! pumps the connection and may receive Release or close it.
+         call pin_export(conn, export_id)
+         conn%exports(export_id)%dispatching = conn%exports(export_id)%dispatching + 1
          select type (s => conn%exports(export_id)%srv)
          class is (rpc_server_t)
             call s%dispatch(ctx, derr)
             dispatched = .true.
          end select
+         conn%exports(export_id)%dispatching = conn%exports(export_id)%dispatching - 1
+         call drop_export_pin(conn, export_id)
+         if (conn%dead .or. .not. associated(conn%transport)) then
+            call release_unflushed(conn, ctx)
+            call rollback_staged(conn, ctx)
+            call capnp_message_free(rm)
+            err = RPC_ERR_DEAD
+            return
+         end if
          if (.not. dispatched .or. derr /= CAPNP_OK) then
-            call discard_unexported_wrappers(ctx)
+            call release_unflushed(conn, ctx)
+            call rollback_staged(conn, ctx)
             call fill_exception(r, 'method raised error', err)
          else
             call flush_cap_table(conn, ctx, err)
             if (err /= CAPNP_OK) then
+               call release_unflushed(conn, ctx)
                call rollback_staged(conn, ctx)
                call fill_exception(r, 'export failed', err)
             end if
@@ -1559,6 +1604,31 @@ contains
          q => nxt
       end do
    end subroutine drain_embargo_queue
+
+   !> Forget a pipelined call that is still waiting on its target
+   !> question, so a canceled call is not dispatched later.
+   subroutine drop_pipe_wait(conn, qid)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_pipe_wait_t), pointer :: node, prev, nxt
+      prev => null()
+      node => conn%pipe_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%call_qid == qid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%pipe_wait => nxt
+            end if
+            call capnp_message_free(node%msg)
+            deallocate (node)
+         else
+            prev => node
+         end if
+         node => nxt
+      end do
+   end subroutine drop_pipe_wait
 
    subroutine drop_queued_call(conn, qid)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -1953,48 +2023,6 @@ contains
          ! never requests.
          conn%abort_reason = 'results sent elsewhere (unrequested tail call)'
          err = RPC_ERR_EXCEPTION
-      case (RETURN_TAKE_FROM_OTHER_QUESTION_TAG)
-         block
-            integer(int64) :: other
-            type(message_t) :: held
-            type(return_t) :: hr
-            type(rpc_answer_slot_t), pointer :: slot
-            logical :: found
-            other = return_take_from_other_question_get(r)
-            call answer_find(conn, other, slot, found)
-            ! .and. and .or. always evaluate both sides, so a missing
-            ! slot must be rejected before it is dereferenced.
-            if (err /= CAPNP_OK .or. .not. found) then
-               call abort_conn(conn, &
-                               '`Return.takeFromOtherQuestion` had invalid answer ID.', &
-                               err)
-               return
-            end if
-            if (.not. associated(slot) .or. .not. slot%used) then
-               call abort_conn(conn, &
-                               '`Return.takeFromOtherQuestion` had invalid answer ID.', &
-                               err)
-               return
-            end if
-            if (.not. slot%redirected .or. .not. slot%has_results) then
-               call abort_conn(conn, &
-                               '`Return.takeFromOtherQuestion` referenced a call that ' // &
-                               'did not use `sendResultsTo.yourself`.', err)
-               return
-            end if
-            held = message_read_root(slot%retmsg, err)
-            if (err /= CAPNP_OK) return
-            hr = message_return_get(held, err)
-            if (err /= CAPNP_OK) return
-            if (return_which(hr) /= RETURN_RESULTS_TAG) then
-               call abort_conn(conn, &
-                               '`Return.takeFromOtherQuestion` referenced a call that ' // &
-                               'did not use `sendResultsTo.yourself`.', err)
-               return
-            end if
-            pl = return_results_get(hr, err)
-            content = payload_content_get(pl, err)
-         end block
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -2187,6 +2215,7 @@ contains
       end if
       if (conn%questions(q)%local_call) then
          call drop_queued_call(conn, qid)
+         call drop_pipe_wait(conn, qid)
       else
          call capnp_message_init_builder(m, err)
          if (err /= CAPNP_OK) return
@@ -2201,7 +2230,12 @@ contains
       end if
       if (.not. conn%questions(q)%used) return
       if (conn%questions(q)%returned) then
+         call drop_finished_caps(conn, q)
          call capnp_message_free(conn%questions(q)%retmsg)
+         call question_slot_clear(conn%questions(q))
+      else if (conn%questions(q)%local_call) then
+         call fail_pipe_waits(conn, qid, err)
+         if (err /= CAPNP_OK) return
          call question_slot_clear(conn%questions(q))
       else
          ! Reserve the id until the matching Return arrives. Reusing it
@@ -2236,6 +2270,7 @@ contains
       type(rpc_answer_slot_t), intent(inout) :: slot
       slot%used = .false.
       slot%has_results = .false.
+      slot%finished = .false.
       slot%redirected = .false.
       slot%nexp = 0
       slot%exports = -1
@@ -2267,6 +2302,10 @@ contains
       node => conn%imports
       do while (associated(node))
          nxt => node%next
+         if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
+             node%resolved_id < int(MAXE, int64)) then
+            call drop_export_pin(conn, int(node%resolved_id))
+         end if
          deallocate (node)
          node => nxt
       end do
@@ -2345,6 +2384,11 @@ contains
       ! A released id can be handed out again. The old node would ignore
       ! the new Resolve and the new refs.
       if (node%released .or. node%refs <= 0) then
+         ! A receiverHosted resolution turned this id into a local client.
+         ! Its wire import was released, but application handles still name
+         ! this node and it owns an export pin. Never overwrite that local
+         ! identity when the peer reuses the released export id.
+         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) return
          node%refs = 1
          node%released = .false.
          node%received_call = .false.
@@ -2514,15 +2558,16 @@ contains
       integer, intent(out) :: err
       type(rpc_embargo_node_t), pointer :: emb
       integer(int64) :: eid
+      logical :: held
       err = CAPNP_OK
+      held = node%refs > 0 .and. .not. node%released
       node%resolved_id = local_id
       ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
       ! Without that ref a Release from the peer frees the object before
       ! the local call runs.
-      if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
+      if (held .and. local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
          if (conn%exports(int(local_id))%used) then
-            conn%exports(int(local_id))%refcount = &
-               conn%exports(int(local_id))%refcount + 1
+            call pin_export(conn, int(local_id))
             node%pinned = .true.
          end if
       end if
@@ -2545,6 +2590,22 @@ contains
       ! C++ drops the promise ImportClient after the Disembargo is sent.
       if (err == CAPNP_OK) call release_all_import(conn, node, err)
    end subroutine resolve_reflected
+
+   subroutine release_resolve_cap(conn, cd, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: cd
+      integer, intent(out) :: err
+      integer(int64) :: id
+      err = CAPNP_OK
+      id = -1_int64
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         id = cap_descriptor_sender_hosted_get(cd)
+      case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         id = cap_descriptor_sender_promise_get(cd)
+      end select
+      if (id >= 0_int64) call send_release(conn, id, 1_int64, err)
+   end subroutine release_resolve_cap
 
    !> Fulfill a promise import. An unknown id is ignored. CapDescriptor
    !> none and a Resolve for a settled import abort the connection.
@@ -2593,13 +2654,18 @@ contains
          return
       end if
       call import_find(conn, pid, node, found)
-      if (.not. found) return
+      if (.not. found) then
+         call release_resolve_cap(conn, cd, err)
+         return
+      end if
       ! A second Resolve arrives after the promise import has been
       ! superseded. C++ has already erased that import and ignores it.
       ! A hosted import that was never a promise is still an error.
       if (node%state /= IMP_PROMISE) then
          if (node%state == IMP_HOSTED) then
             call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
+         else
+            call release_resolve_cap(conn, cd, err)
          end if
          return
       end if
@@ -2857,7 +2923,7 @@ contains
       if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
          if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
              node%resolved_id < int(MAXE, int64)) then
-            call drop_export(conn, int(node%resolved_id), 1)
+            call drop_export_pin(conn, int(node%resolved_id))
             node%pinned = .false.
          end if
          return
@@ -3077,9 +3143,11 @@ contains
          if (.not. conn%exports(i)%used) then
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
+            conn%exports(i)%pins = 0
             call retain_server(srv)
             conn%exports(i)%srv => srv
             conn%exports(i)%owned = own
+            conn%exports(i)%shared = .false.
             eid = i
             return
          end if
@@ -3254,6 +3322,7 @@ contains
       if (.not. found) call answer_add_hi(conn, qid, slot)
       slot%used = .true.
       slot%has_results = .false.
+      slot%finished = .false.
       slot%redirected = .false.
       slot%nexp = 0
       slot%exports = -1
@@ -3288,10 +3357,9 @@ contains
          idx = rpc_ctx_export_cap(ctx, conn%bootstrap_srv, err)
          if (err == CAPNP_OK) then
             call payload_content_set(ctx%results, rpc_make_cap_ptr(rm, idx), err)
-            call flush_cap_table(conn, ctx, err)
+            if (err == CAPNP_OK) call flush_cap_table(conn, ctx, err)
          end if
          if (err /= CAPNP_OK) then
-            ! Exports added by the failed flush are already dropped.
             call release_unflushed(conn, ctx)
             call rollback_staged(conn, ctx)
             call fill_exception(r, 'export failed', err)
@@ -3312,11 +3380,12 @@ contains
       type(return_t) :: r
       integer(int64) :: qid
       integer :: derr, eid
-      logical :: dispatched
+      logical :: dispatched, elsewhere
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
       if (.not. claim_question(conn, qid, err)) return
+      elsewhere = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
       if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_THIRD_PARTY_TAG .or. &
           (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
            call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_YOURSELF_TAG)) then
@@ -3363,7 +3432,7 @@ contains
       if (err /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
          call fill_exception(r, 'no such capability', err)
-         call finish_answer(conn, qid, rm, ctx, err)
+         call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
          return
       end if
       ctx%interface_id = call_interface_id_get(c)
@@ -3373,7 +3442,7 @@ contains
       ctx%results = return_results_init(r, err)
       ! The call keeps one reference so Release or close cannot destroy
       ! the server between entering dispatch and leaving it.
-      conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+      call pin_export(conn, eid)
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching + 1
       dispatched = .false.
       derr = CAPNP_ERR_KIND
@@ -3400,10 +3469,8 @@ contains
          end if
       end if
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
-      call drop_export(conn, eid, 1)
-      call finish_answer(conn, qid, rm, ctx, err, &
-                         elsewhere=call_send_results_to_which(c) == &
-                         CALL_SEND_RESULTS_TO_YOURSELF_TAG)
+      call drop_export_pin(conn, eid)
+      call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
    end subroutine handle_call
 
    !> Find the export id a Call's target names: a direct export, or a
@@ -3680,7 +3747,10 @@ contains
       tgt = provide_target_get(pv, err)
       if (err /= CAPNP_OK) return
       call resolve_message_target(conn, tgt, eid, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call abort_conn(conn, 'provide: invalid imported capability', err)
+         return
+      end if
       if (eid < 0) then
          call send_answer_exception(conn, qid, 'provide: no such capability', err)
          return
@@ -3705,12 +3775,10 @@ contains
             conn%vat%provisions(i)%host => conn
             conn%vat%provisions(i)%qid = qid
             conn%vat%provisions(i)%embargoed = .false.
-            ! Two pins. The export count keeps the slot from being
-            ! reused while the arrangement is open. The object reference
-            ! keeps an owned wrapper alive even if a later Release
-            ! consumes every export ref, including this one.
-            conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
-            call retain_server(conn%exports(eid)%srv)
+            ! A provision is an internal hold, not a reference the peer may
+            ! release. Keeping it out of `refcount` preserves over-release
+            ! detection on the wire.
+            call pin_export(conn, eid)
             call send_empty_answer(conn, qid, err)
             return
          end if
@@ -3731,6 +3799,7 @@ contains
       type(capnp_ptr_t) :: pp
       integer(int64) :: qid, nonce
       integer :: i, eid, new_eid
+      logical :: take_ownership
 
       ac = message_accept_get(msg, err)
       if (err /= CAPNP_OK) return
@@ -3752,11 +3821,29 @@ contains
              .and. conn%vat%provisions(i)%nonce == nonce) then
             ! Export it here: the id the introducer used belongs to its
             ! own connection and means nothing on this one. A new slot
-            ! takes its own reference on an owned membrane.
-            new_eid = export_server(conn, conn%vat%provisions(i)%srv)
+            ! shares ownership when the source export owned the server.
+            take_ownership = .false.
+            if (associated(conn%vat%provisions(i)%host)) then
+               if (conn%vat%provisions(i)%source_eid >= 0 .and. &
+                   conn%vat%provisions(i)%source_eid < MAXE) then
+                  take_ownership = conn%vat%provisions(i)%host%exports( &
+                      conn%vat%provisions(i)%source_eid)%owned
+               end if
+            end if
+            new_eid = export_server(conn, conn%vat%provisions(i)%srv, take_ownership)
             if (new_eid < 0) then
                call send_answer_exception(conn, qid, 'accept: export table full', err)
                return
+            end if
+            if (take_ownership) then
+               ! The introducer's export stays an owner next to the new
+               ! one, so whichever is dropped last frees the server.
+               if (.not. (associated(conn%vat%provisions(i)%host, conn) .and. &
+                          new_eid == conn%vat%provisions(i)%source_eid)) then
+                  call share_export_owner(conn%vat%provisions(i)%host%exports( &
+                                          conn%vat%provisions(i)%source_eid))
+                  call share_export_owner(conn%exports(new_eid))
+               end if
             end if
             eid = new_eid
             conn%vat%provisions(i)%eid = new_eid
@@ -3985,7 +4072,10 @@ contains
       tgt = join_target_get(j, err)
       if (err /= CAPNP_OK) return
       call resolve_message_target(conn, tgt, eid, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call abort_conn(conn, 'join: invalid imported capability', err)
+         return
+      end if
 
       call join_slot_find(conn, jid, pcount, slot)
       if (slot < 0) then
@@ -4158,7 +4248,6 @@ contains
          exported = .false.
          do j = 0, MAXE - 1
             if (conn%exports(j)%used .and. associated(conn%exports(j)%srv, p)) then
-               conn%exports(j)%owned = .true.
                exported = .true.
                exit
             end if
@@ -4169,89 +4258,31 @@ contains
       end do
    end subroutine release_unflushed
 
-   !> Drop the exports `flush_cap_table` added and restore every export
-   !> that was already live.
-   !>
-   !> Cap'n Proto 1.4.0 answers a failure while building the results cap
-   !> table with an exception Return (`RpcCallContext::sendErrorReturn`,
-   !> and `fromException` on the bootstrap path) and does not publish
-   !> that table. The peer therefore has no export id to Release. An
-   !> owned server whose only export came from this flush is released
-   !> once. An export that already existed keeps the refcount and owned
-   !> flag it had on entry; its server stays.
-   subroutine rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
-      type(rpc_conn_t), intent(inout) :: conn
-      type(rpc_call_ctx_t), intent(inout) :: ctx
-      logical, intent(in) :: base_used(0:)
-      integer, intent(in) :: base_ref(0:)
-      logical, intent(in) :: base_owned(0:)
-      class(*), pointer :: p
-      integer :: i, j, delta
-      do j = 0, MAXE - 1
-         if (.not. base_used(j)) then
-            if (.not. conn%exports(j)%used) cycle
-            p => conn%exports(j)%srv
-            do i = 0, ctx%nexp - 1
-               if (associated(p)) then
-                  if (associated(ctx%staged(i)%s, p)) then
-                     ctx%staged(i)%s => null()
-                     ctx%staged(i)%owned = .false.
-                  end if
-               end if
-               if (ctx%staged_eids(i) == j) ctx%staged_eids(i) = -1
-            end do
-            call drop_export(conn, j, conn%exports(j)%refcount)
-         else if (conn%exports(j)%used) then
-            delta = conn%exports(j)%refcount - base_ref(j)
-            if (delta > 0) call drop_export(conn, j, delta)
-            if (conn%exports(j)%used) conn%exports(j)%owned = base_owned(j)
-            do i = 0, ctx%nexp - 1
-               if (ctx%staged_eids(i) == j) ctx%staged_eids(i) = -1
-            end do
-         end if
-      end do
-   end subroutine rollback_flushed_exports
-
    !> Allocate export ids for the staged servers and write the results
-   !> capTable. On failure the exports this flush added are dropped and
-   !> every pre-existing export is restored to its earlier refcount.
+   !> capTable. The caller owns failure rollback through `rollback_staged`;
+   !> keeping it in one place avoids erasing staged ownership information.
    subroutine flush_cap_table(conn, ctx, err)
       type(rpc_conn_t), intent(inout) :: conn
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
-      logical :: base_used(0:MAXE - 1)
-      integer :: base_ref(0:MAXE - 1)
-      logical :: base_owned(0:MAXE - 1)
-      integer :: i, eid, j
+      integer :: i, eid
       err = CAPNP_OK
       if (ctx%nexp == 0) return
-      do j = 0, MAXE - 1
-         base_used(j) = conn%exports(j)%used
-         base_ref(j) = conn%exports(j)%refcount
-         base_owned(j) = conn%exports(j)%owned
-      end do
       ctab = payload_cap_table_init(ctx%results, int(ctx%nexp, int64), err)
       if (err /= CAPNP_OK) return
       do i = 0, ctx%nexp - 1
          eid = export_server(conn, ctx%staged(i)%s, ctx%staged(i)%owned)
          if (eid < 0) then
-            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
             err = CAPNP_ERR_ALLOC
             return
          end if
          ctx%staged_eids(i) = eid
          cd%p = capnp_list_get_struct(ctab, i, err)
-         if (err /= CAPNP_OK) then
-            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
-            return
-         end if
+         if (err /= CAPNP_OK) return
          call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
-         if (err /= CAPNP_OK) then
-            call rollback_flushed_exports(conn, ctx, base_used, base_ref, base_owned)
-            return
-         end if
+         if (err /= CAPNP_OK) return
       end do
    end subroutine flush_cap_table
 
@@ -4310,6 +4341,16 @@ contains
       end if
       call answer_find(conn, qid, slot, found)
       if (.not. found) call answer_add_hi(conn, qid, slot)
+      if (slot%finished) then
+         do i = 0, ctx%nexp - 1
+            if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
+         end do
+         call capnp_message_free(rm)
+         call answer_slot_clear(slot)
+         if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+         err = CAPNP_OK
+         return
+      end if
       if (slot%has_results) then
          ! A question that already has a Return must not drop the
          ! exports of that earlier answer.
@@ -4320,9 +4361,13 @@ contains
          call abort_conn(conn, 'questionId is already in use', err)
          return
       end if
+      ! A handler may close the connection while it is running. There is no
+      ! peer to receive either ordinary or redirected results in that case.
+      if (conn%dead .or. .not. associated(conn%transport)) then
+         err = CAPNP_ERR_IO
       ! yourself results stay here until takeFromOtherQuestion. C++ sends
       ! resultsSentElsewhere from sendRedirectReturn, not from the call.
-      if (.not. hold) then
+      else if (.not. hold) then
          heldmsg = message_read_root(rm, herr)
          if (herr == CAPNP_OK) then
             if (message_which(heldmsg) == MESSAGE_RETURN_TAG) then
@@ -4385,7 +4430,6 @@ contains
       type(rpc_answer_slot_t), pointer :: slot
       logical :: found
       integer(int8), allocatable :: bytes(:)
-      integer :: i, eid
       call answer_find(conn, other, slot, found)
       if (.not. found .or. .not. associated(slot) .or. .not. slot%used) then
          call abort_conn(conn, &
@@ -4404,15 +4448,9 @@ contains
       if (err /= CAPNP_OK) return
       conn%questions(q)%returned = .true.
       conn%questions(q)%local_results = .true.
-      ! The question now holds the caps. Finish of the yourself call
-      ! still drops the answer's own refs.
-      do i = 0, slot%nexp - 1
-         eid = slot%exports(i)
-         if (eid >= 0 .and. eid < MAXE) then
-            if (conn%exports(eid)%used) &
-               conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
-         end if
-      end do
+      ! The redirected question takes over the answer's existing result
+      ! references. C++ sends Finish(releaseResultCaps=false) for the
+      ! yourself call, so adding another export reference leaks it.
       slot%redirected = .false.
       call send_results_elsewhere(conn, other, err)
    end subroutine adopt_redirected
@@ -4425,11 +4463,16 @@ contains
       integer, intent(out) :: err
       type(rpc_answer_slot_t), pointer :: slot
       logical :: found
+      integer :: i, eid
       err = CAPNP_OK
       call answer_find(conn, other, slot, found)
       if (.not. found) return
       if (.not. associated(slot) .or. .not. slot%used) return
       if (.not. slot%redirected .or. .not. slot%has_results) return
+      do i = 0, slot%nexp - 1
+         eid = slot%exports(i)
+         if (eid >= 0 .and. eid < MAXE) call drop_export(conn, eid, 1)
+      end do
       slot%redirected = .false.
       call send_results_elsewhere(conn, other, err)
    end subroutine release_redirected
@@ -4613,6 +4656,10 @@ contains
       call answer_find(conn, qid, jslot, jfound)
       if (.not. jfound) return
       if (.not. jslot%used) return
+      if (.not. jslot%has_results) then
+         jslot%finished = .true.
+         return
+      end if
       if (finish_release_result_caps_get(f)) then
          do i = 0, jslot%nexp - 1
             eid = jslot%exports(i)
@@ -4656,6 +4703,105 @@ contains
       call drop_export(conn, id, int(nref))
    end subroutine handle_release
 
+   subroutine pin_export(conn, eid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: eid
+      if (eid < 0 .or. eid >= MAXE) return
+      if (.not. conn%exports(eid)%used) return
+      conn%exports(eid)%pins = conn%exports(eid)%pins + 1
+   end subroutine pin_export
+
+   !> Count one more export that owns `srv` after a handoff.
+   subroutine shared_owner_add(srv)
+      class(*), pointer, intent(in) :: srv
+      type(rpc_shared_owner_t), pointer :: node
+      node => g_shared_owners
+      do while (associated(node))
+         if (associated(node%srv, srv)) then
+            node%owners = node%owners + 1
+            return
+         end if
+         node => node%next
+      end do
+      allocate (node)
+      node%srv => srv
+      node%owners = 1
+      node%next => g_shared_owners
+      g_shared_owners => node
+   end subroutine shared_owner_add
+
+   !> Drop one owning export of `srv`. True when it was the last one.
+   function shared_owner_drop(srv) result(last)
+      class(*), pointer, intent(in) :: srv
+      logical :: last
+      type(rpc_shared_owner_t), pointer :: node, prev
+      last = .true.
+      prev => null()
+      node => g_shared_owners
+      do while (associated(node))
+         if (associated(node%srv, srv)) then
+            node%owners = node%owners - 1
+            last = node%owners <= 0
+            if (last) then
+               if (associated(prev)) then
+                  prev%next => node%next
+               else
+                  g_shared_owners => node%next
+               end if
+               deallocate (node)
+            end if
+            return
+         end if
+         prev => node
+         node => node%next
+      end do
+   end function shared_owner_drop
+
+   subroutine share_export_owner(slot)
+      type(rpc_export_slot_t), intent(inout) :: slot
+      if (slot%shared .or. .not. slot%owned) return
+      call shared_owner_add(slot%srv)
+      slot%shared = .true.
+   end subroutine share_export_owner
+
+   !> Deallocate the server of an owned export being dropped, unless a
+   !> handoff left another export that still owns it.
+   subroutine free_owned_export(slot, held)
+      type(rpc_export_slot_t), intent(in) :: slot
+      class(*), pointer, intent(inout) :: held
+      logical :: last
+      last = .true.
+      if (slot%shared) last = shared_owner_drop(held)
+      if (last) deallocate (held)
+      held => null()
+   end subroutine free_owned_export
+
+   subroutine drop_export_pin(conn, eid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: eid
+      class(*), pointer :: held
+      if (eid < 0 .or. eid >= MAXE) return
+      if (.not. conn%exports(eid)%used) return
+      if (conn%exports(eid)%pins <= 0) return
+      conn%exports(eid)%pins = conn%exports(eid)%pins - 1
+      if (conn%exports(eid)%refcount > 0 .or. conn%exports(eid)%pins > 0) return
+      held => conn%exports(eid)%srv
+      select type (held)
+      type is (rpc_membrane_server_t)
+      class default
+         if (conn%exports(eid)%owned .and. associated(held)) &
+            call free_owned_export(conn%exports(eid), held)
+      end select
+      conn%exports(eid)%used = .false.
+      conn%exports(eid)%owned = .false.
+      conn%exports(eid)%shared = .false.
+      conn%exports(eid)%srv => null()
+      conn%exports(eid)%refcount = 0
+      conn%exports(eid)%pins = 0
+      conn%exports(eid)%dispatching = 0
+      call release_server(held)
+   end subroutine drop_export_pin
+
    subroutine drop_export(conn, eid, count)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: eid, count
@@ -4665,22 +4811,23 @@ contains
       if (.not. conn%exports(eid)%used) return
       if (count <= 0 .or. count > conn%exports(eid)%refcount) return
       left = conn%exports(eid)%refcount - count
-      ! A dispatch still on the stack owns one reference per entry.
-      if (left < conn%exports(eid)%dispatching) left = conn%exports(eid)%dispatching
       conn%exports(eid)%refcount = left
-      if (conn%exports(eid)%refcount <= 0) then
+      if (conn%exports(eid)%refcount <= 0 .and. conn%exports(eid)%pins <= 0) then
          held => conn%exports(eid)%srv
          ! Membranes use their own refcount. Any other owned export is
          ! freed here so close drops a server the peer never Releases.
          select type (held)
          type is (rpc_membrane_server_t)
          class default
-            if (conn%exports(eid)%owned .and. associated(held)) deallocate (held)
+            if (conn%exports(eid)%owned .and. associated(held)) &
+               call free_owned_export(conn%exports(eid), held)
          end select
          conn%exports(eid)%used = .false.
          conn%exports(eid)%owned = .false.
+         conn%exports(eid)%shared = .false.
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
+         conn%exports(eid)%pins = 0
          conn%exports(eid)%dispatching = 0
          call release_server(held)
       end if

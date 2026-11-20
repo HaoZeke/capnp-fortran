@@ -8,6 +8,7 @@ module test_rpc_lifetime
    use rpc_capnp
    use capnp_posix
    use capnp_rpc
+   use capnp_rpc_transport
    implicit none
    private
 
@@ -40,7 +41,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(9))
+      allocate (testsuite(21))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -57,8 +58,32 @@ contains
       testsuite(7)%test => run_partial_flush
       testsuite(8)%name = "failed flush keeps a reused export"
       testsuite(8)%test => run_partial_reused
-      testsuite(9)%name = "local chained pipelines preserve call order"
-      testsuite(9)%test => run_local_pipeline_order
+      testsuite(9)%name = "closed tail dispatch drops staged owned server"
+      testsuite(9)%test => run_closed_tail_dispatch
+      testsuite(10)%name = "local dispatch failure releases staged server"
+      testsuite(10)%test => run_local_dispatch_failure
+      testsuite(11)%name = "local flush failure releases staged server"
+      testsuite(11)%test => run_local_flush_failure
+      testsuite(12)%name = "local chained pipelines preserve call order"
+      testsuite(12)%test => run_local_pipeline_order
+      testsuite(13)%name = "closed pipeline dispatch frees queued calls"
+      testsuite(13)%test => run_pipeline_close
+      testsuite(14)%name = "canceled local pipeline call does not run"
+      testsuite(14)%test => run_cancel_pipeline
+      testsuite(15)%name = "canceled local call releases its result"
+      testsuite(15)%test => run_cancel_returned
+      testsuite(16)%name = "owned handoff outlives release before accept"
+      testsuite(16)%test => run_handoff_release_before
+      testsuite(17)%name = "owned handoff outlives release after accept"
+      testsuite(17)%test => run_handoff_release_after
+      testsuite(18)%name = "provide with an invalid import aborts"
+      testsuite(18)%test => run_provide_invalid_import
+      testsuite(19)%name = "yourself call to a missing answer is held"
+      testsuite(19)%test => run_yourself_missing_answer
+      testsuite(20)%name = "owned handoff outlives release by the recipient"
+      testsuite(20)%test => run_handoff_recipient_first
+      testsuite(21)%name = "over-release cannot consume a provision pin"
+      testsuite(21)%test => run_provision_over_release
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -230,6 +255,23 @@ contains
          call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx1), err)
          if (err /= CAPNP_OK) return
          call payload_content_set(ctx%results, s, err)
+      case (12)
+         allocate (obj)
+         next_token = next_token + 1
+         obj%token = next_token
+         sp => obj
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) then
+            deallocate (obj)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err /= CAPNP_OK) return
+         call payload_content_set(ctx%results, s, err)
+         if (associated(gsrv)) call rpc_conn_close(gsrv)
       case default
          err = CAPNP_ERR_ARG
       end select
@@ -478,6 +520,98 @@ contains
                               'release-in-dispatch: close frees nothing more')
    end subroutine run_release_during_dispatch
 
+   subroutine run_closed_tail_dispatch(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: qid
+      integer :: err
+      gsrv => null()
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         gsrv => srv
+         final_count = 0
+         call rpc_call_begin(cli, settled, LIFE_IFACE, 12, m, params, qid, err)
+         if (err == CAPNP_OK) then
+            msg = message_read_root(m, err)
+            c = message_call_get(msg, err)
+            if (err == CAPNP_OK) call call_send_results_to_yourself_set(c, err)
+         end if
+         if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(cli, m, err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         call check_(error, srv%dead .and. final_count == 1, &
+                     'closed tail dispatch drops staged owned server')
+      end if
+      gsrv => null()
+      call close_pair(cli, srv, opened)
+   end subroutine run_closed_tail_dispatch
+
+   subroutine run_local_dispatch_failure(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: qid
+      integer :: err
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         final_count = 0
+         call rpc_call_begin(srv, local, LIFE_IFACE, 1, m, params, qid, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 1, &
+                     'local dispatch failure releases staged server')
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_local_dispatch_failure
+
+   subroutine run_local_flush_failure(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: qid
+      integer :: err, i
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         do i = 1, size(srv%exports) - 1
+            srv%exports(i)%used = .true.
+            srv%exports(i)%refcount = 1
+            srv%exports(i)%srv => factory
+         end do
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         final_count = 0
+         call rpc_call_begin(srv, local, LIFE_IFACE, 7, m, params, qid, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 1, &
+                     'local flush failure releases staged server')
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_local_flush_failure
+
    subroutine run_local_pipeline_order(error)
       type(error_type), allocatable, intent(out) :: error
       type(life_srv_t), target :: factory
@@ -517,6 +651,371 @@ contains
       end if
       call close_pair(cli, srv, opened)
    end subroutine run_local_pipeline_order
+
+   subroutine build_pipe(srv, m, p, mth, q1, qq, err)
+      type(rpc_conn_t), intent(inout), target :: srv
+      type(capnp_message_t), intent(inout), target :: m
+      type(payload_t), intent(out) :: p
+      integer, intent(in) :: mth
+      integer(int64), intent(in) :: q1
+      integer(int64), intent(out) :: qq
+      integer, intent(out) :: err
+      type(rpc_cap_t) :: pipeline
+      type(capnp_ptr_t) :: s
+      pipeline%kind = RPC_CAP_PIPELINE
+      pipeline%id = q1
+      pipeline%nops = 1
+      pipeline%ops(0) = 0
+      call rpc_call_begin(srv, pipeline, LIFE_IFACE, mth, m, p, qq, err)
+      if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+      if (err == CAPNP_OK) call payload_content_set(p, s, err)
+   end subroutine build_pipe
+
+   !> The first of two calls waiting on a local result closes the
+   !> connection. The call behind it never runs and its queue entry is freed.
+   subroutine run_pipeline_close(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local
+      type(capnp_message_t), target :: m1, m2, m3
+      type(payload_t) :: p1, p2, p3
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: q1, q2, q3
+      integer :: err
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         gsrv => srv
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         pipeline_count = 0
+         pipeline_log = 0
+         call rpc_call_begin(srv, local, LIFE_IFACE, 3, m1, p1, q1, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m1, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p1, s, err)
+         if (err == CAPNP_OK) call build_pipe(srv, m2, p2, 11, q1, q2, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m2, err)
+         if (err == CAPNP_OK) call build_pipe(srv, m3, p3, 20, q1, q3, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m3, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m1, err)
+         call check_(error, err == RPC_ERR_DEAD .and. pipeline_count == 0 .and. &
+                     .not. rpc_conn_alive(srv), &
+                     'closed pipeline dispatch frees queued calls')
+         gsrv => null()
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_pipeline_close
+
+   !> A pipelined call canceled while it waits for its target question is
+   !> dropped. It must not run later or write a Return into a freed slot.
+   subroutine run_cancel_pipeline(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local
+      type(capnp_message_t), target :: m1, m2
+      type(payload_t) :: p1, p2
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: q1, q2
+      integer :: err, cerr
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         pipeline_count = 0
+         pipeline_log = 0
+         call rpc_call_begin(srv, local, LIFE_IFACE, 3, m1, p1, q1, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m1, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p1, s, err)
+         if (err == CAPNP_OK) call build_pipe(srv, m2, p2, 20, q1, q2, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m2, err)
+         cerr = CAPNP_ERR_ARG
+         if (err == CAPNP_OK) call rpc_request_cancellation(srv, q2, cerr)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m1, err)
+         call check_(error, err == CAPNP_OK .and. cerr == CAPNP_OK .and. &
+                     pipeline_count == 0 .and. &
+                     .not. srv%questions(int(q2))%used .and. &
+                     .not. srv%questions(int(q2))%returned, &
+                     'canceled local pipeline call does not run')
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_cancel_pipeline
+
+   !> Canceling a local call that already returned drops its result
+   !> exports, as Finish with releaseResultCaps does.
+   subroutine run_cancel_returned(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, local
+      type(capnp_message_t), target :: m1
+      type(payload_t) :: p1
+      type(capnp_ptr_t) :: s
+      logical :: opened
+      integer(int64) :: q1
+      integer :: err, cerr
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         local%kind = RPC_CAP_LOCAL
+         local%id = 0_int64
+         call rpc_call_begin(srv, local, LIFE_IFACE, 7, m1, p1, q1, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m1, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(p1, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(srv, m1, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0 .and. &
+                     srv%questions(int(q1))%returned, &
+                     'canceled local call releases its result: returned')
+         cerr = CAPNP_ERR_ARG
+         if (.not. allocated(error)) call rpc_request_cancellation(srv, q1, cerr)
+         call check_(error, cerr == CAPNP_OK .and. final_count == 1, &
+                     'canceled local call releases its result')
+      end if
+      call close_pair(cli, srv, opened)
+      if (opened) call check_(error, final_count == 1, &
+                              'canceled local call releases its result: close')
+   end subroutine run_cancel_returned
+
+   subroutine run_handoff_release_before(error)
+      type(error_type), allocatable, intent(out) :: error
+      call handoff_owned(.true., .false., error)
+   end subroutine run_handoff_release_before
+
+   subroutine run_handoff_release_after(error)
+      type(error_type), allocatable, intent(out) :: error
+      call handoff_owned(.false., .false., error)
+   end subroutine run_handoff_release_after
+
+   !> A peer holding one wire reference to a provided export cannot
+   !> release two. The provision pin is not a wire reference, so the
+   !> Release aborts the connection and the server stays alive until the
+   !> connection closes.
+   subroutine run_provision_over_release(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: intro, prov_a
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: boot_cap, owned_cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      integer(int64) :: qboot, qown, pq
+      integer :: ia, pa, err
+      final_count = 0
+      call px_socketpair(ia, pa, err)
+      boot => factory
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_bootstrap_send(intro, boot_cap, err)
+      qboot = boot_cap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qboot, err)
+      call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+      call check_(error, err == CAPNP_OK, 'pin over-release: bootstrap')
+      if (.not. allocated(error)) then
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'pin over-release: owned result exported')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, 72_int64, pq, err)
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, pq, err)
+         call check_(error, err == CAPNP_OK, 'pin over-release: provide')
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         rel = message_release_init(msg, err)
+         call release_id_set(rel, owned_cap%id, err)
+         call release_reference_count_set(rel, 2_int64, err)
+         call rpc_send_message(intro%fd, m, err)
+         call capnp_message_free(m)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, .not. rpc_conn_alive(prov_a) .and. final_count == 0, &
+                     'pin over-release: aborts and keeps the server')
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(prov_a)
+      if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                              'pin over-release: freed once at close')
+   end subroutine run_provision_over_release
+
+   subroutine run_handoff_recipient_first(error)
+      type(error_type), allocatable, intent(out) :: error
+      call handoff_owned(.false., .true., error)
+   end subroutine run_handoff_recipient_first
+
+   !> An owned server exported on the introducer's connection is also
+   !> exported on the recipient's at Accept. Both exports own it, so it
+   !> is freed when the last one is released, in either order and whether
+   !> the introducer's Release comes before or after the Accept.
+   subroutine handoff_owned(release_first, recipient_first, error)
+      logical, intent(in) :: release_first, recipient_first
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: boot_cap, owned_cap, got
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer(int64) :: qboot, qown, pq, aq, qcall
+      integer :: ia, pa, ra, pb, err
+      final_count = 0
+      call px_socketpair(ia, pa, err)
+      call px_socketpair(ra, pb, err)
+      boot => factory
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      call rpc_bootstrap_send(intro, boot_cap, err)
+      qboot = boot_cap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qboot, err)
+      call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+      call check_(error, err == CAPNP_OK, 'owned handoff: bootstrap')
+      if (.not. allocated(error)) then
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'owned handoff: owned result exported')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, 71_int64, pq, err)
+         call rpc_pump_once(prov_a, err)
+         call rpc_wait(intro, pq, err)
+         call check_(error, err == CAPNP_OK, 'owned handoff: provide')
+      end if
+      if (.not. allocated(error) .and. release_first) then
+         call rpc_release_send(intro, owned_cap, err)
+         call rpc_pump_once(prov_a, err)
+         call check_(error, final_count == 0 .and. rpc_conn_alive(prov_a), &
+                     'owned handoff: provision outlives the introducer release')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_accept_send(recip, 71_int64, .false., aq, err)
+         call rpc_pump_once(prov_b, err)
+         call rpc_wait(recip, aq, err)
+         call rpc_result_cap(recip, aq, [integer ::], got, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'owned handoff: accept')
+      end if
+      if (.not. allocated(error) .and. recipient_first) then
+         call rpc_release_send(recip, got, err)
+         call rpc_pump_once(prov_b, err)
+         call check_(error, final_count == 0 .and. rpc_conn_alive(prov_b), &
+                     'owned handoff: introducer export outlives the recipient')
+         call rpc_call_begin(intro, owned_cap, LIFE_IFACE, 0, m, params, qcall, err)
+         if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, s, err)
+         if (err == CAPNP_OK) call rpc_call_send(intro, m, err)
+         call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_wait(intro, qcall, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'owned handoff: introducer can still call the server')
+         if (.not. allocated(error)) then
+            call rpc_release_send(intro, owned_cap, err)
+            call rpc_pump_once(prov_a, err)
+            call check_(error, final_count == 1, &
+                        'owned handoff: introducer release frees the server')
+         end if
+      else if (.not. allocated(error)) then
+         if (.not. release_first) then
+            call rpc_release_send(intro, owned_cap, err)
+            call rpc_pump_once(prov_a, err)
+         end if
+         call check_(error, final_count == 0 .and. rpc_conn_alive(prov_a), &
+                     'owned handoff: recipient export outlives the introducer')
+         if (.not. allocated(error)) then
+            call rpc_call_begin(recip, got, LIFE_IFACE, 0, m, params, qcall, err)
+            if (err == CAPNP_OK) s = capnp_new_struct(m, 0, 0, err)
+            if (err == CAPNP_OK) call payload_content_set(params, s, err)
+            if (err == CAPNP_OK) call rpc_call_send(recip, m, err)
+            call rpc_pump_once(prov_b, err)
+            if (err == CAPNP_OK) call rpc_wait(recip, qcall, err)
+            call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                        'owned handoff: recipient can call the server')
+         end if
+         if (.not. allocated(error)) then
+            call rpc_release_send(recip, got, err)
+            call rpc_pump_once(prov_b, err)
+            call check_(error, final_count == 1, &
+                        'owned handoff: recipient release frees the server')
+         end if
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+      if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                              'owned handoff: freed exactly once')
+   end subroutine handoff_owned
+
+   subroutine run_provide_invalid_import(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled
+      logical :: opened
+      integer(int64) :: pq
+      integer :: err
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         call rpc_provide_send(cli, 9999_int64, '127.0.0.1', 9, 5_int64, pq, err)
+         call check_(error, err == CAPNP_OK, 'provide invalid import: sent')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_pump_once(srv, err)
+         call check_(error, .not. rpc_conn_alive(srv), &
+                     'provide with an invalid import aborts')
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_provide_invalid_import
+
+   !> A sendResultsTo.yourself call whose target answer is missing keeps
+   !> its exception for a later takeFromOtherQuestion. Sending it as an
+   !> ordinary Return aborts the caller's connection.
+   subroutine run_yourself_missing_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled
+      type(capnp_message_t), target :: m1, m2
+      type(payload_t) :: p1, p2
+      type(capnp_ptr_t) :: s
+      type(message_t) :: msg
+      type(call_t) :: c
+      logical :: opened, readable
+      integer(int64) :: q1, q2
+      integer :: err
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         call rpc_call_begin(cli, settled, LIFE_IFACE, 3, m1, p1, q1, err)
+         if (err == CAPNP_OK) call build_pipe(cli, m2, p2, 20, q1, q2, err)
+         if (err == CAPNP_OK) msg = message_read_root(m2, err)
+         if (err == CAPNP_OK) c = message_call_get(msg, err)
+         if (err == CAPNP_OK) call call_send_results_to_yourself_set(c, err)
+         if (err == CAPNP_OK) call rpc_call_send(cli, m2, err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         if (err == CAPNP_OK) call px_poll_in(cli%fd, 50, readable, err)
+         call check_(error, err == CAPNP_OK .and. rpc_conn_alive(srv) .and. &
+                     .not. readable, &
+                     'yourself call to a missing answer is held')
+         call capnp_message_free(m1)
+      end if
+      call close_pair(cli, srv, opened)
+   end subroutine run_yourself_missing_answer
 
    !> With the export table full, the overflow calls are exception Returns
    !> and only the servers that were not exported are freed before close.
