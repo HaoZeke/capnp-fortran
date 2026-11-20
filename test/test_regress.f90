@@ -6,6 +6,7 @@ module test_regress
    use capnp_dynamic
    use capnp_text
    use capnp_json
+   use capnp_codec, only: capnp_brand_env_t
    use cli_path, only: capnpf_setup, capnpc_setup
    implicit none
    private
@@ -411,6 +412,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: p
+      type(capnp_brand_env_t) :: env
       character(len=:), allocatable :: text
       integer :: err
       p = capnp_ptr_t()
@@ -424,6 +426,12 @@ contains
       call check_(error, err == CAPNP_ERR_ARG, 'guard: json encode unloaded schema')
       call capnp_json_decode(schema, 1, '{}', msg, err)
       call check_(error, err == CAPNP_ERR_ARG, 'guard: json decode unloaded schema')
+      call capnp_text_encode_enum(schema, 1_int64, 0, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text enum unloaded schema')
+      call capnp_text_encode_value(schema, p, p, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text value unloaded schema')
+      call capnp_text_encode_list(schema, p, p, env, text, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'guard: text list unloaded schema')
    end subroutine run_unloaded
 
    subroutine run_long_arg(error)
