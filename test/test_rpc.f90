@@ -103,6 +103,25 @@ module test_rpc
       procedure :: dispatch => defer_dispatch
    end type defer_srv_t
 
+   !> Bootstrap that mints an owned selfie_srv_t (method 1, base from the
+   !> params).
+   type, extends(rpc_server_t) :: selfie_maker_t
+   contains
+      procedure :: dispatch => selfie_maker_dispatch
+   end type selfie_maker_t
+
+   !> Method 0 answers its own capability, method 1 base + params. A
+   !> finalizer counts each free.
+   type, extends(rpc_server_t) :: selfie_srv_t
+      integer(int64) :: base = 0_int64
+      class(rpc_server_t), pointer :: me => null()
+   contains
+      procedure :: dispatch => selfie_dispatch
+      final :: selfie_final
+   end type selfie_srv_t
+
+   integer :: selfie_finals = 0
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -171,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(147))
+      allocate (testsuite(148))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -454,18 +473,20 @@ contains
       testsuite(140)%test => w_param_promise_resolves_twice
       testsuite(141)%name = "rpc-forward-drops-unreferenced-caps"
       testsuite(141)%test => w_forward_drops_unreferenced_caps
-      testsuite(142)%name = "posix-recv-eintr-retried"
-      testsuite(142)%test => t_recv_all_retries_eintr
-      testsuite(143)%name = "rpc-framing-511-accepted"
-      testsuite(143)%test => t_framing_511_accepted
-      testsuite(144)%name = "rpc-framing-512-rejected"
-      testsuite(144)%test => t_framing_512_rejected
-      testsuite(145)%name = "rpc-framing-oversized-rejected"
-      testsuite(145)%test => t_framing_oversized_rejected
-      testsuite(146)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(146)%test => t_framing_negative_traversal_rejected
-      testsuite(147)%name = "rpc-framing-short-and-padded"
-      testsuite(147)%test => t_framing_short_and_padded
+      testsuite(142)%name = "rpc-released-result-export-id-reused"
+      testsuite(142)%test => w_released_result_export_id_reused
+      testsuite(143)%name = "posix-recv-eintr-retried"
+      testsuite(143)%test => t_recv_all_retries_eintr
+      testsuite(144)%name = "rpc-framing-511-accepted"
+      testsuite(144)%test => t_framing_511_accepted
+      testsuite(145)%name = "rpc-framing-512-rejected"
+      testsuite(145)%test => t_framing_512_rejected
+      testsuite(146)%name = "rpc-framing-oversized-rejected"
+      testsuite(146)%test => t_framing_oversized_rejected
+      testsuite(147)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(147)%test => t_framing_negative_traversal_rejected
+      testsuite(148)%name = "rpc-framing-short-and-padded"
+      testsuite(148)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -711,6 +732,58 @@ contains
       if (err /= CAPNP_OK) return
       call payload_content_set(ctx%results, rpc_make_cap_ptr(ctx%rmsg, 0), err)
    end subroutine reflect_dispatch
+
+   subroutine selfie_final(self)
+      type(selfie_srv_t), intent(inout) :: self
+      selfie_finals = selfie_finals + 1
+   end subroutine selfie_final
+
+   subroutine selfie_maker_dispatch(self, ctx, err)
+      class(selfie_maker_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(selfie_srv_t), pointer :: t
+      class(rpc_server_t), pointer :: sp
+      type(capnp_ptr_t) :: s
+      integer :: idx
+      err = CAPNP_OK
+      allocate (t)
+      t%base = capnp_get_i64(ctx%params, 0_int64)
+      t%me => t
+      sp => t
+      idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+      if (err /= CAPNP_OK) then
+         deallocate (t)
+         return
+      end if
+      s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+      if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+      if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+   end subroutine selfie_maker_dispatch
+
+   subroutine selfie_dispatch(self, ctx, err)
+      class(selfie_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: s
+      integer :: idx
+      err = CAPNP_OK
+      select case (ctx%method_id)
+      case (0)
+         idx = rpc_ctx_export_cap(ctx, self%me, err)
+         if (err /= CAPNP_OK) return
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      case (1)
+         s = capnp_new_struct(ctx%rmsg, 1, 0, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_i64(s, 0_int64, self%base + capnp_get_i64(ctx%params, 0_int64), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      case default
+         err = CAPNP_ERR_ARG
+      end select
+   end subroutine selfie_dispatch
 
    subroutine defer_dispatch(self, ctx, err)
       class(defer_srv_t), intent(inout) :: self
@@ -1084,6 +1157,12 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_forward_drops_unreferenced_caps(error)
    end subroutine w_forward_drops_unreferenced_caps
+
+   subroutine w_released_result_export_id_reused(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_released_result_export_id_reused(error)
+      if (.not. allocated(error)) call t_pinned_export_reexported(error)
+   end subroutine w_released_result_export_id_reused
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11737,5 +11816,111 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_forward_drops_unreferenced_caps
+
+   !> An owned result export the peer released to zero lives on the
+   !> answer's pin. A call on that answer that returns the server again
+   !> exports it under a new id, and that export owns the server beside
+   !> the pinned one: Finish frees the pin, not the live export.
+   subroutine t_pinned_export_reexported(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(selfie_maker_t), target :: maker
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: acap, pcap, ncap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: content
+      integer(int64) :: qboot, qmake, eid, q2, q3, aid
+      integer :: e
+
+      selfie_finals = 0
+      srv => maker
+      call ra_pair(cconn, sconn, srv, qboot, qmake, eid)
+      call rpc_result_cap(sconn, qmake, [0], acap, e)
+      aid = acap%id
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, aid, e)
+      call release_reference_count_set(rel, 1_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      pcap = rpc_pipeline_cap(sconn, qmake, [0])
+      call rpc_call_begin(sconn, pcap, ECHO_IFACE, 0, m, params, q2, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, q2, e)
+      call rpc_result_cap(sconn, q2, [0], ncap, e)
+      call check_(error, e == CAPNP_OK .and. ncap%kind == RPC_CAP_IMPORT, &
+                  'pinned export: the server is exported again')
+      if (allocated(error)) return
+      call raw_finish(cconn, sconn, qmake, .false.)
+      call check_(error, selfie_finals == 0, &
+                  'pinned export: the Finish keeps the server of a live export')
+      if (.not. allocated(error)) then
+         call rpc_call_begin(sconn, ncap, ECHO_IFACE, 1, m, params, q3, e)
+         call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+         call rpc_call_send(sconn, m, e)
+         call rpc_pump_once(cconn, e)
+         call rpc_wait(sconn, q3, e)
+         call rpc_result_content(sconn, q3, content, e)
+         call check_(error, e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 0_int64, &
+                     'pinned export: the new export answers')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (.not. allocated(error)) &
+         call check_(error, selfie_finals == 1, 'pinned export: the server is freed once')
+   end subroutine t_pinned_export_reexported
+
+   !> A result export the peer released to zero has a free id in C++,
+   !> though the answer pipeline still holds its server. The next export
+   !> takes that id, and a Finish that releases result caps then drops
+   !> a ref of the new export (rpc.c++ releaseExport) instead of aborting.
+   subroutine t_released_result_export_id_reused(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: boot, acap, bcap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      type(payload_t) :: params
+      integer(int64) :: qboot, qadder, eid, q2, aid
+      integer :: e
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call rpc_result_cap(sconn, qadder, [0], acap, e)
+      aid = acap%id
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, aid, e)
+      call release_reference_count_set(rel, 1_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], boot, e)
+      call rpc_call_begin(sconn, boot, ECHO_IFACE, 1, m, params, q2, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, q2, e)
+      call rpc_result_cap(sconn, q2, [0], bcap, e)
+      call check_(error, e == CAPNP_OK .and. bcap%id == aid, &
+                  'released export: the next export takes its id')
+      if (allocated(error)) return
+      call raw_finish(cconn, sconn, qadder, .true.)
+      call check_(error, rpc_conn_alive(cconn) .and. cconn%exports(int(aid))%refcount == 0, &
+                  'released export: the Finish drops the ref of the new export')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_released_result_export_id_reused
 
 end module test_rpc

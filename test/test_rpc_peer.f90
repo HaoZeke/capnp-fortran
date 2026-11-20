@@ -30,11 +30,15 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(2))
+      allocate (testsuite(4))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
       testsuite(2)%test => t_merge_promise
+      testsuite(3)%name = "fwd-ra-released-param"
+      testsuite(3)%test => t_fwd_ra_released
+      testsuite(4)%name = "released-export-reuse-in-dispatch"
+      testsuite(4)%test => t_reuse_in_dispatch
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -502,5 +506,56 @@ contains
                  f == 'REL 8 1', 'merge promise: got '//b//' / '//c//' / '//d//' / '//f)
       call close_peer(conn, fd)
    end subroutine t_merge_promise
+
+   !> A forwarded receiverAnswer param names a result cap the peer has
+   !> released. The answer still pins it, and C++ exports it again.
+   subroutine t_fwd_ra_released(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer :: fd
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wrel(fd, 1_int64, 1_int64)
+      a = step(conn, fd, 1)
+      call wcall(fd, 5_int64, 0, 2_int64, ['ra'], [1_int64])
+      b = step(conn, fd, 1)
+      call check(error, index(b, ' I4 y [sh') > 0, 'released param: got '//b)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_ra_released
+
+   !> A call on the pipeline of an answer whose result cap the peer has
+   !> released makes a new export while it runs. C++ has freed the id,
+   !> so the new export takes it, and the Finish that releases result
+   !> caps drops a ref of that new export.
+   subroutine t_reuse_in_dispatch(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix, mid
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer :: fd
+      mid%inner => made
+      mix%inner => mid
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wrel(fd, 1_int64, 1_int64)
+      a = step(conn, fd, 1)
+      call wcall(fd, 2_int64, 2, 1_int64, NOCAPS, NOIDS)
+      b = step(conn, fd, 1)
+      call wfin(fd, 1_int64, .true.)
+      c = step(conn, fd, 1)
+      call check(error, b == 'RET 2 res [sh1]' .and. c == '' .and. rpc_conn_alive(conn), &
+                 'reuse in dispatch: got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_reuse_in_dispatch
 
 end module test_rpc_peer

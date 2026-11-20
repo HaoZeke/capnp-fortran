@@ -233,6 +233,10 @@ module capnp_rpc
       integer :: refcount = 0
       !> Internal holds such as dispatch, reflected resolution, and Provide.
       integer :: pins = 0
+      !> The pins that answer pipelines took. An export with no wire
+      !> refcount and only these pins has a free id, as in C++, and moves
+      !> aside when that id is reused (move_released_export).
+      integer :: answer_pins = 0
       class(*), pointer :: srv => null()
       !> True when dropping the last reference must deallocate srv.
       logical :: owned = .false.
@@ -307,6 +311,9 @@ module capnp_rpc
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
       integer, allocatable :: exports(:)
+      !> Where each pinned result export sits now. It differs from
+      !> `exports` once a released export moves aside for a new one.
+      integer, allocatable :: pinned_at(:)
       !> Set once the answer has pinned each result export. Finish
       !> drops those pins. The wire refcount is a separate count.
       logical :: exports_pinned = .false.
@@ -592,6 +599,11 @@ module capnp_rpc
       integer(int64) :: next_hold = 0_int64
       !> Deferred calls in the order they were deferred.
       type(rpc_deferred_t), pointer :: deferred => null()
+      !> Export slot of each dispatch that has been entered and not
+      !> left, innermost last. A released export moves while one of
+      !> them runs, and the dispatch reads its slot back from here.
+      integer, allocatable :: dispatch_at(:)
+      integer :: ndispatch = 0
    end type rpc_conn_t
 
 contains
@@ -1581,7 +1593,7 @@ contains
       type(return_t) :: r
       type(payload_t) :: params
       type(rpc_call_ctx_t) :: ctx
-      integer :: derr
+      integer :: derr, at
       logical :: dispatched
       integer(int8), allocatable :: bytes(:)
       call ctx_reserve(ctx, MAXCAPS)
@@ -1624,15 +1636,16 @@ contains
          derr = CAPNP_ERR_KIND
          ! Match wire dispatch: keep the export alive while application code
          ! pumps the connection and may receive Release or close it.
-         call pin_export(conn, export_id)
-         conn%exports(export_id)%dispatching = conn%exports(export_id)%dispatching + 1
-         select type (s => conn%exports(export_id)%srv)
+         at = export_id
+         call pin_export(conn, at)
+         call dispatch_enter(conn, at)
+         select type (s => conn%exports(at)%srv)
          class is (rpc_server_t)
             call s%dispatch(ctx, derr)
             dispatched = .true.
          end select
-         conn%exports(export_id)%dispatching = conn%exports(export_id)%dispatching - 1
-         call drop_export_pin(conn, export_id)
+         call dispatch_leave(conn, at)
+         call drop_export_pin(conn, at)
          if (conn%dead .or. .not. associated(conn%transport)) then
             call rollback_staged(conn, ctx)
             call capnp_message_free(rm)
@@ -3043,6 +3056,7 @@ contains
       slot%forward_qid = -1_int64
       slot%nexp = 0
       if (allocated(slot%exports)) deallocate (slot%exports)
+      if (allocated(slot%pinned_at)) deallocate (slot%pinned_at)
       slot%exports_pinned = .false.
       if (allocated(slot%held_params)) deallocate (slot%held_params)
       slot%no_pipeline = .false.
@@ -4720,14 +4734,15 @@ contains
       type(rpc_conn_t), intent(inout) :: conn
       class(*), pointer, intent(in) :: srv
       logical, intent(in), optional :: owned
-      integer :: eid, i, n
+      integer :: eid, i, k, n
       type(rpc_export_slot_t), allocatable :: grown(:)
-      logical :: own
+      logical :: own, share_old
       own = .false.
       if (present(owned)) own = owned
       ! Reuse an existing export of the same server.
+      ! A released export is gone from the C++ table, so it is skipped.
       do i = 0, nexports(conn) - 1
-         if (conn%exports(i)%used) then
+         if (conn%exports(i)%used .and. .not. export_released(conn, i)) then
             if (associated(conn%exports(i)%srv, srv)) then
                conn%exports(i)%refcount = conn%exports(i)%refcount + 1
                if (own) conn%exports(i)%owned = .true.
@@ -4738,8 +4753,12 @@ contains
       end do
       if (.not. allocated(conn%exports)) allocate (conn%exports(0:MAXE - 1))
       n = size(conn%exports)
+      ! An owned export of this server that only a pin keeps is freed with
+      ! its last pin, so the new export owns the server beside it.
+      share_old = .false.
+      if (.not. own) share_old = has_pinned_owner(conn, srv)
       if (conn%max_exports > 0) then
-         if (count(conn%exports%used) >= conn%max_exports) then
+         if (count(conn%exports%used .and. conn%exports%refcount > 0) >= conn%max_exports) then
             eid = -1
             return
          end if
@@ -4750,20 +4769,49 @@ contains
          call move_alloc(grown, conn%exports)
       end if
       do i = 0, size(conn%exports) - 1
+         if (export_released(conn, i)) call move_released_export(conn, i)
          if (.not. conn%exports(i)%used) then
             conn%exports(i)%used = .true.
             conn%exports(i)%refcount = 1
             conn%exports(i)%pins = 0
+            conn%exports(i)%answer_pins = 0
             call retain_server(srv)
             conn%exports(i)%srv => srv
             conn%exports(i)%owned = own
             conn%exports(i)%shared = .false.
+            if (share_old) then
+               conn%exports(i)%owned = .true.
+               do k = 0, size(conn%exports) - 1
+                  if (k == i) cycle
+                  if (.not. conn%exports(k)%used .or. .not. conn%exports(k)%owned) cycle
+                  if (conn%exports(k)%refcount > 0) cycle
+                  if (associated(conn%exports(k)%srv, srv)) call share_export_owner(conn%exports(k))
+               end do
+               call share_export_owner(conn%exports(i))
+            end if
             eid = i
             return
          end if
       end do
       eid = -1
    end function export_server
+
+   !> True when an export that owns `srv` has no wire reference left and
+   !> lives only on pins, as after a Release of the id.
+   logical function has_pinned_owner(conn, srv) result(found)
+      type(rpc_conn_t), intent(in) :: conn
+      class(*), pointer, intent(in) :: srv
+      integer :: i
+      found = .false.
+      do i = 0, nexports(conn) - 1
+         if (.not. conn%exports(i)%used .or. .not. conn%exports(i)%owned) cycle
+         if (conn%exports(i)%refcount > 0) cycle
+         if (associated(conn%exports(i)%srv, srv)) then
+            found = .true.
+            return
+         end if
+      end do
+   end function has_pinned_owner
 
    ! ------------------------------------------------------------------
    ! Message pump
@@ -5321,10 +5369,28 @@ contains
       if (e /= CAPNP_OK) return
       select case (kind)
       case (PIPE_EXPORT)
+         id = int(pipeline_export(slot, int(id)), int64)
          if (.not. eslot_ok(conn, id)) return
-         if (.not. conn%exports(int(id))%used .or. conn%exports(int(id))%refcount <= 0) return
-         conn%exports(int(id))%refcount = conn%exports(int(id))%refcount + 1
-         call cap_descriptor_sender_hosted_set(ocd, id, err)
+         if (.not. conn%exports(int(id))%used) return
+         if (conn%exports(int(id))%refcount > 0) then
+            conn%exports(int(id))%refcount = conn%exports(int(id))%refcount + 1
+            call cap_descriptor_sender_hosted_set(ocd, id, err)
+            return
+         end if
+         ! The peer released the export and only the pipeline pins it.
+         ! C++ exports the cap again under a new id (rpc.c++ exportCap).
+         block
+            class(*), pointer :: srv
+            logical :: own
+            integer :: peid
+            srv => conn%exports(int(id))%srv
+            own = conn%exports(int(id))%owned
+            if (own) call share_export_owner(conn%exports(int(id)))
+            peid = export_server(conn, srv, owned=own)
+            if (peid < 0) return
+            if (own) call share_export_owner(conn%exports(peid))
+            call cap_descriptor_sender_hosted_set(ocd, int(peid, int64), err)
+         end block
       case (PIPE_IMPORT)
          call cap_descriptor_receiver_hosted_set(ocd, id, err)
       case (PIPE_QUESTION)
@@ -5363,7 +5429,7 @@ contains
       type(capnp_message_t), pointer :: rm
       type(message_t) :: rmsg
       type(return_t) :: r
-      integer :: derr
+      integer :: derr, at
       integer(int64), allocatable :: pids(:)
       logical :: dispatched, quiet
       ! The caller asked for the pipeline only. C++ never sends this
@@ -5410,11 +5476,12 @@ contains
       ctx%answer_id = qid
       ! The call keeps one reference so Release or close cannot destroy
       ! the server between entering dispatch and leaving it.
-      call pin_export(conn, eid)
-      conn%exports(eid)%dispatching = conn%exports(eid)%dispatching + 1
+      at = eid
+      call pin_export(conn, at)
+      call dispatch_enter(conn, at)
       dispatched = .false.
       derr = CAPNP_ERR_KIND
-      select type (s => conn%exports(eid)%srv)
+      select type (s => conn%exports(at)%srv)
       class is (rpc_server_t)
          call s%dispatch(ctx, derr)
          dispatched = .true.
@@ -5422,8 +5489,8 @@ contains
       ! A deferred call keeps its pin, params and Return until the server
       ! answers it. Its answer stays pending, so pipelined calls queue.
       if (dispatched .and. derr == CAPNP_OK .and. ctx%deferred .and. qid >= 0_int64) then
-         conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
-         call defer_call(conn, qid, eid, ctx, rm, pids, elsewhere, quiet)
+         call dispatch_leave(conn, at)
+         call defer_call(conn, qid, at, ctx, rm, pids, elsewhere, quiet)
          return
       end if
       if (.not. dispatched .or. derr /= CAPNP_OK) then
@@ -5441,8 +5508,8 @@ contains
             call fill_exception(r, 'export failed', err)
          end if
       end if
-      conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
-      call drop_export_pin(conn, eid)
+      call dispatch_leave(conn, at)
+      call drop_export_pin(conn, at)
       call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
                          quiet=quiet)
       deallocate (rm)
@@ -5853,6 +5920,7 @@ contains
          case (PIPE_EXPORT)
             ! The answer's pipeline holds its result capabilities, not the
             ! export table, so a pin keeps a released export callable.
+            eid = int(pipeline_export(aslot, int(eid)), int64)
             if (eslot_ok(conn, eid)) then
                if (conn%exports(int(eid))%used) out_eid = int(eid)
             end if
@@ -7783,10 +7851,16 @@ contains
       type(rpc_answer_slot_t), intent(inout) :: slot
       integer :: i, eid, n
       n = 0
+      if (allocated(slot%pinned_at)) deallocate (slot%pinned_at)
+      allocate (slot%pinned_at(0:max(slot%nexp, 1) - 1))
+      slot%pinned_at = -1
       do i = 0, slot%nexp - 1
          eid = slot%exports(i)
          if (eslot_ok(conn, int(eid, int64))) then
+            if (.not. conn%exports(eid)%used) cycle
             call pin_export(conn, eid)
+            conn%exports(eid)%answer_pins = conn%exports(eid)%answer_pins + 1
+            slot%pinned_at(i) = eid
             n = n + 1
          end if
       end do
@@ -7801,11 +7875,117 @@ contains
       integer :: i, eid
       if (.not. slot%exports_pinned) return
       slot%exports_pinned = .false.
+      if (.not. allocated(slot%pinned_at)) return
       do i = 0, slot%nexp - 1
-         eid = slot%exports(i)
-         if (eslot_ok(conn, int(eid, int64))) call drop_export_pin(conn, eid)
+         eid = slot%pinned_at(i)
+         if (.not. eslot_ok(conn, int(eid, int64))) cycle
+         if (conn%exports(eid)%answer_pins > 0) &
+            conn%exports(eid)%answer_pins = conn%exports(eid)%answer_pins - 1
+         call drop_export_pin(conn, eid)
       end do
+      slot%pinned_at = -1
    end subroutine unpin_answer_exports
+
+   !> The export a pipelined call on `slot` reaches for result export
+   !> `eid`, which may have moved aside since the Return.
+   integer function pipeline_export(slot, eid) result(at)
+      type(rpc_answer_slot_t), intent(in) :: slot
+      integer, intent(in) :: eid
+      integer :: i
+      at = eid
+      if (.not. slot%exports_pinned .or. .not. allocated(slot%pinned_at)) return
+      do i = 0, slot%nexp - 1
+         if (slot%exports(i) == eid .and. slot%pinned_at(i) >= 0) then
+            at = slot%pinned_at(i)
+            return
+         end if
+      end do
+   end function pipeline_export
+
+   !> True when export `i` has no wire refcount and only answer and
+   !> dispatch pins: C++ has already freed its id and keeps the server
+   !> in the pipeline or the running call.
+   pure logical function export_released(conn, i)
+      type(rpc_conn_t), intent(in) :: conn
+      integer, intent(in) :: i
+      export_released = conn%exports(i)%used .and. conn%exports(i)%refcount <= 0 .and. &
+                        conn%exports(i)%pins > 0 .and. &
+                        conn%exports(i)%pins == conn%exports(i)%answer_pins + &
+                        conn%exports(i)%dispatching
+   end function export_released
+
+   !> Enter a dispatch of export `at`; the caller holds a pin on it.
+   subroutine dispatch_enter(conn, at)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: at
+      integer, allocatable :: grown(:)
+      if (.not. allocated(conn%dispatch_at)) allocate (conn%dispatch_at(8))
+      if (conn%ndispatch == size(conn%dispatch_at)) then
+         allocate (grown(2 * conn%ndispatch))
+         grown(1:conn%ndispatch) = conn%dispatch_at
+         call move_alloc(grown, conn%dispatch_at)
+      end if
+      conn%ndispatch = conn%ndispatch + 1
+      conn%dispatch_at(conn%ndispatch) = at
+      conn%exports(at)%dispatching = conn%exports(at)%dispatching + 1
+   end subroutine dispatch_enter
+
+   !> Leave the innermost dispatch. `at` becomes the slot its export
+   !> occupies now, which a move may have changed.
+   subroutine dispatch_leave(conn, at)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(inout) :: at
+      at = conn%dispatch_at(conn%ndispatch)
+      conn%ndispatch = conn%ndispatch - 1
+      if (conn%exports(at)%dispatching > 0) &
+         conn%exports(at)%dispatching = conn%exports(at)%dispatching - 1
+   end subroutine dispatch_leave
+
+   !> Move released export `i` to the highest free index so its id can
+   !> be reused, and point the answers that pin it there.
+   subroutine move_released_export(conn, i)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: i
+      type(rpc_export_slot_t), allocatable :: grown(:)
+      type(rpc_hi_node_t), pointer :: node
+      integer :: j, k, n, b
+      n = size(conn%exports)
+      j = -1
+      do k = n - 1, i + 1, -1
+         if (.not. conn%exports(k)%used) then
+            j = k
+            exit
+         end if
+      end do
+      if (j < 0) then
+         allocate (grown(0:2 * n - 1))
+         grown(0:n - 1) = conn%exports
+         call move_alloc(grown, conn%exports)
+         j = 2 * n - 1
+      end if
+      conn%exports(j) = conn%exports(i)
+      conn%exports(i) = rpc_export_slot_t()
+      if (conn%ndispatch > 0) then
+         where (conn%dispatch_at(1:conn%ndispatch) == i) conn%dispatch_at(1:conn%ndispatch) = j
+      end if
+      do k = 0, MAXQ - 1
+         call retarget_pins(conn%answers(k), i, j)
+      end do
+      do b = 0, HIBUCKETS - 1
+         node => conn%hi_buckets(b)%head
+         do while (associated(node))
+            call retarget_pins(node%slot, i, j)
+            node => node%next
+         end do
+      end do
+   end subroutine move_released_export
+
+   subroutine retarget_pins(slot, from, to)
+      type(rpc_answer_slot_t), intent(inout) :: slot
+      integer, intent(in) :: from, to
+      if (.not. slot%exports_pinned .or. .not. allocated(slot%pinned_at)) return
+      where (slot%pinned_at == from) slot%pinned_at = to
+   end subroutine retarget_pins
 
    subroutine unpin_all_answers(conn)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -7928,6 +8108,7 @@ contains
       conn%exports(eid)%srv => null()
       conn%exports(eid)%refcount = 0
       conn%exports(eid)%pins = 0
+      conn%exports(eid)%answer_pins = 0
       conn%exports(eid)%dispatching = 0
       call release_server(held)
    end subroutine drop_export_pin
@@ -7958,6 +8139,7 @@ contains
          conn%exports(eid)%srv => null()
          conn%exports(eid)%refcount = 0
          conn%exports(eid)%pins = 0
+         conn%exports(eid)%answer_pins = 0
          conn%exports(eid)%dispatching = 0
          call release_server(held)
       end if
