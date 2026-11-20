@@ -1910,6 +1910,7 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_json_union_nested
    !> A chain of 4100 struct types, each a field of the one before. The
+   !> A chain of 4100 struct types, each a field of the one before. The
    !> request is built here, so the audit runs even when capnp compile
    !> cannot finish the same chain on a small stack.
    subroutine run_json_schema_chain(error)
@@ -2004,6 +2005,7 @@ contains
       if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
    end subroutine build_type_chain
+
 
 
 
@@ -2336,6 +2338,10 @@ contains
       type(capnp_message_t) :: msg
       character(len=:), allocatable :: js
       integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
       call load_codec(error, schema)
       if (allocated(error)) return
       idx = capnp_dyn_find(schema, 'Sample', err)
@@ -2648,6 +2654,10 @@ contains
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
       call load_codec(error, schema)
       if (allocated(error)) return
       idx = capnp_dyn_find(schema, 'Sample', err)
