@@ -11,6 +11,12 @@ module capnp_dynamic
    implicit none
    private
 
+   !> Longest chain of type parameters, nested lists, and groups the
+   !> dynamic walkers follow. It matches the reader nesting limit that
+   !> `capnp_dyn_load` applies to the schema message, so a type the loader
+   !> accepts resolves. It only stops a cycle in a malformed schema.
+   integer, parameter :: DYN_MAX_DEPTH = 256
+
    public :: capnp_dyn_schema_t
    public :: capnp_dyn_load, capnp_dyn_free, capnp_dyn_find, capnp_dyn_new_root
    public :: capnp_dyn_get_int, capnp_dyn_get_f64, capnp_dyn_get_bool
@@ -411,7 +417,12 @@ contains
       which = -1
       id = 0_int64
       err = CAPNP_OK
-      if (depth > 8) return
+      ! A walk past the limit is an error, including a cycle of type
+      ! parameters, rather than an unresolved success.
+      if (depth > DYN_MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (t%kind == CAPNP_PK_NULL) return
       which = type_which(t)
       ! A discriminant with no arm is unset. Leaving the raw tag (anyPointer
