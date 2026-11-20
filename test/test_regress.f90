@@ -82,7 +82,8 @@ contains
          new_unittest("string-linear", run_string_linear), &
          new_unittest("write-error", run_write_error), &
          new_unittest("f32-text", run_f32_text), &
-         new_unittest("regress-tmp", run_regress_tmp) &
+         new_unittest("regress-tmp", run_regress_tmp), &
+         new_unittest("cli-sources", run_cli_sources) &
          ]
    end subroutine collect_regress
 
@@ -1694,5 +1695,21 @@ contains
          call test_failed(error, 'regress temp dir remains')
       end if
    end subroutine run_regress_tmp
+
+   !> The command line no longer carries a dead write switch, and the
+   !> interrupted-write check uses the platform errno helper.
+   subroutine run_cli_sources(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('! grep -q strict_io app/capnpf.f90' &
+         //' && ! grep -q __errno_location app/capnpf.f90' &
+         //' && ! grep -q " == 4" app/capnpf.f90' &
+         //' && grep -q os_eintr app/capnpf.f90' &
+         //' && grep -q os_errno_value app/capnpf.f90' &
+         //' && grep -q __error app/os_errno.c' &
+         //' && grep -q __errno_location app/os_errno.c' &
+         //' && grep -q EINTR app/os_errno.c')) then
+         call test_failed(error, 'cli source checks failed')
+      end if
+   end subroutine run_cli_sources
 
 end module test_regress
