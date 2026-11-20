@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(18))
+      allocate (testsuite(24))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -68,6 +68,18 @@ contains
       testsuite(17)%test => t_live_import
       testsuite(18)%name = "yourself-npp-plain-fwd"
       testsuite(18)%test => t_yourself_npp
+      testsuite(19)%name = "disembargo-plain-fwd-npp"
+      testsuite(19)%test => t_dis_plain_npp
+      testsuite(20)%name = "fwd-ra-pending-npp"
+      testsuite(20)%test => t_fwd_ra_pending_npp
+      testsuite(21)%name = "fwd-ra-returned-npp"
+      testsuite(21)%test => t_fwd_ra_returned_npp
+      testsuite(22)%name = "disembargo-plain-fwd-opp"
+      testsuite(22)%test => t_dis_plain_opp
+      testsuite(23)%name = "finish-plain-fwd-opp"
+      testsuite(23)%test => t_fin_plain_opp
+      testsuite(24)%name = "plain-fwd-opp-after-return"
+      testsuite(24)%test => t_opp_after_return
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1060,6 +1072,158 @@ contains
                  'yourself npp: got '//b//' / '//c)
       call close_peer(conn, fd)
    end subroutine t_yourself_npp
+
+   !> A Disembargo on a plain forward that hinted noPromisePipelining.
+   !> C++ aborts, as the disabled pipeline is broken.
+   subroutine t_dis_plain_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wdis(fd, 3_int64, 556_int64)
+      b = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. b == 'ABORT', 'disembargo plain npp: got '//b)
+      call close_peer(conn, fd)
+   end subroutine t_dis_plain_npp
+
+   !> A forwarded receiverAnswer param on a noPromisePipelining answer.
+   !> C++ writes the disabled pipeline, a broken senderPromise, and then
+   !> resolves it to an exception.
+   subroutine ra_npp_case(error, pending, label)
+      type(error_type), allocatable, intent(out) :: error
+      logical, intent(in) :: pending
+      character(len=*), intent(in) :: label
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k1, k2
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      if (pending) then
+         call wcall(fd, 3_int64, 2, 1_int64, NOCAPS, NOIDS, npp=.true.)
+         call rpc_pump_once(conn, e)
+         a = wtext(fd, k1)
+      else
+         call wcall(fd, 3_int64, 2, -1_int64, NOCAPS, NOIDS, npp=.true.)
+         a = step(conn, fd, 1)
+      end if
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [3_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k2)
+      c = drain(fd)
+      call check(error, index(b, ' I4 y [sp') > 0 .and. &
+                 index(c, 'RET 5 take'//itoa(k2)//' | RES ') == 1 .and. &
+                 index(c, ' exc') == len(c) - 3, label//': got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine ra_npp_case
+
+   subroutine t_fwd_ra_pending_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ra_npp_case(error, .true., 'pending npp')
+   end subroutine t_fwd_ra_pending_npp
+
+   subroutine t_fwd_ra_returned_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ra_npp_case(error, .false., 'returned npp')
+   end subroutine t_fwd_ra_returned_npp
+
+   !> A plain forward that hinted both noPromisePipelining and
+   !> onlyPromisePipeline goes out with sendForPipeline (rpc.c++ 2646). Its
+   !> pipeline lives whatever the hint says, and C++ ignores the Return,
+   !> so a Disembargo on the answer is echoed on the forwarded question.
+   subroutine t_dis_plain_opp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true., opp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wret(fd, k, .false., 9_int64)
+      b = step(conn, fd, 1)
+      call wdis(fd, 3_int64, 556_int64)
+      c = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. b == '' .and. c == 'DIS P'//itoa(k)//' rl 556', &
+                 'disembargo plain opp: got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_dis_plain_opp
+
+   !> A Finish on that plain forward before its Return. C++ sent the call
+   !> with isAwaitingReturn false, so the Finish for the forwarded
+   !> question has releaseResultCaps false.
+   subroutine t_fin_plain_opp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true., opp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wfin(fd, 3_int64, .true.)
+      b = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. b == 'FIN '//itoa(k)//' F', &
+                 'finish plain opp: got '//b)
+      call close_peer(conn, fd)
+   end subroutine t_fin_plain_opp
+
+   !> Once the peer has returned a pipeline-only question, C++ sends later
+   !> such calls as ordinary calls. Under noPromisePipelining the dropped
+   !> response finishes the question at once.
+   subroutine t_opp_after_return(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k1, k2
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true., opp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k1)
+      call wret(fd, k1, .false.)
+      a = step(conn, fd, 1)
+      call wcall(fd, 5_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true., opp=.true.)
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k2)
+      c = drain(fd)
+      call check(error, k1 > 1000_int64 .and. k2 >= 0_int64 .and. k2 < 1000_int64 .and. &
+                 b == 'CALL '//itoa(k2)//' I4 c [] opp' .and. c == 'FIN '//itoa(k2)//' T', &
+                 'opp after return: got '//itoa(k1)//' / '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_opp_after_return
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

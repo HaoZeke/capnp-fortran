@@ -293,6 +293,9 @@ module capnp_rpc
       !> The answer that copies this question's results, when this vat
       !> sent that answer's call on as a plain call (forward_call).
       integer(int64) :: plain_answer = -1_int64
+      !> Sent as C++ sendForPipeline sends: under a high-bit id, with no
+      !> Return awaited (rpc.c++ sendForPipelineInternal).
+      logical :: pipeline_only = .false.
       !> Param holds of the call that was forwarded as this question.
       !> C++ keeps them as imports until the original call ends.
       integer(int64), allocatable :: param_ids(:)
@@ -623,6 +626,9 @@ module capnp_rpc
       class(rpc_byte_stream_t), pointer :: transport => null()
       type(rpc_fd_stream_t) :: own_transport
       logical :: dead = .false.
+      !> The peer sent a Return for a pipeline-only question. C++ then
+      !> sends later pipeline-only calls as ordinary calls.
+      logical :: got_high_return = .false.
       character(len=:), allocatable :: abort_reason
       class(rpc_server_t), pointer :: bootstrap_srv => null()
       !> Grows when every slot is taken, as C++ 1.4.0 has no limit.
@@ -645,6 +651,9 @@ module capnp_rpc
       !> senderLoopback Disembargoes on a plain forward still running.
       !> C++ reads their target once the answer resolves.
       type(rpc_incoming_wait_t), pointer :: loopback_wait => null()
+      !> Broken promise exports written this turn. Each gets its Resolve
+      !> once the message is handled, as C++ resolveExportedPromise does.
+      integer, allocatable :: broken_resolves(:)
       integer(int64) :: next_embargo = 0_int64
       integer(int64) :: next_import_handle = -2_int64
       !> Shared with this vat's other connections when one is attached;
@@ -779,6 +788,7 @@ contains
       conn%intro_used = 0
       conn%intro_free = -1
       if (allocated(conn%param_holds)) deallocate (conn%param_holds)
+      if (allocated(conn%broken_resolves)) deallocate (conn%broken_resolves)
    end subroutine rpc_conn_close
 
    !> Inquiry getters over connection state, so callers need not touch
@@ -1176,6 +1186,15 @@ contains
       qslot_ok = qid >= 0_int64 .and. qid < int(size(conn%questions), int64)
    end function qslot_ok
 
+   !> The wire id of our question `q`.
+   pure integer(int64) function qwire(conn, q)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: q
+      qwire = q
+      if (.not. qslot_ok(conn, q)) return
+      if (conn%questions(int(q))%pipeline_only) qwire = ior(q, QID_HIGH_BIT)
+   end function qwire
+
    pure logical function eslot_ok(conn, eid)
       type(rpc_conn_t), intent(in) :: conn
       integer(int64), intent(in) :: eid
@@ -1217,6 +1236,7 @@ contains
             conn%questions(k)%tail_answer = -1_int64
             conn%questions(k)%tail_opp = .false.
             conn%questions(k)%plain_answer = -1_int64
+            conn%questions(k)%pipeline_only = .false.
             if (allocated(conn%questions(k)%param_ids)) deallocate (conn%questions(k)%param_ids)
             conn%questions(k)%local_call = .false.
             conn%questions(k)%local_results = .false.
@@ -1443,7 +1463,8 @@ contains
             conn%questions(int(qid))%local_call = .true.
          case (RPC_CAP_PIPELINE)
             pa = message_target_promised_answer_init(tgt, err)
-            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, target%id, err)
+            if (err == CAPNP_OK) &
+               call promised_answer_question_id_set(pa, qwire(conn, target%id), err)
             if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
             if (err == CAPNP_OK) then
                do i = 0, target%nops - 1
@@ -2415,7 +2436,8 @@ contains
                end block
             case (RPC_CAP_PIPELINE)
                pa = message_target_promised_answer_init(tgt, err)
-               if (err == CAPNP_OK) call promised_answer_question_id_set(pa, caps(i)%id, err)
+               if (err == CAPNP_OK) &
+                  call promised_answer_question_id_set(pa, qwire(conn, caps(i)%id), err)
                if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(caps(i)%nops, int64), err)
                if (err == CAPNP_OK) then
                   do k = 0, caps(i)%nops - 1
@@ -3108,6 +3130,7 @@ contains
       slot%tail_answer = -1_int64
       slot%tail_opp = .false.
       slot%plain_answer = -1_int64
+      slot%pipeline_only = .false.
       if (allocated(slot%param_ids)) deallocate (slot%param_ids)
       slot%local_call = .false.
       slot%local_results = .false.
@@ -3547,7 +3570,7 @@ contains
       if (err == CAPNP_OK) call disembargo_context_receiver_loopback_set(d, embargo_id, err)
       if (err == CAPNP_OK) tgt = disembargo_target_init(d, err)
       if (err == CAPNP_OK) pa = message_target_promised_answer_init(tgt, err)
-      if (err == CAPNP_OK) call promised_answer_question_id_set(pa, qid, err)
+      if (err == CAPNP_OK) call promised_answer_question_id_set(pa, qwire(conn, qid), err)
       if (err == CAPNP_OK) new_ops = promised_answer_transform_init(pa, int(n, int64), err)
       if (err == CAPNP_OK) then
          do i = 0, n - 1
@@ -4410,7 +4433,8 @@ contains
       call import_find(conn, final_id, fnode, ffound)
       if (ffound) ffound = fnode%state == IMP_REMOTE .and. fnode%fwd_qid >= 0_int64
       if (ffound) then
-         if (e == CAPNP_OK) call write_pipeline_target(tgt, fnode%fwd_qid, fnode%answer_ops, e)
+         if (e == CAPNP_OK) call write_pipeline_target(tgt, qwire(conn, fnode%fwd_qid), &
+                                                   fnode%answer_ops, e)
       else
          if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
       end if
@@ -5142,6 +5166,7 @@ contains
          call handle_call(conn, m, msg, err)
       case (MESSAGE_RETURN_TAG)
          call handle_return(conn, m, msg, err)
+         call send_broken_resolves(conn)
          return ! handle_return takes ownership of m
       case (MESSAGE_FINISH_TAG)
          call handle_finish(conn, msg, err)
@@ -5168,7 +5193,41 @@ contains
          call send_unimplemented(conn, msg, err)
       end select
       call capnp_message_free(m)
+      call send_broken_resolves(conn)
    end subroutine rpc_pump_once
+
+   !> Resolve each broken promise export written this turn to its
+   !> exception, unless the peer has already released it.
+   subroutine send_broken_resolves(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(exception_t) :: ex
+      integer, allocatable :: ids(:)
+      integer :: i, eid, e
+      if (.not. allocated(conn%broken_resolves)) return
+      call move_alloc(conn%broken_resolves, ids)
+      do i = 1, size(ids)
+         eid = ids(i)
+         if (conn%dead .or. .not. associated(conn%transport)) exit
+         if (.not. eslot_ok(conn, int(eid, int64))) cycle
+         if (.not. conn%exports(eid)%used) cycle
+         select type (px => conn%exports(eid)%srv)
+         type is (rpc_pipe_proxy_t)
+            call capnp_message_init_builder(m, e)
+            if (e /= CAPNP_OK) cycle
+            msg = message_new_root(m, e)
+            if (e == CAPNP_OK) rv = message_resolve_init(msg, e)
+            if (e == CAPNP_OK) call resolve_promise_id_set(rv, int(eid, int64), e)
+            if (e == CAPNP_OK) ex = resolve_exception_init(rv, e)
+            if (e == CAPNP_OK) call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+            if (e == CAPNP_OK) call exception_reason_set(ex, px%reason, e)
+            if (e == CAPNP_OK) call rpc_send_message(conn%transport, m, e)
+            call capnp_message_free(m)
+         end select
+      end do
+   end subroutine send_broken_resolves
 
    !> Poll-then-pump: handle at most one message if one is readable
    !> within timeout_ms. handled=.false. on timeout. The multiplexing
@@ -5391,9 +5450,11 @@ contains
          end if
       end block
       ! A call that reaches a server, a queue or the peer with the hint
-      ! gets a disabled pipeline. A broken target keeps its own pipeline.
+      ! gets a disabled pipeline. A broken target keeps its own pipeline,
+      ! and a call sent on through sendForPipeline a live one.
       if (call_no_promise_pipelining_get(c) .and. terr == CAPNP_OK .and. &
-          (eid >= 0 .or. aqid >= 0_int64 .or. fkind /= PIPE_BROKEN)) then
+          (eid >= 0 .or. aqid >= 0_int64 .or. &
+           (fkind /= PIPE_BROKEN .and. .not. sends_for_pipeline(conn, c)))) then
          block
             type(rpc_answer_slot_t), pointer :: own
             logical :: have
@@ -5423,6 +5484,17 @@ contains
          call run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held=pids)
       end if
    end subroutine handle_call
+
+   !> True when C++ sends call `c` on through sendForPipeline: it is not
+   !> a tail call, it asks for the pipeline only, its results are not
+   !> redirected, and the peer has never returned such a call.
+   logical function sends_for_pipeline(conn, c)
+      type(rpc_conn_t), intent(in) :: conn
+      type(call_t), intent(in) :: c
+      sends_for_pipeline = .not. can_forward(c) .and. call_only_promise_pipeline_get(c) .and. &
+                           call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_YOURSELF_TAG .and. &
+                           .not. conn%got_high_return
+   end function sends_for_pipeline
 
    !> C++ 1.4.0 forwards a call as a tail call only when the caller
    !> takes the results and accepts promise pipelining (rpc.c++
@@ -5498,7 +5570,11 @@ contains
       call capnp_message_init_builder(cm, err)
       if (err == CAPNP_OK) cmsg = message_new_root(cm, err)
       if (err == CAPNP_OK) fc = message_call_init(cmsg, err)
-      if (err == CAPNP_OK) call call_question_id_set(fc, tq, err)
+      ! A plain forward under onlyPromisePipeline goes as C++
+      ! directTailCall sends it, through sendForPipeline.
+      if (.not. direct .and. sends_for_pipeline(conn, c)) &
+         conn%questions(int(tq))%pipeline_only = .true.
+      if (err == CAPNP_OK) call call_question_id_set(fc, qwire(conn, tq), err)
       if (err == CAPNP_OK) call call_interface_id_set(fc, call_interface_id_get(c), err)
       if (err == CAPNP_OK) call call_method_id_set(fc, call_method_id_get(c), err)
       ! rpc.c++ handleCall drops onlyPromisePipeline for redirected results.
@@ -5514,7 +5590,7 @@ contains
             call message_target_imported_cap_set(tgt, fid, err)
          else
             pa = message_target_promised_answer_init(tgt, err)
-            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, fid, err)
+            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, qwire(conn, fid), err)
             if (err == CAPNP_OK) &
                ops = promised_answer_transform_init(pa, int(size(fops), int64), err)
             do i = 1, size(fops)
@@ -5553,8 +5629,19 @@ contains
          call move_alloc(pids, slot%plain_pids)
          slot%plain_elsewhere = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
          slot%plain_opp = call_only_promise_pipeline_get(c) .and. .not. slot%plain_elsewhere
-         slot%plain_npp = call_no_promise_pipelining_get(c)
+         ! sendForPipeline keeps a live pipeline under noPromisePipelining.
+         slot%plain_npp = call_no_promise_pipelining_get(c) .and. &
+                          .not. conn%questions(int(tq))%pipeline_only
          conn%questions(int(tq))%plain_answer = qid
+         ! Once the peer returned a pipeline-only question, send() takes
+         ! its place. Under noPromisePipelining its pipeline is disabled
+         ! and the dropped response promise finishes the question at once.
+         if (slot%plain_opp .and. slot%plain_npp) then
+            e = CAPNP_OK
+            call send_question_finish(conn, tq, .true., e)
+            conn%questions(int(tq))%canceled = .true.
+            conn%questions(int(tq))%plain_answer = -1_int64
+         end if
          return
       end if
       call move_alloc(pids, conn%questions(int(tq))%param_ids)
@@ -5657,7 +5744,8 @@ contains
    !> for the peer: our export as senderHosted with one more reference,
    !> the peer's export as receiverHosted, a pipeline on our live question
    !> as receiverAnswer. A plain forward still running gives a proxy
-   !> export. Any other answer still running, or a broken cap, is none.
+   !> export, and a noPromisePipelining answer a broken promise export.
+   !> Any other answer still running, or a broken cap, is none.
    subroutine forward_answer_param(conn, icd, ocd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: icd, ocd
@@ -5688,6 +5776,32 @@ contains
       if (found) found = associated(slot)
       if (found) found = slot%used
       if (.not. found) return
+      ! A disabled pipeline gives a broken cap. C++ exports it as a
+      ! promise and resolves that to the exception (rpc.c++
+      ! writeDescriptor, resolveExportedPromise).
+      if (slot%no_pipeline .and. .not. slot%finished) then
+         block
+            type(rpc_pipe_proxy_t), pointer :: px
+            class(*), pointer :: srv
+            integer :: peid
+            allocate (px)
+            px%settled = .true.
+            px%reason = 'caller specified noPromisePipelining hint, but then tried to pipeline'
+            srv => px
+            peid = export_server(conn, srv, owned=.true.)
+            if (peid < 0) then
+               deallocate (px)
+               return
+            end if
+            call cap_descriptor_sender_promise_set(ocd, int(peid, int64), err)
+            if (allocated(conn%broken_resolves)) then
+               conn%broken_resolves = [conn%broken_resolves, peid]
+            else
+               conn%broken_resolves = [peid]
+            end if
+         end block
+         return
+      end if
       if (.not. slot%has_results .and. slot%plain_qid < 0_int64 .and. &
           .not. slot%finished .and. .not. slot%no_pipeline) then
          call write_answer_proxy(conn, ocd, promised_answer_question_id_get(rpa), fields, err)
@@ -5696,7 +5810,7 @@ contains
       ! A plain forward still running serves its pipeline from its
       ! question. C++ exports that pipeline cap as a hosted cap.
       if (.not. slot%has_results) then
-         if (slot%finished .or. slot%no_pipeline .or. slot%plain_qid < 0_int64) return
+         if (slot%finished .or. slot%plain_qid < 0_int64) return
          if (.not. live_question(conn, slot%plain_qid)) return
          block
             type(rpc_pipe_proxy_t), pointer :: px
@@ -5748,7 +5862,7 @@ contains
          if (.not. live_question(conn, id)) return
          if (.not. allocated(qops)) allocate (qops(0))
          opa = cap_descriptor_receiver_answer_init(ocd, err)
-         if (err == CAPNP_OK) call promised_answer_question_id_set(opa, id, err)
+         if (err == CAPNP_OK) call promised_answer_question_id_set(opa, qwire(conn, id), err)
          if (err == CAPNP_OK) ops = promised_answer_transform_init(opa, int(size(qops), int64), err)
          do i = 1, size(qops)
             if (err /= CAPNP_OK) return
@@ -5899,7 +6013,7 @@ contains
                case (PIPE_QUESTION)
                   if (.not. allocated(qops)) allocate (qops(0))
                   opa = cap_descriptor_receiver_answer_init(cd, e)
-                  if (e == CAPNP_OK) call promised_answer_question_id_set(opa, id, e)
+                  if (e == CAPNP_OK) call promised_answer_question_id_set(opa, qwire(conn, id), e)
                   if (e == CAPNP_OK) &
                      ops = promised_answer_transform_init(opa, int(size(qops), int64), e)
                   do k = 1, size(qops)
@@ -6834,6 +6948,14 @@ contains
             return
          end if
          if (aslot%no_pipeline) then
+            ! Once results with caps are on the wire, C++ walks them
+            ! before it asks the disabled pipeline (rpc.c++
+            ! PostReturnRpcPipeline), so a bad walk aborts first.
+            if (aslot%has_results .and. .not. aslot%local_results) then
+               call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err)
+               if (err /= CAPNP_OK .or. conn%dead) return
+               eid = -1_int64
+            end if
             if (present(reason)) reason = 'caller specified noPromisePipelining hint, ' // &
                                           'but then tried to pipeline'
             return
@@ -8203,6 +8325,7 @@ contains
       ! Pipeline-only question ids carry the high bit. C++ ignores a
       ! Return for those rather than treating the id as unknown.
       if (iand(qid, QID_HIGH_BIT) /= 0_int64) then
+         conn%got_high_return = .true.
          err = CAPNP_OK
          call capnp_message_free(m)
          return
@@ -8477,6 +8600,11 @@ contains
       logical :: ignored, sent
       integer :: e
       if (.not. conn%questions(q)%used) return
+      if (conn%questions(q)%pipeline_only) then
+         call send_question_finish(conn, int(q, int64), .false., e)
+         call question_slot_clear(conn%questions(q))
+         return
+      end if
       sent = .false.
       if (present(fin_sent)) sent = fin_sent
       if (.not. sent) &
@@ -8574,7 +8702,7 @@ contains
       call capnp_message_init_builder(m, err)
       if (err == CAPNP_OK) msg = message_new_root(m, err)
       if (err == CAPNP_OK) f = message_finish_init(msg, err)
-      if (err == CAPNP_OK) call finish_question_id_set(f, qid, err)
+      if (err == CAPNP_OK) call finish_question_id_set(f, qwire(conn, qid), err)
       if (err == CAPNP_OK) call finish_release_result_caps_set(f, release_caps, err)
       if (err == CAPNP_OK) call finish_require_early_cancellation_workaround_set(f, .false., err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
@@ -9537,6 +9665,43 @@ contains
       if (.not. afound) then
          call abort_conn(conn, back, err)
          return
+      end if
+      ! A disabled pipeline gives a broken cap, and whenResolved() on it
+      ! fails the Disembargo task (rpc.c++ handleDisembargo). Results on
+      ! the wire are walked first, as for a pipelined call.
+      if (aslot%no_pipeline .and. .not. aslot%finished) then
+         if (aslot%has_results .and. .not. aslot%local_results) then
+            block
+               integer, allocatable :: fields(:)
+               character(len=:), allocatable :: why
+               integer(int64) :: id
+               integer :: kind
+               ops = promised_answer_transform_get(pa, err)
+               if (err /= CAPNP_OK) return
+               allocate (fields(int(capnp_list_len(ops))))
+               do i = 1, size(fields)
+                  op%p = capnp_list_get_struct(ops, i - 1, err)
+                  if (err /= CAPNP_OK) return
+                  fields(i) = -1
+                  if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+                     fields(i) = int(promised_answer_op_get_pointer_field_get(op))
+               end do
+               call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, id, why, err)
+               if (err /= CAPNP_OK .or. conn%dead) return
+            end block
+         end if
+         call abort_conn(conn, 'caller specified noPromisePipelining hint, but then ' // &
+                         'tried to pipeline', err)
+         return
+      end if
+      ! The pipeline of a pipeline-only question never resolves, so its
+      ! client is the target at once.
+      if (.not. aslot%has_results .and. qslot_ok(conn, aslot%plain_qid)) then
+         if (conn%questions(int(aslot%plain_qid))%pipeline_only) then
+            call send_receiver_loopback_answer(conn, embargo_id, pa, err, aslot%plain_qid)
+            if (err == CAPNP_ERR_KIND) call abort_conn(conn, 'Unsupported pipeline op.', err)
+            return
+         end if
       end if
       ! C++ waits for any pending answer to resolve before it reads the
       ! target (rpc.c++ handleDisembargo).

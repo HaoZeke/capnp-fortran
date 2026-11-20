@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(151))
+      allocate (testsuite(152))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -481,18 +481,20 @@ contains
       testsuite(144)%test => w_failed_plain_forward_finishes
       testsuite(145)%name = "rpc-quiet-results-take-no-export-id"
       testsuite(145)%test => w_quiet_results_take_no_export_id
-      testsuite(146)%name = "posix-recv-eintr-retried"
-      testsuite(146)%test => t_recv_all_retries_eintr
-      testsuite(147)%name = "rpc-framing-511-accepted"
-      testsuite(147)%test => t_framing_511_accepted
-      testsuite(148)%name = "rpc-framing-512-rejected"
-      testsuite(148)%test => t_framing_512_rejected
-      testsuite(149)%name = "rpc-framing-oversized-rejected"
-      testsuite(149)%test => t_framing_oversized_rejected
-      testsuite(150)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(150)%test => t_framing_negative_traversal_rejected
-      testsuite(151)%name = "rpc-framing-short-and-padded"
-      testsuite(151)%test => t_framing_short_and_padded
+      testsuite(146)%name = "rpc-npp-walk-aborts-on-bad-path"
+      testsuite(146)%test => w_npp_walk_aborts_on_bad_path
+      testsuite(147)%name = "posix-recv-eintr-retried"
+      testsuite(147)%test => t_recv_all_retries_eintr
+      testsuite(148)%name = "rpc-framing-511-accepted"
+      testsuite(148)%test => t_framing_511_accepted
+      testsuite(149)%name = "rpc-framing-512-rejected"
+      testsuite(149)%test => t_framing_512_rejected
+      testsuite(150)%name = "rpc-framing-oversized-rejected"
+      testsuite(150)%test => t_framing_oversized_rejected
+      testsuite(151)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(151)%test => t_framing_negative_traversal_rejected
+      testsuite(152)%name = "rpc-framing-short-and-padded"
+      testsuite(152)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1185,6 +1187,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_quiet_results_take_no_export_id(error)
    end subroutine w_quiet_results_take_no_export_id
+
+   subroutine w_npp_walk_aborts_on_bad_path(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_npp_walk_aborts_on_bad_path(error)
+   end subroutine w_npp_walk_aborts_on_bad_path
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -12205,5 +12212,72 @@ contains
          call capnp_message_free(reply)
       end do
    end function raw_return_hosted
+
+   !> Once a noPromisePipelining call has returned caps, C++ walks the
+   !> results before it asks the disabled pipeline. A walk through a
+   !> capability pointer aborts, as for any returned answer.
+   subroutine t_npp_walk_aborts_on_bad_path(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(many_caps_srv_t), target :: many
+      class(rpc_server_t), pointer :: srvp
+      character(len=:), allocatable :: a, why
+      integer(int64) :: id
+      integer :: fa, fb, e
+
+      many%ncaps = 1
+      srvp => many
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call send_raw_call(fb, 1_int64, 0_int64, e, npp=.true.)
+      call rpc_pump_once(conn, e)
+      id = raw_return_hosted(fb, 1_int64)
+      call raw_pa_ops_call(fb, 2_int64, 1_int64, [0, 0])
+      call rpc_pump_once(conn, e)
+      why = rpc_conn_reason(conn)
+      call check_(error, id >= 0_int64 .and. .not. rpc_conn_alive(conn) .and. &
+                  index(why, 'non-struct pointer') > 0, &
+                  'npp walk: a walk through a cap aborts, got '//why)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_npp_walk_aborts_on_bad_path
+
+   !> Call echo on answer `aq` through pointer fields `fields`, with
+   !> empty params.
+   subroutine raw_pa_ops_call(fd, q, aq, fields)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: q, aq
+      integer, intent(in) :: fields(:)
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      type(payload_t) :: params
+      integer :: i, e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, q, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, aq, e)
+      ops = promised_answer_transform_init(pa, int(size(fields), int64), e)
+      do i = 1, size(fields)
+         op%p = capnp_list_get_struct(ops, i - 1, e)
+         call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+      end do
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine raw_pa_ops_call
 
 end module test_rpc
