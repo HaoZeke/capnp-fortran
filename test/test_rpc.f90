@@ -60,6 +60,8 @@ module test_rpc
       class(rpc_server_t), pointer :: inner => null()
       type(rpc_cap_t) :: probe
       integer(int64) :: probe_q = -1_int64
+      !> Cancel the probe call right after sending it.
+      logical :: cancel_probe = .false.
    contains
       procedure :: dispatch => pump_dispatch
    end type pump_srv_t
@@ -132,7 +134,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(115))
+      allocate (testsuite(116))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -351,18 +353,20 @@ contains
       testsuite(108)%test => w_finish_before_return_answers
       testsuite(109)%name = "rpc-resolve-unknown-promise-reads-answer"
       testsuite(109)%test => w_resolve_unknown_promise_reads_answer
-      testsuite(110)%name = "posix-recv-eintr-retried"
-      testsuite(110)%test => t_recv_all_retries_eintr
-      testsuite(111)%name = "rpc-framing-511-accepted"
-      testsuite(111)%test => t_framing_511_accepted
-      testsuite(112)%name = "rpc-framing-512-rejected"
-      testsuite(112)%test => t_framing_512_rejected
-      testsuite(113)%name = "rpc-framing-oversized-rejected"
-      testsuite(113)%test => t_framing_oversized_rejected
-      testsuite(114)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(114)%test => t_framing_negative_traversal_rejected
-      testsuite(115)%name = "rpc-framing-short-and-padded"
-      testsuite(115)%test => t_framing_short_and_padded
+      testsuite(110)%name = "rpc-cancel-call-on-pending-answer"
+      testsuite(110)%test => w_cancel_call_on_pending_answer
+      testsuite(111)%name = "posix-recv-eintr-retried"
+      testsuite(111)%test => t_recv_all_retries_eintr
+      testsuite(112)%name = "rpc-framing-511-accepted"
+      testsuite(112)%test => t_framing_511_accepted
+      testsuite(113)%name = "rpc-framing-512-rejected"
+      testsuite(113)%test => t_framing_512_rejected
+      testsuite(114)%name = "rpc-framing-oversized-rejected"
+      testsuite(114)%test => t_framing_oversized_rejected
+      testsuite(115)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(115)%test => t_framing_negative_traversal_rejected
+      testsuite(116)%name = "rpc-framing-short-and-padded"
+      testsuite(116)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -568,6 +572,7 @@ contains
             call capnp_set_text(s, 0, 'probe', e)
             call payload_content_set(params, s, e)
             call rpc_call_send(self%conn, m, e)
+            if (self%cancel_probe) call rpc_request_cancellation(self%conn, self%probe_q, e)
          end if
       end if
       select case (self%mode)
@@ -719,6 +724,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_unknown_promise_reads_answer(error)
    end subroutine w_resolve_unknown_promise_reads_answer
+
+   subroutine w_cancel_call_on_pending_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_cancel_call_on_pending_answer(error)
+   end subroutine w_cancel_call_on_pending_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8251,6 +8261,42 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_pending_receiver_answer
+
+   !> A call canceled while it waits on a pending receiverAnswer is
+   !> dropped with its queued promise in C++ 1.4.0, so it never runs and
+   !> never takes over the question id after the answer returns.
+   subroutine t_cancel_call_on_pending_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      integer(int64) :: qp, emb
+      integer :: dis_at, rel_at, ret_at
+
+      pumper = pump_srv_t()
+      pumper%mode = 1
+      pumper%cancel_probe = .true.
+      srv => local_echo
+      pumper%inner => srv
+      call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+      pumper%probe = promised
+      call ra_resolve(cconn, sconn, 4_int64, qp, [0])
+      call ra_order(sconn, 4_int64, dis_at, rel_at, ret_at)
+      call check_(error, rpc_conn_alive(cconn) .and. pumper%probe_q >= 0_int64 .and. &
+                  ret_at > 0, 'canceled pending call: answer returned')
+      if (.not. allocated(error)) then
+         emb = cconn%embargoes%id
+         call ra_loopback(cconn, sconn, 4_int64, emb)
+         call check_(error, .not. cconn%questions(int(pumper%probe_q))%used .and. &
+                     .not. cconn%questions(int(pumper%probe_q))%returned, &
+                     'canceled pending call: never runs')
+      end if
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_cancel_call_on_pending_answer
 
    !> C++ 1.4.0 reads a pending answer in a continuation (QueuedPipeline),
    !> so a walk or pointer error there breaks the promise with the text

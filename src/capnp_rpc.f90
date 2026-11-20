@@ -1951,6 +1951,31 @@ contains
       end do
    end subroutine drop_pipe_wait
 
+   !> Forget a call that waits on a promise resolved to a pending
+   !> answer, so a canceled call is not sent once that answer returns.
+   subroutine drop_answer_wait(conn, qid)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_answer_wait_t), pointer :: node, prev, nxt
+      prev => null()
+      node => conn%answer_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%call_qid == qid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%answer_wait => nxt
+            end if
+            call capnp_message_free(node%msg)
+            deallocate (node)
+         else
+            prev => node
+         end if
+         node => nxt
+      end do
+   end subroutine drop_answer_wait
+
    subroutine drop_queued_call(conn, qid)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
@@ -2785,6 +2810,7 @@ contains
       if (conn%questions(q)%local_call) then
          call drop_queued_call(conn, qid)
          call drop_pipe_wait(conn, qid)
+         call drop_answer_wait(conn, qid)
       else
          call capnp_message_init_builder(m, err)
          if (err /= CAPNP_OK) return
