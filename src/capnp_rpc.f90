@@ -8044,6 +8044,29 @@ contains
             if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
             return
          end if
+         ! Finish cancels a plain forward's call task at once (rpc.c++
+         ! handleFinish): its question goes, and the caller gets
+         ! resultsSentElsewhere, a canceled Return, or nothing for
+         ! onlyPromisePipeline.
+         if (jslot%plain_qid >= 0_int64) then
+            if (jslot%plain_elsewhere .and. .not. conn%dead .and. associated(conn%transport)) then
+               call send_results_elsewhere(conn, qid, jerr)
+               if (jerr /= CAPNP_OK) err = jerr
+            end if
+            if (qslot_ok(conn, jslot%plain_qid)) then
+               if (conn%questions(int(jslot%plain_qid))%plain_answer == qid) &
+                  call end_plain_question(conn, int(jslot%plain_qid))
+            end if
+            if (.not. jslot%plain_elsewhere .and. .not. jslot%plain_opp .and. &
+                .not. conn%dead .and. associated(conn%transport)) then
+               call send_canceled_return(conn, qid, jerr)
+               if (jerr /= CAPNP_OK) err = jerr
+            end if
+            call drop_param_holds(conn, jslot%plain_pids, err)
+            call answer_slot_clear(jslot)
+            if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+            return
+         end if
          jslot%finished = .true.
          return
       end if

@@ -30,7 +30,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(6))
+      allocate (testsuite(8))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -43,6 +43,10 @@ contains
       testsuite(5)%test => t_yourself_opp
       testsuite(6)%name = "npp-fwd-keeps-promise-import"
       testsuite(6)%test => t_npp_keeps_promise
+      testsuite(7)%name = "finish-plain-fwd-npp"
+      testsuite(7)%test => t_fin_plain_npp
+      testsuite(8)%name = "finish-plain-fwd-yourself"
+      testsuite(8)%test => t_fin_plain_yourself
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -630,6 +634,50 @@ contains
                  index(c, 'REL') == 0 .and. d == 'REL 9 1', 'npp keeps promise: got '//b//' / '//c//' / '//d)
       call close_peer(conn, fd)
    end subroutine t_npp_keeps_promise
+
+   !> Finish on a call that went on as a plain call cancels it at once:
+   !> the question is finished, and the caller gets a canceled Return, or
+   !> resultsSentElsewhere first for a yourself call.
+   subroutine fin_plain_case(error, npp, label)
+      type(error_type), allocatable, intent(out) :: error
+      logical, intent(in) :: npp
+      character(len=*), intent(in) :: label
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, want
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, yourself=.not. npp, npp=npp)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wfin(fd, 3_int64, .true.)
+      b = step(conn, fd, 1)
+      call wret(fd, k, .false.)
+      c = step(conn, fd, 1)
+      if (npp) then
+         want = 'FIN '//itoa(k)//' T | RET 3 can'
+      else
+         want = 'RET 3 else | FIN '//itoa(k)//' T'
+      end if
+      call check(error, k >= 0_int64 .and. b == want .and. c == '', &
+                 label//': got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine fin_plain_case
+
+   subroutine t_fin_plain_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      call fin_plain_case(error, .true., 'finish plain npp')
+   end subroutine t_fin_plain_npp
+
+   subroutine t_fin_plain_yourself(error)
+      type(error_type), allocatable, intent(out) :: error
+      call fin_plain_case(error, .false., 'finish plain yourself')
+   end subroutine t_fin_plain_yourself
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
