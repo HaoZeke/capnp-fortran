@@ -95,7 +95,8 @@ contains
          new_unittest("json-nest-limit", run_json_nest_limit), &
          new_unittest("cli-json-stream", run_cli_json_stream), &
          new_unittest("text-ws-vt-ff", run_text_ws_vt_ff), &
-         new_unittest("text-inactive-arm", run_text_inactive_arm) &
+         new_unittest("text-inactive-arm", run_text_inactive_arm), &
+         new_unittest("text-group-replace", run_text_group_replace) &
          ]
    end subroutine collect_regress
 
@@ -2458,5 +2459,67 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_inactive_arm
+
+   subroutine run_text_group_replace(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: sample, garm, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      sample = capnp_dyn_find(schema, 'Sample', err)
+      garm = capnp_dyn_find(schema, 'GroupArm', err)
+      call show_has(schema, sample, '(where = (city = "a"), where = (zip = 5))', 'zip = 5')
+      call show_lacks(schema, sample, '(where = (city = "a"), where = (zip = 5))', 'city =')
+      call show_has(schema, sample, '(where = (zip = 1), where = (city = "a"))', 'zip = 411')
+      call show_has(schema, sample, '(where = (zip = 1), where = (city = "a"))', 'city = "a"')
+      call show_has(schema, garm, '(box = (y = 7), box = ())', 'y = 0')
+      call show_has(schema, garm, '(box = (x = 1, y = 2), box = (y = 3))', 'x = 0')
+      call show_has(schema, garm, '(box = (x = 1, y = 2), box = (y = 3))', 'y = 3')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine show_has(sch, idx, text, frag)
+         type(capnp_dyn_schema_t), intent(in) :: sch
+         integer, intent(in) :: idx
+         character(len=*), intent(in) :: text, frag
+         character(len=:), allocatable :: out
+         call render(sch, idx, text, out)
+         call check_(error, index(out, frag) > 0, 'group replace has '//frag)
+      end subroutine show_has
+
+      subroutine show_lacks(sch, idx, text, frag)
+         type(capnp_dyn_schema_t), intent(in) :: sch
+         integer, intent(in) :: idx
+         character(len=*), intent(in) :: text, frag
+         character(len=:), allocatable :: out
+         call render(sch, idx, text, out)
+         call check_(error, index(out, frag) == 0, 'group replace lacks '//frag)
+      end subroutine show_lacks
+
+      subroutine render(sch, idx, text, out)
+         type(capnp_dyn_schema_t), intent(in) :: sch
+         integer, intent(in) :: idx
+         character(len=*), intent(in) :: text
+         character(len=:), allocatable, intent(out) :: out
+         type(capnp_message_t) :: msg
+         type(capnp_ptr_t) :: root
+         integer :: e2
+         out = ''
+         if (allocated(error) .or. idx <= 0) return
+         call capnp_text_decode(sch, idx, text, msg, e2)
+         if (e2 /= CAPNP_OK) then
+            call test_failed(error, 'group replace decode')
+            call capnp_message_free(msg)
+            return
+         end if
+         root = capnp_root(msg, e2)
+         call capnp_text_encode(sch, idx, root, out, e2, pretty=.false.)
+         if (e2 /= CAPNP_OK) call test_failed(error, 'group replace encode')
+         call capnp_message_free(msg)
+      end subroutine render
+   end subroutine run_text_group_replace
 
 end module test_regress

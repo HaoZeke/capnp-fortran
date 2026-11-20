@@ -628,6 +628,82 @@ contains
       end select
    end subroutine enc_element
 
+   recursive subroutine clear_inline_group(schema, idx, p, env, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f, t
+      integer :: i, nf, tw, gidx
+      integer(int64) :: off
+      err = CAPNP_OK
+      if (idx < 1 .or. idx > size(schema%nodes)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      nf = int(capnp_list_len(fl))
+      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) then
+         call capnp_set_which(p, &
+            int(node_struct_discriminant_offset(schema%nodes(idx))), 0, err)
+         if (err /= CAPNP_OK) return
+      end if
+      do i = 0, nf - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = capnp_codec_find_id(schema, field_group_type_id(f))
+            if (gidx == 0) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            call clear_inline_group(schema, gidx, p, env, err)
+            if (err /= CAPNP_OK) return
+            cycle
+         end if
+         if (field_which(f) /= FIELD_SLOT) cycle
+         t = field_slot_type(f, err)
+         if (err /= CAPNP_OK) return
+         t = capnp_brand_resolve(env, t)
+         tw = type_which(t)
+         off = field_slot_offset(f)
+         select case (tw)
+         case (TYPE_VOID)
+         case (TYPE_BOOL)
+            call capnp_set_bool(p, off, .false., err)
+         case (TYPE_INT8)
+            call capnp_set_i8(p, off, 0_int8, err)
+         case (TYPE_INT16)
+            call capnp_set_i16(p, off*2_int64, 0_int16, err)
+         case (TYPE_INT32)
+            call capnp_set_i32(p, off*4_int64, 0_int32, err)
+         case (TYPE_INT64)
+            call capnp_set_i64(p, off*8_int64, 0_int64, err)
+         case (TYPE_UINT8)
+            call capnp_set_u8(p, off, 0_int16, err)
+         case (TYPE_UINT16)
+            call capnp_set_u16(p, off*2_int64, 0_int32, err)
+         case (TYPE_UINT32)
+            call capnp_set_u32(p, off*4_int64, 0_int64, err)
+         case (TYPE_UINT64)
+            call capnp_set_u64(p, off*8_int64, 0_int64, err)
+         case (TYPE_FLOAT32)
+            call capnp_set_f32(p, off*4_int64, 0.0_real32, err)
+         case (TYPE_FLOAT64)
+            call capnp_set_f64(p, off*8_int64, 0.0_real64, err)
+         case (TYPE_ENUM)
+            call capnp_set_u16(p, off*2_int64, 0_int32, err)
+         case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+            call capnp_setp(p, int(off), capnp_ptr_t(), err)
+         case default
+            err = CAPNP_ERR_KIND
+         end select
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine clear_inline_group
+
    recursive subroutine parse_struct(schema, idx, p, env, sc, depth, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
@@ -713,6 +789,8 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
+         call clear_inline_group(schema, idx, p, env, err)
+         if (err /= CAPNP_OK) return
          call parse_struct(schema, idx, p, env, sc, depth, err)
          return
       end if
