@@ -14,6 +14,7 @@ module test_dynamic
                                 node_struct_discriminant_offset
    use kitchen_capnp, only: sink_t, sink_new_root, NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
+                                person_employment_employer_set, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
                          dual_primary_text_a_set, dual_secondary_void_b_set, &
@@ -30,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(20))
+      allocate (testsuite(21))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -71,6 +72,8 @@ contains
       testsuite(19)%test => run_unknown_list
       testsuite(20)%name = "dynamic-brand-depth"
       testsuite(20)%test => run_brand_depth
+      testsuite(21)%name = "dynamic-union-disc"
+      testsuite(21)%test => run_union_disc
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1109,6 +1112,26 @@ contains
                   'null reader: builder flag is not read through or')
       call capnp_dyn_free(schema)
    end subroutine run_null_reader
+
+   !> A failed discriminant write is the error the caller sees, and the
+   !> value is not stored afterwards.
+   subroutine run_union_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(person_t) :: h
+      type(capnp_ptr_t) :: q
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      h%p = capnp_new_struct(msg, 0, 4, err)
+      call check_(error, err == CAPNP_OK, 'union-disc: short struct')
+      call person_employment_employer_set(h, 'Acme', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'union-disc: discriminant error stands')
+      q = capnp_getp(h%p, 3, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL, &
+                  'union-disc: text was not written')
+      call capnp_message_free(msg)
+   end subroutine run_union_disc
 
    !> A parameter binding that points at itself stops with a depth error.
    subroutine run_brand_depth(error)

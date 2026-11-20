@@ -145,6 +145,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(h%p, 3, s, err)
    end subroutine person_employment_employer_set
 
@@ -160,6 +161,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 2_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(h%p, 3, s, err)
    end subroutine person_employment_school_set
 

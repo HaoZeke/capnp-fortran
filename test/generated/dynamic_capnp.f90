@@ -152,6 +152,7 @@ contains
       integer(int32), intent(in) :: v
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_i32(h%p, 0_int64, v, err)
    end subroutine dynamic_choice_number_set
 
@@ -167,6 +168,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(h%p, 3, s, err)
    end subroutine dynamic_choice_label_set
 
@@ -183,6 +185,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
       call capnp_set_u16(h%p, 4_int64, 2_int32, err)
+      if (err /= CAPNP_OK) return
       l = capnp_new_list(h%p%msg, 4, n, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 3, l, err)
    end function dynamic_choice_items_init

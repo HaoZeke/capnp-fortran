@@ -1272,6 +1272,16 @@ contains
       call capnp_message_free(tmp)
    end function register_default_blob
 
+   !> Write the union discriminant, then leave before the value write if
+   !> that store failed. dynamic.c++ setInUnion (163) stores the tag
+   !> before the value, and a failed data write does not continue.
+   subroutine emit_disc(gset)
+      character(len=*), intent(in) :: gset
+      if (len(gset) == 0) return
+      call w(gset)
+      call w('      if (err /= CAPNP_OK) return')
+   end subroutine emit_disc
+
    subroutine emit_anyptr_field(an, ht, pidx, gset)
       character(len=*), intent(in) :: an, ht, gset
       integer, intent(in) :: pidx
@@ -1286,7 +1296,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      type(capnp_ptr_t), intent(in) :: q')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_setp(h%p, '//itoa(int(pidx, int64))//', q, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1333,7 +1343,7 @@ contains
       call w('      type('//st//'_client_t), intent(in) :: c')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: q')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      q = capnp_ptr_t()')
       call w('      if (associated(h%p%msg)) q%msg => h%p%msg')
       call w('      q%kind = CAPNP_PK_CAP')
@@ -1364,7 +1374,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      logical, intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_bool(h%p, '//itoa(bit_off)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1400,7 +1410,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      '//vt//', intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_'//acc//'(h%p, '//itoa(off*bytes)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1446,7 +1456,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      '//vt//', intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_'//acc//'(h%p, '//itoa(off*bytes)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1472,7 +1482,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_u16(h%p, '//itoa(off*2_int64)// &
              '_int64, int(v, int32), err'//defarg//')')
       call w('   end subroutine '//an//'_set')
@@ -1508,7 +1518,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      character(len=*), intent(in) :: s')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_text(h%p, '//itoa(int(pidx, int64))//', s, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1547,7 +1557,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer(int8), intent(in) :: b(:)')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_data(h%p, '//itoa(int(pidx, int64))//', b, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -1615,7 +1625,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
       call w('      type('//st//'_t) :: o')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      o%p = capnp_new_struct(h%p%msg, '//upcase(st)//'_DWORDS, '// &
              upcase(st)//'_PWORDS, err)')
       call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '// &
@@ -1743,7 +1753,7 @@ contains
       call w('      integer(int64), intent(in) :: n')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: l')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      l = '//newexpr)
       call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '// &
              itoa(int(pidx, int64))//', l, err)')
