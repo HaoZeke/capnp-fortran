@@ -92,7 +92,8 @@ contains
          new_unittest("json-trailing-spaces", run_json_trailing_spaces), &
          new_unittest("json-union-clear", run_json_union_clear), &
          new_unittest("json-nul-eof", run_json_nul_eof), &
-         new_unittest("json-nest-limit", run_json_nest_limit) &
+         new_unittest("json-nest-limit", run_json_nest_limit), &
+         new_unittest("cli-json-stream", run_cli_json_stream) &
          ]
    end subroutine collect_regress
 
@@ -2356,5 +2357,41 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_nest_limit
+
+   !> JSON stream splitting recognizes punctuation inside quoted strings.
+   !> Cap'n Proto 1.4.0 readOneJson does not enter its quote state and
+   !> rejects these valid streams.
+   subroutine run_cli_json_stream(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call check_stream('url', '{"display_name":"http://x"}'//achar(10)//'{"big":"3"}')
+      call check_stream('hash', '{"display_name":"#x"}'//achar(10)//'{"big":"3"}')
+      call check_stream('brace', '{"display_name":"{"}'//achar(10)//'{"big":"3"}')
+   contains
+      subroutine check_stream(label, payload)
+         character(len=*), intent(in) :: label, payload
+         integer :: e2
+         if (allocated(error)) return
+         call spit(tmp//'/js.in', payload, e2)
+         if (e2 /= CAPNP_OK) then
+            call test_failed(error, 'cli-json-stream: write '//label)
+            return
+         end if
+         if (.not. sh(cap_setup() &
+            //' && "$CAP" convert json:json --short schema/codec.capnp Sample' &
+            //' < '//tmp//'/js.in > '//tmp//'/js.out 2>'//tmp//'/js.ferr' &
+            //' && test "$(wc -l < '//tmp//'/js.out)" = 2' &
+            //' && grep -q ''"big":"3"'' '//tmp//'/js.out')) then
+            call test_failed(error, 'cli-json-stream: valid '//label)
+         end if
+      end subroutine check_stream
+   end subroutine run_cli_json_stream
 
 end module test_regress
