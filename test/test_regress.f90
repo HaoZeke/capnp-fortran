@@ -723,6 +723,12 @@ contains
       call udiff(error, schema, n, 'NestedFlatDisc', &
          '{"outerKind":"g","innerKind":"b","innerVal":"hi"}')
       call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"innerKind":"a","outerKind":"g","innerVal":5}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"innerKind":"b","outerKind":"g","innerVal":"x"}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerVal":{"z":{}}}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
          '{"outerKind":"g","innerKind":"a","innerKind":"b"}')
       call udiff(error, schema, n, 'NestedFlatStructDisc', &
          '{"outerKind":"g","innerKind":"a","innerVal":42}')
@@ -734,7 +740,10 @@ contains
       call udiff(error, schema, n, 'VoidPayload', '{"v":{"a":1}}')
       call udiff(error, schema, n, 'VoidPayload', '{"vls":[1,"a"]}')
       call udiff(error, schema, n, 'VoidPayload', '{"v":null,"n":3}')
-      call check_(error, n == 84, 'union-diff: case count')
+      call tdiff(error, schema, n, 'GroupArm', '(n = 5, box = (y = 1))')
+      call tdiff(error, schema, n, 'GroupArm', '(n = 5, box = ())')
+      call tdiff(error, schema, n, 'GroupUnion', '(n = 5, gu = (p = 1))')
+      call check_(error, n == 90, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 
@@ -778,6 +787,46 @@ contains
       end if
       call capnp_message_free(decoded)
    end subroutine udiff
+
+   subroutine tdiff(error, schema, n, tname, text)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(inout) :: n
+      character(len=*), intent(in) :: tname, text
+      type(capnp_message_t), target :: decoded
+      integer(int8), allocatable :: ours(:), ref(:)
+      integer :: err, idx
+      logical :: cpp_ok, ours_ok
+      n = n + 1
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, tname, err)
+      if (idx <= 0) then
+         call test_failed(error, 'union-diff: missing '//tname)
+         return
+      end if
+      call spit(tmp//'/ut.txt', text, err)
+      cpp_ok = sh('capnp convert text:canonical schema/codec.capnp '//tname &
+         //' < '//tmp//'/ut.txt > '//tmp//'/ut.can 2>'//tmp//'/ut.err')
+      call capnp_text_decode(schema, idx, text, decoded, err)
+      ours_ok = err == CAPNP_OK
+      if (cpp_ok .neqv. ours_ok) then
+         call test_failed(error, 'union-diff: text status '//tname//' '//text)
+         call capnp_message_free(decoded)
+         return
+      end if
+      if (.not. ours_ok) then
+         call capnp_message_free(decoded)
+         return
+      end if
+      call capnp_canonicalize(decoded, ours, err)
+      call capnp_read_file(tmp//'/ut.can', ref, err)
+      if (err /= CAPNP_OK .or. .not. allocated(ours) .or. .not. allocated(ref)) then
+         call test_failed(error, 'union-diff: text bytes '//tname//' '//text)
+      else if (.not. same_i8(ours, ref)) then
+         call test_failed(error, 'union-diff: text bytes '//tname//' '//text)
+      end if
+      call capnp_message_free(decoded)
+   end subroutine tdiff
 
    subroutine check_file_text(error, text, path, label)
       type(error_type), allocatable, intent(inout) :: error
