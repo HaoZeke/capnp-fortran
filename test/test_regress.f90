@@ -18,7 +18,8 @@ contains
    subroutine collect_regress(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
-         new_unittest("comment-eof", run_comment_eof) &
+         new_unittest("comment-eof", run_comment_eof), &
+         new_unittest("text-leniency", run_text_leniency) &
          ]
    end subroutine collect_regress
 
@@ -73,6 +74,46 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_comment_eof
+
+   subroutine run_text_leniency(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx
+      integer(int64) :: count
+      real(real64) :: ratio
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'kitchen cgr missing')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Sink', err)
+      call capnp_text_decode(schema, idx, '(count = +10)', msg, err)
+      call check_(error, err /= CAPNP_OK, 'text: reject unary plus')
+      call capnp_text_decode(schema, idx, '(ratio = .5)', msg, err)
+      call check_(error, err /= CAPNP_OK, 'text: reject leading dot')
+      call capnp_text_decode(schema, idx, '(state = 1)', msg, err)
+      call check_(error, err /= CAPNP_OK, 'text: reject numeric enum')
+      call capnp_text_decode(schema, idx, '(state = (1))', msg, err)
+      call check_(error, err /= CAPNP_OK, 'text: reject parenthesised ordinal')
+      call capnp_text_decode(schema, idx, '(count = 010)', msg, err)
+      call check_(error, err == CAPNP_OK, 'text: octal still accepted')
+      root = capnp_root(msg, err)
+      count = capnp_dyn_get_int(schema, idx, root, 'count', err)
+      call check_(error, err == CAPNP_OK .and. count == 8_int64, 'text: 010 is eight')
+      call capnp_message_free(msg)
+      call capnp_text_decode(schema, idx, '(ratio = 5., state = (busy))', msg, err)
+      call check_(error, err == CAPNP_OK, 'text: trailing dot and (name)')
+      root = capnp_root(msg, err)
+      ratio = capnp_dyn_get_f64(schema, idx, root, 'ratio', err)
+      call check_(error, err == CAPNP_OK .and. abs(ratio - 5.0_real64) < 1.0e-12_real64, &
+                  'text: 5. is five')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_leniency
 
    subroutine spit(path, s, err, err_ignored)
       character(len=*), intent(in) :: path, s

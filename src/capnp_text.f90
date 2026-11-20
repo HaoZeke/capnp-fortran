@@ -946,35 +946,20 @@ contains
       integer, intent(out) :: ord
       integer, intent(out) :: err
       character(len=:), allocatable :: tok
-      integer(int64) :: iv
       err = CAPNP_OK
       ord = 0
       call skip_ws(sc)
       if (peek(sc) == '(') then
          sc%i = sc%i + 1
-         call read_numeric(sc, tok, err)
-         if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
+         call read_ident(sc, tok, err)
          if (err /= CAPNP_OK) return
          call expect_ch(sc, ')', err)
          if (err /= CAPNP_OK) return
-         if (iv < 0_int64 .or. iv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         ord = int(iv)
+         ord = enum_by_name(schema, type_type_id(t), tok, err)
          return
       end if
       if (is_num_start(peek(sc))) then
-         call read_numeric(sc, tok, err)
-         if (err /= CAPNP_OK) return
-         call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
-         if (err /= CAPNP_OK) return
-         if (iv < 0_int64 .or. iv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         ord = int(iv)
+         err = CAPNP_ERR_ARG
          return
       end if
       call read_ident(sc, tok, err)
@@ -1182,7 +1167,11 @@ contains
       tok = ''
       call skip_ws(sc)
       a = sc%i
-      if (peek(sc) == '+' .or. peek(sc) == '-') sc%i = sc%i + 1
+      if (peek(sc) == '+') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (peek(sc) == '-') sc%i = sc%i + 1
       if (is_ident_start(peek(sc))) then
          sc%i = sc%i + 1
          do while (is_ident_cont(peek(sc)))
@@ -1207,9 +1196,12 @@ contains
       character(len=1) :: c
       err = CAPNP_OK
       nd = 0
+      if (peek(sc) == '.') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (sc%i < sc%n) then
-         if (sc%s(sc%i:sc%i) == '0' .and. &
-             (sc%s(sc%i + 1:sc%i + 1) == 'x' .or. sc%s(sc%i + 1:sc%i + 1) == 'X')) then
+         if (sc%s(sc%i:sc%i) == '0' .and. sc%s(sc%i + 1:sc%i + 1) == 'x') then
             sc%i = sc%i + 2
             if (capnp_hex_digit(peek(sc)) < 0) then
                err = CAPNP_ERR_ARG
