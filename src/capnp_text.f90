@@ -635,7 +635,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f
       character(len=:), allocatable :: name
-      integer :: fd
+      integer :: fd, parens
       err = CAPNP_OK
       if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
@@ -643,18 +643,18 @@ contains
       end if
       call expect_ch(sc, '(', err)
       if (err /= CAPNP_OK) return
+      parens = 0
       call skip_ws(sc)
-      if (peek(sc) == '(') then
-         call parse_struct(schema, idx, p, env, sc, depth + 1, err)
-         if (err /= CAPNP_OK) return
-         call expect_ch(sc, ')', err)
-         return
-      end if
+      do while (peek(sc) == '(')
+         sc%i = sc%i + 1
+         parens = parens + 1
+         call skip_ws(sc)
+      end do
       do
          call skip_ws(sc)
          if (peek(sc) == ')') then
             sc%i = sc%i + 1
-            return
+            exit
          end if
          if (peek(sc) == achar(0)) then
             err = CAPNP_ERR_ARG
@@ -684,12 +684,13 @@ contains
             cycle
          else if (peek(sc) == ')') then
             sc%i = sc%i + 1
-            return
+            exit
          else
             err = CAPNP_ERR_ARG
             return
          end if
       end do
+      if (parens > 0) call close_parens(sc, parens, err)
    end subroutine parse_struct
 
    recursive subroutine parse_field_value(schema, f, p, env, sc, depth, err)
@@ -753,13 +754,19 @@ contains
       type(scan_t), intent(inout) :: sc
       integer, intent(out) :: err
       type(capnp_ptr_t) :: lst, et
-      integer :: n, i, at
+      integer :: n, i, at, parens
       err = CAPNP_OK
       if (depth > depth_cap(parent)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
+      parens = 0
       call skip_ws(sc)
+      do while (peek(sc) == '(')
+         sc%i = sc%i + 1
+         parens = parens + 1
+         call skip_ws(sc)
+      end do
       if (peek(sc) /= '[') then
          err = CAPNP_ERR_ARG
          return
@@ -777,6 +784,7 @@ contains
       sc%i = sc%i + 1
       if (n == 0) then
          call expect_ch(sc, ']', err)
+         if (err == CAPNP_OK .and. parens > 0) call close_parens(sc, parens, err)
          return
       end if
       do i = 0, n - 1
@@ -795,7 +803,11 @@ contains
       end do
       at = sc%i
       call expect_ch(sc, ']', err)
-      if (err /= CAPNP_OK) sc%i = at
+      if (err /= CAPNP_OK) then
+         sc%i = at
+         return
+      end if
+      if (parens > 0) call close_parens(sc, parens, err)
    end subroutine parse_list
 
    recursive subroutine parse_element(schema, et, lst, i, env, sc, depth, err)
@@ -850,9 +862,16 @@ contains
       integer(int64) :: iv, uv
       real(real64) :: fv
       real(real32) :: f32v
-      integer :: tw, ord
+      integer :: tw, ord, parens
       logical :: bv
       err = CAPNP_OK
+      parens = 0
+      call skip_ws(sc)
+      do while (peek(sc) == '(')
+         sc%i = sc%i + 1
+         parens = parens + 1
+         call skip_ws(sc)
+      end do
       tw = type_which(t)
       select case (tw)
       case (TYPE_VOID)
@@ -934,6 +953,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK .and. parens > 0) call close_parens(sc, parens, err)
    end subroutine store_scalar
 
    subroutine parse_text_f64(tok, fv, err)
@@ -1019,15 +1039,6 @@ contains
       err = CAPNP_OK
       ord = 0
       call skip_ws(sc)
-      if (peek(sc) == '(') then
-         sc%i = sc%i + 1
-         call read_ident(sc, tok, err)
-         if (err /= CAPNP_OK) return
-         call expect_ch(sc, ')', err)
-         if (err /= CAPNP_OK) return
-         ord = enum_by_name(schema, type_type_id(t), tok, err)
-         return
-      end if
       if (is_num_start(peek(sc))) then
          err = CAPNP_ERR_ARG
          return
@@ -1303,6 +1314,20 @@ contains
       end if
       sc%i = sc%i + 1
    end subroutine expect_ch
+
+   subroutine close_parens(sc, parens, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(in) :: parens
+      integer, intent(out) :: err
+      integer :: k
+      err = CAPNP_OK
+      do k = 1, parens
+         call skip_ws(sc)
+         if (peek(sc) == ',') sc%i = sc%i + 1
+         call expect_ch(sc, ')', err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine close_parens
 
    subroutine read_ident(sc, name, err)
       type(scan_t), intent(inout) :: sc
