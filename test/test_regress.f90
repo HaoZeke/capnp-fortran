@@ -7,7 +7,7 @@ module test_regress
    use capnp_dynamic
    use capnp_text
    use capnp_json
-   use capnp_codec, only: capnp_brand_env_t
+   use capnp_codec, only: capnp_brand_env_t, capnp_codec_find_field
    use cli_path, only: capnpf_setup, capnpc_setup
    implicit none
    private
@@ -88,7 +88,8 @@ contains
          new_unittest("json-union-nested", run_json_union_nested), &
          new_unittest("json-schema-chain", run_json_schema_chain), &
          new_unittest("group-clear-depth", run_group_clear_depth), &
-         new_unittest("packed-zero-cap", run_packed_zero_cap) &
+         new_unittest("packed-zero-cap", run_packed_zero_cap), &
+         new_unittest("json-trailing-spaces", run_json_trailing_spaces) &
          ]
    end subroutine collect_regress
 
@@ -2073,5 +2074,94 @@ contains
          call check_(error, all(ubuf(0:7) == word), 'packed-zero-cap: roundtrip')
       end if
    end subroutine run_packed_zero_cap
+
+   !> JSON keys, schema names, and enum values must match with exact length
+   !> so trailing spaces are never ignored.
+   subroutine run_json_trailing_spaces(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, fld
+      character(len=:), allocatable :: src, out, ref
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x9a1b2c3d4e5f6071;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+            'enum Color { red @0; blue @1; }'//achar(10)// &
+            'struct Sp {'//achar(10)// &
+            '  a @0 :Int32;'//achar(10)// &
+            '  b @1 :Int32 $Json.name("a ");'//achar(10)// &
+            '  e @2 :Color;'//achar(10)// &
+            '  u :union {'//achar(10)// &
+            '    none @3 :Void;'//achar(10)// &
+            '    num @4 :Int32;'//achar(10)// &
+            '  }'//achar(10)// &
+            '  d :union $Json.discriminator(name = "kind") {'//achar(10)// &
+            '    da @5 :Int32;'//achar(10)// &
+            '    db @6 :Text;'//achar(10)// &
+            '  }'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/sp.capnp', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/sp.capnp > '//tmp//'/sp.cgr' &
+         //' && printf ''{"a": 1, "a ": 2}\n''' &
+         //' | capnp convert -I"$INC" json:json --short '//tmp//'/sp.capnp Sp > '//tmp//'/sp.ref')) then
+         call test_failed(error, 'trailing-spaces: compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/sp.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Sp', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'trailing-spaces: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_codec_find_field(schema, idx, 'a ', fld, err)
+      call check_(error, err /= CAPNP_OK, 'trailing-spaces: find_field rejects trailing blank')
+      call capnp_json_decode(schema, idx, '{"a": 1, "a ": 2}', msg, err)
+      call check_(error, err == CAPNP_OK, 'trailing-spaces: decode distinct a and "a "')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+         call slurp(tmp//'/sp.ref', ref, err)
+         call check_(error, err == CAPNP_OK .and. out//achar(10) == ref, &
+                     'trailing-spaces: encode matches capnp 1.4.0')
+      end if
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"a  ": 5}', msg, err)
+      call check_(error, err == CAPNP_OK, 'trailing-spaces: unknown key "a  " ignored')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         call check_(error, capnp_get_i32(root, 0_int64) == 0_int32, &
+                     'trailing-spaces: "a  " does not set a')
+      end if
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"e": "blue "}', msg, err)
+      call check_(error, err /= CAPNP_OK, 'trailing-spaces: enum "blue " rejected')
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"u": {"num ": 4}}', msg, err)
+      call check_(error, err == CAPNP_OK, 'trailing-spaces: union key "num " ignored')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+         call check_(error, index(out, '"none":null') > 0, &
+                     'trailing-spaces: union stays on none')
+      end if
+      call capnp_message_free(msg)
+      call capnp_json_decode(schema, idx, '{"d": {"kind ": "da", "kind": "db", "db": "ok"}}', &
+                             msg, err)
+      call check_(error, err == CAPNP_OK, 'trailing-spaces: "kind " ignored beside "kind"')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_trailing_spaces
 
 end module test_regress

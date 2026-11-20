@@ -450,7 +450,9 @@ contains
          if (err /= CAPNP_OK) return
          call field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == name) return
+         if (len(nm) == len(name)) then
+            if (nm == name) return
+         end if
       end do
       err = CAPNP_ERR_ARG
    end subroutine capnp_codec_find_field

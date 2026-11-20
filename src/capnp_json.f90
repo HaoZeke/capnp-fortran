@@ -1226,7 +1226,7 @@ contains
          key = ''
          if (allocated(jv%kids(ki)%key)) key = jv%kids(ki)%key
          plen = len(pfx)
-         if (len(dkey) > 0 .and. key == dkey) then
+         if (len(dkey) > 0 .and. exact_eq(key, dkey)) then
             if (jv%kids(ki)%k /= JK_STR) then
                err = CAPNP_ERR_ARG
                return
@@ -1249,7 +1249,7 @@ contains
          end if
          if (opts%has_val) then
             vkey = pfx//opts%val_name
-            if (key == vkey) then
+            if (exact_eq(key, vkey)) then
                if (.not. tag_set) then
                   defer = .true.
                   return
@@ -2009,7 +2009,7 @@ contains
          if (err /= CAPNP_OK) return
          call name_override(al, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == jv%str) then
+         if (exact_eq(nm, jv%str)) then
             ord = i
             return
          end if
@@ -2873,6 +2873,13 @@ contains
       end do
    end function data_mode
 
+   pure logical function exact_eq(a, b) result(y)
+      character(len=*), intent(in) :: a, b
+      y = .false.
+      if (len(a) /= len(b)) return
+      y = (a == b)
+   end function exact_eq
+
    function find_jkey(jv, key, idx) result(y)
       type(jval), intent(in) :: jv
       character(len=*), intent(in) :: key
@@ -2883,10 +2890,12 @@ contains
       idx = 0
       if (.not. allocated(jv%kids)) return
       do i = size(jv%kids), 1, -1
-         if (jv%kids(i)%key == key) then
-            idx = i
-            y = .true.
-            return
+         if (allocated(jv%kids(i)%key)) then
+            if (exact_eq(jv%kids(i)%key, key)) then
+               idx = i
+               y = .true.
+               return
+            end if
          end if
       end do
    end function find_jkey
@@ -3014,7 +3023,7 @@ contains
          if (field_discriminant(f) == NO_DISCRIMINANT) cycle
          call json_field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == key) then
+         if (exact_eq(nm, key)) then
             y = .true.
             return
          end if
@@ -3567,7 +3576,7 @@ contains
       err = CAPNP_OK
       if (allocated(names)) then
          do i = 1, n
-            if (names(i)%key == key) then
+            if (exact_eq(names(i)%key, key)) then
                if (kind == JN_FLAT_U .and. names(i)%kind == JN_FLAT_U) return
                err = CAPNP_ERR_ARG
                return

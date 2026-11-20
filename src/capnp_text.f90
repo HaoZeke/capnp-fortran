@@ -1099,9 +1099,11 @@ contains
          if (err /= CAPNP_OK) return
          call enumerant_name(e, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == name) then
-            ord = i
-            return
+         if (len(nm) == len(name)) then
+            if (nm == name) then
+               ord = i
+               return
+            end if
          end if
       end do
       err = CAPNP_ERR_ARG
