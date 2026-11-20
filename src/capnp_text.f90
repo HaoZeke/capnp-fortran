@@ -1154,7 +1154,19 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
+            if (sc%s(sc%i:sc%i) == achar(10)) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
             if (sc%s(sc%i:sc%i) == '\') then
+               if (sc%i + 1 > sc%n) then
+                  err = CAPNP_ERR_ARG
+                  return
+               end if
+               if (sc%s(sc%i + 1:sc%i + 1) == achar(10)) then
+                  err = CAPNP_ERR_ARG
+                  return
+               end if
                sc%i = sc%i + 2
                cycle
             end if
@@ -1244,9 +1256,11 @@ contains
       integer :: i, depth
       logical :: in_str, in_cmt, item
       character(len=1) :: c
+      character(len=1) :: stk(MAX_DEPTH + 4)
       n = 0
       i = at + 1
       depth = 1
+      stk(1) = '['
       in_str = .false.
       in_cmt = .false.
       item = .false.
@@ -1258,7 +1272,10 @@ contains
             cycle
          end if
          if (in_str) then
-            if (c == '\') then
+            if (c == achar(10)) then
+               n = -1
+               return
+            else if (c == '\') then
                i = i + 2
                cycle
             else if (c == '"') then
@@ -1274,9 +1291,18 @@ contains
             in_str = .true.
             item = .true.
          else if (c == '(' .or. c == '[') then
+            if (depth >= size(stk)) then
+               n = -1
+               return
+            end if
             depth = depth + 1
+            stk(depth) = c
             item = .true.
          else if (c == ')' .or. c == ']') then
+            if ((c == ')' .and. stk(depth) /= '(') .or. (c == ']' .and. stk(depth) /= '[')) then
+               n = -1
+               return
+            end if
             depth = depth - 1
             if (depth == 0) then
                if (item) n = n + 1
@@ -1284,7 +1310,11 @@ contains
             end if
             item = .true.
          else if (c == ',' .and. depth == 1) then
-            if (item) n = n + 1
+            if (.not. item) then
+               n = -1
+               return
+            end if
+            n = n + 1
             item = .false.
          else if (c /= ' ' .and. c /= achar(9) .and. c /= achar(10) .and. c /= achar(13)) then
             item = .true.
@@ -1302,6 +1332,7 @@ contains
       integer :: i, depth
       logical :: in_str, in_cmt
       character(len=1) :: c
+      character(len=1) :: stk(MAX_DEPTH + 4)
       err = CAPNP_OK
       to = beg
       i = beg
@@ -1316,7 +1347,10 @@ contains
             cycle
          end if
          if (in_str) then
-            if (c == '\') then
+            if (c == achar(10)) then
+               err = CAPNP_ERR_ARG
+               return
+            else if (c == '\') then
                i = i + 2
                cycle
             else if (c == '"') then
@@ -1330,8 +1364,21 @@ contains
          else if (c == '"') then
             in_str = .true.
          else if (c == '(' .or. c == '[') then
+            if (depth >= size(stk)) then
+               err = CAPNP_ERR_DEPTH
+               return
+            end if
             depth = depth + 1
+            stk(depth) = c
          else if (c == ')' .or. c == ']') then
+            if (depth <= 0) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            if ((c == ')' .and. stk(depth) /= '(') .or. (c == ']' .and. stk(depth) /= '[')) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
             depth = depth - 1
             if (depth == 0) then
                to = i

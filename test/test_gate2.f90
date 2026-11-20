@@ -2,6 +2,7 @@ program test_gate2
    use capnp
    implicit none
    call case_0()
+   call case_1()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -32,4 +33,32 @@ contains
          'cmp -s /tmp/g2-oct.o /tmp/g2-oct.r && cmp -s /tmp/g2-oct.e1 ' // &
          '/tmp/g2-oct.e2')
    end subroutine case_0
+
+   subroutine case_1()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "open(' // &
+         achar(39) // &
+         '/tmp/g2-nl.in' // &
+         achar(39) // &
+         ',' // &
+         achar(39) // &
+         'w' // &
+         achar(39) // &
+         ').write(' // &
+         achar(39) // &
+         '(title = \"a' // &
+         achar(39) // &
+         '+chr(10)+' // &
+         achar(39) // &
+         'b\")\n' // &
+         achar(39) // &
+         ')"; "$CAP" convert text:text schema/codec.capnp Sample < /tm' // &
+         'p/g2-nl.in > /tmp/g2-nl.o; test $? -ne 0')
+   end subroutine case_1
 end program test_gate2
