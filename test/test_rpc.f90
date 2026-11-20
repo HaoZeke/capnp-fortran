@@ -132,7 +132,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(111))
+      allocate (testsuite(112))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -343,18 +343,20 @@ contains
       testsuite(104)%test => w_call_bootstrap_answer_transform
       testsuite(105)%name = "rpc-resolve-pending-receiver-answer-errors"
       testsuite(105)%test => w_resolve_pending_receiver_answer_errors
-      testsuite(106)%name = "posix-recv-eintr-retried"
-      testsuite(106)%test => t_recv_all_retries_eintr
-      testsuite(107)%name = "rpc-framing-511-accepted"
-      testsuite(107)%test => t_framing_511_accepted
-      testsuite(108)%name = "rpc-framing-512-rejected"
-      testsuite(108)%test => t_framing_512_rejected
-      testsuite(109)%name = "rpc-framing-oversized-rejected"
-      testsuite(109)%test => t_framing_oversized_rejected
-      testsuite(110)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(110)%test => t_framing_negative_traversal_rejected
-      testsuite(111)%name = "rpc-framing-short-and-padded"
-      testsuite(111)%test => t_framing_short_and_padded
+      testsuite(106)%name = "rpc-call-promised-answer-outcomes"
+      testsuite(106)%test => w_call_promised_answer_outcomes
+      testsuite(107)%name = "posix-recv-eintr-retried"
+      testsuite(107)%test => t_recv_all_retries_eintr
+      testsuite(108)%name = "rpc-framing-511-accepted"
+      testsuite(108)%test => t_framing_511_accepted
+      testsuite(109)%name = "rpc-framing-512-rejected"
+      testsuite(109)%test => t_framing_512_rejected
+      testsuite(110)%name = "rpc-framing-oversized-rejected"
+      testsuite(110)%test => t_framing_oversized_rejected
+      testsuite(111)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(111)%test => t_framing_negative_traversal_rejected
+      testsuite(112)%name = "rpc-framing-short-and-padded"
+      testsuite(112)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -691,6 +693,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_pending_receiver_answer_errors(error)
    end subroutine w_resolve_pending_receiver_answer_errors
+
+   subroutine w_call_promised_answer_outcomes(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_call_promised_answer_outcomes(error)
+   end subroutine w_call_promised_answer_outcomes
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8823,5 +8830,79 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_call_bootstrap_answer_transform
+
+   !> A promisedAnswer Call reads the answer's pipeline (rpc.c++
+   !> 3108-3129). A missing, finished or capless answer has none, an
+   !> exception answer keeps one that fails with its reason, and a
+   !> returned answer is read on the spot, so a schema error aborts.
+   subroutine t_call_promised_answer_outcomes(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: boot
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qboot, qadder, eid, qcapless, qexc
+      integer :: e
+      logical :: is_exception
+      character(len=:), allocatable :: reason
+      character(len=*), parameter :: closed = 'Pipeline call on a request that ' // &
+                                     'returned no capabilities or was already closed.'
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      boot = rpc_cap_t()
+      boot%kind = RPC_CAP_IMPORT
+      boot%id = eid
+      call pa_call(cconn, sconn, 30_int64, qadder, [0], is_exception, reason)
+      call check_(error, .not. is_exception, 'promisedAnswer: returned cap is called')
+      call pa_call(cconn, sconn, 31_int64, 700_int64, [0], is_exception, reason)
+      call check_(error, is_exception .and. reason == closed, &
+                  'promisedAnswer: unknown answer has no pipeline')
+      call pa_call(cconn, sconn, 32_int64, qadder, [1], is_exception, reason)
+      call check_(error, is_exception .and. reason == 'Called null capability.', &
+                  'promisedAnswer: null field is a null capability')
+
+      call rpc_call_begin(sconn, boot, ECHO_IFACE, 0, m, params, qcapless, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qcapless, e)
+      call pa_call(cconn, sconn, 33_int64, qcapless, [0], is_exception, reason)
+      call check_(error, is_exception .and. reason == closed, &
+                  'promisedAnswer: capless answer has no pipeline')
+
+      call rpc_call_begin(sconn, boot, ECHO_IFACE, 9, m, params, qexc, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qexc, e)
+      call pa_call(cconn, sconn, 34_int64, qexc, [0], is_exception, reason)
+      call check_(error, is_exception .and. reason == 'method raised error', &
+                  'promisedAnswer: exception answer fails with its reason')
+      call pa_call(cconn, sconn, 35_int64, qexc, [integer ::], is_exception, reason)
+      call check_(error, is_exception .and. reason == 'method raised error', &
+                  'promisedAnswer: exception answer fails without a transform')
+
+      call rpc_finish_send(sconn, qadder, .true., e)
+      call rpc_pump_once(cconn, e)
+      call pa_call(cconn, sconn, 36_int64, qadder, [0], is_exception, reason)
+      call check_(error, is_exception .and. reason == closed, &
+                  'promisedAnswer: finished answer has no pipeline')
+      call check_(error, rpc_conn_alive(cconn), 'promisedAnswer: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_call(cconn, sconn, 30_int64, qadder, [0, 0], is_exception, reason)
+      call check_(error, .not. rpc_conn_alive(cconn) .and. rpc_conn_reason(cconn) == &
+                  'Schema mismatch: Message contains non-struct pointer where ' // &
+                  'struct pointer was expected.', &
+                  'promisedAnswer: walk through a capability aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_call_promised_answer_outcomes
 
 end module test_rpc

@@ -119,6 +119,10 @@ module capnp_rpc
    integer, parameter :: IMP_EMBARGO = 5
    integer, parameter :: IMP_BROKEN = 6
    integer, parameter :: IMP_ANSWER = 7
+   !> What an answer's pipeline gives for a transform.
+   integer, parameter :: PIPE_BROKEN = 0
+   integer, parameter :: PIPE_EXPORT = 1
+   integer, parameter :: PIPE_IMPORT = 2
 
    !> Policy shared by every wrapper belonging to one membrane. Reusing
    !> the same object gives all wrapped capabilities one revocation
@@ -4637,13 +4641,11 @@ contains
       character(len=:), allocatable, intent(inout), optional :: reason
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
-      type(capnp_ptr_t) :: ops, p, ctab
-      type(message_t) :: amsg
-      type(return_t) :: ar
-      type(payload_t) :: apl
-      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ops
       integer(int64) :: aqid, eid
-      integer :: i
+      integer :: i, kind
+      integer, allocatable :: fields(:)
+      character(len=:), allocatable :: why
       type(rpc_answer_slot_t), pointer :: aslot
       logical :: afound
       out_eid = -1
@@ -4661,64 +4663,128 @@ contains
          pa = message_target_promised_answer_get(tgt, err)
          if (err /= CAPNP_OK) return
          aqid = promised_answer_question_id_get(pa)
-         call answer_find(conn, aqid, aslot, afound)
-         if (.not. afound) return
-         if (.not. aslot%has_results) return
-         if (aslot%bootstrap) then
-            ops = promised_answer_transform_get(pa, err)
-            if (err /= CAPNP_OK) return
-            if (capnp_list_len(ops) > 0_int64) then
-               do i = 0, int(capnp_list_len(ops)) - 1
-                  op%p = capnp_list_get_struct(ops, i, err)
-                  if (err /= CAPNP_OK) return
-                  select case (promised_answer_op_which(op))
-                  case (PROMISED_ANSWER_OP_NOOP_TAG, PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
-                  case default
-                     call abort_conn(conn, 'Unsupported pipeline op.', err)
-                     return
-                  end select
-               end do
-               if (present(reason)) reason = 'Invalid pipeline transform.'
-               return
-            end if
-         end if
-         amsg = message_read_root(aslot%retmsg, err)
-         ar = message_return_get(amsg, err)
-         apl = return_results_get(ar, err)
-         p = payload_content_get(apl, err)
-         if (err /= CAPNP_OK) return
          ops = promised_answer_transform_get(pa, err)
          if (err /= CAPNP_OK) return
-         do i = 0, int(capnp_list_len(ops)) - 1
+         allocate (fields(int(capnp_list_len(ops))))
+         do i = 0, size(fields) - 1
             op%p = capnp_list_get_struct(ops, i, err)
             if (err /= CAPNP_OK) return
             select case (promised_answer_op_which(op))
             case (PROMISED_ANSWER_OP_NOOP_TAG)
+               fields(i + 1) = -1
             case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
-               p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
-               if (err /= CAPNP_OK) return
+               fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
             case default
                call abort_conn(conn, 'Unsupported pipeline op.', err)
                return
             end select
          end do
-         if (p%kind /= CAPNP_PK_CAP) return
-         ctab = payload_cap_table_get(apl, err)
-         if (err /= CAPNP_OK) return
-         if (p%capidx < 0_int64 .or. p%capidx >= capnp_list_len(ctab)) return
-         cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
-         if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_SENDER_HOSTED_TAG) return
-         eid = cap_descriptor_sender_hosted_get(cd)
-         ! rpc.c++ 3109-3125 resolves a promisedAnswer through the answer's
-         ! own pipeline, not the export table. A peer's Release of the
-         ! export id does not end the answer, so a pin keeps it callable.
-         if (eid >= 0_int64 .and. eid < int(MAXE, int64)) then
-            if (conn%exports(int(eid))%used) out_eid = int(eid)
+         ! A capless answer was erased when it returned, and Finish drops
+         ! the pipeline (rpc.c++ 2466-2478, 3289-3333).
+         call answer_find(conn, aqid, aslot, afound)
+         if (afound) afound = associated(aslot)
+         if (afound) afound = aslot%used .and. .not. aslot%finished
+         if (.not. afound) then
+            if (present(reason)) reason = 'Pipeline call on a request that returned ' // &
+                                          'no capabilities or was already closed.'
+            return
          end if
+         if (.not. aslot%has_results) return
+         if (aslot%bootstrap .and. size(fields) > 0) then
+            if (present(reason)) reason = 'Invalid pipeline transform.'
+            return
+         end if
+         call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err)
+         if (err /= CAPNP_OK .or. conn%dead) return
+         select case (kind)
+         case (PIPE_EXPORT)
+            ! The answer's pipeline holds its result capabilities, not the
+            ! export table, so a pin keeps a released export callable.
+            if (eid >= 0_int64 .and. eid < int(MAXE, int64)) then
+               if (conn%exports(int(eid))%used) out_eid = int(eid)
+            end if
+         case (PIPE_BROKEN)
+            if (present(reason)) reason = why
+         end select
       case default
          call abort_conn(conn, 'Unknown message target type.', err)
       end select
    end subroutine resolve_message_target
+
+   !> The capability a returned answer's pipeline gives for `fields`
+   !> (negative is a noop): one of our exports, the import a
+   !> receiverHosted entry names, or a broken capability with `reason`.
+   !> C++ reads a returned answer on the spot, so a walk through a
+   !> pointer that is not a struct, a non-capability pointer and a bad
+   !> cap index abort the connection (layout.c++ readCapabilityPointer).
+   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout) :: retmsg
+      integer, intent(in) :: fields(:)
+      integer, intent(out) :: kind
+      integer(int64), intent(out) :: id
+      character(len=:), allocatable, intent(out) :: reason
+      integer, intent(out) :: err
+      type(message_t) :: amsg
+      type(return_t) :: ar
+      type(payload_t) :: apl
+      type(capnp_ptr_t) :: p, ctab
+      type(cap_descriptor_t) :: cd
+      integer :: i
+      kind = PIPE_BROKEN
+      id = -1_int64
+      reason = 'no such capability'
+      amsg = message_read_root(retmsg, err)
+      if (err == CAPNP_OK) ar = message_return_get(amsg, err)
+      if (err /= CAPNP_OK) return
+      if (return_which(ar) == RETURN_EXCEPTION_TAG) then
+         call return_exception_reason(ar, reason)
+         return
+      end if
+      if (return_which(ar) /= RETURN_RESULTS_TAG) return
+      apl = return_results_get(ar, err)
+      if (err == CAPNP_OK) p = payload_content_get(apl, err)
+      if (err /= CAPNP_OK) return
+      do i = 1, size(fields)
+         if (fields(i) < 0) cycle
+         if (p%kind == CAPNP_PK_NULL) cycle
+         if (p%kind /= CAPNP_PK_STRUCT) then
+            call abort_conn(conn, 'Schema mismatch: Message contains non-struct ' // &
+                            'pointer where struct pointer was expected.', err)
+            return
+         end if
+         p = capnp_getp(p, fields(i), err)
+         if (err /= CAPNP_OK) return
+      end do
+      if (p%kind == CAPNP_PK_NULL) then
+         reason = 'Called null capability.'
+         return
+      end if
+      if (p%kind /= CAPNP_PK_CAP) then
+         call abort_conn(conn, 'Schema mismatch: Message contains non-capability ' // &
+                         'pointer where capability pointer was expected.', err)
+         return
+      end if
+      ctab = payload_cap_table_get(apl, err)
+      if (err /= CAPNP_OK) return
+      if (p%capidx < 0_int64 .or. p%capidx >= capnp_list_len(ctab)) then
+         call abort_conn(conn, 'Message contains invalid capability pointer.', err)
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         kind = PIPE_EXPORT
+         id = cap_descriptor_sender_hosted_get(cd)
+      case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         kind = PIPE_EXPORT
+         id = cap_descriptor_sender_promise_get(cd)
+      case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         kind = PIPE_IMPORT
+         id = cap_descriptor_receiver_hosted_get(cd)
+      end select
+   end subroutine answer_pipeline_cap
 
    ! ------------------------------------------------------------------
    ! Level 3: introductions handed to us
