@@ -710,7 +710,31 @@ contains
       call udiff(error, schema, n, 'GroupArm', '{"kind":"box","box":{"x":4,"y":5}}')
       call udiff(error, schema, n, 'GroupArm', '{"n":5,"box":{}}')
       call udiff(error, schema, n, 'GroupUnion', '{"gu":{"q":5},"kind":"gu"}')
-      call check_(error, n == 70, 'union-diff: case count')
+      call udiff(error, schema, n, 'UnionOfMid', &
+         '{"kind":"mid","midId":7,"pl_city":"Oslo","pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfMid', &
+         '{"pl_city":"Oslo","kind":"mid","midId":7,"pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfGroupFlat', &
+         '{"kind":"g","pl_city":"Oslo","pl_code":500}')
+      call udiff(error, schema, n, 'UnionOfGroupFlat', &
+         '{"pl_code":500,"kind":"g","pl_city":"Oslo"}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"a","innerVal":42}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"b","innerVal":"hi"}')
+      call udiff(error, schema, n, 'NestedFlatDisc', &
+         '{"outerKind":"g","innerKind":"a","innerKind":"b"}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"outerKind":"g","innerKind":"a","innerVal":42}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"innerVal":"hi","outerKind":"g","innerKind":"b"}')
+      call udiff(error, schema, n, 'NestedFlatStructDisc', &
+         '{"outerKind":"g","innerKind":"a","innerKind":"b"}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":123}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":{"a":1}}')
+      call udiff(error, schema, n, 'VoidPayload', '{"vls":[1,"a"]}')
+      call udiff(error, schema, n, 'VoidPayload', '{"v":null,"n":3}')
+      call check_(error, n == 84, 'union-diff: case count')
       call capnp_dyn_free(schema)
    end subroutine run_json_union_diff
 

@@ -87,6 +87,52 @@ struct MultiUnionDoc {
   }
 }
 
+struct UnionOfMid $Json.discriminator(name = "kind") {
+  union {
+    mid @0 :MidFlat $Json.flatten();
+    other @1 :Int32;
+  }
+}
+
+struct UnionOfGroupFlat $Json.discriminator(name = "kind") {
+  union {
+    g :group $Json.flatten() {
+      place @0 :Place $Json.flatten(prefix = "pl_");
+    }
+    other @1 :Int32;
+  }
+}
+
+struct InnerDisc $Json.discriminator(name = "innerKind", valueName = "innerVal") {
+  union {
+    a @0 :Int32;
+    b @1 :Text;
+  }
+}
+
+struct NestedFlatDisc $Json.discriminator(name = "outerKind") {
+  union {
+    g :union $Json.flatten() $Json.discriminator(name = "innerKind", valueName = "innerVal") {
+      a @0 :Int32;
+      b @1 :Text;
+    }
+    other @2 :Int32;
+  }
+}
+
+struct NestedFlatStructDisc $Json.discriminator(name = "outerKind") {
+  union {
+    g @0 :InnerDisc $Json.flatten();
+    other @1 :Int32;
+  }
+}
+
+struct VoidPayload {
+  v @0 :Void;
+  vls @1 :List(Void);
+  n @2 :Int32;
+}
+
 struct UnionDefaults {
   before @0 :Int32;
   union {
