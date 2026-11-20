@@ -21,6 +21,11 @@ module capnp_text
       character(len=:), allocatable :: s
    end type piece_t
 
+   type :: buf_t
+      character(len=:), allocatable :: s
+      integer :: n = 0
+   end type buf_t
+
    type :: scan_t
       character(len=:), allocatable :: s
       integer :: i = 1
@@ -300,9 +305,11 @@ contains
          if (err /= CAPNP_OK) return
          call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth + 1, val, err)
          if (err /= CAPNP_OK) return
-         call push(items, n, nm//' = '//val)
+         call push(items, n, nm//' = '//val, err)
+         if (err /= CAPNP_OK) return
       end do
-      call join_items(items, n, indent, mode, .true., body)
+      call join_items(items, n, indent, mode, .true., body, err)
+      if (err /= CAPNP_OK) return
       out = '('//body//')'
    end subroutine enc_struct
 
@@ -479,9 +486,11 @@ contains
       do i = 0_int64, nlen - 1_int64
          call enc_element(schema, et, lst, i, env, next_ind(indent), MODE_BARE, depth + 1, el, err)
          if (err /= CAPNP_OK) return
-         call push(items, n, el)
+         call push(items, n, el, err)
+         if (err /= CAPNP_OK) return
       end do
-      call join_items(items, n, indent, mode, .false., body)
+      call join_items(items, n, indent, mode, .false., body, err)
+      if (err /= CAPNP_OK) return
       out = '['//body//']'
    end subroutine enc_list
 
@@ -1036,16 +1045,28 @@ contains
       end if
    end function next_ind
 
-   subroutine push(items, n, s)
+   subroutine push(items, n, s, err)
       type(piece_t), allocatable, intent(inout) :: items(:)
       integer, intent(inout) :: n
       character(len=*), intent(in) :: s
+      integer, intent(out) :: err
       type(piece_t), allocatable :: tmp(:)
-      integer :: cap
-      if (.not. allocated(items)) allocate (items(8))
+      integer :: cap, stat
+      err = CAPNP_OK
+      if (.not. allocated(items)) then
+         allocate (items(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
       if (n >= size(items)) then
          cap = size(items)*2
-         allocate (tmp(cap))
+         allocate (tmp(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          if (n > 0) tmp(1:n) = items(1:n)
          call move_alloc(tmp, items)
       end if
@@ -1053,14 +1074,17 @@ contains
       items(n)%s = s
    end subroutine push
 
-   subroutine join_items(items, n, indent, mode, is_record, out)
+   subroutine join_items(items, n, indent, mode, is_record, out, err)
       type(piece_t), allocatable, intent(in) :: items(:)
       integer, intent(in) :: n, indent, mode
       logical, intent(in) :: is_record
       character(len=:), allocatable, intent(out) :: out
+      integer, intent(out) :: err
       integer :: i, total
       logical :: inline
       character(len=:), allocatable :: sp, delim
+      type(buf_t) :: buf
+      err = CAPNP_OK
       out = ''
       if (n <= 0) return
       inline = indent == 0
@@ -1075,25 +1099,84 @@ contains
          if (is_record .and. total > 64) inline = .false.
       end if
       if (inline) then
-         out = items(1)%s
+         call buf_add(buf, items(1)%s, err)
+         if (err /= CAPNP_OK) return
          do i = 2, n
-            out = out//', '//items(i)%s
+            call buf_add(buf, ', '//items(i)%s, err)
+            if (err /= CAPNP_OK) return
          end do
+         call buf_take(buf, out)
          return
       end if
       sp = repeat(' ', indent*2)
       delim = ','//achar(10)//sp
       if (mode == MODE_BARE) then
-         out = ' '
+         call buf_add(buf, ' ', err)
       else
-         out = achar(10)//sp
+         call buf_add(buf, achar(10)//sp, err)
       end if
-      out = out//items(1)%s
+      if (err /= CAPNP_OK) return
+      call buf_add(buf, items(1)%s, err)
+      if (err /= CAPNP_OK) return
       do i = 2, n
-         out = out//delim//items(i)%s
+         call buf_add(buf, delim//items(i)%s, err)
+         if (err /= CAPNP_OK) return
       end do
-      out = out//' '
+      call buf_add(buf, ' ', err)
+      if (err /= CAPNP_OK) return
+      call buf_take(buf, out)
    end subroutine join_items
+
+   subroutine buf_add(buf, piece, err)
+      type(buf_t), intent(inout) :: buf
+      character(len=*), intent(in) :: piece
+      integer, intent(out) :: err
+      integer :: need, cap, stat
+      character(len=:), allocatable :: tmp
+      err = CAPNP_OK
+      need = buf%n + len(piece)
+      if (need < buf%n) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (.not. allocated(buf%s)) then
+         cap = max(need, 64)
+         allocate (character(len=cap) :: buf%s, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      else if (need > len(buf%s)) then
+         cap = len(buf%s)
+         do while (cap < need)
+            if (cap > ishft(huge(cap), -1)) then
+               cap = need
+               exit
+            end if
+            cap = cap*2
+         end do
+         allocate (character(len=cap) :: tmp, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         if (buf%n > 0) tmp(1:buf%n) = buf%s(1:buf%n)
+         call move_alloc(tmp, buf%s)
+      end if
+      if (len(piece) > 0) buf%s(buf%n + 1:need) = piece
+      buf%n = need
+   end subroutine buf_add
+
+   subroutine buf_take(buf, out)
+      type(buf_t), intent(in) :: buf
+      character(len=:), allocatable, intent(out) :: out
+      if (.not. allocated(buf%s) .or. buf%n <= 0) then
+         out = ''
+      else
+         out = buf%s(1:buf%n)
+      end if
+   end subroutine buf_take
+
 
    subroutine skip_ws(sc)
       type(scan_t), intent(inout) :: sc
