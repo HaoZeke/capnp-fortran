@@ -136,7 +136,7 @@ contains
       integer(int64), intent(in), optional :: max_words
       integer(int8), allocatable :: buf(:)
       integer(int64) :: ipos, opos, cap, n, j, limit
-      integer :: tag, k, cnt
+      integer :: tag, k, cnt, stat
       err = CAPNP_OK
       n = size(inb, kind=int64)
       limit = huge(0_int64)
@@ -152,7 +152,11 @@ contains
          end if
       end if
       cap = min(max(8_int64*n, 64_int64), max(limit, 1_int64))
-      allocate (buf(0:cap - 1))
+      allocate (buf(0:cap - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       buf = 0_int8
       ipos = 0_int64
       opos = 0_int64
@@ -163,7 +167,8 @@ contains
             err = CAPNP_ERR_TRAVERSAL
             return
          end if
-         call ensure(buf, cap, opos + 8_int64)
+         call ensure(buf, cap, opos + 8_int64, err)
+         if (err /= CAPNP_OK) return
          do k = 0, 7
             if (btest(tag, k)) then
                if (ipos >= n) then
@@ -188,7 +193,8 @@ contains
                err = CAPNP_ERR_TRAVERSAL
                return
             end if
-            call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
+            call ensure(buf, cap, opos + int(cnt, int64)*8_int64, err)
+            if (err /= CAPNP_OK) return
             buf(opos:opos + int(cnt, int64)*8_int64 - 1) = 0_int8
             opos = opos + int(cnt, int64)*8_int64
          else if (tag == 255) then
@@ -206,7 +212,8 @@ contains
                err = CAPNP_ERR_TRAVERSAL
                return
             end if
-            call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
+            call ensure(buf, cap, opos + int(cnt, int64)*8_int64, err)
+            if (err /= CAPNP_OK) return
             do j = 0_int64, int(cnt, int64)*8_int64 - 1_int64
                buf(opos + j) = inb(ipos + j)
             end do
@@ -214,11 +221,16 @@ contains
             opos = opos + int(cnt, int64)*8_int64
          end if
       end do
-      allocate (outb(0:max(opos, 1_int64) - 1))
+      allocate (outb(0:max(opos, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (opos > 0_int64) outb(0:opos - 1) = buf(0:opos - 1)
       if (opos == 0_int64) then
          deallocate (outb)
-         allocate (outb(0))
+         allocate (outb(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
       end if
    end subroutine capnp_unpack
 
@@ -236,7 +248,8 @@ contains
       integer :: take
       err = CAPNP_OK
       n = size(chunk, kind=int64)
-      call out_init(out, outn, cap, n)
+      call out_init(out, outn, cap, n, err)
+      if (err /= CAPNP_OK) return
       ipos = 0_int64
       do while (ipos < n)
          take = int(min(8_int64 - int(pk%npart, int64), n - ipos))
@@ -246,7 +259,8 @@ contains
          if (pk%npart < 8) return ! word continues in the next chunk
          word = pk%partial
          pk%npart = 0
-         call pack_word(pk, word, out, outn, cap)
+         call pack_word(pk, word, out, outn, cap, err)
+         if (err /= CAPNP_OK) return
       end do
    end subroutine capnp_pack_push
 
@@ -259,20 +273,23 @@ contains
       integer, intent(out) :: err
       integer(int64) :: cap
       err = CAPNP_OK
-      call out_init(out, outn, cap, 1_int64)
+      call out_init(out, outn, cap, 1_int64, err)
+      if (err /= CAPNP_OK) return
       if (pk%npart /= 0) then
          err = CAPNP_ERR_ARG
          return
       end if
-      call flush_runs(pk, out, outn, cap)
+      call flush_runs(pk, out, outn, cap, err)
    end subroutine capnp_pack_finish
 
-   subroutine pack_word(pk, word, out, outn, cap)
+   subroutine pack_word(pk, word, out, outn, cap, err)
       type(capnp_packer_t), intent(inout) :: pk
       integer(int8), intent(in) :: word(0:7)
       integer(int8), allocatable, intent(inout) :: out(:)
       integer(int64), intent(inout) :: outn, cap
+      integer, intent(out) :: err
       integer :: tag, nz, k
+      err = CAPNP_OK
       tag = 0
       nz = 0
       do k = 0, 7
@@ -282,8 +299,14 @@ contains
          end if
       end do
       if (tag == 0) then
-         if (pk%mode == PM_LIT_RUN) call flush_runs(pk, out, outn, cap)
-         if (pk%mode == PM_ZERO_RUN .and. pk%run == 256) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_LIT_RUN) then
+            call flush_runs(pk, out, outn, cap, err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (pk%mode == PM_ZERO_RUN .and. pk%run == 256) then
+            call flush_runs(pk, out, outn, cap, err)
+            if (err /= CAPNP_OK) return
+         end if
          if (pk%mode == PM_IDLE) then
             pk%mode = PM_ZERO_RUN
             pk%run = 1
@@ -291,10 +314,17 @@ contains
             pk%run = pk%run + 1
          end if
       else if (nz == 8) then
-         if (pk%mode == PM_ZERO_RUN) call flush_runs(pk, out, outn, cap)
-         if (pk%mode == PM_LIT_RUN .and. pk%run == 255) call flush_runs(pk, out, outn, cap)
+         if (pk%mode == PM_ZERO_RUN) then
+            call flush_runs(pk, out, outn, cap, err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (pk%mode == PM_LIT_RUN .and. pk%run == 255) then
+            call flush_runs(pk, out, outn, cap, err)
+            if (err /= CAPNP_OK) return
+         end if
          if (pk%mode == PM_IDLE) then
-            call ensure(out, cap, outn + 9_int64)
+            call ensure(out, cap, outn + 9_int64, err)
+            if (err /= CAPNP_OK) return
             out(outn) = -1_int8 ! 0xff
             out(outn + 1:outn + 8) = word
             outn = outn + 9
@@ -309,8 +339,10 @@ contains
          pk%lit(pk%run*8:pk%run*8 + 7) = word
          pk%run = pk%run + 1
       else
-         call flush_runs(pk, out, outn, cap)
-         call ensure(out, cap, outn + 9_int64)
+         call flush_runs(pk, out, outn, cap, err)
+         if (err /= CAPNP_OK) return
+         call ensure(out, cap, outn + 9_int64, err)
+         if (err /= CAPNP_OK) return
          out(outn) = cp_i8b(tag)
          outn = outn + 1
          do k = 0, 7
@@ -322,18 +354,22 @@ contains
       end if
    end subroutine pack_word
 
-   subroutine flush_runs(pk, out, outn, cap)
+   subroutine flush_runs(pk, out, outn, cap, err)
       type(capnp_packer_t), intent(inout) :: pk
       integer(int8), allocatable, intent(inout) :: out(:)
       integer(int64), intent(inout) :: outn, cap
+      integer, intent(out) :: err
+      err = CAPNP_OK
       select case (pk%mode)
       case (PM_ZERO_RUN)
-         call ensure(out, cap, outn + 2_int64)
+         call ensure(out, cap, outn + 2_int64, err)
+         if (err /= CAPNP_OK) return
          out(outn) = 0_int8
          out(outn + 1) = cp_i8b(pk%run - 1)
          outn = outn + 2
       case (PM_LIT_RUN)
-         call ensure(out, cap, outn + 1_int64 + int(pk%run, int64)*8_int64)
+         call ensure(out, cap, outn + 1_int64 + int(pk%run, int64)*8_int64, err)
+         if (err /= CAPNP_OK) return
          out(outn) = cp_i8b(pk%run)
          outn = outn + 1
          if (pk%run > 0) then
@@ -345,13 +381,21 @@ contains
       pk%run = 0
    end subroutine flush_runs
 
-   subroutine out_init(out, outn, cap, hint)
+   subroutine out_init(out, outn, cap, hint, err)
       integer(int8), allocatable, intent(inout) :: out(:)
       integer(int64), intent(inout) :: outn
       integer(int64), intent(out) :: cap
       integer(int64), intent(in) :: hint
+      integer, intent(out) :: err
+      integer :: stat
+      err = CAPNP_OK
+      cap = 0_int64
       if (.not. allocated(out)) then
-         allocate (out(0:max(2_int64*hint, 64_int64) - 1))
+         allocate (out(0:max(2_int64*hint, 64_int64) - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          out = 0_int8
          outn = 0_int64
       end if
@@ -368,11 +412,15 @@ contains
       integer(int64), intent(inout) :: outn
       integer, intent(out) :: err
       integer(int64) :: ipos, n, take, cap
-      integer :: b, k
+      integer :: b, k, stat
       err = CAPNP_OK
       n = size(chunk, kind=int64)
       if (.not. allocated(out)) then
-         allocate (out(0:max(8_int64*n, 64_int64) - 1))
+         allocate (out(0:max(8_int64*n, 64_int64) - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          out = 0_int8
          outn = 0_int64
       end if
@@ -397,7 +445,8 @@ contains
                   ipos = ipos + 1
                end if
             end do
-            call ensure(out, cap, outn + 8_int64)
+            call ensure(out, cap, outn + 8_int64, err)
+            if (err /= CAPNP_OK) return
             out(outn:outn + 7) = u%word
             outn = outn + 8
             if (u%tag == 0) then
@@ -410,7 +459,8 @@ contains
          case (US_ZERO_COUNT)
             b = cp_u8(chunk(ipos))
             ipos = ipos + 1
-            call ensure(out, cap, outn + int(b, int64)*8_int64)
+            call ensure(out, cap, outn + int(b, int64)*8_int64, err)
+            if (err /= CAPNP_OK) return
             out(outn:outn + int(b, int64)*8_int64 - 1) = 0_int8
             outn = outn + int(b, int64)*8_int64
             u%state = US_TAG
@@ -425,7 +475,8 @@ contains
             end if
          case (US_RAW)
             take = min(u%raw_left, n - ipos)
-            call ensure(out, cap, outn + take)
+            call ensure(out, cap, outn + take, err)
+            if (err /= CAPNP_OK) return
             out(outn:outn + take - 1) = chunk(ipos:ipos + take - 1)
             outn = outn + take
             ipos = ipos + take
@@ -452,19 +503,31 @@ contains
       end do
    end function word_zero_count
 
-   subroutine ensure(buf, cap, need)
+   !> Grow buf to hold need bytes. A host that cannot provide the memory
+   !> is CAPNP_ERR_ALLOC, and buf and cap keep their old values.
+   subroutine ensure(buf, cap, need, err)
       integer(int8), allocatable, intent(inout) :: buf(:)
       integer(int64), intent(inout) :: cap
       integer(int64), intent(in) :: need
+      integer, intent(out) :: err
       integer(int8), allocatable :: tmp(:)
+      integer(int64) :: ncap
+      integer :: stat
+      err = CAPNP_OK
       if (need <= cap) return
-      do while (cap < need)
-         cap = cap*2_int64
+      ncap = cap
+      do while (ncap < need)
+         ncap = ncap*2_int64
       end do
-      allocate (tmp(0:cap - 1))
+      allocate (tmp(0:ncap - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       tmp = 0_int8
       tmp(0:size(buf, kind=int64) - 1) = buf
       call move_alloc(tmp, buf)
+      cap = ncap
    end subroutine ensure
 
 end module capnp_packed

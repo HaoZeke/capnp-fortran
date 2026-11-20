@@ -31,6 +31,7 @@ program test_gate2
    call case_28()
    call case_29()
    call case_30()
+   call case_31()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -896,4 +897,40 @@ contains
          'st.e2; cmp -s /tmp/g2-nest.o /tmp/g2-nest.r && cmp -s /tmp/g' // &
          '2-nest.e1 /tmp/g2-nest.e2')
    end subroutine case_30
+
+   subroutine case_31()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '(x = 1)\n' // &
+         achar(39) // &
+         ' > /tmp/g2-big.t' // &
+         achar(10) // &
+         '( ulimit -v 400000; "$CAP" encode schema/common.capnp Vec3 <' // &
+         ' /tmp/g2-big.t > /dev/null 2>&1 ) || exit 77' // &
+         achar(10) // &
+         'python3 -c ' // &
+         achar(39) // &
+         'import sys; sys.stdout.buffer.write(b"\x00\xff" * 200000)' // &
+         achar(39) // &
+         ' > /tmp/g2-big.pk' // &
+         achar(10) // &
+         '( ulimit -v 400000; "$CAP" convert flat-packed:binary schema' // &
+         '/common.capnp Vec3 < /tmp/g2-big.pk > /dev/null 2> /tmp/g2-b' // &
+         'ig.e ); r=$?' // &
+         achar(10) // &
+         'test $r -eq 1 && grep -q ' // &
+         achar(39) // &
+         '^capnpf:' // &
+         achar(39) // &
+         ' /tmp/g2-big.e')
+   end subroutine case_31
 end program test_gate2
