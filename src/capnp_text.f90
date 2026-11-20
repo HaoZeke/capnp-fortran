@@ -99,59 +99,78 @@ contains
       case (TYPE_VOID)
          text = 'void'
       case (TYPE_BOOL)
-         if (value_bool(val)) then
+         if (val%kind /= CAPNP_PK_NULL .and. value_bool(val)) then
             text = 'true'
          else
             text = 'false'
          end if
       case (TYPE_INT8)
-         call capnp_fmt_i64(int(value_i8(val), int64), text)
+         call capnp_fmt_i64(int(capnp_def_i8(val), int64), text)
       case (TYPE_INT16)
-         call capnp_fmt_i64(int(value_i16(val), int64), text)
+         call capnp_fmt_i64(int(capnp_def_i16(val), int64), text)
       case (TYPE_INT32)
-         call capnp_fmt_i64(int(value_i32(val), int64), text)
+         call capnp_fmt_i64(int(capnp_def_i32(val), int64), text)
       case (TYPE_INT64)
-         call capnp_fmt_i64(value_i64(val), text)
+         call capnp_fmt_i64(capnp_def_i64(val), text)
       case (TYPE_UINT8)
-         call capnp_fmt_u64(int(value_u8(val), int64), text)
+         call capnp_fmt_u64(int(capnp_def_u8(val), int64), text)
       case (TYPE_UINT16)
-         call capnp_fmt_u64(int(value_u16(val), int64), text)
+         call capnp_fmt_u64(int(capnp_def_u16(val), int64), text)
       case (TYPE_UINT32)
-         call capnp_fmt_u64(value_u32(val), text)
+         call capnp_fmt_u64(capnp_def_u32(val), text)
       case (TYPE_UINT64)
-         call capnp_fmt_u64(value_u64(val), text)
+         call capnp_fmt_u64(capnp_def_i64(val), text)
       case (TYPE_FLOAT32)
-         call capnp_fmt_f32(value_f32(val), text)
+         call capnp_fmt_f32(capnp_def_f32(val), text)
       case (TYPE_FLOAT64)
-         call capnp_fmt_f64(value_f64(val), text)
+         call capnp_fmt_f64(capnp_def_f64(val), text)
       case (TYPE_TEXT)
-         call value_text(val, body, err)
-         if (err /= CAPNP_OK) return
+         if (val%kind == CAPNP_PK_NULL) then
+            body = ''
+         else
+            call value_text(val, body, err)
+            if (err /= CAPNP_OK) return
+         end if
          call capnp_cescape_text(body, esc)
          text = '"'//esc//'"'
       case (TYPE_DATA)
-         call value_data(val, raw, err)
-         if (err /= CAPNP_OK) return
-         call capnp_cescape_data(raw, esc)
+         if (val%kind == CAPNP_PK_NULL) then
+            esc = ''
+         else
+            call value_data(val, raw, err)
+            if (err /= CAPNP_OK) return
+            call capnp_cescape_data(raw, esc)
+         end if
          text = '"'//esc//'"'
       case (TYPE_ENUM)
-         ord = value_enum(val)
+         ord = 0
+         if (val%kind /= CAPNP_PK_NULL) ord = value_enum(val)
          call enum_text(schema, type_type_id(typ), ord, text, err)
       case (TYPE_LIST)
-         q = value_pointer(val, err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (val%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(val, err)
+            if (err /= CAPNP_OK) return
+         end if
          et = type_list_element(typ, err)
          if (err /= CAPNP_OK) return
          call enc_list(schema, et, q, ind, MODE_BARE, 0, text, err)
       case (TYPE_STRUCT)
-         q = value_pointer(val, err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (val%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(val, err)
+            if (err /= CAPNP_OK) return
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(typ))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
          call enc_struct(schema, idx, q, ind, MODE_BARE, 0, text, err)
+      case (TYPE_ANY_POINTER)
+         text = '<opaque pointer>'
+      case (TYPE_INTERFACE)
+         text = '<external capability>'
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -209,8 +228,13 @@ contains
          return
       end if
       active = -1
-      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) &
-         active = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) then
+         if (p%kind == CAPNP_PK_NULL) then
+            active = 0
+         else
+            active = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+         end if
+      end if
       fl = node_struct_fields(schema%nodes(idx), err)
       if (err /= CAPNP_OK) return
       nf = int(capnp_list_len(fl))
@@ -301,36 +325,67 @@ contains
       case (TYPE_FLOAT64)
          call capnp_fmt_f64(capnp_get_f64(p, off*8_int64, default=capnp_def_f64(dv)), out)
       case (TYPE_TEXT)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
          if (q%kind == CAPNP_PK_NULL) then
-            out = '""'
+            if (dv%kind /= CAPNP_PK_NULL) then
+               call value_text(dv, s, err)
+               if (err /= CAPNP_OK) return
+            else
+               s = ''
+            end if
          else
             call capnp_get_text(p, int(off), s, err)
             if (err /= CAPNP_OK) return
-            call capnp_cescape_text(s, esc)
-            out = '"'//esc//'"'
          end if
+         call capnp_cescape_text(s, esc)
+         out = '"'//esc//'"'
       case (TYPE_DATA)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
          if (q%kind == CAPNP_PK_NULL) then
-            out = '""'
+            if (dv%kind /= CAPNP_PK_NULL) then
+               call value_data(dv, raw, err)
+               if (err /= CAPNP_OK) return
+               call capnp_cescape_data(raw, esc)
+            else
+               esc = ''
+            end if
          else
             call capnp_get_data(p, int(off), raw, err)
             if (err /= CAPNP_OK) return
             call capnp_cescape_data(raw, esc)
-            out = '"'//esc//'"'
          end if
+         out = '"'//esc//'"'
       case (TYPE_LIST)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(dv, err)
+            if (err /= CAPNP_OK) return
+         end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
          call enc_list(schema, et, q, indent, mode, depth, out, err)
       case (TYPE_STRUCT)
-         q = capnp_getp(p, int(off), err)
-         if (err /= CAPNP_OK) return
+         q = capnp_ptr_t()
+         if (p%kind /= CAPNP_PK_NULL) then
+            q = capnp_getp(p, int(off), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
+            q = value_pointer(dv, err)
+            if (err /= CAPNP_OK) return
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
