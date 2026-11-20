@@ -247,6 +247,8 @@ module capnp_rpc
       logical :: local_results = .false.
       !> Set when the call target is a local export, before send.
       integer :: local_export = -1
+      !> Application import handle used to form an outgoing Call.
+      integer(int64) :: import_handle = -1_int64
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -290,6 +292,9 @@ module capnp_rpc
    !> embargo id and waits for receiverLoopback.
    type :: rpc_import_node_t
       integer(int64) :: id = -1_int64
+      !> The peer's wire id. `id` may be a private local alias after the
+      !> peer reuses an id that still names a reflected local capability.
+      integer(int64) :: wire_id = -1_int64
       integer :: state = IMP_ABSENT
       logical :: received_call = .false.
       integer(int64) :: resolved_id = -1_int64
@@ -442,6 +447,7 @@ module capnp_rpc
       type(rpc_embargo_node_t), pointer :: embargoes => null()
       type(rpc_pipe_wait_t), pointer :: pipe_wait => null()
       integer(int64) :: next_embargo = 0_int64
+      integer(int64) :: next_import_handle = -2_int64
       !> Shared with this vat's other connections when one is attached;
       !> otherwise `own_vat` below.
       type(rpc_vat_t), pointer :: vat => null()
@@ -477,6 +483,7 @@ contains
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
       conn%next_embargo = 0_int64
+      conn%next_import_handle = -2_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
       ! Its own vat until told otherwise, which is what a two-party
@@ -505,6 +512,7 @@ contains
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
       conn%next_embargo = 0_int64
+      conn%next_import_handle = -2_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
       conn%vat => conn%own_vat
@@ -1010,7 +1018,7 @@ contains
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
       integer :: i
-      integer(int64) :: target_id
+      integer(int64) :: target_id, wire_id
       logical :: broken
       character(len=:), allocatable :: breason
       err = CAPNP_OK
@@ -1039,6 +1047,11 @@ contains
       if (qid < 0_int64) then
          err = CAPNP_ERR_ALLOC
          return
+      end if
+      if (target%kind == RPC_CAP_IMPORT) then
+         conn%questions(int(qid))%import_handle = target%id
+         call import_wire_id(conn, target_id, wire_id)
+         target_id = wire_id
       end if
       conn%questions(int(qid))%membrane => target%membrane
       conn%questions(int(qid))%membrane_reverse = target%membrane_reverse
@@ -1157,7 +1170,12 @@ contains
          if (rerr == CAPNP_OK) then
             if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
                target_id = message_target_imported_cap_get(tgt)
-               call import_find(conn, target_id, node, found)
+               if (qid >= 0_int64 .and. qid < int(MAXQ, int64) .and. &
+                   conn%questions(int(qid))%import_handle /= -1_int64) then
+                  call import_find(conn, conn%questions(int(qid))%import_handle, node, found)
+               else
+                  call import_find(conn, target_id, node, found)
+               end if
                if (found) then
                   if (node%state == IMP_EMBARGO .or. node%state == IMP_LOCAL) then
                      call deliver_local_promise(conn, node, m, qid, err)
@@ -1168,7 +1186,7 @@ contains
             end if
          end if
       end if
-      call note_sent_promise(conn, m)
+      call note_sent_promise(conn, m, qid)
       call rpc_send_message(conn%transport, m, err)
       if (err /= CAPNP_OK) then
          call release_unsent_call_caps(conn, m)
@@ -2042,7 +2060,9 @@ contains
       type(payload_t) :: pl
       type(capnp_ptr_t) :: p, ctab
       type(cap_descriptor_t) :: cd
+      type(rpc_import_node_t), pointer :: inode
       integer :: i
+      logical :: found
       cap = rpc_cap_t()
       call rpc_result_content(conn, qid, p, err)
       if (err /= CAPNP_OK) return
@@ -2073,6 +2093,8 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
+            call import_find_wire(conn, cap%id, inode, found)
+            if (found) cap%id = inode%id
          end if
       case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
          ! A promise import: the spec permits continuing to address the
@@ -2084,6 +2106,8 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
+            call import_find_wire(conn, cap%id, inode, found)
+            if (found) cap%id = inode%id
          end if
       case default
          err = CAPNP_ERR_KIND
@@ -2184,9 +2208,8 @@ contains
       integer(int64), intent(in) :: id
       type(rpc_import_node_t), pointer :: node
       logical :: found
-      call import_find(conn, id, node, found)
+      call import_find_live(conn, id, node, found)
       if (.not. found) return
-      if (node%released .or. node%refs <= 0) return
       node%refs = node%refs - 1
       if (node%refs == 0) node%released = .true.
    end subroutine forget_import_ref
@@ -2261,6 +2284,7 @@ contains
       slot%local_call = .false.
       slot%local_results = .false.
       slot%local_export = -1
+      slot%import_handle = -1_int64
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -2344,6 +2368,44 @@ contains
       node => null()
    end subroutine import_find
 
+   !> The import currently holding references to a peer wire id. After a
+   !> reflected resolution the id may also name a released local alias, so
+   !> `import_find_wire` alone can select the wrong node.
+   subroutine import_find_live(conn, wire_id, node, found)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: wire_id
+      type(rpc_import_node_t), pointer, intent(out) :: node
+      logical, intent(out) :: found
+      node => conn%imports
+      found = .false.
+      do while (associated(node))
+         if (node%wire_id == wire_id .and. node%refs > 0 .and. &
+             .not. node%released) then
+            found = .true.
+            return
+         end if
+         node => node%next
+      end do
+      node => null()
+   end subroutine import_find_live
+
+   subroutine import_find_wire(conn, wire_id, node, found)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: wire_id
+      type(rpc_import_node_t), pointer, intent(out) :: node
+      logical, intent(out) :: found
+      node => conn%imports
+      found = .false.
+      do while (associated(node))
+         if (node%wire_id == wire_id) then
+            found = .true.
+            return
+         end if
+         node => node%next
+      end do
+      node => null()
+   end subroutine import_find_wire
+
    !> Remember an import id the first time a cap descriptor names it.
    !> A later descriptor for the same id does not change a promise into
    !> a settled import or the reverse.
@@ -2358,6 +2420,7 @@ contains
       if (found) return
       allocate (node)
       node%id = id
+      node%wire_id = id
       node%refs = 1
       node%released = .false.
       if (promise) then
@@ -2370,15 +2433,23 @@ contains
    end subroutine import_note
 
    !> A new delivery of an id we already know is another remote reference.
-   subroutine import_receive(conn, id, promise)
+   subroutine import_receive(conn, id, promise, handle)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: id
       logical, intent(in) :: promise
+      integer(int64), intent(out), optional :: handle
       type(rpc_import_node_t), pointer :: node
       logical :: found
+      call import_find_live(conn, id, node, found)
+      if (found) then
+         node%refs = node%refs + 1
+         if (present(handle)) handle = node%id
+         return
+      end if
       call import_find(conn, id, node, found)
       if (.not. found) then
          call import_note(conn, id, promise)
+         if (present(handle)) handle = id
          return
       end if
       ! A released id can be handed out again. The old node would ignore
@@ -2388,7 +2459,23 @@ contains
          ! Its wire import was released, but application handles still name
          ! this node and it owns an export pin. Never overwrite that local
          ! identity when the peer reuses the released export id.
-         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) return
+         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
+            allocate (node)
+            node%id = conn%next_import_handle
+            conn%next_import_handle = conn%next_import_handle - 1_int64
+            node%wire_id = id
+            node%refs = 1
+            node%released = .false.
+            if (promise) then
+               node%state = IMP_PROMISE
+            else
+               node%state = IMP_HOSTED
+            end if
+            node%next => conn%imports
+            conn%imports => node
+            if (present(handle)) handle = node%id
+            return
+         end if
          node%refs = 1
          node%released = .false.
          node%received_call = .false.
@@ -2401,10 +2488,12 @@ contains
          else
             node%state = IMP_HOSTED
          end if
+         if (present(handle)) handle = node%id
          return
       end if
       node%refs = node%refs + 1
       node%released = .false.
+      if (present(handle)) handle = node%id
    end subroutine import_receive
 
    !> Record senderHosted and senderPromise rows of a payload cap table.
@@ -2474,9 +2563,21 @@ contains
       end do
    end subroutine import_follow
 
-   subroutine note_sent_promise(conn, m)
+   subroutine import_wire_id(conn, handle, wire_id)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: handle
+      integer(int64), intent(out) :: wire_id
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      wire_id = handle
+      call import_find(conn, handle, node, found)
+      if (found) wire_id = node%wire_id
+   end subroutine import_wire_id
+
+   subroutine note_sent_promise(conn, m, qid)
       type(rpc_conn_t), intent(inout) :: conn
       type(capnp_message_t), intent(inout), target :: m
+      integer(int64), intent(in), optional :: qid
       type(message_t) :: msg
       type(call_t) :: c
       type(message_target_t) :: tgt
@@ -2493,7 +2594,16 @@ contains
       if (rerr /= CAPNP_OK) return
       if (message_target_which(tgt) /= MESSAGE_TARGET_IMPORTED_CAP_TAG) return
       id = message_target_imported_cap_get(tgt)
-      call import_find(conn, id, node, found)
+      if (present(qid)) then
+         if (qid >= 0_int64 .and. qid < int(MAXQ, int64) .and. &
+             conn%questions(int(qid))%import_handle /= -1_int64) then
+            call import_find(conn, conn%questions(int(qid))%import_handle, node, found)
+         else
+            call import_find(conn, id, node, found)
+         end if
+      else
+         call import_find(conn, id, node, found)
+      end if
       if (.not. found) return
       if (node%state == IMP_PROMISE) node%received_call = .true.
    end subroutine note_sent_promise
@@ -2529,6 +2639,7 @@ contains
       integer, intent(out) :: err
       type(rpc_import_node_t), pointer :: other
       logical :: found, held
+      integer(int64) :: new_handle
       err = CAPNP_OK
       ! The application still holds this promise when refs remain. The
       ! promise import itself is dropped now; the replacement is what a
@@ -2537,8 +2648,8 @@ contains
       call release_all_import(conn, node, err)
       if (err /= CAPNP_OK) return
       node%state = IMP_REMOTE
-      node%resolved_id = new_id
-      call import_receive(conn, new_id, as_promise)
+      call import_receive(conn, new_id, as_promise, new_handle)
+      node%resolved_id = new_handle
       if (.not. held) then
          call import_find(conn, new_id, other, found)
          if (found) call release_one_import(conn, other, err)
@@ -2586,7 +2697,7 @@ contains
       conn%embargoes => emb
       node%state = IMP_EMBARGO
       node%embargo_id = eid
-      call send_sender_loopback(conn, node%id, eid, err)
+      call send_sender_loopback(conn, node%wire_id, eid, err)
       ! C++ drops the promise ImportClient after the Disembargo is sent.
       if (err == CAPNP_OK) call release_all_import(conn, node, err)
    end subroutine resolve_reflected
@@ -2625,7 +2736,7 @@ contains
       if (err /= CAPNP_OK) return
       pid = resolve_promise_id_get(rv)
       if (resolve_which(rv) == RESOLVE_EXCEPTION_TAG) then
-         call import_find(conn, pid, node, found)
+         call import_find_wire(conn, pid, node, found)
          if (.not. found) return
          if (node%state /= IMP_PROMISE) then
             if (node%state == IMP_HOSTED) then
@@ -2653,7 +2764,7 @@ contains
          call abort_conn(conn, "'Resolve' contained 'CapDescriptor.none'.", err)
          return
       end if
-      call import_find(conn, pid, node, found)
+      call import_find_wire(conn, pid, node, found)
       if (.not. found) then
          call release_resolve_cap(conn, cd, err)
          return
@@ -2878,7 +2989,7 @@ contains
       n = node%refs
       node%refs = 0
       node%released = .true.
-      call send_release(conn, node%id, int(n, int64), err)
+      call send_release(conn, node%wire_id, int(n, int64), err)
    end subroutine release_all_import
 
    !> Drop one remote reference, matching one rpc_release_send.
@@ -2890,7 +3001,7 @@ contains
       if (node%released .or. node%refs <= 0) return
       node%refs = node%refs - 1
       if (node%refs == 0) node%released = .true.
-      call send_release(conn, node%id, 1_int64, err)
+      call send_release(conn, node%wire_id, 1_int64, err)
    end subroutine release_one_import
 
    !> Drop refcount on an imported capability. A resolved promise

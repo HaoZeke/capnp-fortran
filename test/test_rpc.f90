@@ -4513,8 +4513,8 @@ contains
       type(rpc_conn_t), target :: cconn, sconn
       type(echo_srv_t), target :: local_echo
       class(rpc_server_t), pointer :: boot
-      type(rpc_cap_t) :: echo_cap, quiet, called
-      type(capnp_message_t), target :: m, reply
+      type(rpc_cap_t) :: echo_cap, quiet, called, reused
+      type(capnp_message_t), target :: m, reply, drained
       type(message_t) :: msg, rmsg
       type(resolve_t) :: rv
       type(cap_descriptor_t) :: cd
@@ -4522,8 +4522,8 @@ contains
       type(disembargo_t) :: d
       type(release_t) :: rel
       type(message_target_t) :: tgt
-      integer :: fa, fb, e
-      integer(int64) :: qboot, qquiet, qprom, qcall, emb
+      integer :: fa, fb, e, nmsg
+      integer(int64) :: qboot, qquiet, qprom, qcall, qreuse, emb
       logical :: readable
       call px_socketpair(fa, fb, e)
       boot => local_echo
@@ -4560,6 +4560,41 @@ contains
       call px_poll_in(sconn%fd, 0, readable, e)
       call check_(error, e == CAPNP_OK .and. .not. readable, &
                   'resolve: no call means no embargo')
+      if (allocated(error)) return
+      ! The peer may now reuse wire id 4. The earlier application handle
+      ! must keep naming its reflected local capability, while the new
+      ! delivery receives a separate local import handle.
+      sconn%exports(4)%used = .true.
+      sconn%exports(4)%refcount = 1
+      sconn%exports(4)%srv => local_echo
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qreuse, e)
+      call rpc_wait(cconn, qreuse, e)
+      call rpc_result_cap(cconn, qreuse, [integer ::], reused, e)
+      call check_(error, e == CAPNP_OK .and. reused%kind == RPC_CAP_IMPORT .and. &
+                  reused%id /= 4_int64, 'resolve: reused wire id gets private handle')
+      if (allocated(error)) return
+      call rpc_call_begin(cconn, quiet, ECHO_IFACE, 0, m, params, qcall, e)
+      if (e == CAPNP_OK) call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+      if (e == CAPNP_OK) call rpc_call_send(cconn, m, e)
+      if (e == CAPNP_OK) call rpc_wait(cconn, qcall, e)
+      call px_poll_in(sconn%fd, 0, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'resolve: reflected capability remains local after reuse')
+      if (allocated(error)) return
+      ! Finish with releaseResultCaps already released the reused id, so
+      ! the later release of the handle sends nothing more.
+      call rpc_finish_send(cconn, qreuse, .false., e)
+      if (e == CAPNP_OK) call rpc_release_send(cconn, reused, e)
+      nmsg = 0
+      do while (e == CAPNP_OK)
+         call px_poll_in(sconn%fd, 0, readable, e)
+         if (e /= CAPNP_OK .or. .not. readable) exit
+         call rpc_recv_message(sconn%fd, drained, e)
+         call capnp_message_free(drained)
+         nmsg = nmsg + 1
+      end do
+      call check_(error, e == CAPNP_OK .and. nmsg == 1, &
+                  'resolve: reused id is released once')
       if (allocated(error)) return
       call inject_promise(sconn%fd, cconn, echo_cap, 6_int64, qprom, e)
       call rpc_wait(cconn, qprom, e)
