@@ -18,19 +18,32 @@ contains
            new_unittest("golden-single-struct", test_golden_single_struct), &
            new_unittest("struct-fields-roundtrip", test_struct_fields_roundtrip), &
            new_unittest("text-data", test_text_data), &
+           new_unittest("overwrite-text-zero", test_overwrite_text_zero), &
            new_unittest("lists", test_lists), &
+           new_unittest("list-count-limit", test_list_count_limit), &
+           new_unittest("void-list-struct", test_void_list_struct), &
+           new_unittest("void-list-amplify", test_void_list_amplify), &
+           new_unittest("empty-list-amplify", test_empty_list_amplify), &
            new_unittest("composite-list", test_composite_list), &
+           new_unittest("composite-count-unsigned", test_composite_count_unsigned), &
            new_unittest("nested-struct", test_nested_struct), &
            new_unittest("far-pointer", test_far_pointer), &
+           new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
            new_unittest("wire-capability", test_wire_capability), &
+           new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
            new_unittest("packed-roundtrip", test_packed_roundtrip), &
            new_unittest("packed-incremental", test_packed_incremental), &
            new_unittest("framing-errors", test_framing_errors), &
            new_unittest("traversal-limit", test_traversal_limit), &
+           new_unittest("traversal-root-words", test_traversal_root_words), &
+           new_unittest("traversal-single-far", test_traversal_single_far), &
+           new_unittest("traversal-double-far", test_traversal_double_far), &
            new_unittest("depth-limit", test_depth_limit), &
-           new_unittest("depth-limit-nested", test_depth_limit_nested)]
+           new_unittest("depth-limit-nested", test_depth_limit_nested), &
+           new_unittest("nest-limit-64", test_nest_limit_64), &
+           new_unittest("far-depth-one", test_far_depth_one)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -234,6 +247,54 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_text_data
+   !> Overwriting Text must erase the previous bytes. Compared with the
+   !> flat array from C++ 1.4.0 MallocMessageBuilder for Holder.text.
+   subroutine test_overwrite_text_zero(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      integer(int8) :: expect(0:79)
+      character(len=*), parameter :: hex = &
+         '00000000090000000000000000000400' // &
+         '00000000000000000000000000000000' // &
+         '00000000000000000d0000001a000000' // &
+         '00000000000000000000000000000000' // &
+         '00000000000000006f6b000000000000'
+      integer :: err, i
+      do i = 0, 79
+         expect(i) = int(hexdig(hex(2*i + 1:2*i + 1))*16 + &
+                         hexdig(hex(2*i + 2:2*i + 2)), int8)
+      end do
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 4, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_set_text(root, 3, 'SECRET_PASSWORD_12345', err)
+      call check(error, err == CAPNP_OK, 'overwrite: first text')
+      if (allocated(error)) return
+      call capnp_set_text(root, 3, 'ok', err)
+      call check(error, err == CAPNP_OK, 'overwrite: second text')
+      if (allocated(error)) return
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, err == CAPNP_OK .and. size(bytes) == 80, 'overwrite: 80 bytes')
+      if (allocated(error)) return
+      call check(error, all(bytes == expect), 'overwrite: matches C++ 1.4.0 bytes')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   contains
+      pure function hexdig(ch) result(n)
+         character(len=1), intent(in) :: ch
+         integer :: n
+         select case (ch)
+         case ('0':'9')
+            n = iachar(ch) - iachar('0')
+         case ('a':'f')
+            n = iachar(ch) - iachar('a') + 10
+         case default
+            n = 0
+         end select
+      end function hexdig
+   end subroutine test_overwrite_text_zero
    subroutine test_lists(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -273,6 +334,117 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_lists
+   !> 2^29 elements is past LIST_ELEMENT_COUNT_BITS (common.h). C++ throws
+   !> in initListPointer; 2^29-1 of List(Void) still allocates.
+   subroutine test_list_count_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      call check(error, err == CAPNP_OK, 'list-count: builder')
+      if (allocated(error)) return
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870912_int64, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 void rejected')
+      if (allocated(error)) return
+      lst = capnp_new_composite_list(msg, 536870912_int64, 1, 0, err)
+      call check(error, err == CAPNP_ERR_ARG, 'list-count: 2^29 composite rejected')
+      if (allocated(error)) return
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 536870911_int64, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 536870911_int64, &
+                  'list-count: 2^29-1 void accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_list_count_limit
+   !> List(Void) upgrades to a struct list of zero-size elements. Field
+   !> reads are defaults. layout.c++ readListPointer / getStructElement.
+   subroutine test_void_list_struct(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, el
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:23))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 2_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_VOID, 3_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'void-struct: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. lst%kind == CAPNP_PK_LIST .and. &
+                  capnp_list_len(lst) == 3_int64, 'void-struct: list')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 0, err)
+      call check(error, err == CAPNP_OK .and. el%kind == CAPNP_PK_STRUCT, 'void-struct: element')
+      if (allocated(error)) return
+      call check(error, capnp_get_i64(el, 0_int64) == 0_int64, 'void-struct: default field')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 2, err)
+      call check(error, err == CAPNP_OK, 'void-struct: last element')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_void_list_struct
+   !> List(Void) of 10^7 elements has no payload bytes but costs one word
+   !> each (layout.c++ amplifiedRead). The default limit is 2^23 words.
+   subroutine test_void_list_amplify(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:23))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 2_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_VOID, 10000000_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'void-amplify: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, 'void-amplify: root')
+      if (allocated(error)) return
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'void-amplify: traversal')
+      if (allocated(error)) return
+      call check(error, lst%kind == CAPNP_PK_NULL, 'void-amplify: no list handle')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_void_list_amplify
+   !> Inline-composite list of 10^7 zero-word structs. The tag carries the
+   !> count; the body is one word. layout.c++:2323 charges one word each.
+   subroutine test_empty_list_amplify(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: tag
+      integer :: err
+      allocate (buf(0:31))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 3_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_COMPOSITE, 0_int64))
+      tag = shiftl(10000000_int64, 2)
+      call cp_put_i64(buf, 24_int64, tag)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'empty-amplify: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, 'empty-amplify: root')
+      if (allocated(error)) return
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'empty-amplify: traversal')
+      if (allocated(error)) return
+      call check(error, lst%kind == CAPNP_PK_NULL, 'empty-amplify: no list handle')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_empty_list_amplify
    subroutine test_composite_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -308,6 +480,39 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_composite_list
+   !> Tag word 0x0000000180000004 has bit 31 set and a 29-bit count of 1.
+   !> layout.c++ inlineCompositeListElementCount returns 1, then [0] is 42.
+   subroutine test_composite_count_unsigned(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, el
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: tag
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 4_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 0_int32, 1_int32))
+      call cp_put_i64(buf, 16_int64, wp_make_list(0_int32, CAPNP_SZ_COMPOSITE, 1_int64))
+      tag = int(z'0000000180000004', int64)
+      call cp_put_i64(buf, 24_int64, tag)
+      call cp_put_i64(buf, 32_int64, 42_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'composite-unsigned: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 1_int64, &
+                  'composite-unsigned: length is 1')
+      if (allocated(error)) return
+      el = capnp_list_get_struct(lst, 0, err)
+      call check(error, err == CAPNP_OK, 'composite-unsigned: element')
+      if (allocated(error)) return
+      call check(error, capnp_get_i64(el, 0_int64) == 42_int64, 'composite-unsigned: value')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_composite_count_unsigned
    subroutine test_nested_struct(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -369,6 +574,36 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_far_pointer
+   !> A single far whose landing pad is another far is not a struct.
+   !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
+   subroutine test_far_chain_rejected(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer(int64) :: hdr
+      integer :: err
+      hdr = 16_int64
+      allocate (buf(0:hdr + 32_int64 - 1))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 2_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 1_int32)
+      call cp_put_i32(buf, 12_int64, 2_int32)
+      call cp_put_i64(buf, hdr, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, hdr + 8_int64, wp_make_far(.false., 0_int64, 2_int64))
+      call cp_put_i64(buf, hdr + 16_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, hdr + 24_int64, 99_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'far-chain: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_KIND, 'far-chain: landing pad far is rejected')
+      if (allocated(error)) return
+      call check(error, root%kind /= CAPNP_PK_STRUCT, 'far-chain: not read as struct')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_far_chain_rejected
    !> Multi-segment double-far: pointer on seg A, landing pad (single far +
    !> tag) on seg B, object on seg C. Serialize, deserialize, resolve through
    !> resolve_double_far and read the object's data word.
@@ -458,6 +693,36 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_wire_capability
+   !> Low word 0x7 is kind OTHER with reserved bits. isCapability() is false
+   !> (layout.c++). A clean capability word still resolves.
+   subroutine test_cap_reserved_bits(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:15))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i64(buf, 8_int64, 7_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'cap-reserved: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_KIND, 'cap-reserved: word 7 rejected')
+      if (allocated(error)) return
+      call check(error, root%kind /= CAPNP_PK_CAP, 'cap-reserved: not a capability')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call cp_put_i64(buf, 8_int64, wp_make_cap(4_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_CAP .and. &
+                  root%capidx == 4_int64, 'cap-reserved: clean cap still resolves')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_cap_reserved_bits
    !> Vectors from https://capnproto.org/encoding.html#packing
    subroutine test_packed_spec_vectors(error)
       type(error_type), allocatable, intent(out) :: error
@@ -671,8 +936,93 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_traversal_limit
-   !> Pointer resolution charges nesting depth; a zero depth_limit still
-   !> allows the root (depth 0) but fails the first capnp_getp (depth 1).
+   !> An 8-word struct costs 2 root words plus 8 body words. Limit 9 fails
+   !> and limit 10 reads it (message.c++:100, layout.c++:2707).
+   subroutine test_traversal_root_words(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:79))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 9_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 8_int32, 0_int32))
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=9_int64)
+      call check(error, err == CAPNP_OK, 'trav-root: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-root: limit 9 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=10_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
+                  'trav-root: limit 10 reads the struct')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_root_words
+   !> Single-far 1-word struct costs 2 root + 1 pad + 1 body. Limit 3 fails,
+   !> limit 4 yields 55 (layout.c++:586).
+   subroutine test_traversal_single_far(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 1_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 32_int64, 55_int64)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=3_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-sfar: limit 3 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=4_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 55_int64, &
+                  'trav-sfar: limit 4 reads 55')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_single_far
+   !> Double-far 1-word struct costs 2 root + 2 pad + 1 body. Limit 4 fails,
+   !> limit 5 yields 123 (layout.c++:586).
+   subroutine test_traversal_double_far(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:47))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 2_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i32(buf, 12_int64, 1_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.true., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_far(.false., 0_int64, 2_int64))
+      call cp_put_i64(buf, 32_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 40_int64, 123_int64)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=4_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-dfar: limit 4 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=5_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 123_int64, &
+                  'trav-dfar: limit 5 reads 123')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_double_far
+   !> nestingLimit must be greater than zero to read the root
+   !> (layout.c++:2186). Limit 1 allows the root and rejects the first getp.
    subroutine test_depth_limit(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -686,10 +1036,10 @@ contains
       call capnp_setp(root, 0, kid, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
-      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=0)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=1)
       root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
-                  'guards: root at depth 0 allowed')
+                  'guards: root within limit 1')
       if (allocated(error)) return
       q = capnp_getp(root, 0, err)
       call check(error, err == CAPNP_ERR_DEPTH, 'guards: depth limit on getp')
@@ -697,8 +1047,8 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_depth_limit
-   !> Nested walks accumulate depth on the handle: with depth_limit=1 a
-   !> two-hop chain (root -> a -> b) allows the first getp and fails the second.
+   !> With depth_limit=2 the first nested struct is readable and the next
+   !> getp hits the limit. The root itself consumes one level.
    subroutine test_depth_limit_nested(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
@@ -714,7 +1064,7 @@ contains
       call capnp_setp(root, 0, a, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
-      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=1)
+      call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=2)
       root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_OK, 'guards: nested root ok')
       if (allocated(error)) return
@@ -730,5 +1080,75 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_depth_limit_nested
+   !> Default nesting limit is 64. A chain of 64 structs is readable; the
+   !> 65th struct is rejected (layout.c++:2186).
+   subroutine test_nest_limit_64(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: node, prev, p
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, i, n, last, hops
+      do n = 64, 65
+         call capnp_message_init_builder(msg, err)
+         prev = capnp_ptr_t()
+         do i = n, 1, -1
+            node = capnp_new_struct(msg, 1, 1, err)
+            call capnp_set_i32(node, 0_int64, int(i, int32), err)
+            if (i /= n) call capnp_setp(node, 0, prev, err)
+            prev = node
+         end do
+         call capnp_set_root(msg, prev, err)
+         call capnp_serialize_bytes(msg, bytes, err)
+         call capnp_deserialize_bytes(bytes, rmsg, err, depth_limit=64)
+         p = capnp_root(rmsg, err)
+         last = 0
+         hops = 0
+         do
+            if (err /= CAPNP_OK .or. p%kind /= CAPNP_PK_STRUCT) exit
+            last = int(capnp_get_i32(p, 0_int64))
+            hops = hops + 1
+            p = capnp_getp(p, 0, err)
+         end do
+         if (n == 64) then
+            call check(error, err == CAPNP_OK .and. last == 64 .and. hops == 64, &
+                        'nest-64: chain of 64 is readable')
+         else
+            call check(error, err == CAPNP_ERR_DEPTH .and. last == 64, &
+                        'nest-65: 65th struct is past the limit')
+         end if
+         if (allocated(error)) return
+         call capnp_message_free(msg)
+         call capnp_message_free(rmsg)
+      end do
+   end subroutine test_nest_limit_64
+   !> A far landing pad does not consume a nesting level. With depth_limit=1
+   !> the far root is depth 0 and its data is readable (layout.c++ followFars).
+   subroutine test_far_depth_one(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 1_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 32_int64, 77_int64)
+      call capnp_deserialize_bytes(buf, msg, err, depth_limit=0)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'far-depth: limit 0 rejects the root')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, depth_limit=1)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%depth == 0 .and. &
+                  capnp_get_i64(root, 0_int64) == 77_int64, &
+                  'far-depth: limit 1 reads val 77 at depth 0')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_far_depth_one
 
 end module test_wire

@@ -90,10 +90,6 @@ contains
       p = capnp_ptr_t()
       p%msg => msg
 
-      if (depth > msg%depth_limit) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
       if (seg < 1 .or. seg > msg%nsegs) then
          err = CAPNP_ERR_SEGMENT
          return
@@ -104,7 +100,14 @@ contains
       end if
 
       w = cp_get_i64(msg%segs(seg)%bytes, byte_off)
-      if (w == 0_int64) return ! null: default-valued handle
+      ! A null pointer returns before the nesting check (layout.c++:2174).
+      if (w == 0_int64) return
+      ! readStructPointer requires nestingLimit > 0, then stores limit-1.
+      ! followFars does not consume a level (layout.c++:2186, 2215).
+      if (depth >= msg%depth_limit) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
 
       k = wp_kind(w)
       select case (k)
@@ -137,13 +140,32 @@ contains
          tseg = int(tseg64) + 1
          pad_off = wp_far_off(w)*8_int64
          if (.not. wp_far_two(w)) then
-            ! Single far: the pad is an ordinary intra-segment pointer.
-            call resolve_at(msg, tseg, pad_off, depth + 1, p, err)
+            ! Single far: the landing pad is the final pointer. A second
+            ! far is not a struct (layout.c++ readStructPointer, the
+            ! kind == STRUCT check).
+            if (pad_off < 0_int64 .or. pad_off + 8_int64 > msg%segs(tseg)%len) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+            ! followFars charges the landing pad before reading it
+            ! (layout.c++:586-587, arena.h:430).
+            if (.not. charge(msg, 8_int64, err)) return
+            if (wp_kind(cp_get_i64(msg%segs(tseg)%bytes, pad_off)) == CAPNP_WK_FAR) then
+               err = CAPNP_ERR_KIND
+               return
+            end if
+            call resolve_at(msg, tseg, pad_off, depth, p, err)
          else
             call resolve_double_far(msg, tseg, pad_off, depth, p, err)
          end if
 
       case (CAPNP_WK_CAP)
+         ! layout.c++ WirePointer::isCapability requires the whole low word
+         ! to be OTHER. Any of bits 2-31 set is a reserved pointer.
+         if (ibits(w, 2, 30) /= 0_int64) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          p%kind = CAPNP_PK_CAP
          p%capidx = wp_cap_index(w)
          p%depth = depth
@@ -165,14 +187,12 @@ contains
       err = CAPNP_OK
       p = capnp_ptr_t()
       p%msg => msg
-      if (depth + 1 > msg%depth_limit) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
       if (pad_off < 0_int64 .or. pad_off + 16_int64 > msg%segs(pseg)%len) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
+      ! A double-far pad is two words (layout.c++:586).
+      if (.not. charge(msg, 16_int64, err)) return
       w0 = cp_get_i64(msg%segs(pseg)%bytes, pad_off)
       tag = cp_get_i64(msg%segs(pseg)%bytes, pad_off + 8_int64)
       if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) then
@@ -200,10 +220,10 @@ contains
          p%off = obase
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
-         p%depth = depth + 1
+         p%depth = depth
       case (CAPNP_WK_LIST)
          call fill_list(msg, oseg, obase, tag, p, err)
-         if (err == CAPNP_OK) p%depth = depth + 1
+         if (err == CAPNP_OK) p%depth = depth
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -243,13 +263,20 @@ contains
          p%seg = seg
          p%off = base + 8_int64
          p%esize = es
-         p%nelem = int(wp_offset(tag), int64)
+         ! layout.c++ inlineCompositeListElementCount: unsigned 29-bit
+         ! count in the tag offset field. Bit 31 is outside that mask.
+         p%nelem = ibits(tag, 2, 29)
          p%dwords = wp_struct_dwords(tag)
          p%pwords = wp_struct_pwords(tag)
          ! Element count must fit the declared content words.
          if (p%nelem*int(p%dwords + p%pwords, int64) > cnt) then
             err = CAPNP_ERR_BOUNDS
             p%kind = CAPNP_PK_NULL
+            return
+         end if
+         ! layout.c++:2323: a zero-word element still costs one word.
+         if (p%dwords + p%pwords == 0 .and. p%nelem > 0_int64) then
+            if (.not. charge(msg, p%nelem*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       else
          sb = capnp_list_step_bits(es)
@@ -264,6 +291,10 @@ contains
          p%off = base
          p%esize = es
          p%nelem = cnt
+         ! layout.c++:2396: List(Void) costs one word per element.
+         if (es == CAPNP_SZ_VOID .and. cnt > 0_int64) then
+            if (.not. charge(msg, cnt*8_int64, err)) p%kind = CAPNP_PK_NULL
+         end if
       end if
    end subroutine fill_list
 
@@ -310,6 +341,16 @@ contains
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_ptr_t) :: p
+      p = capnp_ptr_t()
+      ! An out-of-range root is not charged (arena.h:430 short-circuits).
+      if (msg%nsegs < 1 .or. msg%segs(1)%len < 8_int64) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      ! The root pointer word is charged twice: MessageReader::getRootInternal
+      ! (message.c++:100) and PointerReader::getRoot (layout.c++:2707).
+      if (.not. charge(msg, 8_int64, err)) return
+      if (.not. charge(msg, 8_int64, err)) return
       call resolve_at(msg, 1, 0_int64, 0, p, err)
    end function capnp_root
 
@@ -408,6 +449,17 @@ contains
          q%pwords = 1
          q%dbits = 0_int64
          q%depth = p%depth
+      case (CAPNP_SZ_VOID)
+         ! layout.c++ readListPointer (the non-composite arm) treats VOID as
+         ! a struct list with dataSize 0 and pointerCount 0.
+         ! getStructElement then returns that zero-size struct.
+         q%kind = CAPNP_PK_STRUCT
+         q%seg = p%seg
+         q%off = p%off
+         q%dwords = 0
+         q%pwords = 0
+         q%dbits = 0_int64
+         q%depth = p%depth
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -469,7 +521,8 @@ contains
       integer(int64) :: off, nwords
       p = capnp_ptr_t()
       sb = capnp_list_step_bits(esize)
-      if (sb < 0 .or. count < 0_int64) then
+      ! layout.c++ initListPointer rejects elementCount >= 1<<29.
+      if (sb < 0 .or. count < 0_int64 .or. count >= 536870912_int64) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -494,7 +547,8 @@ contains
       integer :: seg
       integer(int64) :: off, nwords
       p = capnp_ptr_t()
-      if (count < 0_int64 .or. dwords < 0 .or. pwords < 0) then
+      ! layout.c++ initStructListPointer uses the same 29-bit element cap.
+      if (count < 0_int64 .or. count >= 536870912_int64 .or. dwords < 0 .or. pwords < 0) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -587,6 +641,259 @@ contains
       end select
    end function local_ptr_word
 
+   !> True when [base, base+nbytes) lies inside segment seg.
+   pure function span_ok(msg, seg, base, nbytes) result(ok)
+      type(capnp_message_t), intent(in) :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: base, nbytes
+      logical :: ok
+      ok = .false.
+      if (seg < 1 .or. seg > msg%nsegs) return
+      if (base < 0_int64 .or. nbytes < 0_int64) return
+      if (base > msg%segs(seg)%len) return
+      if (nbytes > msg%segs(seg)%len - base) return
+      ok = .true.
+   end function span_ok
+
+   subroutine zero_bytes(msg, seg, base, nbytes)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: base, nbytes
+      if (nbytes <= 0_int64) return
+      if (.not. span_ok(msg, seg, base, nbytes)) return
+      msg%segs(seg)%bytes(base:base + nbytes - 1) = 0_int8
+   end subroutine zero_bytes
+
+   !> Bytes occupied by a list body. Composite includes the tag word.
+   pure function list_payload_bytes(w) result(n)
+      integer(int64), intent(in) :: w
+      integer(int64) :: n
+      integer :: es, sb
+      integer(int64) :: cnt
+      es = wp_list_esize(w)
+      cnt = wp_list_count(w)
+      select case (es)
+      case (CAPNP_SZ_VOID)
+         n = 0_int64
+      case (CAPNP_SZ_COMPOSITE)
+         n = (cnt + 1_int64)*8_int64
+      case (CAPNP_SZ_PTR)
+         n = cnt*8_int64
+      case default
+         sb = capnp_list_step_bits(es)
+         if (sb < 0) then
+            n = -1_int64
+         else
+            n = ((int(sb, int64)*cnt + 63_int64)/64_int64)*8_int64
+         end if
+      end select
+   end function list_payload_bytes
+
+   !> Zero the object `tag` describes at `base`. The tag's offset is ignored.
+   !> layout.c++ zeroObject(segment, capTable, tag, ptr), lines 669-737.
+   recursive subroutine zero_at(msg, seg, base, tag, depth)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(in) :: seg, depth
+      integer(int64), intent(in) :: base, tag
+      integer :: es, dwords, pwords, j
+      integer(int64) :: cnt, nbytes, child, stride, nelem, i64, ctag, pos
+      if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT) return
+      select case (wp_kind(tag))
+      case (CAPNP_WK_STRUCT)
+         dwords = wp_struct_dwords(tag)
+         pwords = wp_struct_pwords(tag)
+         nbytes = int(dwords + pwords, int64)*8_int64
+         if (.not. span_ok(msg, seg, base, nbytes)) return
+         do j = 0, pwords - 1
+            child = base + int(dwords, int64)*8_int64 + int(j, int64)*8_int64
+            call zero_pointer_word(msg, seg, child, &
+                                    cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+         end do
+         call zero_bytes(msg, seg, base, nbytes)
+      case (CAPNP_WK_LIST)
+         es = wp_list_esize(tag)
+         cnt = wp_list_count(tag)
+         if (es == CAPNP_SZ_VOID) return
+         if (es == CAPNP_SZ_PTR) then
+            nbytes = cnt*8_int64
+            if (.not. span_ok(msg, seg, base, nbytes)) return
+            do i64 = 0_int64, cnt - 1_int64
+               child = base + i64*8_int64
+               call zero_pointer_word(msg, seg, child, &
+                                       cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+            end do
+            call zero_bytes(msg, seg, base, nbytes)
+         else if (es == CAPNP_SZ_COMPOSITE) then
+            nbytes = (cnt + 1_int64)*8_int64
+            if (.not. span_ok(msg, seg, base, nbytes)) return
+            ctag = cp_get_i64(msg%segs(seg)%bytes, base)
+            if (wp_kind(ctag) == CAPNP_WK_STRUCT) then
+               dwords = wp_struct_dwords(ctag)
+               pwords = wp_struct_pwords(ctag)
+               stride = int(dwords + pwords, int64)
+               nelem = ibits(ctag, 2, 29)
+               if (pwords > 0 .and. stride > 0_int64) then
+                  if (nelem > cnt/stride) nelem = cnt/stride
+                  do i64 = 0_int64, nelem - 1_int64
+                     pos = base + 8_int64 + i64*stride*8_int64 + int(dwords, int64)*8_int64
+                     do j = 0, pwords - 1
+                        child = pos + int(j, int64)*8_int64
+                        call zero_pointer_word(msg, seg, child, &
+                           cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+                     end do
+                  end do
+               end if
+            end if
+            call zero_bytes(msg, seg, base, nbytes)
+         else
+            nbytes = list_payload_bytes(tag)
+            call zero_bytes(msg, seg, base, nbytes)
+         end if
+      end select
+   end subroutine zero_at
+
+   !> Zero the object a pointer word addresses, including a far landing pad.
+   !> layout.c++ zeroObject(segment, capTable, ref), lines 625-667.
+   recursive subroutine zero_pointer_word(msg, seg, slot, w, depth)
+      type(capnp_message_t), intent(inout) :: msg
+      integer, intent(in) :: seg, depth
+      integer(int64), intent(in) :: slot, w
+      integer :: tseg, oseg
+      integer(int64) :: base, padoff, w0, tag
+      if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
+      select case (wp_kind(w))
+      case (CAPNP_WK_STRUCT, CAPNP_WK_LIST)
+         base = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
+         call zero_at(msg, seg, base, w, depth)
+      case (CAPNP_WK_FAR)
+         tseg = int(wp_far_seg(w)) + 1
+         padoff = wp_far_off(w)*8_int64
+         if (.not. wp_far_two(w)) then
+            if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
+            call zero_pointer_word(msg, tseg, padoff, &
+                                    cp_get_i64(msg%segs(tseg)%bytes, padoff), depth + 1)
+            call zero_bytes(msg, tseg, padoff, 8_int64)
+         else
+            if (.not. span_ok(msg, tseg, padoff, 16_int64)) return
+            w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
+            tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
+            if (wp_kind(w0) == CAPNP_WK_FAR .and. .not. wp_far_two(w0)) then
+               oseg = int(wp_far_seg(w0)) + 1
+               call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth + 1)
+            end if
+            call zero_bytes(msg, tseg, padoff, 16_int64)
+         end if
+      end select
+   end subroutine zero_pointer_word
+
+   !> Byte range of the object a pointer word addresses (far pads excluded).
+   recursive subroutine locate_body(msg, seg, slot, w, depth, oseg, obase, onbytes, ok)
+      type(capnp_message_t), intent(in) :: msg
+      integer, intent(in) :: seg, depth
+      integer(int64), intent(in) :: slot, w
+      integer, intent(out) :: oseg
+      integer(int64), intent(out) :: obase, onbytes
+      logical, intent(out) :: ok
+      integer :: tseg
+      integer(int64) :: padoff, w0, tag
+      ok = .false.
+      oseg = 0
+      obase = 0_int64
+      onbytes = 0_int64
+      if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
+      select case (wp_kind(w))
+      case (CAPNP_WK_STRUCT)
+         oseg = seg
+         obase = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
+         onbytes = int(wp_struct_dwords(w) + wp_struct_pwords(w), int64)*8_int64
+         ok = .true.
+      case (CAPNP_WK_LIST)
+         oseg = seg
+         obase = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
+         onbytes = list_payload_bytes(w)
+         ok = onbytes >= 0_int64
+      case (CAPNP_WK_FAR)
+         tseg = int(wp_far_seg(w)) + 1
+         padoff = wp_far_off(w)*8_int64
+         if (.not. wp_far_two(w)) then
+            if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
+            call locate_body(msg, tseg, padoff, &
+                             cp_get_i64(msg%segs(tseg)%bytes, padoff), depth + 1, &
+                             oseg, obase, onbytes, ok)
+         else
+            if (.not. span_ok(msg, tseg, padoff, 16_int64)) return
+            w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
+            tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
+            if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) return
+            oseg = int(wp_far_seg(w0)) + 1
+            obase = wp_far_off(w0)*8_int64
+            if (wp_kind(tag) == CAPNP_WK_STRUCT) then
+               onbytes = int(wp_struct_dwords(tag) + wp_struct_pwords(tag), int64)*8_int64
+            else if (wp_kind(tag) == CAPNP_WK_LIST) then
+               onbytes = list_payload_bytes(tag)
+            else
+               return
+            end if
+            ok = onbytes >= 0_int64
+         end if
+      end select
+   end subroutine locate_body
+
+   !> Byte range of an object handle already in hand.
+   subroutine locate_handle(q, oseg, obase, onbytes, ok)
+      type(capnp_ptr_t), intent(in) :: q
+      integer, intent(out) :: oseg
+      integer(int64), intent(out) :: obase, onbytes
+      logical, intent(out) :: ok
+      integer :: sb
+      ok = .false.
+      oseg = q%seg
+      obase = q%off
+      onbytes = 0_int64
+      select case (q%kind)
+      case (CAPNP_PK_STRUCT)
+         onbytes = int(q%dwords + q%pwords, int64)*8_int64
+         ok = .true.
+      case (CAPNP_PK_LIST)
+         if (q%esize == CAPNP_SZ_COMPOSITE) then
+            obase = q%off - 8_int64
+            onbytes = 8_int64 + q%nelem*int(q%dwords + q%pwords, int64)*8_int64
+         else if (q%esize == CAPNP_SZ_PTR) then
+            onbytes = q%nelem*8_int64
+         else if (q%esize == CAPNP_SZ_VOID) then
+            onbytes = 0_int64
+         else
+            sb = capnp_list_step_bits(q%esize)
+            if (sb < 0) return
+            onbytes = ((int(sb, int64)*q%nelem + 63_int64)/64_int64)*8_int64
+         end if
+         ok = .true.
+      end select
+   end subroutine locate_handle
+
+   !> Zero the object currently addressed by a slot, unless `q` is that
+   !> object (or lives inside it). layout.c++ allocate() line 485.
+   subroutine zero_slot_target(msg, seg, slot, q)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: slot
+      type(capnp_ptr_t), intent(in) :: q
+      integer :: oseg, qseg
+      integer(int64) :: w, obase, onbytes, qbase, qnbytes
+      logical :: ok, qok
+      if (.not. span_ok(msg, seg, slot, 8_int64)) return
+      w = cp_get_i64(msg%segs(seg)%bytes, slot)
+      if (w == 0_int64) return
+      call locate_body(msg, seg, slot, w, 0, oseg, obase, onbytes, ok)
+      if (ok .and. associated(q%msg, msg)) then
+         call locate_handle(q, qseg, qbase, qnbytes, qok)
+         if (qok .and. qseg == oseg .and. onbytes > 0_int64 .and. qnbytes > 0_int64) then
+            if (obase < qbase + qnbytes .and. qbase < obase + onbytes) return
+         end if
+      end if
+      call zero_pointer_word(msg, seg, slot, w, 0)
+   end subroutine zero_slot_target
+
    recursive subroutine write_ptr_slot(msg, sseg, slot, q, err)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: sseg
@@ -599,6 +906,9 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      ! Drop the previous object before the slot word changes, matching
+      ! layout.c++ allocate() which calls zeroObject on a live pointer.
+      call zero_slot_target(msg, sseg, slot, q)
       if (q%kind == CAPNP_PK_NULL .or. .not. associated(q%msg)) then
          call cp_put_i64(msg%segs(sseg)%bytes, slot, 0_int64)
          return
