@@ -3690,8 +3690,9 @@ contains
       integer :: i, n
       integer, allocatable :: fields(:)
       character(len=:), allocatable :: reason
+      ! layout.c++ readStructPointer joins "pointer" and "was" with no space.
       character(len=*), parameter :: not_struct = "Schema mismatch: Message contains " // &
-                                     "non-struct pointer where struct pointer was expected."
+                                     "non-struct pointer where struct pointerwas expected."
       character(len=*), parameter :: not_cap = "Schema mismatch: Message contains " // &
                                      "non-capability pointer where capability pointer was expected."
       err = CAPNP_OK
@@ -3962,8 +3963,9 @@ contains
                   if (err /= CAPNP_OK) return
                end do
                if (.not. walk_ok) then
+                  ! No space before "was", as in layout.c++ readStructPointer.
                   call break_answer_promise(node, 'Schema mismatch: Message contains ' // &
-                                            'non-struct pointer where struct pointer was expected.')
+                                            'non-struct pointer where struct pointerwas expected.')
                else if (content%kind == CAPNP_PK_NULL) then
                   call break_answer_promise(node, 'Called null capability.')
                else if (content%kind /= CAPNP_PK_CAP) then
@@ -5633,8 +5635,9 @@ contains
          if (fields(i) < 0) cycle
          if (p%kind == CAPNP_PK_NULL) cycle
          if (p%kind /= CAPNP_PK_STRUCT) then
+            ! No space before "was", as in layout.c++ readStructPointer.
             call read_error('Schema mismatch: Message contains non-struct ' // &
-                            'pointer where struct pointer was expected.')
+                            'pointer where struct pointerwas expected.')
             return
          end if
          p = capnp_getp(p, fields(i), err)

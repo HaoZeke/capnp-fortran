@@ -8595,7 +8595,7 @@ contains
       integer :: e
       logical :: released, disembargo
       character(len=*), parameter :: not_struct = "Schema mismatch: Message contains " // &
-                                     "non-struct pointer where struct pointer was expected."
+                                     "non-struct pointer where struct pointerwas expected."
       character(len=*), parameter :: bad_transform = 'Invalid pipeline transform.'
       srv => local_echo
 
@@ -8790,7 +8790,7 @@ contains
       character(len=*), parameter :: not_cap = 'Schema mismatch: Message contains ' // &
                                      'non-capability pointer where capability pointer was expected.'
       character(len=*), parameter :: not_struct = 'Schema mismatch: Message contains ' // &
-                                     'non-struct pointer where struct pointer was expected.'
+                                     'non-struct pointer where struct pointerwas expected.'
       character(len=*), parameter :: bad_cap = 'Message contains invalid capability pointer.'
       character(len=120) :: want
 
@@ -9310,7 +9310,7 @@ contains
       call ra_resolve(cconn, sconn, 902_int64, qadder, [0, 0])
       call check_(error, .not. rpc_conn_alive(cconn) .and. rpc_conn_reason(cconn) == &
                   'Schema mismatch: Message contains non-struct pointer where ' // &
-                  'struct pointer was expected.', &
+                  'struct pointerwas expected.', &
                   'unknown promise: receiverAnswer read error aborts')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
@@ -9505,7 +9505,7 @@ contains
       call pa_call(cconn, sconn, 30_int64, qadder, [0, 0], is_exception, reason)
       call check_(error, .not. rpc_conn_alive(cconn) .and. rpc_conn_reason(cconn) == &
                   'Schema mismatch: Message contains non-struct pointer where ' // &
-                  'struct pointer was expected.', &
+                  'struct pointerwas expected.', &
                   'promisedAnswer: walk through a capability aborts')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
