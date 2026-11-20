@@ -251,9 +251,10 @@ module capnp_rpc
       integer(int64) :: import_handle = -1_int64
       !> Import handles bound to retmsg's cap table when Return arrived.
       integer :: nresult_handles = 0
-      integer(int64) :: result_handles(0:MAXCAPS - 1) = -1_int64
+      !> Both are indexed from 0 and sized to the Return's capTable.
+      integer(int64), allocatable :: result_handles(:)
       !> Result caps whose reference an introduction pickup has released.
-      logical :: result_released(0:MAXCAPS - 1) = .false.
+      logical, allocatable :: result_released(:)
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -2216,9 +2217,8 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
-            if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
-                conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
-               cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+            if (result_handle(conn%questions(int(qid)), int(p%capidx)) /= -1_int64) then
+               cap%id = result_handle(conn%questions(int(qid)), int(p%capidx))
             else
                call import_find_wire(conn, cap%id, inode, found)
                if (found) cap%id = inode%id
@@ -2234,9 +2234,8 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
-            if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
-                conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
-               cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+            if (result_handle(conn%questions(int(qid)), int(p%capidx)) /= -1_int64) then
+               cap%id = result_handle(conn%questions(int(qid)), int(p%capidx))
             else
                call import_find_wire(conn, cap%id, inode, found)
                if (found) cap%id = inode%id
@@ -2258,9 +2257,8 @@ contains
                   vine = third_party_cap_descriptor_vine_id_get(tp)
                   cap%kind = RPC_CAP_IMPORT
                   cap%id = vine
-                  if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
-                      conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
-                     cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+                  if (result_handle(conn%questions(int(qid)), int(p%capidx)) /= -1_int64) then
+                     cap%id = result_handle(conn%questions(int(qid)), int(p%capidx))
                   else
                      call import_find_live(conn, vine, inode, found)
                      if (.not. found) call import_find_wire(conn, vine, inode, found)
@@ -2308,7 +2306,9 @@ contains
           .not. conn%questions(q)%local_results) then
          call scan_result_imports(conn, q, explicit_release, .false., err)
          if (err /= CAPNP_OK) return
-         if (any(conn%questions(q)%result_released)) explicit_release = .true.
+         if (allocated(conn%questions(q)%result_released)) then
+            if (any(conn%questions(q)%result_released)) explicit_release = .true.
+         end if
       end if
       release_flag = .not. retain_caps
       if (explicit_release) release_flag = .false.
@@ -2438,9 +2438,8 @@ contains
          else if (result_was_released(conn%questions(q), i)) then
             cycle
          else
-            if (i < conn%questions(q)%nresult_handles .and. &
-                conn%questions(q)%result_handles(i) /= -1_int64) then
-               call forget_import_handle(conn, conn%questions(q)%result_handles(i))
+            if (result_handle(conn%questions(q), i) /= -1_int64) then
+               call forget_import_handle(conn, result_handle(conn%questions(q), i))
             else
                call forget_import_ref(conn, id)
             end if
@@ -2475,9 +2474,21 @@ contains
       type(rpc_question_slot_t), intent(in) :: slot
       integer, intent(in) :: i
       result_was_released = .false.
-      if (i >= 0 .and. i < size(slot%result_released)) &
-         result_was_released = slot%result_released(i)
+      if (.not. allocated(slot%result_released)) return
+      if (i < 0 .or. i >= size(slot%result_released)) return
+      result_was_released = slot%result_released(i)
    end function result_was_released
+
+   !> Import handle bound to result cap `i`, or -1 when none was bound.
+   pure function result_handle(slot, i) result(h)
+      type(rpc_question_slot_t), intent(in) :: slot
+      integer, intent(in) :: i
+      integer(int64) :: h
+      h = -1_int64
+      if (.not. allocated(slot%result_handles)) return
+      if (i < 0 .or. i >= min(slot%nresult_handles, size(slot%result_handles))) return
+      h = slot%result_handles(i)
+   end function result_handle
 
    !> Walk result imports recorded for question `q`. `any_released` is
    !> true when one of them has already sent Release. With `do_release`,
@@ -2535,9 +2546,8 @@ contains
          if (result_was_released(conn%questions(q), i)) cycle
          found = .false.
          node => null()
-         if (i < conn%questions(q)%nresult_handles .and. &
-             conn%questions(q)%result_handles(i) /= -1_int64) then
-            call import_find(conn, conn%questions(q)%result_handles(i), node, found)
+         if (result_handle(conn%questions(q), i) /= -1_int64) then
+            call import_find(conn, result_handle(conn%questions(q), i), node, found)
          else
             call import_find_live(conn, id, node, found)
             if (.not. found) call import_find_wire(conn, id, node, found)
@@ -2631,8 +2641,8 @@ contains
       slot%local_export = -1
       slot%import_handle = -1_int64
       slot%nresult_handles = 0
-      slot%result_handles = -1_int64
-      slot%result_released = .false.
+      if (allocated(slot%result_handles)) deallocate (slot%result_handles)
+      if (allocated(slot%result_released)) deallocate (slot%result_released)
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -4300,6 +4310,7 @@ contains
       if (intro%qid < 0_int64 .or. intro%qid >= int(MAXQ, int64)) return
       q = int(intro%qid)
       if (.not. conn%questions(q)%used .or. .not. conn%questions(q)%returned) return
+      if (.not. allocated(conn%questions(q)%result_released)) return
       if (intro%capidx < 0 .or. intro%capidx >= size(conn%questions(q)%result_released)) return
       conn%questions(q)%result_released(intro%capidx) = .true.
    end subroutine note_result_released
@@ -5210,8 +5221,22 @@ contains
       if (return_which(r) == RETURN_RESULTS_TAG) then
          block
             type(payload_t) :: rpl
-            integer :: ierr
+            type(capnp_ptr_t) :: rctab
+            integer :: ierr, ncap
             rpl = return_results_get(r, ierr)
+            ncap = 0
+            if (ierr == CAPNP_OK .and. rpl%p%kind == CAPNP_PK_STRUCT) then
+               rctab = payload_cap_table_get(rpl, ierr)
+               if (ierr == CAPNP_OK) ncap = int(capnp_list_len(rctab))
+               ierr = CAPNP_OK
+            end if
+            if (allocated(conn%questions(q)%result_handles)) &
+               deallocate (conn%questions(q)%result_handles)
+            if (allocated(conn%questions(q)%result_released)) &
+               deallocate (conn%questions(q)%result_released)
+            allocate (conn%questions(q)%result_handles(0:ncap - 1))
+            allocate (conn%questions(q)%result_released(0:ncap - 1))
+            conn%questions(q)%result_released = .false.
             if (ierr == CAPNP_OK) call note_payload_imports( &
                conn, rpl, .true., ierr, &
                conn%questions(q)%result_handles, conn%questions(q)%nresult_handles)

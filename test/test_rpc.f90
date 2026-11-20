@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(100))
+      allocate (testsuite(101))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -306,18 +306,20 @@ contains
       testsuite(93)%test => w_vine_finish_shared_id
       testsuite(94)%name = "rpc-vine-done-shared-id-finish"
       testsuite(94)%test => w_vine_done_shared_id_finish
-      testsuite(95)%name = "posix-recv-eintr-retried"
-      testsuite(95)%test => t_recv_all_retries_eintr
-      testsuite(96)%name = "rpc-framing-511-accepted"
-      testsuite(96)%test => t_framing_511_accepted
-      testsuite(97)%name = "rpc-framing-512-rejected"
-      testsuite(97)%test => t_framing_512_rejected
-      testsuite(98)%name = "rpc-framing-oversized-rejected"
-      testsuite(98)%test => t_framing_oversized_rejected
-      testsuite(99)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(99)%test => t_framing_negative_traversal_rejected
-      testsuite(100)%name = "rpc-framing-short-and-padded"
-      testsuite(100)%test => t_framing_short_and_padded
+      testsuite(95)%name = "rpc-vine-past-sixteen-caps"
+      testsuite(95)%test => w_vine_past_sixteen_caps
+      testsuite(96)%name = "posix-recv-eintr-retried"
+      testsuite(96)%test => t_recv_all_retries_eintr
+      testsuite(97)%name = "rpc-framing-511-accepted"
+      testsuite(97)%test => t_framing_511_accepted
+      testsuite(98)%name = "rpc-framing-512-rejected"
+      testsuite(98)%test => t_framing_512_rejected
+      testsuite(99)%name = "rpc-framing-oversized-rejected"
+      testsuite(99)%test => t_framing_oversized_rejected
+      testsuite(100)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(100)%test => t_framing_negative_traversal_rejected
+      testsuite(101)%name = "rpc-framing-short-and-padded"
+      testsuite(101)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -560,6 +562,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_vine_done_shared_id_finish(error)
    end subroutine w_vine_done_shared_id_finish
+
+   subroutine w_vine_past_sixteen_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_vine_past_sixteen_caps(error)
+   end subroutine w_vine_past_sixteen_caps
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7671,5 +7678,52 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_vine_done_shared_id_finish
+
+   !> A vine past the sixteenth result cap is tracked like any other: the
+   !> pickup releases it through its handle, and the releasing Finish
+   !> that follows releases only the other sixteen.
+   subroutine t_vine_past_sixteen_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: cap, vine
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: q, a, b
+      integer :: e, tag, n, nrel
+      logical :: got, saw_finish, saw_vine
+      srv => local_echo
+      call scripted_pair(cconn, sconn, srv, cap)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q, e)
+      call capnp_message_free(m)
+      call scripted_caps_return(cconn, sconn, q, 17, 16, 1_int64, 913_int64)
+      call rpc_result_cap(cconn, q, [16], vine, e)
+      call check_(error, e == CAPNP_OK .and. vine%kind == RPC_CAP_IMPORT .and. &
+                  vine%id == 17_int64, 'cap 16: vine import')
+      call rpc_introduction_done(cconn, 913_int64, e)
+      call scripted_frame(sconn, 1000, got, tag, a, b)
+      call check_(error, e == CAPNP_OK .and. got .and. tag == MESSAGE_RELEASE_TAG .and. &
+                  a == 17_int64 .and. b == 1_int64, 'cap 16: pickup releases the vine')
+      call rpc_finish_send(cconn, q, .false., e)
+      saw_finish = .false.
+      saw_vine = .false.
+      nrel = 0
+      do n = 1, 20
+         call scripted_frame(sconn, 200, got, tag, a, b)
+         if (.not. got) exit
+         if (tag == MESSAGE_FINISH_TAG) saw_finish = a == q .and. b == 0_int64
+         if (tag == MESSAGE_RELEASE_TAG) then
+            nrel = nrel + 1
+            if (a == 17_int64) saw_vine = .true.
+         end if
+      end do
+      call check_(error, saw_finish, 'cap 16: Finish leaves the released vine out')
+      call check_(error, nrel == 16 .and. .not. saw_vine, &
+                  'cap 16: Finish releases the other sixteen once')
+      call check_(error, rpc_conn_alive(cconn), 'cap 16: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_vine_past_sixteen_caps
 
 end module test_rpc
