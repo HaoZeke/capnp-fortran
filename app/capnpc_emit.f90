@@ -170,6 +170,10 @@ module capnpc_emit
 
    ! Fortran 2003 max identifier length (gfortran / F2003).
    integer, parameter :: F_IDENT_MAX = 63
+   ! Schema graphs are not the message nesting limit of 64. Stop before
+   ! a recursion that would exhaust the stack. Chains capnp 1.4.0 still
+   ! compiles sit under this bound.
+   integer, parameter :: SCHEMA_WALK_LIMIT = 4096
    ! Longest accessor suffix we append: `_set_elem` (9 chars).
    integer, parameter :: F_IDENT_SUFFIX = 9
 
@@ -2054,15 +2058,31 @@ contains
       call emit_fields_of(np, tn, tn, err)
    end subroutine emit_struct_procs
 
+   !> Write a union discriminant setter and stop when it fails, so the
+   !> value write does not replace that error.
+   subroutine emit_disc(gset)
+      character(len=*), intent(in) :: gset
+      if (len(gset) == 0) return
+      call w(gset)
+      call w('      if (err /= CAPNP_OK) return')
+   end subroutine emit_disc
+
    !> Emit accessors for every field of node np. Accessors take handle type
    !> ht_t; generated names start with pfx (differs from ht for groups).
-   recursive subroutine emit_fields_of(np, ht, pfx, err)
+   recursive subroutine emit_fields_of(np, ht, pfx, err, depth)
       type(capnp_ptr_t), intent(in) :: np
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
+      integer, intent(in), optional :: depth
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
-      integer :: disc_count
+      integer :: disc_count, d
+      d = 0
+      if (present(depth)) d = depth
+      if (d > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       disc_count = node_struct_discriminant_count(np)
       if (disc_count > 0) then
          call w('   function '//pfx//'_which(h) result(tag)')
@@ -2078,20 +2098,27 @@ contains
       do i = 0_int64, capnp_list_len(fl) - 1_int64
          f = capnp_list_get_struct(fl, int(i), err)
          if (err /= CAPNP_OK) return
-         call emit_field(np, f, ht, pfx, err)
+         call emit_field(np, f, ht, pfx, err, d)
          if (err /= CAPNP_OK) return
       end do
    end subroutine emit_fields_of
 
-   recursive subroutine emit_field(np, f, ht, pfx, err)
+   recursive subroutine emit_field(np, f, ht, pfx, err, depth)
       type(capnp_ptr_t), intent(in) :: np, f
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
+      integer, intent(in), optional :: depth
       type(capnp_ptr_t) :: t, dv
       character(len=:), allocatable :: fn, an, gset
-      integer :: disc, gidx, ctx, saved
+      integer :: disc, gidx, ctx, saved, d
       integer(int64) :: off
 
+      d = 0
+      if (present(depth)) d = depth
+      if (d > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       call field_name(f, fn, err)
       if (err /= CAPNP_OK) return
       an = accessor_base(pfx, fn)
@@ -2114,11 +2141,11 @@ contains
             call w('   subroutine '//an//'_select(h, err)')
             call w('      type('//ht//'_t), intent(in) :: h')
             call w('      integer, intent(out) :: err')
-            call w(gset)
+            call emit_disc(gset)
             call w('   end subroutine '//an//'_select')
             call w('')
          end if
-         call emit_fields_of(g_nodes(gidx)%p, ht, an, err)
+         call emit_fields_of(g_nodes(gidx)%p, ht, an, err, d + 1)
          return
       end if
 
@@ -2156,7 +2183,7 @@ contains
             call w('   subroutine '//an//'_set(h, err)')
             call w('      type('//ht//'_t), intent(in) :: h')
             call w('      integer, intent(out) :: err')
-            call w(gset)
+            call emit_disc(gset)
             call w('   end subroutine '//an//'_set')
             call w('')
          end if
@@ -2276,7 +2303,7 @@ contains
          call w('      type('//ht//'_t), intent(in) :: h')
          call w('      type(capnp_ptr_t), intent(in) :: q')
          call w('      integer, intent(out) :: err')
-         if (len(gset) > 0) call w(gset)
+         call emit_disc(gset)
          call w('      call capnp_setp(h%p, '//itoa(int(pidx, int64))//', q, err)')
          call w('   end subroutine '//an//'_set')
          call w('')
@@ -2297,7 +2324,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      type('//tn//'), intent(in) :: src')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_setp(h%p, '//itoa(int(pidx, int64))//', src%p, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2332,7 +2359,7 @@ contains
       call w('      type('//tn//'_t), intent(in) :: c')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: q')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      q = capnp_ptr_t()')
       call w('      if (associated(h%p%msg)) q%msg => h%p%msg')
       call w('      q%kind = CAPNP_PK_CAP')
@@ -2371,7 +2398,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      type(capnp_ptr_t), intent(in) :: q')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_setp(h%p, '//itoa(int(pidx, int64))//', q, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2427,7 +2454,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      logical, intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_bool(h%p, '//itoa(bit_off)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2463,7 +2490,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      '//vt//', intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_'//acc//'(h%p, '//itoa(off*bytes)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2509,7 +2536,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      '//vt//', intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_'//acc//'(h%p, '//itoa(off*bytes)//'_int64, v, err'//defarg//')')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2535,7 +2562,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(in) :: v')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_u16(h%p, '//itoa(off*2_int64)// &
              '_int64, int(v, int32), err'//defarg//')')
       call w('   end subroutine '//an//'_set')
@@ -2572,7 +2599,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      character(len=*), intent(in) :: s')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_text(h%p, '//itoa(int(pidx, int64))//', s, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2612,7 +2639,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer(int8), intent(in) :: b(:)')
       call w('      integer, intent(out) :: err')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      call capnp_set_data(h%p, '//itoa(int(pidx, int64))//', b, err)')
       call w('   end subroutine '//an//'_set')
       call w('')
@@ -2682,7 +2709,7 @@ contains
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
       call w('      type('//st//'_t) :: o')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      o%p = capnp_new_struct(h%p%msg, '//upcase(st)//'_DWORDS, '// &
              upcase(st)//'_PWORDS, err)')
       call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '// &
@@ -2695,7 +2722,7 @@ contains
       call w('      type('//st//'_t), intent(in) :: src')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: c')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      c = capnp_copy(h%p%msg, src%p, err)')
       call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '// &
              itoa(int(pidx, int64))//', c, err)')
@@ -2860,7 +2887,7 @@ contains
       call w('      integer(int64), intent(in) :: n')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: l')
-      if (len(gset) > 0) call w(gset)
+      call emit_disc(gset)
       call w('      l = '//newexpr)
       call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '// &
              itoa(int(pidx, int64))//', l, err)')
@@ -3131,7 +3158,7 @@ contains
       integer, intent(out) :: err
       character(len=:), allocatable, intent(out), optional :: plain
       character(len=:), allocatable :: base, pl
-      integer :: k, j
+      integer :: k, j, stat
       logical :: fresh, iface
       err = CAPNP_OK
       o = clip_inst_name(o)
@@ -3185,7 +3212,11 @@ contains
       g_insts(g_ninsts)%inherit_scope = sid
       if (allocated(g_insts(g_ninsts)%bindings)) &
          deallocate (g_insts(g_ninsts)%bindings)
-      allocate (g_insts(g_ninsts)%bindings(0:n - 1))
+      allocate (g_insts(g_ninsts)%bindings(0:n - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (allocated(g_insts(g_ninsts)%bctx)) deallocate (g_insts(g_ninsts)%bctx)
       allocate (g_insts(g_ninsts)%bctx(0:n - 1))
       do k = 0, n - 1
@@ -3318,16 +3349,24 @@ contains
 
    !> Name fragment for one binding type. Lists recurse into their
    !> element so distinct list bindings get distinct instantiations.
-   recursive subroutine inst_suffix(bt, part, key, err, mpart)
+   recursive subroutine inst_suffix(bt, part, key, err, mpart, depth)
       type(capnp_ptr_t), intent(in) :: bt
       character(len=:), allocatable, intent(out) :: part, key
       integer, intent(out) :: err
       character(len=:), allocatable, intent(out), optional :: mpart
+      integer, intent(in), optional :: depth
       type(capnp_ptr_t) :: et
       character(len=:), allocatable :: ep, ek, pp, epm
-      integer :: idx
+      integer :: idx, d
       err = CAPNP_OK
       if (present(mpart)) mpart = ''
+      d = 0
+      if (present(depth)) d = depth
+      if (d > SCHEMA_WALK_LIMIT) then
+         part = 'any'
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (bt%kind == CAPNP_PK_NULL) then
          part = 'any'
          key = part
@@ -3352,7 +3391,7 @@ contains
       case (TYPE_LIST)
          et = type_list_element(bt, err)
          if (err /= CAPNP_OK) return
-         call inst_suffix(et, ep, ek, err, epm)
+         call inst_suffix(et, ep, ek, err, epm, d + 1)
          if (err /= CAPNP_OK) return
          part = 'list_'//ep
          key = 'list_'//ek

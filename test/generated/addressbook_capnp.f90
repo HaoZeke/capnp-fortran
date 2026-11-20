@@ -158,6 +158,7 @@ contains
       type(person_t), intent(in) :: h
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
    end subroutine person_employment_unemployed_set
 
    function person_employment_employer_has(h) result(v)
@@ -181,6 +182,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(h%p, 3, s, err)
    end subroutine person_employment_employer_set
 
@@ -205,6 +207,7 @@ contains
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 2_int32, err)
+      if (err /= CAPNP_OK) return
       call capnp_set_text(h%p, 3, s, err)
    end subroutine person_employment_school_set
 
@@ -212,6 +215,7 @@ contains
       type(person_t), intent(in) :: h
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 3_int32, err)
+      if (err /= CAPNP_OK) return
    end subroutine person_employment_self_employed_set
 
    function person_phone_number_new(msg, err) result(h)
