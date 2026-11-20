@@ -265,6 +265,9 @@ module capnp_rpc
       !> for its pipeline `ops`. C++ exports that QueuedClient as a
       !> promise and resolves it when the call returns.
       integer(int64) :: aqid = -1_int64
+      !> Made for a broken cap, so the export stands for that cap and
+      !> keeps its id when the cap is written again.
+      logical :: for_broken = .false.
    end type rpc_pipe_proxy_t
 
    !> Owners of a server that a handoff exported on two connections.
@@ -5678,6 +5681,7 @@ contains
       type(payload_t), intent(inout) :: outp
       type(capnp_message_t), intent(inout), target :: m
       integer, intent(out) :: err
+      character(len=:), allocatable :: why
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
       integer(int64), allocatable :: used(:)
@@ -5720,8 +5724,12 @@ contains
             if (eslot_ok(conn, id)) then
                eid = int(id)
                if (conn%exports(eid)%used .and. conn%exports(eid)%refcount > 0) then
-                  conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
-                  call cap_descriptor_sender_hosted_set(ocd, id, err)
+                  if (broken_px_reason(conn, eid, why)) then
+                     call write_broken_export(conn, ocd, eid, why, err)
+                  else
+                     conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+                     call cap_descriptor_sender_hosted_set(ocd, id, err)
+                  end if
                end if
             end if
          case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
@@ -5744,8 +5752,10 @@ contains
    !> for the peer: our export as senderHosted with one more reference,
    !> the peer's export as receiverHosted, a pipeline on our live question
    !> as receiverAnswer. A plain forward still running gives a proxy
-   !> export, and a noPromisePipelining answer a broken promise export.
-   !> Any other answer still running, or a broken cap, is none.
+   !> export, and a call still running a promise export that resolves
+   !> when it returns. A cap broken by an exception, a disabled pipeline
+   !> or an answer that is gone is a new promise export resolved to the
+   !> exception (rpc.c++ receiveCap, writeDescriptor). A null cap is none.
    subroutine forward_answer_param(conn, icd, ocd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: icd, ocd
@@ -5774,43 +5784,28 @@ contains
       end do
       call answer_find(conn, promised_answer_question_id_get(rpa), slot, found)
       if (found) found = associated(slot)
-      if (found) found = slot%used
-      if (.not. found) return
-      ! A disabled pipeline gives a broken cap. C++ exports it as a
-      ! promise and resolves that to the exception (rpc.c++
-      ! writeDescriptor, resolveExportedPromise).
-      if (slot%no_pipeline .and. .not. slot%finished) then
-         block
-            type(rpc_pipe_proxy_t), pointer :: px
-            class(*), pointer :: srv
-            integer :: peid
-            allocate (px)
-            px%settled = .true.
-            px%reason = 'caller specified noPromisePipelining hint, but then tried to pipeline'
-            srv => px
-            peid = export_server(conn, srv, owned=.true.)
-            if (peid < 0) then
-               deallocate (px)
-               return
-            end if
-            call cap_descriptor_sender_promise_set(ocd, int(peid, int64), err)
-            if (allocated(conn%broken_resolves)) then
-               conn%broken_resolves = [conn%broken_resolves, peid]
-            else
-               conn%broken_resolves = [peid]
-            end if
-         end block
+      if (found) found = slot%used .and. .not. slot%finished
+      if (.not. found) then
+         call write_broken_promise(conn, ocd, "invalid 'receiverAnswer'", err)
          return
       end if
-      if (.not. slot%has_results .and. slot%plain_qid < 0_int64 .and. &
-          .not. slot%finished .and. .not. slot%no_pipeline) then
+      if (slot%no_pipeline) then
+         ! Returned results wrap the disabled pipeline, so its broken cap
+         ! is a local promise (rpc.c++ PostReturnRpcPipeline).
+         call write_broken_promise(conn, ocd, 'caller specified noPromisePipelining ' // &
+                                   'hint, but then tried to pipeline', err, &
+                                   promise=slot%has_results .and. &
+                                  .not. (slot%local_results .or. slot%redirected .or. &
+                                         slot%plain_elsewhere))
+         return
+      end if
+      if (.not. slot%has_results .and. slot%plain_qid < 0_int64) then
          call write_answer_proxy(conn, ocd, promised_answer_question_id_get(rpa), fields, err)
          return
       end if
       ! A plain forward still running serves its pipeline from its
       ! question. C++ exports that pipeline cap as a hosted cap.
       if (.not. slot%has_results) then
-         if (slot%finished .or. slot%plain_qid < 0_int64) return
          if (.not. live_question(conn, slot%plain_qid)) return
          block
             type(rpc_pipe_proxy_t), pointer :: px
@@ -5833,10 +5828,16 @@ contains
                                deferred=.true., qops=qops)
       if (e /= CAPNP_OK) return
       select case (kind)
+      case (PIPE_BROKEN)
+         if (reason /= 'Called null capability.') call write_broken_promise(conn, ocd, reason, err)
       case (PIPE_EXPORT)
          id = int(pipeline_export(slot, int(id)), int64)
          if (.not. eslot_ok(conn, id)) return
          if (.not. conn%exports(int(id))%used) return
+         if (broken_px_reason(conn, int(id), reason)) then
+            call write_broken_export(conn, ocd, int(id), reason, err)
+            return
+         end if
          if (conn%exports(int(id))%refcount > 0) then
             conn%exports(int(id))%refcount = conn%exports(int(id))%refcount + 1
             call cap_descriptor_sender_hosted_set(ocd, id, err)
@@ -5876,6 +5877,82 @@ contains
          end do
       end select
    end subroutine forward_answer_param
+
+   !> Export `eid` is a promise already broken, with `reason` as its
+   !> exception.
+   !> A null cap is resolved and keeps its export.
+   logical function broken_px_reason(conn, eid, reason) result(broken)
+      type(rpc_conn_t), intent(in), target :: conn
+      integer, intent(in) :: eid
+      character(len=:), allocatable, intent(out) :: reason
+      broken = .false.
+      select type (px => conn%exports(eid)%srv)
+      type is (rpc_pipe_proxy_t)
+         if (px%settled .and. px%eid < 0 .and. px%import < 0_int64 .and. &
+             px%aqid < 0_int64 .and. allocated(px%reason)) then
+            if (px%reason /= 'Called null capability.') then
+               reason = px%reason
+               broken = .true.
+            end if
+         end if
+      end select
+   end function broken_px_reason
+
+   !> Write a new promise export that resolves to `reason`, as C++
+   !> writes a broken cap (rpc.c++ writeDescriptor, BrokenClient). With
+   !> `promise` true, C++ holds a local promise that broke, so writing it
+   !> again makes a new cap.
+   subroutine write_broken_promise(conn, ocd, reason, err, promise)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: ocd
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      logical, intent(in), optional :: promise
+      type(rpc_pipe_proxy_t), pointer :: px
+      class(*), pointer :: srv
+      integer :: peid
+      err = CAPNP_OK
+      allocate (px)
+      px%settled = .true.
+      px%reason = reason
+      px%for_broken = .true.
+      if (present(promise)) px%for_broken = .not. promise
+      srv => px
+      peid = export_server(conn, srv, owned=.true.)
+      if (peid < 0) then
+         deallocate (px)
+         return
+      end if
+      call cap_descriptor_sender_promise_set(ocd, int(peid, int64), err)
+      if (allocated(conn%broken_resolves)) then
+         conn%broken_resolves = [conn%broken_resolves, peid]
+      else
+         conn%broken_resolves = [peid]
+      end if
+   end subroutine write_broken_promise
+
+   !> Write export `eid`, a promise already broken, for the peer. C++
+   !> keeps a broken cap it exported in exportsByCap, with its resolveOp,
+   !> so writing that cap again names the same senderPromise. A promise
+   !> that broke later stands for its exception, a new cap (rpc.c++
+   !> writeDescriptor).
+   subroutine write_broken_export(conn, ocd, eid, reason, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: ocd
+      integer, intent(in) :: eid
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      select type (px => conn%exports(eid)%srv)
+      type is (rpc_pipe_proxy_t)
+         if (px%for_broken .and. conn%exports(eid)%refcount > 0) then
+            conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+            call cap_descriptor_sender_promise_set(ocd, int(eid, int64), err)
+            return
+         end if
+      end select
+      call write_broken_promise(conn, ocd, reason, err)
+   end subroutine write_broken_export
 
    !> Write the pipeline `ops` of answer `aqid`, a call still running, as
    !> a promise export. C++ QueuedPipeline keeps one cap per ops, so the

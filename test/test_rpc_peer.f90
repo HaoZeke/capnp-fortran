@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(24))
+      allocate (testsuite(29))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -80,6 +80,16 @@ contains
       testsuite(23)%test => t_fin_plain_opp
       testsuite(24)%name = "plain-fwd-opp-after-return"
       testsuite(24)%test => t_opp_after_return
+      testsuite(25)%name = "fwd-ra-failed-answer"
+      testsuite(25)%test => t_fwd_ra_failed
+      testsuite(26)%name = "fwd-ra-unknown-answer"
+      testsuite(26)%test => t_fwd_ra_unknown
+      testsuite(27)%name = "fwd-rh-broken-proxy"
+      testsuite(27)%test => t_fwd_rh_broken
+      testsuite(28)%name = "fwd-rh-broken-promise-again"
+      testsuite(28)%test => t_fwd_rh_broken_again
+      testsuite(29)%name = "fwd-rh-npp-promise-again"
+      testsuite(29)%test => t_fwd_rh_npp_again
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -141,8 +151,8 @@ contains
    end subroutine close_peer
 
    !> Call `method` on export 0, or on pa(aq, [0]) when aq >= 0. The
-   !> params point at cap 0 of the entries `ck` ('sh', 'sp', or 'ra' for
-   !> receiverAnswer(id, [0])) with ids `cid`.
+   !> params point at cap 0 of the entries `ck` ('sh', 'sp', 'rh', or 'ra'
+   !> for receiverAnswer(id, [0])) with ids `cid`.
    subroutine wcall(fd, q, method, aq, ck, cid, yourself, npp, opp)
       integer, intent(in) :: fd, method
       integer(int64), intent(in) :: q, aq
@@ -189,6 +199,8 @@ contains
                call cap_descriptor_sender_hosted_set(cd, cid(i), e)
             case ('sp')
                call cap_descriptor_sender_promise_set(cd, cid(i), e)
+            case ('rh')
+               call cap_descriptor_receiver_hosted_set(cd, cid(i), e)
             case ('ra')
                pa = cap_descriptor_receiver_answer_init(cd, e)
                call set_answer(pa, cid(i))
@@ -1224,6 +1236,164 @@ contains
                  'opp after return: got '//itoa(k1)//' / '//b//' / '//c)
       call close_peer(conn, fd)
    end subroutine t_opp_after_return
+
+   !> A forwarded receiverAnswer param names an answer that failed. C++
+   !> takes a broken cap from its pipeline and writes it as a new
+   !> senderPromise export, which it then resolves to the exception.
+   subroutine t_fwd_ra_failed(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call rpc_deferred_return(conn, 2_int64, e, failed=.true., reason='boom')
+      a = drain(fd)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      c = drain(fd)
+      call check(error, a == 'RET 2 exc' .and. index(b, ' I4 y [sp') > 0 .and. &
+                 index(c, 'RES ') > 0 .and. index(c, ' exc') == len(c) - 3, &
+                 'failed answer: got '//a//' / '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_ra_failed
+
+   !> A forwarded receiverAnswer param names no answer. C++ writes the
+   !> broken cap for "invalid 'receiverAnswer'" as a new promise export.
+   subroutine t_fwd_ra_unknown(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [77_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      c = drain(fd)
+      call check(error, index(b, ' I4 y [sp') > 0 .and. index(c, 'RES ') > 0 .and. &
+                 index(c, ' exc') == len(c) - 3, 'unknown answer: got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_ra_unknown
+
+   !> A forwarded receiverHosted param names our promise export that has
+   !> resolved to an exception. C++ writes that broken cap as a new
+   !> senderPromise export and resolves it to the exception.
+   subroutine t_fwd_rh_broken(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d, f
+      integer(int64) :: k, px
+      integer :: fd, e, i
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      call rpc_deferred_return(conn, 2_int64, e, failed=.true., reason='boom')
+      c = drain(fd)
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      d = wtext(fd, k)
+      f = drain(fd)
+      call check(error, px >= 0_int64 .and. c == 'RET 2 exc | RES '//itoa(px)//' exc' .and. &
+                 index(d, ' I4 y [sp') > 0 .and. index(d, '[sp'//itoa(px)//']') == 0 .and. &
+                 index(f, 'RES ') > 0 .and. index(f, ' exc') == len(f) - 3, &
+                 'broken proxy: got '//b//' / '//c//' / '//d//' / '//f)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_broken
+
+   !> A forwarded receiverHosted param names the broken promise an earlier
+   !> forward wrote. C++ writes that broken cap again as the same
+   !> senderPromise export, with no second Resolve.
+   subroutine t_fwd_rh_broken_again(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d, f
+      integer(int64) :: k, px
+      integer :: fd, e, i
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [77_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      c = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      d = wtext(fd, k)
+      f = drain(fd)
+      call check(error, px >= 0_int64 .and. index(c, 'RES '//itoa(px)//' ') > 0 .and. &
+                 index(d, ' I4 y [sp'//itoa(px)//']') > 0 .and. index(f, 'RES ') == 0, &
+                 'broken again: got '//b//' / '//c//' / '//d//' / '//f)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_broken_again
+
+   !> The same with a receiverAnswer on a returned noPromisePipelining
+   !> answer that has caps. C++ wraps its disabled pipeline after the
+   !> Return, so the broken cap is a local promise, and writing it again
+   !> makes a new senderPromise with its own Resolve.
+   subroutine t_fwd_rh_npp_again(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d, f
+      integer(int64) :: k, px, py
+      integer :: fd, e, i
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 2, -1_int64, NOCAPS, NOIDS, npp=.true.)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      c = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      d = wtext(fd, k)
+      f = drain(fd)
+      i = index(d, '[sp')
+      py = -1_int64
+      if (i > 0) read (d(i + 3:index(d, ']') - 1), *) py
+      call check(error, index(a, 'RET 2 res [sh') > 0 .and. px >= 0_int64 .and. &
+                 index(c, 'RES '//itoa(px)//' ') > 0 .and. py >= 0_int64 .and. py /= px .and. &
+                 index(f, 'RES '//itoa(py)//' ') > 0, &
+                 'npp broken again: got '//a//' / '//b//' / '//c//' / '//d//' / '//f)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_npp_again
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
