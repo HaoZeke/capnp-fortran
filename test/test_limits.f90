@@ -17,7 +17,8 @@ contains
    subroutine collect_limits(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
-         new_unittest("json-audit-depth", run_json_audit_depth) &
+         new_unittest("json-audit-depth", run_json_audit_depth), &
+         new_unittest("group-encode-depth", run_group_encode_depth) &
          ]
    end subroutine collect_limits
 
@@ -122,5 +123,70 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_audit_depth
+
+   !> Inline groups do not consume pointer depth while encoding.
+   subroutine run_group_encode_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: src, body, out, num
+      character(len=8) :: buf
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, i, n
+      n = 70
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      src = '@0xc1d2e3f405162738;'//achar(10)//'struct DeepG {'//achar(10)
+      body = '('
+      do i = 0, n - 1
+         write (buf, '(i0)') i
+         num = trim(buf)
+         src = src//'  g'//num//' :group {'//achar(10)
+         body = body//'g'//num//' = ('
+      end do
+      src = src//'  v @0 :UInt32;'//achar(10)
+      body = body//'v = 1'
+      do i = 1, n
+         src = src//'}'//achar(10)
+         body = body//')'
+      end do
+      src = src//'}'//achar(10)
+      body = body//')'
+      call load_src(error, schema, src, 'deepg.capnp', 'deepg')
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'DeepG', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'group schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_text_decode(schema, idx, body, msg, err)
+      call check_(error, err == CAPNP_OK, 'group text decode')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_dyn_free(schema)
+         return
+      end if
+      ! Builders ignore the default depth cap. A reader uses 64.
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(bytes, msg, err)
+      call check_(error, err == CAPNP_OK, 'group reader')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_dyn_free(schema)
+         return
+      end if
+      root = capnp_root(msg, err)
+      call capnp_text_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK .and. index(out, 'v = 1') > 0, 'group text encode')
+      call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+      call check_(error, err == CAPNP_OK .and. index(out, '"v":1') > 0, 'group json encode')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_group_encode_depth
 
 end module test_limits

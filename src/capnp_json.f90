@@ -151,7 +151,7 @@ contains
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
       if (present(brand_env)) env = brand_env
-      call build_struct(schema, idx, p, env, no_disc, 0, root, err)
+      call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
       call emit_jval(root, 0, .false., do_pretty, text, multi, err)
    end subroutine capnp_json_encode
@@ -227,9 +227,9 @@ contains
       if (err == CAPNP_OK) to = sc%i - 1
    end subroutine capnp_json_span
 
-   recursive subroutine build_struct(schema, idx, p, env, parent_disc, depth, jv, err)
+   recursive subroutine build_struct(schema, idx, p, env, parent_disc, depth, gdepth, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx, depth
+      integer, intent(in) :: idx, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
       type(capnp_brand_env_t), intent(in) :: env
       type(disc_opts_t), intent(in) :: parent_disc
@@ -239,16 +239,16 @@ contains
       err = CAPNP_OK
       jv%k = JK_OBJ
       n = 0
-      call append_struct_fields(schema, idx, p, env, '', parent_disc, '', depth, jv%kids, n, err)
+      call append_struct_fields(schema, idx, p, env, '', parent_disc, '', depth, gdepth, jv%kids, n, err)
       if (err /= CAPNP_OK) return
       call trim_kids(jv%kids, n, err)
       if (err /= CAPNP_OK) return
    end subroutine build_struct
 
    recursive subroutine append_struct_fields(schema, idx, p, env, pfx, parent_disc, union_decl, &
-                                             depth, kids, n, err)
+                                             depth, gdepth, kids, n, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx, depth
+      integer, intent(in) :: idx, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
       type(capnp_brand_env_t), intent(in) :: env
       character(len=*), intent(in) :: pfx, union_decl
@@ -264,7 +264,7 @@ contains
       integer :: i, nf, active, fd, gidx, sidx
       logical :: show, is_flat
       err = CAPNP_OK
-      if (depth > depth_cap(p)) then
+      if (depth > depth_cap(p) .or. gdepth > size(schema%nodes)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -295,7 +295,7 @@ contains
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
                call append_struct_fields(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
-                                         depth + 1, kids, n, err)
+                                         depth, gdepth + 1, kids, n, err)
                if (err /= CAPNP_OK) return
             else
                show = capnp_codec_field_present(f, p, err)
@@ -318,7 +318,7 @@ contains
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
                call append_struct_fields(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
-                                         depth + 1, kids, n, err)
+                                         depth + 1, 0, kids, n, err)
                if (err /= CAPNP_OK) return
             end if
          else
@@ -327,7 +327,7 @@ contains
             if (.not. show) cycle
             call json_field_name(f, nm, err)
             if (err /= CAPNP_OK) return
-            call build_field_value(schema, f, p, env, depth + 1, one, err)
+            call build_field_value(schema, f, p, env, depth, gdepth, one, err)
             if (err /= CAPNP_OK) return
             one%key = pfx//nm
             call append_kid(kids, n, one, err)
@@ -397,7 +397,7 @@ contains
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
                call append_struct_fields(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
-                                         depth + 1, kids, n, err)
+                                         depth, gdepth + 1, kids, n, err)
                if (err /= CAPNP_OK) return
             else
                raw_t = field_slot_type(f, err)
@@ -428,7 +428,7 @@ contains
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
                call append_struct_fields(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
-                                         depth + 1, kids, n, err)
+                                         depth + 1, 0, kids, n, err)
                if (err /= CAPNP_OK) return
             end if
          else
@@ -437,7 +437,7 @@ contains
             else
                vkey = pfx//nm
             end if
-            call build_field_value(schema, f, p, env, depth + 1, one, err)
+            call build_field_value(schema, f, p, env, depth, gdepth, one, err)
             if (err /= CAPNP_OK) return
             one%key = vkey
             call append_kid(kids, n, one, err)
@@ -447,11 +447,11 @@ contains
       end do
    end subroutine append_struct_fields
 
-   recursive subroutine build_field_value(schema, f, p, env, depth, jv, err)
+   recursive subroutine build_field_value(schema, f, p, env, depth, gdepth, jv, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
-      integer, intent(in) :: depth
+      integer, intent(in) :: depth, gdepth
       type(jval), intent(out) :: jv
       integer, intent(out) :: err
       type(capnp_ptr_t) :: raw_t, t, q, et, dv, al
@@ -471,7 +471,7 @@ contains
          if (err /= CAPNP_OK) return
          call read_disc_opts(al, gdisc, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, p, env, gdisc, depth, jv, err)
+         call build_struct(schema, idx, p, env, gdisc, depth, gdepth + 1, jv, err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -570,7 +570,7 @@ contains
          end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call build_list(schema, et, q, env, depth, jv, err)
+         call build_list(schema, et, q, env, depth + 1, jv, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
@@ -588,7 +588,7 @@ contains
          end if
          call capnp_brand_enter(env, t, cenv, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, q, cenv, no_disc, depth, jv, err)
+         call build_struct(schema, idx, q, cenv, no_disc, depth + 1, 0, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -702,7 +702,7 @@ contains
          end if
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, el, cenv, no_disc, depth, jv, err)
+         call build_struct(schema, idx, el, cenv, no_disc, depth, 0, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select

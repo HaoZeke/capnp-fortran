@@ -70,7 +70,7 @@ contains
          if (.not. pretty) ind = 0
       end if
       if (present(brand_env)) env = brand_env
-      call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, text, err)
+      call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, 0, text, err)
    end subroutine capnp_text_encode
 
    subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty, &
@@ -255,7 +255,7 @@ contains
          end if
          call capnp_brand_enter(env, typ, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, q, cenv, ind, MODE_BARE, 0, text, err)
+         call enc_struct(schema, idx, q, cenv, ind, MODE_BARE, 0, 0, text, err)
       case (TYPE_ANY_POINTER)
          text = '<opaque pointer>'
       case (TYPE_INTERFACE)
@@ -295,9 +295,9 @@ contains
       end if
    end subroutine capnp_text_span
 
-   recursive subroutine enc_struct(schema, idx, p, env, indent, mode, depth, out, err)
+   recursive subroutine enc_struct(schema, idx, p, env, indent, mode, depth, gdepth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
-      integer, intent(in) :: idx, indent, mode, depth
+      integer, intent(in) :: idx, indent, mode, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
       type(capnp_brand_env_t), intent(in) :: env
       character(len=:), allocatable, intent(out) :: out
@@ -309,7 +309,7 @@ contains
       logical :: show
       err = CAPNP_OK
       out = ''
-      if (depth > depth_cap(p)) then
+      if (depth > depth_cap(p) .or. gdepth > size(schema%nodes)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
@@ -343,7 +343,7 @@ contains
          end if
          call field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth + 1, val, err)
+         call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth, gdepth, val, err)
          if (err /= CAPNP_OK) return
          call push(items, n, nm//' = '//val, err)
          if (err /= CAPNP_OK) return
@@ -353,11 +353,11 @@ contains
       out = '('//body//')'
    end subroutine enc_struct
 
-   recursive subroutine enc_field_value(schema, f, p, env, indent, mode, depth, out, err)
+   recursive subroutine enc_field_value(schema, f, p, env, indent, mode, depth, gdepth, out, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
-      integer, intent(in) :: indent, mode, depth
+      integer, intent(in) :: indent, mode, depth, gdepth
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
       type(capnp_ptr_t) :: raw_t, t, q, et, dv
@@ -374,7 +374,7 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, p, env, indent, mode, depth, out, err)
+         call enc_struct(schema, idx, p, env, indent, mode, depth, gdepth + 1, out, err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -473,7 +473,7 @@ contains
          end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, env, indent, mode, depth, out, err)
+         call enc_list(schema, et, q, env, indent, mode, depth + 1, out, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
@@ -491,7 +491,7 @@ contains
          end if
          call capnp_brand_enter(env, t, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, q, cenv, indent, mode, depth, out, err)
+         call enc_struct(schema, idx, q, cenv, indent, mode, depth + 1, 0, out, err)
       case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
@@ -616,7 +616,7 @@ contains
          end if
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, el, cenv, indent, mode, depth, out, err)
+         call enc_struct(schema, idx, el, cenv, indent, mode, depth, 0, out, err)
       case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
