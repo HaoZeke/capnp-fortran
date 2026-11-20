@@ -182,11 +182,21 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
       integer(int64) :: n, i
+      integer :: stat
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
+      if (.not. associated(l%msg) .or. &
+          .not. capnp_host_count_ok(n, capnp_message_nbytes(l%msg))) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (allocated(g_nodes)) deallocate (g_nodes)
-      allocate (g_nodes(n))
+      allocate (g_nodes(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1_int64, n
          g_nodes(i)%p = capnp_list_get_struct(l, int(i - 1), err)
          if (err /= CAPNP_OK) return

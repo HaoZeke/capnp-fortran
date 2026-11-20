@@ -75,6 +75,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: root, l
       integer(int64) :: n, i
+      integer :: stat
       call capnp_dyn_free(schema)
       ! Schema graphs are deep; match the plugin's generous reader guards.
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
@@ -85,7 +86,15 @@ contains
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
-      allocate (schema%nodes(n))
+      if (.not. wire_count_ok(l, n)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (schema%nodes(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1_int64, n
          schema%nodes(i) = capnp_list_get_struct(l, int(i - 1), err)
          if (err /= CAPNP_OK) return
@@ -99,6 +108,23 @@ contains
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
    end subroutine capnp_dyn_free
+
+   !> A list element stored in a host array is at least one byte on the wire.
+   !> A count past the message size is a zero-size claim.
+   function wire_count_ok(p, n) result(ok)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: n
+      logical :: ok
+      if (n < 0_int64) then
+         ok = .false.
+         return
+      end if
+      if (.not. associated(p%msg)) then
+         ok = n == 0_int64
+         return
+      end if
+      ok = capnp_host_count_ok(n, capnp_message_nbytes(p%msg))
+   end function wire_count_ok
 
    !> Node index for a type name: an exact displayName match, or the
    !> part after the file prefix ('Person' finds
@@ -246,7 +272,8 @@ contains
       type(capnp_dyn_brand_t), intent(out) :: brand
       integer, intent(out) :: err
       type(capnp_ptr_t) :: raw, scopes, scope, bindings, binding
-      integer(int64) :: i, j
+      integer(int64) :: i, j, nsc, nb
+      integer :: stat
       err = CAPNP_OK
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
@@ -271,8 +298,17 @@ contains
       end if
       scopes = brand_scopes(raw, err)
       if (err /= CAPNP_OK) return
-      allocate (brand%scopes(capnp_list_len(scopes)))
-      do i = 0_int64, capnp_list_len(scopes) - 1_int64
+      nsc = capnp_list_len(scopes)
+      if (.not. wire_count_ok(scopes, nsc)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (brand%scopes(nsc), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, nsc - 1_int64
          scope = capnp_list_get_struct(scopes, int(i), err)
          if (err /= CAPNP_OK) return
          brand%scopes(i + 1)%id = scope_scope_id(scope)
@@ -289,8 +325,17 @@ contains
          end select
          bindings = scope_bindings(scope, err)
          if (err /= CAPNP_OK) return
-         allocate (brand%scopes(i + 1)%bindings(capnp_list_len(bindings)))
-         do j = 0_int64, capnp_list_len(bindings) - 1_int64
+         nb = capnp_list_len(bindings)
+         if (.not. wire_count_ok(bindings, nb)) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         allocate (brand%scopes(i + 1)%bindings(nb), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         do j = 0_int64, nb - 1_int64
             binding = capnp_list_get_struct(bindings, int(j), err)
             if (err /= CAPNP_OK) return
             select case (binding_which(binding))
@@ -536,9 +581,19 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: a
       integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
       n = capnp_list_len(list)
-      allocate (annotations(n))
+      if (.not. wire_count_ok(list, n)) then
+         err = CAPNP_ERR_ALLOC
+         allocate (annotations(0), stat=stat)
+         return
+      end if
+      allocate (annotations(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 0_int64, n - 1_int64
          a = capnp_list_get_struct(list, int(i), err)
          if (err /= CAPNP_OK) return

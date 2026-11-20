@@ -20,6 +20,7 @@ module capnp_arena
    public :: capnp_segment_view
    public :: capnp_builder_options_t
    public :: capnp_grown_segment_bytes
+   public :: capnp_message_nbytes, capnp_host_count_ok
 
    integer(int64), parameter :: DEFAULT_FIRST_WORDS = CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS
    integer(int64), parameter :: MAX_SEGMENT_WORDS = 536870912_int64
@@ -516,5 +517,30 @@ contains
          end if
       end do
    end function capnp_arena_take_pad
+
+   !> Sum of segment lengths. Saturates at huge(int64) if the sum overflows.
+   pure function capnp_message_nbytes(msg) result(n)
+      type(capnp_message_t), intent(in) :: msg
+      integer(int64) :: n
+      integer :: i
+      n = 0_int64
+      if (.not. allocated(msg%segs)) return
+      do i = 1, msg%nsegs
+         if (msg%segs(i)%len <= 0_int64) cycle
+         if (n > huge(n) - msg%segs(i)%len) then
+            n = huge(n)
+            return
+         end if
+         n = n + msg%segs(i)%len
+      end do
+   end function capnp_message_nbytes
+
+   !> True when n is a count that can be stored. A real element is at least
+   !> one byte, so a count past the message size is zero-size amplification.
+   pure function capnp_host_count_ok(n, nbytes) result(ok)
+      integer(int64), intent(in) :: n, nbytes
+      logical :: ok
+      ok = n >= 0_int64 .and. nbytes >= 0_int64 .and. n <= nbytes
+   end function capnp_host_count_ok
 
 end module capnp_arena
