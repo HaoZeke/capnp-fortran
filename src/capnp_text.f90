@@ -34,7 +34,8 @@ module capnp_text
 
 contains
 
-   subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env)
+   subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env, &
+                                 traversal_words)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -42,8 +43,10 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
       type(capnp_brand_env_t), intent(in), optional :: brand_env
+      integer(int64), intent(in), optional :: traversal_words
       type(capnp_brand_env_t) :: env
       integer :: ind
+      integer(int64) :: limit
       err = CAPNP_OK
       text = ''
       if (.not. schema%loaded) then
@@ -54,6 +57,10 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) limit = traversal_words
+      call guard_traversal(p, limit, err)
+      if (err /= CAPNP_OK) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
@@ -66,18 +73,25 @@ contains
       call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode
 
-   subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty)
+   subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty, &
+                                      traversal_words)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       type(capnp_brand_env_t), intent(in) :: env
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      integer(int64), intent(in), optional :: traversal_words
       integer :: ind
+      integer(int64) :: limit
       ind = 1
       if (present(pretty)) then
          if (.not. pretty) ind = 0
       end if
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) limit = traversal_words
+      call guard_traversal(lst, limit, err)
+      if (err /= CAPNP_OK) return
       call enc_list(schema, et, lst, env, ind, MODE_BARE, 0, text, err)
    end subroutine capnp_text_encode_list
 
@@ -1185,6 +1199,24 @@ contains
       end if
    end subroutine buf_take
 
+   !> Builders are exempt from the reader charge, so the encoder applies
+   !> the same default word budget before it walks the tree.
+   subroutine guard_traversal(p, limit, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: limit
+      integer, intent(out) :: err
+      integer(int64) :: words
+      err = CAPNP_OK
+      if (limit < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. associated(p%msg)) return
+      if (.not. p%msg%is_builder) return
+      words = capnp_total_size(p, err)
+      if (err /= CAPNP_OK) return
+      if (words > limit) err = CAPNP_ERR_TRAVERSAL
+   end subroutine guard_traversal
 
    subroutine skip_ws(sc)
       type(scan_t), intent(inout) :: sc

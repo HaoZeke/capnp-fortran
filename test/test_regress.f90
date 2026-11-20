@@ -19,6 +19,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
+         new_unittest("list-linear", run_list_linear), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded) &
          ]
@@ -75,6 +76,59 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_comment_eof
+
+   subroutine run_list_linear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst
+      character(len=:), allocatable :: text, src
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx
+      integer(int64) :: c1, c2, rate, n
+      real :: elapsed
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x8f0c3d2b1a947e65;'//achar(10)// &
+            'struct IntList { xs @0 :List(Int32); }'//achar(10)
+      call spit(tmp//'/intlist.capnp', src, err)
+      if (.not. sh('capnp compile -o- '//tmp//'/intlist.capnp > '//tmp//'/intlist.cgr')) then
+         call test_failed(error, 'compile IntList')
+         return
+      end if
+      call capnp_read_file(tmp//'/intlist.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK, 'list: schema')
+      idx = capnp_dyn_find(schema, 'IntList', err)
+      call check_(error, idx > 0, 'list: type')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      n = 200000_int64
+      lst = capnp_dyn_init_list(schema, idx, root, 'xs', n, err)
+      call check_(error, err == CAPNP_OK .and. capnp_list_len(lst) == n, 'list: allocated')
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.false., &
+                             traversal_words=1_int64)
+      call check_(error, err == CAPNP_ERR_TRAVERSAL, 'list: tiny traversal budget')
+      call system_clock(c1, rate)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.false.)
+      call system_clock(c2)
+      elapsed = real(c2 - c1)/real(rate)
+      call check_(error, err == CAPNP_OK, 'list: encode')
+      call check_(error, elapsed < 3.0, 'list: encode under 3s')
+      call check_(error, index(text, '(xs = [0, 0, 0,') == 1, 'list: prefix')
+      call check_(error, index(text, '1') == 0, 'list: only zeros')
+      call spit(tmp//'/big.txt', text, err)
+      call check_(error, sh('capnp encode '//tmp//'/intlist.capnp IntList < ' &
+         //tmp//'/big.txt > '//tmp//'/big.bin'), 'list: capnp accepts the text')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_list_linear
 
    subroutine run_text_leniency(error)
       type(error_type), allocatable, intent(out) :: error
