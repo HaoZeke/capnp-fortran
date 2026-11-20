@@ -914,12 +914,17 @@ contains
       type(disc_opts_t), intent(in) :: parent_disc
       type(jval), intent(in) :: jv
       integer, intent(out) :: err
+      integer :: mark
       err = CAPNP_OK
+      mark = union_seen_n
       if (jv%k /= JK_OBJ) then
          err = CAPNP_ERR_ARG
          return
       end if
       call fill_struct_pfx(schema, idx, p, env, '', parent_disc, '', jv, depth, err)
+      ! Drop notes made for this object. Nested objects save their own
+      ! mark, so a long list does not fill the 64-slot record.
+      union_seen_n = mark
    end subroutine fill_struct
 
    recursive subroutine fill_struct_pfx(schema, idx, p, env, pfx, parent_disc, union_decl, jv, &

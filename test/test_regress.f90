@@ -83,7 +83,8 @@ contains
          new_unittest("write-error", run_write_error), &
          new_unittest("f32-text", run_f32_text), &
          new_unittest("regress-tmp", run_regress_tmp), &
-         new_unittest("cli-sources", run_cli_sources) &
+         new_unittest("cli-sources", run_cli_sources), &
+         new_unittest("json-union-many", run_json_union_many) &
          ]
    end subroutine collect_regress
 
@@ -1752,5 +1753,72 @@ contains
          call test_failed(error, 'cli source checks failed')
       end if
    end subroutine run_cli_sources
+
+   !> Sixty-five discriminated objects in one list. Each object pops its
+   !> union note on the way out, so the 64-slot record does not fill up.
+   subroutine run_json_union_many(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, rows, el
+      character(len=:), allocatable :: src, js
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, i, iidx
+      integer(int64) :: aval
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x8011223344556677;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+            'struct Item $Json.discriminator(name = "kind") {'//achar(10)// &
+            '  union {'//achar(10)// &
+            '    a @0 :Int32;'//achar(10)// &
+            '    b @1 :Int32;'//achar(10)// &
+            '  }'//achar(10)// &
+            '}'//achar(10)// &
+            'struct Bag { rows @0 :List(Item); }'//achar(10)
+      call spit(tmp//'/many.capnp', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/many.capnp > '//tmp//'/many.cgr')) then
+         call test_failed(error, 'union-many: compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/many.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Bag', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'union-many: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      js = '{"rows":['
+      do i = 1, 65
+         if (i > 1) js = js//','
+         js = js//'{"kind":"a","a":1}'
+      end do
+      js = js//']}'
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_OK, 'union-many: 65 items decode')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_dyn_free(schema)
+         return
+      end if
+      root = capnp_root(msg, err)
+      rows = capnp_getp(root, 0, err)
+      call check_(error, err == CAPNP_OK .and. capnp_list_len(rows) == 65_int64, &
+                  'union-many: list length')
+      iidx = capnp_dyn_find(schema, 'Item', err)
+      el = capnp_list_get_struct(rows, 64, err)
+      aval = capnp_dyn_get_int(schema, iidx, el, 'a', err)
+      call check_(error, err == CAPNP_OK .and. aval == 1_int64, 'union-many: last value')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_union_many
 
 end module test_regress
