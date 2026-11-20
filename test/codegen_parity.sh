@@ -278,6 +278,41 @@ EOF
   echo "g7 ok"
 }
 
+g8() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > server.capnp <<'EOF'
+@0x8888888888888801;
+interface Echo { ping @0 () -> (); }
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" server.capnp
+  cat > impl.f90 <<'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use server_capnp
+   implicit none
+   type, extends(echo_server_t) :: server_t
+   contains
+      procedure :: ping => ping
+   end type server_t
+contains
+   subroutine ping(self, ctx, params, results, err)
+      class(server_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(echo_ping_params_t), intent(in) :: params
+      type(echo_ping_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+   end subroutine ping
+end module impl
+EOF
+  fc -c server_capnp.f90 impl.f90 -I "$MOD" -J .
+  grep -q 'rpc_call_ctx_t' server_capnp.f90
+  echo "g8 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
@@ -286,6 +321,7 @@ case "${1:-all}" in
   g5) g5 ;;
   g6) g6 ;;
   g7) g7 ;;
-  all) g1; g2; g34 g3; g34 g4; g5; g6; g7 ;;
+  g8) g8 ;;
+  all) g1; g2; g34 g3; g34 g4; g5; g6; g7; g8 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac

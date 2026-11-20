@@ -34,9 +34,10 @@ module schema__holder_capnp
       procedure :: dispatch => echo_dispatch
    end type echo_server_t
    abstract interface
-      subroutine echo_ping_ifc(self, params, results, err)
-         import :: echo_server_t, echo_ping_params_t, echo_ping_results_t
+      subroutine echo_ping_ifc(self, ctx, params, results, err)
+         import :: echo_server_t, rpc_call_ctx_t, echo_ping_params_t, echo_ping_results_t
          class(echo_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(echo_ping_params_t), intent(in) :: params
          type(echo_ping_results_t), intent(in) :: results
          integer, intent(out) :: err
@@ -127,7 +128,7 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%ping(params, results, err)
+            call self%ping(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default

@@ -2,6 +2,7 @@
 !> bytes across `write` stream calls, reports the total from `done`.
 module rpc_writer_impl
    use capnp
+   use capnp_rpc, only: rpc_call_ctx_t
    use streamer_capnp
    implicit none
    private
@@ -17,8 +18,9 @@ module rpc_writer_impl
 
 contains
 
-   subroutine my_write(self, params, results, err)
+   subroutine my_write(self, ctx, params, results, err)
       class(my_writer_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
       type(writer_write_params_t), intent(in) :: params
       type(stream_result_t), intent(in) :: results
       integer, intent(out) :: err
@@ -28,8 +30,9 @@ contains
       self%total = self%total + size(b, kind=int64)
    end subroutine my_write
 
-   subroutine my_done(self, params, results, err)
+   subroutine my_done(self, ctx, params, results, err)
       class(my_writer_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
       type(writer_done_params_t), intent(in) :: params
       type(writer_done_results_t), intent(in) :: results
       integer, intent(out) :: err

@@ -2,6 +2,7 @@
 !> the emitter's dispatch routes method ordinals here.
 module rpc_adder_impl
    use capnp
+   use capnp_rpc, only: rpc_call_ctx_t
    use adder_capnp
    implicit none
    private
@@ -15,8 +16,9 @@ module rpc_adder_impl
 
 contains
 
-   subroutine my_add(self, params, results, err)
+   subroutine my_add(self, ctx, params, results, err)
       class(my_adder_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
       type(adder_add_params_t), intent(in) :: params
       type(adder_add_results_t), intent(in) :: results
       integer, intent(out) :: err

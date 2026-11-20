@@ -465,7 +465,7 @@ contains
    subroutine w(line)
       character(len=*), intent(in) :: line
       if (g_suppress) return
-      write (g_out, '(a)') line
+      call w_fitted(line)
    end subroutine w
 
    !> The file node with this display name, or 0.
@@ -485,6 +485,62 @@ contains
          end if
       end do
    end function find_file_node
+
+   !> Write a line, continuing it with `&` wherever it would pass the
+   !> free-form limit of 132 columns. A line breaks at a blank outside a
+   !> character literal; comment lines are left alone. Embedded newlines
+   !> (from ftext) separate lines that are fitted one at a time.
+   subroutine w_fitted(line)
+      character(len=*), intent(in) :: line
+      integer :: b, e
+      b = 1
+      do
+         e = index(line(b:), achar(10))
+         if (e == 0) then
+            call w_fit_one(line(b:))
+            return
+         end if
+         call w_fit_one(line(b:b + e - 2))
+         b = b + e
+      end do
+   end subroutine w_fitted
+
+   subroutine w_fit_one(line)
+      character(len=*), intent(in) :: line
+      integer, parameter :: max_col = 132, indent = 6
+      character(len=:), allocatable :: rest
+      integer :: lead, k, brk
+      logical :: in_q
+      character :: q
+      rest = line
+      lead = verify(rest, ' ') - 1
+      if (lead < 0) lead = len(rest)
+      if (lead < len(rest)) then
+         if (rest(lead + 1:lead + 1) == '!') then
+            write (g_out, '(a)') rest
+            return
+         end if
+      end if
+      do while (len(rest) > max_col)
+         brk = 0
+         in_q = .false.
+         q = ' '
+         do k = 1, max_col - 2
+            if (in_q) then
+               if (rest(k:k) == q) in_q = .false.
+            else if (rest(k:k) == "'" .or. rest(k:k) == '"') then
+               in_q = .true.
+               q = rest(k:k)
+            else if (rest(k:k) == ' ' .and. k > lead + 1) then
+               brk = k
+            end if
+         end do
+         if (brk <= lead + indent + 1) exit
+         write (g_out, '(a)') rest(1:brk - 1)//' &'
+         rest = repeat(' ', lead + indent)//trim(adjustl(rest(brk + 1:)))
+      end do
+      write (g_out, '(a)') rest
+   end subroutine w_fit_one
 
    !> Module name owning a node: its displayName's file part, snake_cased,
    !> with the extension dropped and '_capnp' appended.
@@ -2063,13 +2119,14 @@ contains
             mn = snake(mn)
             call method_types(mp, pn, rn, err)
             if (err /= CAPNP_OK) return
-            call w('      subroutine '//tn//'_'//mn//'_ifc(self, params, results, err)')
+            call w('      subroutine '//tn//'_'//mn//'_ifc(self, ctx, params, results, err)')
             if (pn == rn) then
-               call w('         import :: '//tn//'_server_t, '//pn//'_t')
+               call w('         import :: '//tn//'_server_t, rpc_call_ctx_t, '//pn//'_t')
             else
-               call w('         import :: '//tn//'_server_t, '//pn//'_t, '//rn//'_t')
+               call w('         import :: '//tn//'_server_t, rpc_call_ctx_t, '//pn//'_t, '//rn//'_t')
             end if
             call w('         class('//tn//'_server_t), intent(inout) :: self')
+            call w('         type(rpc_call_ctx_t), intent(inout) :: ctx')
             call w('         type('//pn//'_t), intent(in) :: params')
             call w('         type('//rn//'_t), intent(in) :: results')
             call w('         integer, intent(out) :: err')
@@ -2158,7 +2215,7 @@ contains
          call w('            results%p = capnp_new_struct(ctx%rmsg, '//upcase(rn)// &
                 '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
-         call w('            call self%'//mn//'(params, results, err)')
+         call w('            call self%'//mn//'(ctx, params, results, err)')
          call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')
          call w('         end block')
       end do

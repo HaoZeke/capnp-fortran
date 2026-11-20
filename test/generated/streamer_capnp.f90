@@ -36,16 +36,18 @@ module schema__streamer_capnp
       procedure :: dispatch => writer_dispatch
    end type writer_server_t
    abstract interface
-      subroutine writer_write_ifc(self, params, results, err)
-         import :: writer_server_t, writer_write_params_t, stream_result_t
+      subroutine writer_write_ifc(self, ctx, params, results, err)
+         import :: writer_server_t, rpc_call_ctx_t, writer_write_params_t, stream_result_t
          class(writer_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(writer_write_params_t), intent(in) :: params
          type(stream_result_t), intent(in) :: results
          integer, intent(out) :: err
       end subroutine writer_write_ifc
-      subroutine writer_done_ifc(self, params, results, err)
-         import :: writer_server_t, writer_done_params_t, writer_done_results_t
+      subroutine writer_done_ifc(self, ctx, params, results, err)
+         import :: writer_server_t, rpc_call_ctx_t, writer_done_params_t, writer_done_results_t
          class(writer_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(writer_done_params_t), intent(in) :: params
          type(writer_done_results_t), intent(in) :: results
          integer, intent(out) :: err
@@ -209,7 +211,7 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, STREAM_RESULT_DWORDS, STREAM_RESULT_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%write(params, results, err)
+            call self%write(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case (1)
@@ -219,7 +221,7 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, WRITER_DONE_RESULTS_DWORDS, WRITER_DONE_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%done(params, results, err)
+            call self%done(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default

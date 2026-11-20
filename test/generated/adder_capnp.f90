@@ -28,9 +28,10 @@ module schema__adder_capnp
       procedure :: dispatch => adder_dispatch
    end type adder_server_t
    abstract interface
-      subroutine adder_add_ifc(self, params, results, err)
-         import :: adder_server_t, adder_add_params_t, adder_add_results_t
+      subroutine adder_add_ifc(self, ctx, params, results, err)
+         import :: adder_server_t, rpc_call_ctx_t, adder_add_params_t, adder_add_results_t
          class(adder_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(adder_add_params_t), intent(in) :: params
          type(adder_add_results_t), intent(in) :: results
          integer, intent(out) :: err
@@ -160,7 +161,7 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%add(params, results, err)
+            call self%add(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
