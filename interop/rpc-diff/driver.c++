@@ -995,8 +995,9 @@ uint32_t callOnBoot(int method, int64_t n) {
   return q;
 }
 
-// A call on pa(aq, [0]). raQ >= 0 adds a receiverAnswer(raQ, [0]) param.
-uint32_t callOnPipeline(uint32_t aq, int method, int64_t n, int64_t raQ) {
+// A call on pa(aq, [0]). raQ >= 0 adds a receiverAnswer(raQ, [0]) param,
+// and sh adds a senderHosted param naming a fresh driver export.
+uint32_t callOnPipeline(uint32_t aq, int method, int64_t n, int64_t raQ, bool sh = false) {
   uint32_t q = newQuestion(kMethods[method]);
   capnp::MallocMessageBuilder mb;
   auto c = mb.initRoot<rpc::Message>().initCall();
@@ -1009,7 +1010,7 @@ uint32_t callOnPipeline(uint32_t aq, int method, int64_t n, int64_t raQ) {
   auto params = c.initParams();
   std::string caps;
   capnp::BuilderCapabilityTable table;
-  if (raQ >= 0) {
+  if (raQ >= 0 || sh) {
     auto st = table.imbue(params.getContent()).initAs<NCap>();
     st.setN(n);
     st.setCap(capnp::Capability::Client(capnp::newBrokenCap("placeholder")).castAs<Target>());
@@ -1021,6 +1022,12 @@ uint32_t callOnPipeline(uint32_t aq, int method, int64_t n, int64_t raQ) {
     ra.setQuestionId(uint32_t(raQ));
     setOps(ra, {0});
     caps = "ra:(q" + std::to_string(raQ) + ",0)";
+  } else if (sh) {
+    uint32_t id = nextExportId++;
+    exports[id].refs += 1;
+    params.initCapTable(1)[0].setSenderHosted(id);
+    questions[q].paramExports.push_back(id);
+    caps = "sh:D" + std::to_string(id);
   }
   sendRaw(mb);
   emit("D> CALL q" + std::to_string(q) + " pa(q" + std::to_string(aq) + ",0) " +
@@ -1057,7 +1064,7 @@ void answerWire(int64_t wire, int64_t n) {
 }
 
 const char* kScenarios[] = {"FINISH_QUEUED_Q2", "EARLY_FINISH_Q1_WITH_Q2", "FWD_RA_PARAM",
-                            "DISEMBARGO_FWD"};
+                            "DISEMBARGO_FWD", "FWD_SH_PARAM"};
 
 void scenario(int k, int which) {
   std::string cls = kScenarios[which];
@@ -1107,6 +1114,26 @@ void scenario(int k, int which) {
       part(cls);
       break;
     }
+    case 4: {
+      // A forwarded call carries a senderHosted param. The parts show
+      // when the forwarding side releases it.
+      uint32_t qr = callOnBoot(5, n);
+      part(cls);
+      size_t before = pending.size();
+      uint32_t q3 = callOnPipeline(qr, 0, n + 4, -1, true);
+      part(cls);
+      int64_t fwd = newPing(before);
+      if (fwd >= 0) {
+        for (size_t i = 0; i < pending.size(); ++i)
+          if (int64_t(pending[i].wire) == fwd) pending.erase(pending.begin() + i);
+        sendReturnElsewhere(uint32_t(fwd));
+        markAnswered(uint32_t(fwd));
+      }
+      part(cls);
+      sendFinish(q3, false, true);
+      part(cls);
+      break;
+    }
     default: {
       // Disembargo(senderLoopback) on an answer that was forwarded.
       uint32_t qr = callOnBoot(5, n);
@@ -1131,11 +1158,11 @@ void step(int k) {
   std::string label;
   // call, finish, release, answer, poke70, resolve, disembargo, bootstrap,
   // then one weight per scenario
-  int w[12] = {35, 12, 8, pending.empty() ? 0 : 22, 2, 6, 1, 2, 2, 2, 2, 2};
+  int w[13] = {35, 12, 8, pending.empty() ? 0 : 22, 2, 6, 1, 2, 2, 2, 2, 2, 2};
   int total = 0;
   for (int x : w) total += x;
   int r = pick(total), a = 0;
-  for (; a < 11; ++a) {
+  for (; a < 12; ++a) {
     if (r < w[a]) break;
     r -= w[a];
   }

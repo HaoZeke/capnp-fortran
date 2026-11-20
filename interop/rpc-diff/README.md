@@ -49,15 +49,17 @@ capability; seventy concurrent calls; Resolve of the driver's promises
 extra Bootstrap. A few ids are deliberately invalid, so some seeds end
 in an Abort that both peers must send alike.
 
-Four scenario shapes run as several parts, each its own window, and
+Five scenario shapes run as several parts, each its own window, and
 are counted per class in `summary.tsv`:
 
 - `FINISH_QUEUED_Q2`: Finish for a call queued on a pending answer.
 - `EARLY_FINISH_Q1_WITH_Q2`: Finish for a pending answer that has a
   pipelined call waiting on it.
 - `FWD_RA_PARAM`: a call forwarded back to the driver whose params
-  hold a `receiverAnswer` capability.
+  name a `receiverAnswer` capability.
 - `DISEMBARGO_FWD`: `Disembargo(senderLoopback)` on a forwarded answer.
+- `FWD_SH_PARAM`: a forwarded call with a `senderHosted` param, then
+  its Return and the Finish, to show when the param is released.
 
 After the last step the driver answers every pending call, finishes
 every question and releases every import.
