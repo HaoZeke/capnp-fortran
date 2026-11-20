@@ -81,6 +81,8 @@ contains
          new_unittest("rpc-framing-511-accepted", t_framing_511_accepted), &
          new_unittest("rpc-framing-512-rejected", t_framing_512_rejected), &
          new_unittest("rpc-framing-oversized-rejected", t_framing_oversized_rejected), &
+         new_unittest("rpc-framing-negative-traversal-rejected", &
+                      t_framing_negative_traversal_rejected), &
          new_unittest("rpc-framing-short-and-padded", t_framing_short_and_padded) &
       ]
    end subroutine collect_rpc
@@ -1742,6 +1744,33 @@ contains
       call capnp_message_free(src)
       call capnp_message_free(dst)
    end subroutine t_framing_oversized_rejected
+
+   !> C++ exposes the traversal budget as uint64_t; reject an invalid
+   !> signed Fortran value at this API boundary rather than treating it as
+   !> a limit that rejects every valid frame.
+   subroutine t_framing_negative_traversal_rejected(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t) :: dst
+      integer(int8) :: head(0:7), unread(0:7)
+      integer :: fa, fb, e
+
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'negative traversal: socketpair')
+      if (.not. allocated(error)) then
+         head = 0_int8
+         call send_closed(fa, head, e)
+         call rpc_recv_message(fb, dst, e, traversal_words=-1_int64)
+         call check_(error, e == CAPNP_ERR_ARG, 'negative traversal: argument rejected')
+         call check_(error, dst%nsegs == 0, 'negative traversal: message empty')
+         unread = 1_int8
+         call px_recv_all(fb, unread, e)
+         call check_(error, e == CAPNP_OK .and. all(unread == 0_int8), &
+                     'negative traversal: header left unread')
+      end if
+      call capnp_message_free(dst)
+      call px_close(fa)
+      call px_close(fb)
+   end subroutine t_framing_negative_traversal_rejected
 
    !> Feed raw bytes to rpc_recv_message over a socketpair, closing the
    !> sender afterwards so a short frame reads as EOF.

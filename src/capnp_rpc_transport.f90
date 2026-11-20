@@ -41,7 +41,13 @@ contains
       integer :: astat
       call capnp_message_free(msg)
       limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
-      if (present(traversal_words)) limit = traversal_words
+      if (present(traversal_words)) then
+         if (traversal_words < 0_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         limit = traversal_words
+      end if
       call px_recv_all(fd, hdr(0:7), err)
       if (err /= CAPNP_OK) return
       raw_count = iand(int(cp_get_i32(hdr, 0_int64), int64), 4294967295_int64)
