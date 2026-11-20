@@ -32,7 +32,7 @@ contains
 
    subroutine main_run(rc)
       integer, intent(out) :: rc
-      character(len=4096) :: arg, next_arg
+      character(len=:), allocatable :: arg, next_arg
       character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
       character(len=:), allocatable :: from_fmt, to_fmt
       logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc
@@ -62,7 +62,7 @@ contains
       end if
       i = 1
       do while (i <= n)
-         call get_command_argument(i, arg)
+         call take_arg(i, arg)
          if (trim(arg) == '--help' .or. trim(arg) == '-h') then
             call print_usage(output_unit)
             return
@@ -81,9 +81,9 @@ contains
                return
             end if
             i = i + 1
-            call get_command_argument(i, next_arg)
-            inc_flags = inc_flags//' -I'//shell_quote(trim(next_arg))
-         else if (len_trim(arg) > 2 .and. arg(1:2) == '-I') then
+            call take_arg(i, next_arg)
+            inc_flags = inc_flags//' -I'//shell_quote(next_arg)
+         else if (starts_with(arg, '-I') .and. len(arg) > 2) then
             inc_flags = inc_flags//' -I'//shell_quote(trim(arg(3:)))
          else if (index(trim(arg), '--import-path=') == 1) then
             inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
@@ -106,16 +106,16 @@ contains
                return
             end if
             i = i + 1
-            call get_command_argument(i, next_arg)
-            ofmt = trim(next_arg)
+            call take_arg(i, next_arg)
+            ofmt = next_arg
             ofmt_explicit = .true.
-         else if (len_trim(arg) > 2 .and. arg(1:2) == '-o') then
+         else if (starts_with(arg, '-o') .and. len(arg) > 2) then
             ofmt = trim(arg(3:))
             ofmt_explicit = .true.
          else if (index(trim(arg), '--output=') == 1) then
             ofmt = trim(arg(10:))
             ofmt_explicit = .true.
-         else if (arg(1:1) == '-') then
+         else if (starts_with(arg, '-')) then
             call fail('unknown option '//trim(arg), rc)
             return
          else if (len(cmd) == 0) then
@@ -327,6 +327,24 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(sch, bytes, err)
    end subroutine load_schema
+
+   subroutine take_arg(i, s)
+      integer, intent(in) :: i
+      character(len=:), allocatable, intent(out) :: s
+      integer :: n
+      call get_command_argument(i, length=n)
+      if (n < 0) n = 0
+      allocate (character(len=n) :: s)
+      if (n > 0) call get_command_argument(i, s)
+   end subroutine take_arg
+
+   pure function starts_with(s, pfx) result(y)
+      character(len=*), intent(in) :: s, pfx
+      logical :: y
+      y = .false.
+      if (len(s) < len(pfx)) return
+      y = s(1:len(pfx)) == pfx
+   end function starts_with
 
    subroutine cmd_encode(sch, idx, to_fmt, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch

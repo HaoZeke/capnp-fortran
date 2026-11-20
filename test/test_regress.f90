@@ -26,7 +26,8 @@ contains
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("text-leniency", run_text_leniency), &
          new_unittest("unloaded-guard", run_unloaded), &
-         new_unittest("json-unloaded-guard", run_json_unloaded) &
+         new_unittest("json-unloaded-guard", run_json_unloaded), &
+         new_unittest("long-argument", run_long_arg) &
          ]
    end subroutine collect_regress
 
@@ -388,6 +389,26 @@ contains
       call capnp_json_decode(schema, 1, '{}', msg, err)
       call check_(error, err == CAPNP_ERR_ARG, 'guard: json decode unloaded schema')
    end subroutine run_unloaded
+
+   subroutine run_long_arg(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=5000) :: opt
+      integer :: i
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup())) then
+         call skip_test(error, 'capnpf binary not built')
+         return
+      end if
+      opt = '--'
+      do i = 3, 4994
+         opt(i:i) = 'y'
+      end do
+      opt(4995:5000) = 'MARKER'
+      call spit(tmp//'/longarg.txt', trim(opt), err_ignored=error)
+      if (allocated(error)) return
+      call check_(error, sh(cap_setup()//' && opt=$(cat '//tmp//'/longarg.txt)' &
+         //' && "$CAP" "$opt" >'//tmp//'/long.out 2>'//tmp//'/long.err; test $? -ne 0' &
+         //' && grep -q MARKER '//tmp//'/long.err'), 'args: 5000-character option is intact')
+   end subroutine run_long_arg
 
    subroutine spit(path, s, err, err_ignored)
       character(len=*), intent(in) :: path, s
