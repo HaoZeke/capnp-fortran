@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(135))
+      allocate (testsuite(136))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -423,18 +423,20 @@ contains
       testsuite(128)%test => w_finish_after_abort_is_silent
       testsuite(129)%name = "rpc-peer-eof-gets-abort"
       testsuite(129)%test => w_peer_eof_gets_abort
-      testsuite(130)%name = "posix-recv-eintr-retried"
-      testsuite(130)%test => t_recv_all_retries_eintr
-      testsuite(131)%name = "rpc-framing-511-accepted"
-      testsuite(131)%test => t_framing_511_accepted
-      testsuite(132)%name = "rpc-framing-512-rejected"
-      testsuite(132)%test => t_framing_512_rejected
-      testsuite(133)%name = "rpc-framing-oversized-rejected"
-      testsuite(133)%test => t_framing_oversized_rejected
-      testsuite(134)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(134)%test => t_framing_negative_traversal_rejected
-      testsuite(135)%name = "rpc-framing-short-and-padded"
-      testsuite(135)%test => t_framing_short_and_padded
+      testsuite(130)%name = "rpc-param-caps-released-at-finish"
+      testsuite(130)%test => w_param_caps_released_at_finish
+      testsuite(131)%name = "posix-recv-eintr-retried"
+      testsuite(131)%test => t_recv_all_retries_eintr
+      testsuite(132)%name = "rpc-framing-511-accepted"
+      testsuite(132)%test => t_framing_511_accepted
+      testsuite(133)%name = "rpc-framing-512-rejected"
+      testsuite(133)%test => t_framing_512_rejected
+      testsuite(134)%name = "rpc-framing-oversized-rejected"
+      testsuite(134)%test => t_framing_oversized_rejected
+      testsuite(135)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(135)%test => t_framing_negative_traversal_rejected
+      testsuite(136)%name = "rpc-framing-short-and-padded"
+      testsuite(136)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -983,6 +985,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_peer_eof_gets_abort(error)
    end subroutine w_peer_eof_gets_abort
+
+   subroutine w_param_caps_released_at_finish(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_param_caps_released_at_finish(error)
+   end subroutine w_param_caps_released_at_finish
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10819,5 +10826,129 @@ contains
       call rpc_conn_close(conn)
       call px_close(fb)
    end subroutine t_peer_eof_gets_abort
+
+   !> One raw frame as text: "RET <id> <releaseParamCaps>", "REL <id>
+   !> <count>", or the message tag. '' after 200 ms with nothing.
+   function raw_frame_text(fd) result(txt)
+      integer, intent(in) :: fd
+      character(len=:), allocatable :: txt
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(release_t) :: rel
+      character(len=64) :: buf
+      integer :: e
+      logical :: ok
+      txt = ''
+      call raw_next(fd, reply, msg, ok)
+      if (.not. ok) return
+      select case (message_which(msg))
+      case (MESSAGE_RETURN_TAG)
+         r = message_return_get(msg, e)
+         write (buf, '(a,i0,a,l1)') 'RET ', return_answer_id_get(r), ' ', &
+            return_release_param_caps_get(r)
+      case (MESSAGE_RELEASE_TAG)
+         rel = message_release_get(msg, e)
+         write (buf, '(a,i0,a,i0)') 'REL ', release_id_get(rel), ' ', &
+            release_reference_count_get(rel)
+      case default
+         write (buf, '(a,i0)') 'TAG ', message_which(msg)
+      end select
+      txt = trim(buf)
+      call capnp_message_free(reply)
+   end function raw_frame_text
+
+   !> Call method `method` of export `eid` from a raw peer. The params
+   !> content is cap 0, senderHosted or senderPromise `id`.
+   subroutine raw_param_call(fd, q, eid, method, promise, id)
+      integer, intent(in) :: fd, method
+      integer(int64), intent(in) :: q, eid, id
+      logical, intent(in) :: promise
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, q, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, int(method, int32), e)
+      tgt = call_target_init(c, e)
+      call message_target_imported_cap_set(tgt, eid, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (promise) then
+         call cap_descriptor_sender_promise_set(cd, id, e)
+      else
+         call cap_descriptor_sender_hosted_set(cd, id, e)
+      end if
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine raw_param_call
+
+   subroutine raw_finish_fd(fd, q)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: q
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      f = message_finish_init(msg, e)
+      call finish_question_id_set(f, q, e)
+      call finish_release_result_caps_set(f, .false., e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine raw_finish_fd
+
+   !> The params of a call whose results hold a cap live until Finish,
+   !> as the C++ call context does. The Return keeps releaseParamCaps
+   !> false and the Release follows the Finish. Two calls naming the
+   !> same cap share one Release with both refs.
+   subroutine t_param_caps_released_at_finish(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer :: fa, fb, e
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call raw_param_call(fb, 1_int64, 0_int64, 1, .false., 5_int64)
+      call rpc_pump_once(conn, e)
+      call raw_param_call(fb, 2_int64, 0_int64, 1, .false., 5_int64)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      b = raw_frame_text(fb)
+      c = raw_frame_text(fb)
+      call check_(error, a == 'RET 1 F' .and. b == 'RET 2 F' .and. c == '', &
+                  'param caps: nothing is released with the Return, got '// &
+                  a//' | '//b//' | '//c)
+      if (allocated(error)) return
+      call raw_finish_fd(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      c = raw_frame_text(fb)
+      call raw_finish_fd(fb, 2_int64)
+      call rpc_pump_once(conn, e)
+      d = raw_frame_text(fb)
+      call check_(error, c == '' .and. d == 'REL 5 2', &
+                  'param caps: one Release after the last Finish, got '//c//' | '//d)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_param_caps_released_at_finish
 
 end module test_rpc
