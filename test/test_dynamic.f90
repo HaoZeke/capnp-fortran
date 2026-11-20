@@ -14,6 +14,7 @@ module test_dynamic
                                 node_struct_discriminant_offset
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
+                                person_employment_employer_set, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
                          dual_primary_text_a_set, dual_secondary_void_b_set, &
@@ -30,7 +31,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(25))
+      allocate (testsuite(26))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -81,6 +82,8 @@ contains
       testsuite(24)%test => run_unknown_list
       testsuite(25)%name = "dynamic-brand-depth"
       testsuite(25)%test => run_brand_depth
+      testsuite(26)%name = "dynamic-union-disc"
+      testsuite(26)%test => run_union_disc
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1541,5 +1544,25 @@ contains
       if (err /= CAPNP_OK) tw = -1
       call capnp_message_free(msg)
    end function brand_chain_type
+
+   !> A failed discriminant write is the error the caller sees, and the
+   !> value is not stored afterwards.
+   subroutine run_union_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(person_t) :: h
+      type(capnp_ptr_t) :: q
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      h%p = capnp_new_struct(msg, 0, 4, err)
+      call check_(error, err == CAPNP_OK, 'union-disc: short struct')
+      call person_employment_employer_set(h, 'Acme', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'union-disc: discriminant error stands')
+      q = capnp_getp(h%p, 3, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL, &
+                  'union-disc: text was not written')
+      call capnp_message_free(msg)
+   end subroutine run_union_disc
 
 end module test_dynamic
