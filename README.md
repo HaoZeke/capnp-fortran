@@ -266,7 +266,7 @@ end program tutorial
 
 Messages carry `target` because handles hold a pointer to their message.
 Every fallible call returns an `err` code (`CAPNP_OK` on success); readers
-never crash on malformed input, they return errors and defaults.
+return errors and defaults for malformed inputs covered by the test suite.
 
 ## Layout
 

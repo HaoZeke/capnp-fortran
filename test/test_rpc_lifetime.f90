@@ -1,7 +1,6 @@
-!> Owned servers staged into a call that fails before the cap table
-!> flushes. A finalizer counts each release. One object is released
-!> once: on the failed return, or later with the export that already
-!> owned it.
+!> Owned servers staged into failed calls, including partial cap-table
+!> flushes. A finalizer counts each release. One object is released once:
+!> on the failed return, or later with the export that already owned it.
 module test_rpc_lifetime
    use testdrive, only: unittest_type, error_type, check
    use capnp
