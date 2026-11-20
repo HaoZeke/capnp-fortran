@@ -52,7 +52,7 @@ module capnp_rpc
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
    public :: rpc_membrane_policy_t, rpc_membrane_server_t
    public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
-   public :: rpc_membrane_owned_live
+   public :: rpc_membrane_owned_live, rpc_shared_owners_live
    public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
@@ -648,7 +648,12 @@ contains
       class(rpc_membrane_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
-      integer :: i
+      type :: staged_ptr_t
+         class(*), pointer :: p => null()
+      end type staged_ptr_t
+      type(staged_ptr_t) :: orig(0:MAXCAPS - 1)
+      integer :: i, j
+      logical :: dup
       if (.not. associated(self%inner) .or. .not. associated(self%policy)) then
          err = CAPNP_ERR_ARG
          return
@@ -659,6 +664,25 @@ contains
       call self%inner%dispatch(ctx, err)
       if (err /= CAPNP_OK) return
       do i = 0, ctx%nexp - 1
+         orig(i)%p => ctx%staged(i)%s
+      end do
+      do i = 0, ctx%nexp - 1
+         dup = .false.
+         do j = 0, i - 1
+            if (associated(orig(j)%p, orig(i)%p)) then
+               ctx%staged(i)%s => ctx%staged(j)%s
+               if (ctx%staged(i)%owned) then
+                  ctx%staged(j)%owned = .true.
+                  select type (w => ctx%staged(j)%s)
+                  type is (rpc_membrane_server_t)
+                     if (w%owned) w%inner_owned = .true.
+                  end select
+               end if
+               dup = .true.
+               exit
+            end if
+         end do
+         if (dup) cycle
          call membrane_wrap_server_ref(ctx%staged(i)%s, self%policy, &
                                        self%reverse, err, ctx%staged(i)%owned)
          if (err /= CAPNP_OK) then
@@ -730,18 +754,44 @@ contains
       end select
    end subroutine retain_server
 
+   !> Free an owned membrane wrapper and any owned inner server it holds.
+   recursive subroutine free_owned_membrane(w)
+      type(rpc_membrane_server_t), pointer, intent(inout) :: w
+      class(rpc_server_t), pointer :: inner
+      if (.not. associated(w)) return
+      if (w%inner_owned .and. associated(w%inner)) then
+         inner => w%inner
+         w%inner => null()
+         select type (inner)
+         type is (rpc_membrane_server_t)
+            if (inner%owned) then
+               inner%refs = inner%refs - 1
+               if (inner%refs <= 0) call free_owned_membrane(inner)
+            else
+               deallocate (inner)
+            end if
+         class default
+            deallocate (inner)
+         end select
+      else
+         w%inner => null()
+      end if
+      deallocate (w)
+      w => null()
+   end subroutine free_owned_membrane
+
    !> Drop one holder. The last holder frees the wrapper.
    subroutine release_server(srv)
       class(*), pointer, intent(inout) :: srv
+      type(rpc_membrane_server_t), pointer :: w
       if (.not. associated(srv)) return
       select type (srv)
       type is (rpc_membrane_server_t)
          if (srv%owned) then
             srv%refs = srv%refs - 1
             if (srv%refs <= 0) then
-               if (srv%inner_owned .and. associated(srv%inner)) deallocate (srv%inner)
-               srv%inner => null()
-               deallocate (srv)
+               w => srv
+               call free_owned_membrane(w)
             end if
          end if
       end select
@@ -749,16 +799,16 @@ contains
    end subroutine release_server
 
    !> Free an owned membrane wrapper that never reached an export slot.
-   !> The inner server is left alone: it may be a caller-owned object.
+   !> An owned inner server is freed with it; caller-owned inners stay.
    subroutine discard_unexported_wrapper(srv)
       class(*), pointer, intent(inout) :: srv
+      type(rpc_membrane_server_t), pointer :: w
       if (.not. associated(srv)) return
       select type (srv)
       type is (rpc_membrane_server_t)
          if (srv%owned .and. srv%refs <= 0) then
-            if (srv%inner_owned .and. associated(srv%inner)) deallocate (srv%inner)
-            srv%inner => null()
-            deallocate (srv)
+            w => srv
+            call free_owned_membrane(w)
             srv => null()
          end if
       end select
@@ -766,26 +816,56 @@ contains
 
    subroutine discard_unexported_wrappers(ctx)
       type(rpc_call_ctx_t), intent(inout) :: ctx
-      integer :: i
+      integer :: i, j
+      class(*), pointer :: p
       do i = 0, ctx%nexp - 1
-         if (ctx%staged_eids(i) < 0) call discard_unexported_wrapper(ctx%staged(i)%s)
+         if (ctx%staged_eids(i) >= 0) cycle
+         if (.not. associated(ctx%staged(i)%s)) cycle
+         p => ctx%staged(i)%s
+         do j = i + 1, ctx%nexp - 1
+            if (ctx%staged_eids(j) < 0 .and. associated(ctx%staged(j)%s, p)) then
+               ctx%staged(j)%s => null()
+               ctx%staged(j)%owned = .false.
+            end if
+         end do
+         call discard_unexported_wrapper(ctx%staged(i)%s)
       end do
    end subroutine discard_unexported_wrappers
 
-   !> Drop exports this call already published and free wrappers that
-   !> never got an id, so a failed flush does not leave them behind.
+   !> Drop exports this call already published, free owned servers that
+   !> never reached the export table, and discard unexported wrappers.
    subroutine rollback_staged(conn, ctx)
       type(rpc_conn_t), intent(inout) :: conn
       type(rpc_call_ctx_t), intent(inout) :: ctx
-      integer :: i
+      integer :: i, j, eid
+      class(*), pointer :: p
+      logical :: was_owned, freed_owned
       do i = 0, ctx%nexp - 1
-         if (ctx%staged_eids(i) >= 0) then
-            call drop_export(conn, ctx%staged_eids(i), 1)
+         eid = ctx%staged_eids(i)
+         if (eid >= 0 .and. eid < MAXE) then
+            p => conn%exports(eid)%srv
+            was_owned = conn%exports(eid)%owned
+            if (.not. was_owned .and. associated(p)) then
+               select type (p)
+               type is (rpc_membrane_server_t)
+                  was_owned = p%owned
+               end select
+            end if
+            call drop_export(conn, eid, 1)
+            freed_owned = was_owned .and. .not. conn%exports(eid)%used
+            if (freed_owned .and. associated(p)) then
+               do j = 0, ctx%nexp - 1
+                  if (associated(ctx%staged(j)%s, p)) then
+                     ctx%staged(j)%s => null()
+                     ctx%staged(j)%owned = .false.
+                  end if
+               end do
+            end if
             ctx%staged_eids(i) = -1
-         else
-            call discard_unexported_wrapper(ctx%staged(i)%s)
          end if
       end do
+      call release_unflushed(conn, ctx)
+      call discard_unexported_wrappers(ctx)
       ctx%nexp = 0
    end subroutine rollback_staged
 
@@ -1317,20 +1397,17 @@ contains
          conn%exports(export_id)%dispatching = conn%exports(export_id)%dispatching - 1
          call drop_export_pin(conn, export_id)
          if (conn%dead .or. .not. associated(conn%transport)) then
-            call release_unflushed(conn, ctx)
             call rollback_staged(conn, ctx)
             call capnp_message_free(rm)
             err = RPC_ERR_DEAD
             return
          end if
          if (.not. dispatched .or. derr /= CAPNP_OK) then
-            call release_unflushed(conn, ctx)
             call rollback_staged(conn, ctx)
             call fill_exception(r, 'method raised error', err)
          else
             call flush_cap_table(conn, ctx, err)
             if (err /= CAPNP_OK) then
-               call release_unflushed(conn, ctx)
                call rollback_staged(conn, ctx)
                call fill_exception(r, 'export failed', err)
             end if
@@ -3471,7 +3548,6 @@ contains
             if (err == CAPNP_OK) call flush_cap_table(conn, ctx, err)
          end if
          if (err /= CAPNP_OK) then
-            call release_unflushed(conn, ctx)
             call rollback_staged(conn, ctx)
             call fill_exception(r, 'export failed', err)
          end if
@@ -3566,15 +3642,13 @@ contains
          ! An exception return does not publish the results cap table.
          ! Owned servers staged for that table are freed here, once.
          ! A membrane that never received an export id is freed too.
-         call release_unflushed(conn, ctx)
-         call discard_unexported_wrappers(ctx)
+         call rollback_staged(conn, ctx)
          call fill_exception(r, 'method raised error', err)
       else
          call flush_cap_table(conn, ctx, err)
          if (err /= CAPNP_OK) then
-            ! Exports added by the failed flush are already dropped.
-            ! Owned servers with no export slot are freed here, once.
-            call release_unflushed(conn, ctx)
+            ! Exports added by the failed flush are dropped first;
+            ! remaining owned servers and wrappers are freed once.
             call rollback_staged(conn, ctx)
             call fill_exception(r, 'export failed', err)
          end if
@@ -4340,7 +4414,7 @@ contains
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer :: i, j
       class(*), pointer :: p
-      logical :: exported
+      logical :: exported, is_membrane
       do i = 0, ctx%nexp - 1
          if (.not. associated(ctx%staged(i)%s)) cycle
          do j = 0, i - 1
@@ -4356,6 +4430,12 @@ contains
          if (.not. ctx%staged(i)%owned) cycle
          if (.not. associated(ctx%staged(i)%s)) cycle
          p => ctx%staged(i)%s
+         is_membrane = .false.
+         select type (p)
+         type is (rpc_membrane_server_t)
+            is_membrane = .true.
+         end select
+         if (is_membrane) cycle
          exported = .false.
          do j = 0, MAXE - 1
             if (conn%exports(j)%used .and. associated(conn%exports(j)%srv, p)) then
@@ -4868,9 +4948,25 @@ contains
       end do
    end function shared_owner_drop
 
+   function rpc_shared_owners_live() result(n)
+      integer :: n
+      type(rpc_shared_owner_t), pointer :: node
+      n = 0
+      node => g_shared_owners
+      do while (associated(node))
+         n = n + 1
+         node => node%next
+      end do
+   end function rpc_shared_owners_live
+
    subroutine share_export_owner(slot)
       type(rpc_export_slot_t), intent(inout) :: slot
-      if (slot%shared .or. .not. slot%owned) return
+      if (slot%shared .or. .not. slot%owned .or. .not. associated(slot%srv)) return
+      ! Membranes share cross-connection ownership via `refs`.
+      select type (s => slot%srv)
+      type is (rpc_membrane_server_t)
+         return
+      end select
       call shared_owner_add(slot%srv)
       slot%shared = .true.
    end subroutine share_export_owner

@@ -41,7 +41,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(21))
+      allocate (testsuite(22))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -84,6 +84,8 @@ contains
       testsuite(20)%test => run_handoff_recipient_first
       testsuite(21)%name = "over-release cannot consume a provision pin"
       testsuite(21)%test => run_provision_over_release
+      testsuite(22)%name = "mixed-owned partial flush releases both staged servers"
+      testsuite(22)%test => run_partial_mixed_owned
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -272,6 +274,38 @@ contains
          if (err /= CAPNP_OK) return
          call payload_content_set(ctx%results, s, err)
          if (associated(gsrv)) call rpc_conn_close(gsrv)
+      case (13)
+         ! Stage A(owned=F), B(owned=T), A(owned=T) so slot 63 takes A
+         ! non-owned before B overflows the export table.
+         allocate (obj)
+         next_token = next_token + 1
+         obj%token = next_token
+         sp => obj
+         idx1 = rpc_ctx_export_cap(ctx, sp, err, owned=.false.)
+         if (err /= CAPNP_OK .or. idx1 < 0) then
+            deallocate (obj)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         allocate (obj2)
+         next_token = next_token + 1
+         obj2%token = next_token
+         sp => obj2
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) then
+            deallocate (obj)
+            deallocate (obj2)
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         sp => obj
+         idx = rpc_ctx_export_cap(ctx, sp, err, owned=.true.)
+         if (err /= CAPNP_OK .or. idx < 0) return
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx1), err)
+         if (err /= CAPNP_OK) return
+         call payload_content_set(ctx%results, s, err)
       case default
          err = CAPNP_ERR_ARG
       end select
@@ -1195,5 +1229,29 @@ contains
                      'failed flush keeps a reused export: close')
       end if
    end subroutine run_partial_reused
+
+   subroutine run_partial_mixed_owned(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, victim, held_cap
+      logical :: opened
+      integer :: err, nlive
+      nlive = 0
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) &
+         call fill_one_free_slot(cli, srv, settled, .false., victim, &
+                                 held_cap, nlive, error)
+      if (.not. allocated(error)) then
+         final_count = 0
+         call call_method(cli, srv, settled, 13, err)
+         call check_(error, err == RPC_ERR_EXCEPTION .and. final_count == 2, &
+                     'mixed-owned partial flush releases both staged servers')
+      end if
+      call close_pair(cli, srv, opened)
+      if (opened .and. .not. allocated(error)) &
+         call check_(error, final_count == nlive + 2, &
+                     'mixed-owned partial flush: close frees remaining exports')
+   end subroutine run_partial_mixed_owned
 
 end module test_rpc_lifetime

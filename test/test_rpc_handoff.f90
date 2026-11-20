@@ -56,13 +56,19 @@ contains
 
    subroutine collect_rpc_handoff(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(3))
+      allocate (testsuite(6))
       testsuite(1)%name = "handoff"
       testsuite(1)%test => run_handoff
       testsuite(2)%name = "handoff membrane ref"
       testsuite(2)%test => run_membrane_handoff
       testsuite(3)%name = "membrane releases owned inner server"
       testsuite(3)%test => run_membrane_owned_inner
+      testsuite(4)%name = "membrane flush failure frees owned inner server"
+      testsuite(4)%test => run_membrane_owned_flush_fail
+      testsuite(5)%name = "membrane owned server staged twice is freed once"
+      testsuite(5)%test => run_membrane_owned_twice
+      testsuite(6)%name = "membrane handoff leaves no shared owner entry"
+      testsuite(6)%test => run_membrane_owned_handoff
    end subroutine collect_rpc_handoff
 
    subroutine allow_inbound(self, interface_id, method_id, err)
@@ -106,7 +112,7 @@ contains
       type(owned_inner_srv_t), pointer :: inner
       class(rpc_server_t), pointer :: server
       type(capnp_ptr_t) :: result
-      integer :: idx
+      integer :: idx, idx2
       associate (factory => self)
       end associate
       allocate (inner)
@@ -116,8 +122,16 @@ contains
          deallocate (inner)
          return
       end if
-      result = capnp_new_struct(ctx%rmsg, 0, 1, err)
-      if (err == CAPNP_OK) call capnp_setp(result, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+      if (ctx%method_id == 1) then
+         idx2 = rpc_ctx_export_cap(ctx, server, err, owned=.true.)
+         if (err /= CAPNP_OK) return
+         result = capnp_new_struct(ctx%rmsg, 0, 2, err)
+         if (err == CAPNP_OK) call capnp_setp(result, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+         if (err == CAPNP_OK) call capnp_setp(result, 1, rpc_make_cap_ptr(ctx%rmsg, idx2), err)
+      else
+         result = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(result, 0, rpc_make_cap_ptr(ctx%rmsg, idx), err)
+      end if
       if (err == CAPNP_OK) call payload_content_set(ctx%results, result, err)
    end subroutine owned_factory_dispatch
 
@@ -495,6 +509,176 @@ contains
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
    end subroutine run_membrane_owned_inner
+
+   subroutine run_membrane_owned_flush_fail(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cli, srv
+      type(owned_factory_srv_t), target :: factory
+      type(rpc_membrane_server_t), target :: wrapped
+      type(allow_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, boot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: pipe
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: empty
+      integer :: fa, fb, err, i, before_live
+      integer(int64) :: qb, q
+      call px_socketpair(fa, fb, err)
+      call check_(error, err == CAPNP_OK, 'membrane flush fail: socketpair')
+      if (allocated(error)) return
+      inner => factory
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped, inner, policy)
+      boot => wrapped
+      call rpc_conn_init(srv, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      owned_inner_deaths = 0
+      before_live = rpc_membrane_owned_live()
+      call rpc_bootstrap_send(cli, pipe, err)
+      qb = pipe%id
+      call rpc_pump_once(srv, err)
+      call rpc_wait(cli, qb, err)
+      call rpc_result_cap(cli, qb, [integer ::], pipe, err)
+      call check_(error, err == CAPNP_OK, 'membrane flush fail: bootstrap')
+      if (.not. allocated(error)) then
+         do i = 1, size(srv%exports) - 1
+            srv%exports(i)%used = .true.
+            srv%exports(i)%refcount = 1
+            srv%exports(i)%srv => factory
+         end do
+         call rpc_call_begin(cli, pipe, 991_int64, 0, m, params, q, err)
+         if (err == CAPNP_OK) empty = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, empty, err)
+         if (err == CAPNP_OK) call rpc_call_send(cli, m, err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         if (err == CAPNP_OK) call rpc_wait(cli, q, err)
+         call check_(error, err == CAPNP_OK .and. owned_inner_deaths == 1 .and. &
+                     rpc_membrane_owned_live() == before_live, &
+                     'membrane flush fail: owned inner server and wrapper freed')
+      end if
+      call rpc_conn_close(cli)
+      call rpc_conn_close(srv)
+   end subroutine run_membrane_owned_flush_fail
+
+   subroutine run_membrane_owned_twice(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cli, srv
+      type(owned_factory_srv_t), target :: factory
+      type(rpc_membrane_server_t), target :: wrapped
+      type(allow_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, boot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: pipe
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: empty
+      integer :: fa, fb, err, before_live
+      integer(int64) :: qb, q
+      call px_socketpair(fa, fb, err)
+      call check_(error, err == CAPNP_OK, 'membrane twice: socketpair')
+      if (allocated(error)) return
+      inner => factory
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped, inner, policy)
+      boot => wrapped
+      call rpc_conn_init(srv, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      owned_inner_deaths = 0
+      before_live = rpc_membrane_owned_live()
+      call rpc_bootstrap_send(cli, pipe, err)
+      qb = pipe%id
+      call rpc_pump_once(srv, err)
+      call rpc_wait(cli, qb, err)
+      call rpc_result_cap(cli, qb, [integer ::], pipe, err)
+      call check_(error, err == CAPNP_OK, 'membrane twice: bootstrap')
+      if (.not. allocated(error)) then
+         call rpc_call_begin(cli, pipe, 991_int64, 1, m, params, q, err)
+         if (err == CAPNP_OK) empty = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, empty, err)
+         if (err == CAPNP_OK) call rpc_call_send(cli, m, err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         if (err == CAPNP_OK) call rpc_wait(cli, q, err)
+         if (err == CAPNP_OK) call rpc_finish_send(cli, q, .false., err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         call check_(error, err == CAPNP_OK .and. owned_inner_deaths == 1 .and. &
+                     rpc_membrane_owned_live() == before_live, &
+                     'membrane twice: owned inner server freed once')
+      end if
+      call rpc_conn_close(cli)
+      call rpc_conn_close(srv)
+   end subroutine run_membrane_owned_twice
+
+   subroutine run_membrane_owned_handoff(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat
+      type(rpc_conn_t), target :: intro, prov_a, recip, prov_b
+      type(owned_factory_srv_t), target :: factory
+      type(rpc_membrane_server_t), target :: wrapped
+      type(allow_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, boot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: bcap, ocap, got
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: empty
+      integer :: ia, pa, ra, pb, err, before_live, before_shared
+      integer(int64) :: qb, qo, pq, aq
+      call px_socketpair(ia, pa, err)
+      if (err == CAPNP_OK) call px_socketpair(ra, pb, err)
+      call check_(error, err == CAPNP_OK, 'membrane owned handoff: socketpairs')
+      if (allocated(error)) return
+      inner => factory
+      policy => policy_store
+      call rpc_membrane_server_init(wrapped, inner, policy)
+      boot => wrapped
+      call rpc_conn_init(prov_a, pa, boot)
+      call rpc_conn_init(prov_b, pb, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      call rpc_conn_set_vat(prov_b, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_conn_init(recip, ra, boot)
+      owned_inner_deaths = 0
+      before_live = rpc_membrane_owned_live()
+      before_shared = rpc_shared_owners_live()
+      call rpc_bootstrap_send(intro, bcap, err)
+      qb = bcap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qb, err)
+      call rpc_result_cap(intro, qb, [integer ::], bcap, err)
+      call check_(error, err == CAPNP_OK, 'membrane owned handoff: bootstrap')
+      if (.not. allocated(error)) then
+         call rpc_call_begin(intro, bcap, 991_int64, 0, m, params, qo, err)
+         if (err == CAPNP_OK) empty = capnp_new_struct(m, 0, 0, err)
+         if (err == CAPNP_OK) call payload_content_set(params, empty, err)
+         if (err == CAPNP_OK) call rpc_call_send(intro, m, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_wait(intro, qo, err)
+         if (err == CAPNP_OK) call rpc_result_cap(intro, qo, [0], ocap, err)
+         if (err == CAPNP_OK) call rpc_provide_send(intro, ocap%id, '127.0.0.1', 9, 511_int64, pq, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_wait(intro, pq, err)
+         if (err == CAPNP_OK) call rpc_accept_send(recip, 511_int64, .false., aq, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_b, err)
+         if (err == CAPNP_OK) call rpc_wait(recip, aq, err)
+         if (err == CAPNP_OK) call rpc_result_cap(recip, aq, [integer ::], got, err)
+         if (err == CAPNP_OK) call rpc_release_send(intro, ocap, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_release_send(recip, got, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_b, err)
+         call check_(error, err == CAPNP_OK .and. owned_inner_deaths == 1 .and. &
+                     rpc_membrane_owned_live() == before_live .and. &
+                     rpc_shared_owners_live() == before_shared, &
+                     'membrane owned handoff: no shared owner entry leaked')
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(recip)
+      call rpc_conn_close(prov_a)
+      call rpc_conn_close(prov_b)
+   end subroutine run_membrane_owned_handoff
 
    subroutine allow_local_dial(host, port, allow)
       character(len=*), intent(in) :: host
