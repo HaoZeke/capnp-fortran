@@ -355,6 +355,14 @@ contains
          defloaded = .true.
       end if
       l = capnp_root(defmsg, err)
+      if (err /= CAPNP_OK) return
+      if (associated(h%p%msg)) then
+         if (h%p%msg%is_builder) then
+            l = capnp_copy(h%p%msg, l, err)
+            if (err == CAPNP_OK) call capnp_setp(h%p, 8, l, err)
+            return
+         end if
+      end if
    end function sink_scores_get
 
    function sink_scores_init(h, n, err) result(l)
