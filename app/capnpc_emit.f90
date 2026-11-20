@@ -20,6 +20,11 @@ module capnpc_emit
    end type blob_t
 
    type(node_ref_t), allocatable :: g_nodes(:)
+   !> Module name of each file node (blank for the other nodes). A file in a
+   !> directory carries the directory in the name.
+   character(len=64), allocatable :: g_fmod(:)
+   !> The plain-basename module that re-exports a file's module, or blank.
+   character(len=64), allocatable :: g_shim(:)
    integer :: g_out = -1
    !> Pass 1 walks without writing, collecting imports and default blobs;
    !> pass 2 writes.
@@ -77,7 +82,149 @@ contains
          if (err /= CAPNP_OK) return
          g_nodes(i)%id = node_id(g_nodes(i)%p)
       end do
+      call build_modnames(err)
    end subroutine load_nodes
+
+   !> The text of a file's display name without directory and extension,
+   !> when qualify is false, or with the directory kept as a prefix. The
+   !> directories join with a double underscore, so a flat file such as
+   !> dir_a_sub.capnp does not meet dir_a/sub.capnp.
+   function module_stem(dn, qualify) result(o)
+      character(len=*), intent(in) :: dn
+      logical, intent(in) :: qualify
+      character(len=:), allocatable :: o, base, dir
+      integer :: i
+      i = index(dn, '/', back=.true.)
+      base = dn(i + 1:)
+      dir = dn(1:i)
+      i = index(base, '.')
+      if (i > 0) base = base(1:i - 1)
+      o = base
+      if (qualify) o = dir//base
+      do i = 1, len(o)
+         if (.not. (o(i:i) >= 'a' .and. o(i:i) <= 'z' .or. o(i:i) >= 'A' .and. o(i:i) <= 'Z' &
+                    .or. o(i:i) >= '0' .and. o(i:i) <= '9' .or. o(i:i) == '/')) o(i:i) = '_'
+      end do
+      if (qualify) call replace_all_slash(o)
+      o = snake(o)
+      if (len(o) == 0) o = 'f'
+      if (.not. (o(1:1) >= 'a' .and. o(1:1) <= 'z')) o = 'f'//o
+   end function module_stem
+
+   !> Directory separators as a double underscore; a trailing separator of
+   !> the directory part joins the base name the same way.
+   subroutine replace_all_slash(o)
+      character(len=:), allocatable, intent(inout) :: o
+      character(len=:), allocatable :: r
+      integer :: i
+      r = ''
+      do i = 1, len(o)
+         if (o(i:i) == '/') then
+            r = r//'__'
+         else
+            r = r//o(i:i)
+         end if
+      end do
+      o = r
+   end subroutine replace_all_slash
+
+   !> The module a file gets from its own display name alone, so a file
+   !> compiled by itself and in a larger request agree. Files in a directory
+   !> carry the directory in the name. The schemas bundled with Cap'n Proto
+   !> (capnp/stream.capnp and the others) keep the plain name, which is the
+   !> module this library provides for them.
+   function primary_module(dn) result(o)
+      character(len=*), intent(in) :: dn
+      character(len=:), allocatable :: o
+      if (index(dn, '/') > 0 .and. index(dn, 'capnp/') /= 1) then
+         o = ident_fit(module_stem(dn, .true.)//'_capnp')
+      else
+         o = module_stem(dn, .false.)//'_capnp'
+      end if
+   end function primary_module
+
+   !> Name every file's module. A name comes from the display name alone.
+   !> A file in a directory also gets a module of its plain basename that
+   !> re-exports it, when that name is free in this request. Names that
+   !> still meet another module take the file id.
+   subroutine build_modnames(err)
+      integer, intent(out) :: err
+      character(len=:), allocatable :: dn, cand
+      character(len=256), allocatable :: dns(:)
+      character(len=64), allocatable :: plain(:)
+      integer :: i, j
+      logical :: clash
+      err = CAPNP_OK
+      if (allocated(g_fmod)) deallocate (g_fmod)
+      if (allocated(g_shim)) deallocate (g_shim)
+      allocate (g_fmod(size(g_nodes)), g_shim(size(g_nodes)))
+      allocate (dns(size(g_nodes)), plain(size(g_nodes)))
+      g_fmod = ''
+      g_shim = ''
+      plain = ''
+      do i = 1, size(g_nodes)
+         if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
+         call node_display_name(g_nodes(i)%p, dn, err)
+         if (err /= CAPNP_OK) return
+         dns(i) = dn
+         plain(i) = module_stem(dn, .false.)//'_capnp'
+         g_fmod(i) = primary_module(dn)
+      end do
+      do i = 1, size(g_nodes)
+         if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
+         clash = .false.
+         do j = 1, size(g_nodes)
+            if (j /= i .and. node_which(g_nodes(j)%p) == NODE_FILE) then
+               if (trim(g_fmod(j)) == trim(g_fmod(i))) clash = .true.
+            end if
+         end do
+         if (.not. clash) cycle
+         cand = ident_fit(module_stem(trim(dns(i)), .true.)// &
+                          '_'//hex_of_id(g_nodes(i)%id, 8)//'_capnp')
+         g_fmod(i) = cand
+      end do
+      do i = 1, size(g_nodes)
+         if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
+         if (trim(g_fmod(i)) == trim(plain(i))) cycle
+         clash = .false.
+         do j = 1, size(g_nodes)
+            if (j == i .or. node_which(g_nodes(j)%p) /= NODE_FILE) cycle
+            if (trim(plain(j)) == trim(plain(i)) .or. trim(g_fmod(j)) == trim(plain(i))) clash = .true.
+         end do
+         if (.not. clash) g_shim(i) = plain(i)
+      end do
+   end subroutine build_modnames
+
+   !> The name a file's own constants and its rpc test use for the module:
+   !> the plain basename module when there is one.
+   function surface_name(fidx, modname) result(o)
+      integer, intent(in) :: fidx
+      character(len=*), intent(in) :: modname
+      character(len=:), allocatable :: o
+      o = modname
+      if (.not. allocated(g_shim)) return
+      if (fidx < 1 .or. fidx > size(g_shim)) return
+      if (len_trim(g_shim(fidx)) > 0) o = trim(g_shim(fidx))
+   end function surface_name
+
+   !> The low n hex digits of an id.
+   pure function hex_of_id(id, n) result(o)
+      integer(int64), intent(in) :: id
+      integer, intent(in) :: n
+      character(len=n) :: o
+      integer :: i, d
+      integer(int64) :: h
+      h = id
+      do i = n, 1, -1
+         d = int(iand(h, 15_int64))
+         if (d < 10) then
+            o(i:i) = achar(iachar('0') + d)
+         else
+            o(i:i) = achar(iachar('a') + d - 10)
+         end if
+         h = ishft(h, -4)
+      end do
+   end function hex_of_id
 
    function find_node(id) result(idx)
       integer(int64), intent(in) :: id
@@ -321,6 +468,24 @@ contains
       write (g_out, '(a)') line
    end subroutine w
 
+   !> The file node with this display name, or 0.
+   function find_file_node(prefix) result(idx)
+      character(len=*), intent(in) :: prefix
+      integer :: idx
+      character(len=:), allocatable :: dn
+      integer :: i, err
+      idx = 0
+      do i = 1, size(g_nodes)
+         if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
+         call node_display_name(g_nodes(i)%p, dn, err)
+         if (err /= CAPNP_OK) cycle
+         if (dn == prefix) then
+            idx = i
+            return
+         end if
+      end do
+   end function find_file_node
+
    !> Module name owning a node: its displayName's file part, snake_cased,
    !> with the extension dropped and '_capnp' appended.
    subroutine node_module(np, o, err)
@@ -328,19 +493,21 @@ contains
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
       character(len=:), allocatable :: dn
-      integer :: i
+      integer :: i, fidx
       call node_display_name(np, dn, err)
       if (err /= CAPNP_OK) return
       i = index(dn, ':')
       if (i > 0) dn = dn(1:i - 1)
-      i = index(dn, '/', back=.true.)
-      if (i > 0) dn = dn(i + 1:)
-      i = index(dn, '.')
-      if (i > 0) dn = dn(1:i - 1)
-      do i = 1, len(dn)
-         if (dn(i:i) == '-') dn(i:i) = '_'
-      end do
-      o = snake(dn)//'_capnp'
+      fidx = find_file_node(dn)
+      if (fidx > 0) then
+         if (allocated(g_fmod)) then
+            if (len_trim(g_fmod(fidx)) > 0) then
+               o = trim(g_fmod(fidx))
+               return
+            end if
+         end if
+      end if
+      o = primary_module(dn)
    end subroutine node_module
 
    !> Record a cross-file type reference during pass 1.
@@ -416,28 +583,38 @@ contains
       integer(int64), intent(in) :: file_id
       character(len=*), intent(in) :: filename
       integer, intent(out) :: err
-      character(len=:), allocatable :: modname, base, prefix, dn
+      character(len=:), allocatable :: modname, base, prefix, dn, dir, outfile
       integer :: i, ios, fidx
       logical :: mine
 
       call load_nodes(root, err)
       if (err /= CAPNP_OK) return
 
+      ! capnpc-c++.c++ writeFile keeps the requested file's directory, so
+      ! two schemas that share a basename do not overwrite each other.
+      ! The file keeps the basename. So does the module name, which is what
+      ! callers import, unless another file of the request has the same
+      ! basename: then the module is named by its path.
+      dir = ''
       base = filename
       i = index(base, '/', back=.true.)
-      if (i > 0) base = base(i + 1:)
+      if (i > 0) then
+         dir = base(1:i)
+         base = base(i + 1:)
+      end if
       i = index(base, '.')
       if (i > 0) base = base(1:i - 1)
       do i = 1, len(base)
          if (base(i:i) == '-') base(i:i) = '_'
       end do
-      modname = snake(base)//'_capnp'
 
       fidx = find_node(file_id)
       if (fidx == 0) then
          err = CAPNP_ERR_ARG
          return
       end if
+      call node_module(g_nodes(fidx)%p, modname, err)
+      if (err /= CAPNP_OK) return
       call node_display_name(g_nodes(fidx)%p, prefix, err)
       if (err /= CAPNP_OK) return
       g_prefix = prefix
@@ -484,7 +661,16 @@ contains
       end do
       g_suppress = .false.
 
-      open (newunit=g_out, file=modname//'.f90', status='replace', action='write', iostat=ios)
+      outfile = dir//snake(base)//'_capnp.f90'
+      if (len(dir) > 0) then
+         call execute_command_line('mkdir -p "'//dir(1:len(dir) - 1)//'"', &
+                                   exitstat=ios)
+         if (ios /= 0) then
+            err = CAPNP_ERR_IO
+            return
+         end if
+      end if
+      open (newunit=g_out, file=outfile, status='replace', action='write', iostat=ios)
       if (ios /= 0) then
          err = CAPNP_ERR_IO
          return
@@ -574,6 +760,15 @@ contains
       end if
 
       call w('end module '//modname)
+      if (allocated(g_shim)) then
+         if (len_trim(g_shim(fidx)) > 0) then
+            write (g_out, '(a)') ''
+            write (g_out, '(a)') '!> '//trim(g_shim(fidx))//' re-exports '//modname//'.'
+            write (g_out, '(a)') 'module '//trim(g_shim(fidx))
+            write (g_out, '(a)') '   use '//modname
+            write (g_out, '(a)') 'end module '//trim(g_shim(fidx))
+         end if
+      end if
       close (g_out)
    end subroutine emit_file
 

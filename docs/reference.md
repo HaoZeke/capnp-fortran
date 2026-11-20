@@ -218,7 +218,10 @@ surface (socketpair, TCP listen/accept/connect, poll) as pure
 ## Code generator (`capnpc-fortran`)
 
 Run as a `capnp` plugin: `capnp compile -o <path-to-capnpc-fortran>
-file.capnp`, one module per schema file (`<file>_capnp.f90`). Generated
+file.capnp`, one module per schema file (`<file>_capnp.f90`). A schema in a
+directory, `dir/foo.capnp`, declares `dir__foo_capnp` and a module `foo_capnp`
+that re-exports it while no other schema of the run uses that name; schemas
+under `capnp/` keep the plain name. Generated
 surface per struct `Foo`: `foo_t` handle type, `FOO_DWORDS`/`FOO_PWORDS`,
 `foo_new`/`foo_new_root`/`foo_read_root`, per-field
 `<field>_get`/`<field>_set` (scalars carry declared defaults),

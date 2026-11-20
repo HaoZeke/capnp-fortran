@@ -13,7 +13,8 @@ contains
          new_unittest("g3_default_list_copy", test_g3), &
          new_unittest("g4_get_elem_default", test_g4), &
          new_unittest("g5_extends", test_g5), &
-         new_unittest("g6_generics", test_g6) &
+         new_unittest("g6_generics", test_g6), &
+         new_unittest("g7_basename", test_g7) &
          ]
    end subroutine collect_codegen_parity
 
@@ -55,4 +56,9 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_gap(error, "g6")
    end subroutine test_g6
+
+   subroutine test_g7(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, "g7")
+   end subroutine test_g7
 end module test_codegen_parity
