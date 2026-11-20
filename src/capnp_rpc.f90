@@ -516,13 +516,17 @@ module capnp_rpc
       type(rpc_provision_slot_t) :: provisions(0:MAXPROV - 1)
    end type rpc_vat_t
 
-   !> `wire` is what the hold Releases: `id` itself, the import a Resolve
-   !> of `id` named, or -1 when nothing is owed.
+   !> `id` names the hold in the lists of the calls that share it. `wire`
+   !> is the import it Releases: the id the params named, the import a
+   !> Resolve of that id named, or -1 when nothing is owed.
    type :: rpc_param_hold_t
       integer(int64) :: id = -1_int64
       integer(int64) :: wire = -1_int64
       integer(int64) :: refs = 0_int64
       integer :: holders = 0
+      !> The hold this one merged into when its promise resolved to an id
+      !> another hold names. It counts as one holder of that hold.
+      integer(int64) :: into = -1_int64
    end type rpc_param_hold_t
 
    !> A call whose server answers later, as a C++ server returns a
@@ -585,6 +589,7 @@ module capnp_rpc
       !> imports each one and releases it, with every ref the calls
       !> gathered, once the last call context naming it is gone.
       type(rpc_param_hold_t), allocatable :: param_holds(:)
+      integer(int64) :: next_hold = 0_int64
       !> Deferred calls in the order they were deferred.
       type(rpc_deferred_t), pointer :: deferred => null()
    end type rpc_conn_t
@@ -7365,8 +7370,8 @@ contains
 
    !> Take the references a call's params name, as C++ receiveCap does
    !> for each senderHosted and senderPromise entry. A live import of the
-   !> same id gains the ref. Any other id is held for the call, and its
-   !> distinct ids come back in `ids` for drop_param_holds.
+   !> same id gains the ref. Any other id is held for the call, and the
+   !> distinct holds come back in `ids` for drop_param_holds.
    subroutine hold_call_params(conn, c, ids)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
@@ -7428,19 +7433,20 @@ contains
       end if
       if (.not. allocated(conn%param_holds)) allocate (conn%param_holds(0))
       n = size(conn%param_holds)
-      k = hold_index(conn, id)
+      k = hold_by_wire(conn, id)
       if (k < 0) then
          allocate (grown(n + 1))
          grown(1:n) = conn%param_holds
-         grown(n + 1)%id = id
+         grown(n + 1)%id = conn%next_hold
          grown(n + 1)%wire = id
+         conn%next_hold = conn%next_hold + 1_int64
          call move_alloc(grown, conn%param_holds)
          k = n + 1
       end if
       conn%param_holds(k)%refs = conn%param_holds(k)%refs + 1_int64
-      if (.not. any(ids == id)) then
+      if (.not. any(ids == conn%param_holds(k)%id)) then
          conn%param_holds(k)%holders = conn%param_holds(k)%holders + 1
-         ids = [ids, id]
+         ids = [ids, conn%param_holds(k)%id]
       end if
    end subroutine hold_param_wire
 
@@ -7458,6 +7464,20 @@ contains
       end do
    end function hold_index
 
+   integer function hold_by_wire(conn, wire) result(k)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: wire
+      integer :: i
+      k = -1
+      if (.not. allocated(conn%param_holds)) return
+      do i = 1, size(conn%param_holds)
+         if (conn%param_holds(i)%wire == wire) then
+            k = i
+            return
+         end if
+      end do
+   end function hold_by_wire
+
    !> A call context naming `ids` is gone. An id no other call holds is
    !> Released with every ref the calls took.
    subroutine drop_param_holds(conn, ids, err)
@@ -7465,27 +7485,32 @@ contains
       integer(int64), allocatable, intent(inout) :: ids(:)
       integer, intent(inout) :: err
       integer :: i, k, e
-      integer(int64) :: refs, wire
+      integer(int64) :: refs, wire, cur
       if (.not. allocated(ids)) return
       do i = 1, size(ids)
-         k = hold_index(conn, ids(i))
-         if (k < 0) cycle
-         conn%param_holds(k)%holders = conn%param_holds(k)%holders - 1
-         if (conn%param_holds(k)%holders > 0) cycle
-         refs = conn%param_holds(k)%refs
-         wire = conn%param_holds(k)%wire
-         ! Section assignment into a sized array, so emptying the table
-         ! never reallocates to zero bytes.
-         block
-            type(rpc_param_hold_t), allocatable :: kept(:)
-            allocate (kept(size(conn%param_holds) - 1))
-            kept(:k - 1) = conn%param_holds(:k - 1)
-            kept(k:) = conn%param_holds(k + 1:)
-            call move_alloc(kept, conn%param_holds)
-         end block
-         if (wire < 0_int64) cycle
-         call send_release(conn, wire, refs, e)
-         if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         cur = ids(i)
+         do while (cur >= 0_int64)
+            k = hold_index(conn, cur)
+            if (k < 0) exit
+            cur = -1_int64
+            conn%param_holds(k)%holders = conn%param_holds(k)%holders - 1
+            if (conn%param_holds(k)%holders > 0) exit
+            refs = conn%param_holds(k)%refs
+            wire = conn%param_holds(k)%wire
+            cur = conn%param_holds(k)%into
+            ! Section assignment into a sized array, so emptying the table
+            ! never reallocates to zero bytes.
+            block
+               type(rpc_param_hold_t), allocatable :: kept(:)
+               allocate (kept(size(conn%param_holds) - 1))
+               kept(:k - 1) = conn%param_holds(:k - 1)
+               kept(k:) = conn%param_holds(k + 1:)
+               call move_alloc(kept, conn%param_holds)
+            end block
+            if (wire < 0_int64) cycle
+            call send_release(conn, wire, refs, e)
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end do
       end do
       deallocate (ids)
    end subroutine drop_param_holds
@@ -7502,12 +7527,11 @@ contains
       type(rpc_import_node_t), pointer :: node
       type(third_party_cap_descriptor_t) :: tp
       integer(int64) :: next
-      integer :: k, e
+      integer :: j, k, e
       logical :: found
       held = .false.
-      k = hold_index(conn, pid)
+      k = hold_by_wire(conn, pid)
       if (k < 0) return
-      if (conn%param_holds(k)%wire /= pid) return
       held = .true.
       call send_release(conn, pid, conn%param_holds(k)%refs, e)
       if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
@@ -7527,6 +7551,17 @@ contains
          call import_find_live(conn, next, node, found)
          if (found) then
             node%refs = node%refs + 1
+            next = -1_int64
+         end if
+      end if
+      ! C++ counts refs per import id, so a resolution to an id another
+      ! hold names joins that hold (rpc.c++ receiveCap).
+      if (next >= 0_int64) then
+         j = hold_by_wire(conn, next)
+         if (j > 0 .and. j /= k) then
+            conn%param_holds(j)%refs = conn%param_holds(j)%refs + 1_int64
+            conn%param_holds(j)%holders = conn%param_holds(j)%holders + 1
+            conn%param_holds(k)%into = conn%param_holds(j)%id
             next = -1_int64
          end if
       end if

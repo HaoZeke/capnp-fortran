@@ -171,7 +171,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(145))
+      allocate (testsuite(146))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -450,18 +450,20 @@ contains
       testsuite(138)%test => w_deferred_call_answers_later
       testsuite(139)%name = "rpc-queued-call-param-promise-resolve"
       testsuite(139)%test => w_queued_call_param_promise_resolve
-      testsuite(140)%name = "posix-recv-eintr-retried"
-      testsuite(140)%test => t_recv_all_retries_eintr
-      testsuite(141)%name = "rpc-framing-511-accepted"
-      testsuite(141)%test => t_framing_511_accepted
-      testsuite(142)%name = "rpc-framing-512-rejected"
-      testsuite(142)%test => t_framing_512_rejected
-      testsuite(143)%name = "rpc-framing-oversized-rejected"
-      testsuite(143)%test => t_framing_oversized_rejected
-      testsuite(144)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(144)%test => t_framing_negative_traversal_rejected
-      testsuite(145)%name = "rpc-framing-short-and-padded"
-      testsuite(145)%test => t_framing_short_and_padded
+      testsuite(140)%name = "rpc-param-promise-resolves-twice"
+      testsuite(140)%test => w_param_promise_resolves_twice
+      testsuite(141)%name = "posix-recv-eintr-retried"
+      testsuite(141)%test => t_recv_all_retries_eintr
+      testsuite(142)%name = "rpc-framing-511-accepted"
+      testsuite(142)%test => t_framing_511_accepted
+      testsuite(143)%name = "rpc-framing-512-rejected"
+      testsuite(143)%test => t_framing_512_rejected
+      testsuite(144)%name = "rpc-framing-oversized-rejected"
+      testsuite(144)%test => t_framing_oversized_rejected
+      testsuite(145)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(145)%test => t_framing_negative_traversal_rejected
+      testsuite(146)%name = "rpc-framing-short-and-padded"
+      testsuite(146)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1070,6 +1072,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_queued_call_param_promise_resolve(error)
    end subroutine w_queued_call_param_promise_resolve
+
+   subroutine w_param_promise_resolves_twice(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_param_promise_resolves_twice(error)
+   end subroutine w_param_promise_resolves_twice
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11603,5 +11610,61 @@ contains
       call rpc_send_message(fd, m, e)
       call capnp_message_free(m)
    end subroutine raw_pa_promise_call
+
+   !> A param promise that resolves to another promise is followed by
+   !> its new id, so a Resolve of that id releases it in turn. The
+   !> final cap goes at Finish.
+   subroutine t_param_promise_resolves_twice(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer :: fa, fb, e
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call raw_param_call(fb, 1_int64, 0_int64, 1, .true., 6_int64)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call send_resolve_promise(fb, 6_int64, 7_int64, e)
+      call rpc_pump_once(conn, e)
+      b = raw_frame_text(fb)
+      call send_resolve_hosted(fb, 7_int64, 8_int64, e)
+      call rpc_pump_once(conn, e)
+      c = raw_frame_text(fb)
+      call raw_finish_fd(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      d = raw_frame_text(fb)
+      call check_(error, a == 'RET 1 F' .and. b == 'REL 6 1' .and. c == 'REL 7 1' .and. &
+                  d == 'REL 8 1', 'param promise twice: got '//a//' | '//b//' | '//c//' | '//d)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_param_promise_resolves_twice
+
+   subroutine send_resolve_promise(peer_fd, promise_id, next, e)
+      integer, intent(in) :: peer_fd
+      integer(int64), intent(in) :: promise_id, next
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, promise_id, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_promise_set(cd, next, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(peer_fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_resolve_promise
 
 end module test_rpc

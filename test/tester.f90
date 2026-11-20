@@ -23,6 +23,7 @@ program tester
    use test_codegen, only: collect_codegen
    use test_rpc_lifetime, only: collect_rpc_lifetime
    use test_net, only: collect_net
+   use test_rpc_peer, only: collect_rpc_peer
    use rpc_servers, only: free_minted_adders
    implicit none
    integer :: stat, is
@@ -33,7 +34,7 @@ program tester
    stat = 0
    ! Each name is allocated in the element that owns it. A constructor
    ! of new_testsuite() leaks those strings on this compiler.
-   allocate (testsuites(20))
+   allocate (testsuites(21))
    testsuites(1)%name = "wire"
    testsuites(1)%collect => collect_wire
    testsuites(2)%name = "addressbook"
@@ -74,6 +75,8 @@ program tester
    testsuites(19)%collect => collect_rpc_lifetime
    testsuites(20)%name = "net"
    testsuites(20)%collect => collect_net
+   testsuites(21)%name = "rpc_peer"
+   testsuites(21)%collect => collect_rpc_peer
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)
