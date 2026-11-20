@@ -60,6 +60,8 @@ module capnp_rpc
    public :: rpc_request_cancellation
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
+   public :: rpc_ctx_defer, rpc_deferred_ctx, rpc_deferred_return
+   public :: rpc_question_returned
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
    public :: rpc_stream_t, rpc_stream_init, rpc_stream_send, rpc_stream_finish
    public :: rpc_stream_cancel
@@ -167,6 +169,11 @@ module capnp_rpc
       !> which may fill them directly; rpc_ctx_export_cap grows them.
       type(rpc_srv_ref_t), allocatable :: staged(:)
       integer, allocatable :: staged_eids(:)
+      !> The answer id of the call. It names the call to
+      !> rpc_deferred_ctx and rpc_deferred_return.
+      integer(int64) :: answer_id = -1_int64
+      !> Set by rpc_ctx_defer: the call returns once the server asks.
+      logical :: deferred = .false.
    end type rpc_call_ctx_t
 
    !> A capability implementation hosted by this vat.
@@ -517,6 +524,19 @@ module capnp_rpc
       integer :: holders = 0
    end type rpc_param_hold_t
 
+   !> A call whose server answers later, as a C++ server returns a
+   !> promise. Its context and Return wait here for rpc_deferred_return.
+   type :: rpc_deferred_t
+      integer(int64) :: qid = -1_int64
+      integer :: eid = -1
+      logical :: elsewhere = .false.
+      logical :: quiet = .false.
+      type(rpc_call_ctx_t) :: ctx
+      type(capnp_message_t), pointer :: rm => null()
+      integer(int64), allocatable :: pids(:)
+      type(rpc_deferred_t), pointer :: next => null()
+   end type rpc_deferred_t
+
    type :: rpc_conn_t
       integer :: fd = PX_BAD_FD
       class(rpc_byte_stream_t), pointer :: transport => null()
@@ -564,6 +584,8 @@ module capnp_rpc
       !> imports each one and releases it, with every ref the calls
       !> gathered, once the last call context naming it is gone.
       type(rpc_param_hold_t), allocatable :: param_holds(:)
+      !> Deferred calls in the order they were deferred.
+      type(rpc_deferred_t), pointer :: deferred => null()
    end type rpc_conn_t
 
 contains
@@ -634,6 +656,7 @@ contains
       conn%transport => null()
       conn%fd = PX_BAD_FD
       conn%dead = .true.
+      call free_deferred(conn)
       ! Drop answer-pipeline pins before the wire refcounts. A peer that
       ! already Released an export leaves only that pin, and the server
       ! is freed here. A remaining wire refcount is dropped below.
@@ -5306,7 +5329,7 @@ contains
       integer, intent(out) :: err
       type(payload_t) :: params
       type(rpc_call_ctx_t) :: ctx
-      type(capnp_message_t), target :: rm
+      type(capnp_message_t), pointer :: rm
       type(message_t) :: rmsg
       type(return_t) :: r
       integer :: derr
@@ -5317,8 +5340,12 @@ contains
       ! handleCall), and the call context lives until Finish.
       quiet = call_only_promise_pipeline_get(c) .and. .not. elsewhere
       call ctx_reserve(ctx, MAXCAPS)
+      allocate (rm)
       call capnp_message_init_builder(rm, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         deallocate (rm)
+         return
+      end if
       call hold_call_params(conn, c, pids)
       rmsg = message_new_root(rm, err)
       r = message_return_init(rmsg, err)
@@ -5331,6 +5358,7 @@ contains
          call fill_exception(r, reason, err)
          call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
                             quiet=quiet)
+         deallocate (rm)
          return
       end if
       params = call_params_get(c, err)
@@ -5339,6 +5367,7 @@ contains
       ctx%params = payload_content_get(params, err)
       ctx%rmsg => rm
       ctx%results = return_results_init(r, err)
+      ctx%answer_id = qid
       ! The call keeps one reference so Release or close cannot destroy
       ! the server between entering dispatch and leaving it.
       call pin_export(conn, eid)
@@ -5350,6 +5379,13 @@ contains
          call s%dispatch(ctx, derr)
          dispatched = .true.
       end select
+      ! A deferred call keeps its pin, params and Return until the server
+      ! answers it. Its answer stays pending, so pipelined calls queue.
+      if (dispatched .and. derr == CAPNP_OK .and. ctx%deferred .and. qid >= 0_int64) then
+         conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
+         call defer_call(conn, qid, eid, ctx, rm, pids, elsewhere, quiet)
+         return
+      end if
       if (.not. dispatched .or. derr /= CAPNP_OK) then
          ! An exception return does not publish the results cap table.
          ! Owned servers staged for that table are freed here, once.
@@ -5369,7 +5405,139 @@ contains
       call drop_export_pin(conn, eid)
       call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
                          quiet=quiet)
+      deallocate (rm)
    end subroutine run_call
+
+   subroutine defer_call(conn, qid, eid, ctx, rm, pids, elsewhere, quiet)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(in) :: eid
+      type(rpc_call_ctx_t), intent(in) :: ctx
+      type(capnp_message_t), pointer, intent(in) :: rm
+      integer(int64), allocatable, intent(inout) :: pids(:)
+      logical, intent(in) :: elsewhere, quiet
+      type(rpc_deferred_t), pointer :: node, tail
+      allocate (node)
+      node%qid = qid
+      node%eid = eid
+      node%elsewhere = elsewhere
+      node%quiet = quiet
+      node%ctx = ctx
+      ! The params live in the Call message, which goes once this returns.
+      node%ctx%params = capnp_ptr_t()
+      node%rm => rm
+      if (allocated(pids)) call move_alloc(pids, node%pids)
+      if (.not. associated(conn%deferred)) then
+         conn%deferred => node
+      else
+         tail => conn%deferred
+         do while (associated(tail%next))
+            tail => tail%next
+         end do
+         tail%next => node
+      end if
+   end subroutine defer_call
+
+   !> Mark the call as answered later. The server reads its params now,
+   !> since they are gone once dispatch returns. It keeps
+   !> ctx%answer_id, fills the results through rpc_deferred_ctx and ends
+   !> the call with rpc_deferred_return. A Finish meanwhile does not
+   !> stop the call: its Return is then canceled, as in C++ 1.4.0.
+   subroutine rpc_ctx_defer(ctx)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      ctx%deferred = .true.
+   end subroutine rpc_ctx_defer
+
+   !> The context of deferred call `qid`, or null when there is none.
+   function rpc_deferred_ctx(conn, qid) result(p)
+      type(rpc_conn_t), intent(in), target :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_call_ctx_t), pointer :: p
+      type(rpc_deferred_t), pointer :: node
+      p => null()
+      node => conn%deferred
+      do while (associated(node))
+         if (node%qid == qid) then
+            p => node%ctx
+            return
+         end if
+         node => node%next
+      end do
+   end function rpc_deferred_ctx
+
+   !> Send the Return of deferred call `qid` with the results in its
+   !> context, or an exception when `failed` is set. CAPNP_ERR_ARG when
+   !> no such call is waiting.
+   recursive subroutine rpc_deferred_return(conn, qid, err, failed)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      logical, intent(in), optional :: failed
+      type(rpc_deferred_t), pointer :: node, prev
+      type(message_t) :: msg
+      type(return_t) :: r
+      logical :: bad
+      integer :: e
+      bad = .false.
+      if (present(failed)) bad = failed
+      prev => null()
+      node => conn%deferred
+      do while (associated(node))
+         if (node%qid == qid) exit
+         prev => node
+         node => node%next
+      end do
+      if (.not. associated(node)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (associated(prev)) then
+         prev%next => node%next
+      else
+         conn%deferred => node%next
+      end if
+      msg = message_read_root(node%rm, e)
+      if (e == CAPNP_OK) r = message_return_get(msg, e)
+      if (bad) then
+         call rollback_staged(conn, node%ctx)
+         call fill_exception(r, 'method raised error', e)
+      else
+         call flush_cap_table(conn, node%ctx, e)
+         if (e /= CAPNP_OK) then
+            call rollback_staged(conn, node%ctx)
+            call fill_exception(r, 'export failed', e)
+         end if
+      end if
+      call drop_export_pin(conn, node%eid)
+      call finish_answer(conn, qid, node%rm, node%ctx, err, elsewhere=node%elsewhere, &
+                         pids=node%pids, quiet=node%quiet)
+      deallocate (node%rm)
+      deallocate (node)
+   end subroutine rpc_deferred_return
+
+   !> Close drops every deferred call. No Return can reach the peer.
+   subroutine free_deferred(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_deferred_t), pointer :: node
+      do while (associated(conn%deferred))
+         node => conn%deferred
+         conn%deferred => node%next
+         call rollback_staged(conn, node%ctx)
+         call drop_export_pin(conn, node%eid)
+         call capnp_message_free(node%rm)
+         deallocate (node%rm)
+         deallocate (node)
+      end do
+   end subroutine free_deferred
+
+   !> True once question `qid` has its Return.
+   logical function rpc_question_returned(conn, qid) result(done)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: qid
+      done = .false.
+      if (.not. qslot_ok(conn, qid)) return
+      done = conn%questions(int(qid))%used .and. conn%questions(int(qid))%returned
+   end function rpc_question_returned
 
    !> Keep a Call made on the pipeline of answer `aqid`, which is still
    !> running, until that answer's Return is built.

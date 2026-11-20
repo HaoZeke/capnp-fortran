@@ -96,6 +96,13 @@ module test_rpc
       procedure :: dispatch => pump_dispatch
    end type pump_srv_t
 
+   !> Defers every call it gets and keeps the latest answer id.
+   type, extends(rpc_server_t) :: defer_srv_t
+      integer(int64) :: last = -1_int64
+   contains
+      procedure :: dispatch => defer_dispatch
+   end type defer_srv_t
+
    type, extends(rpc_byte_stream_t) :: fail_stream_t
       integer :: accept_sends = 0
    contains
@@ -164,7 +171,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(143))
+      allocate (testsuite(144))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -439,18 +446,20 @@ contains
       testsuite(136)%test => w_finish_queued_yourself_call
       testsuite(137)%name = "rpc-no-pipelining-broken-target"
       testsuite(137)%test => w_no_pipelining_broken_target
-      testsuite(138)%name = "posix-recv-eintr-retried"
-      testsuite(138)%test => t_recv_all_retries_eintr
-      testsuite(139)%name = "rpc-framing-511-accepted"
-      testsuite(139)%test => t_framing_511_accepted
-      testsuite(140)%name = "rpc-framing-512-rejected"
-      testsuite(140)%test => t_framing_512_rejected
-      testsuite(141)%name = "rpc-framing-oversized-rejected"
-      testsuite(141)%test => t_framing_oversized_rejected
-      testsuite(142)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(142)%test => t_framing_negative_traversal_rejected
-      testsuite(143)%name = "rpc-framing-short-and-padded"
-      testsuite(143)%test => t_framing_short_and_padded
+      testsuite(138)%name = "rpc-deferred-call-answers-later"
+      testsuite(138)%test => w_deferred_call_answers_later
+      testsuite(139)%name = "posix-recv-eintr-retried"
+      testsuite(139)%test => t_recv_all_retries_eintr
+      testsuite(140)%name = "rpc-framing-511-accepted"
+      testsuite(140)%test => t_framing_511_accepted
+      testsuite(141)%name = "rpc-framing-512-rejected"
+      testsuite(141)%test => t_framing_512_rejected
+      testsuite(142)%name = "rpc-framing-oversized-rejected"
+      testsuite(142)%test => t_framing_oversized_rejected
+      testsuite(143)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(143)%test => t_framing_negative_traversal_rejected
+      testsuite(144)%name = "rpc-framing-short-and-padded"
+      testsuite(144)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -696,6 +705,15 @@ contains
       if (err /= CAPNP_OK) return
       call payload_content_set(ctx%results, rpc_make_cap_ptr(ctx%rmsg, 0), err)
    end subroutine reflect_dispatch
+
+   subroutine defer_dispatch(self, ctx, err)
+      class(defer_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      self%last = ctx%answer_id
+      call rpc_ctx_defer(ctx)
+   end subroutine defer_dispatch
 
    recursive subroutine pump_dispatch(self, ctx, err)
       class(pump_srv_t), intent(inout) :: self
@@ -1039,6 +1057,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_no_pipelining_broken_target(error)
    end subroutine w_no_pipelining_broken_target
+
+   subroutine w_deferred_call_answers_later(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_deferred_call_answers_later(error)
+   end subroutine w_deferred_call_answers_later
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11330,5 +11353,101 @@ contains
       call rpc_conn_close(conn)
       call px_close(fb)
    end subroutine t_no_pipelining_broken_target
+
+   !> A deferred call answers when its server asks, as a C++ server
+   !> answers when its promise resolves. Pipelined calls queue on it
+   !> meanwhile. A Finish before then leaves the call to run, and its
+   !> Return is canceled (rpc.c++ sendReturn after receivedFinish).
+   subroutine t_deferred_call_answers_later(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn, raw
+      type(defer_srv_t), target :: dsrv
+      type(echo_srv_t), target :: echo_local
+      class(rpc_server_t), pointer :: srvp, ep
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, r1, r2, r3
+      integer :: fa, fb, e, idx, tag3
+      logical :: got1, got2, got3, x1, x2, x3, early
+
+      srvp => dsrv
+      ep => echo_local
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      raw%fd = fb
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call defer_raw_call(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      call pa_send(raw, 2_int64, 1_int64, [0])
+      call rpc_pump_once(conn, e)
+      call px_poll_in(fb, 0, early, e)
+      ctx => rpc_deferred_ctx(conn, 1_int64)
+      call check_(error, dsrv%last == 1_int64 .and. associated(ctx) .and. .not. early, &
+                  'deferred: no Return before the server answers')
+      if (allocated(error)) return
+      idx = rpc_ctx_export_cap(ctx, ep, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 1_int64, e)
+      call pa_await(raw, 1_int64, got1, x1, r1)
+      call pa_await(raw, 2_int64, got2, x2, r2)
+      call check_(error, e == CAPNP_OK .and. got1 .and. .not. x1 .and. got2 .and. .not. x2, &
+                  'deferred: the Return, then the queued pipelined call')
+      if (allocated(error)) return
+      call defer_raw_call(fb, 3_int64)
+      call rpc_pump_once(conn, e)
+      call raw_finish_fd(fb, 3_int64)
+      call rpc_pump_once(conn, e)
+      ctx => rpc_deferred_ctx(conn, 3_int64)
+      call check_(error, associated(ctx), 'deferred: a Finish leaves the call running')
+      if (allocated(error)) return
+      call set_struct_n(ctx, 5_int64, e)
+      call rpc_deferred_return(conn, 3_int64, e)
+      call pa_await(raw, 3_int64, got3, x3, r3, tag=tag3)
+      call check_(error, got3 .and. tag3 == RETURN_CANCELED_TAG, &
+                  'deferred: Return after Finish is canceled')
+      if (allocated(error)) return
+      call rpc_deferred_return(conn, 3_int64, e)
+      call check_(error, e == CAPNP_ERR_ARG, 'deferred: a second return is refused')
+      raw%fd = PX_BAD_FD
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_deferred_call_answers_later
+
+   subroutine defer_raw_call(fd, q)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: q
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: params
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, q, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine defer_raw_call
+
+   subroutine set_struct_n(ctx, n, err)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: s
+      s = capnp_new_struct(ctx%rmsg, 1, 0, err)
+      if (err == CAPNP_OK) call capnp_set_i64(s, 0_int64, n, err)
+      if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+   end subroutine set_struct_n
 
 end module test_rpc
