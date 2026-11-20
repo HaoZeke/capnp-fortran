@@ -9,6 +9,7 @@ program tester
    use test_dynamic, only: collect_dynamic
    use test_generated, only: collect_generated
    use test_generic, only: collect_generic
+   use test_codegen_parity, only: collect_codegen_parity
    use test_holder, only: collect_holder
    use test_interop, only: collect_interop
    use test_kitchen, only: collect_kitchen
@@ -31,6 +32,7 @@ program tester
         new_testsuite("dynamic", collect_dynamic), &
         new_testsuite("generated", collect_generated), &
         new_testsuite("generic", collect_generic), &
+        new_testsuite("codegen_parity", collect_codegen_parity), &
         new_testsuite("holder", collect_holder), &
         new_testsuite("interop", collect_interop), &
         new_testsuite("kitchen", collect_kitchen), &
