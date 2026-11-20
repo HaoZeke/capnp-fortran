@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(153))
+      allocate (testsuite(154))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -485,18 +485,20 @@ contains
       testsuite(146)%test => w_npp_walk_aborts_on_bad_path
       testsuite(147)%name = "rpc-forwarded-promise-resolve-disembargo"
       testsuite(147)%test => w_forwarded_promise_resolve_disembargo
-      testsuite(148)%name = "posix-recv-eintr-retried"
-      testsuite(148)%test => t_recv_all_retries_eintr
-      testsuite(149)%name = "rpc-framing-511-accepted"
-      testsuite(149)%test => t_framing_511_accepted
-      testsuite(150)%name = "rpc-framing-512-rejected"
-      testsuite(150)%test => t_framing_512_rejected
-      testsuite(151)%name = "rpc-framing-oversized-rejected"
-      testsuite(151)%test => t_framing_oversized_rejected
-      testsuite(152)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(152)%test => t_framing_negative_traversal_rejected
-      testsuite(153)%name = "rpc-framing-short-and-padded"
-      testsuite(153)%test => t_framing_short_and_padded
+      testsuite(148)%name = "rpc-deferred-call-frees-released-id"
+      testsuite(148)%test => w_deferred_call_frees_released_id
+      testsuite(149)%name = "posix-recv-eintr-retried"
+      testsuite(149)%test => t_recv_all_retries_eintr
+      testsuite(150)%name = "rpc-framing-511-accepted"
+      testsuite(150)%test => t_framing_511_accepted
+      testsuite(151)%name = "rpc-framing-512-rejected"
+      testsuite(151)%test => t_framing_512_rejected
+      testsuite(152)%name = "rpc-framing-oversized-rejected"
+      testsuite(152)%test => t_framing_oversized_rejected
+      testsuite(153)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(153)%test => t_framing_negative_traversal_rejected
+      testsuite(154)%name = "rpc-framing-short-and-padded"
+      testsuite(154)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1199,6 +1201,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_forwarded_promise_resolve_disembargo(error)
    end subroutine w_forwarded_promise_resolve_disembargo
+
+   subroutine w_deferred_call_frees_released_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_deferred_call_frees_released_id(error)
+   end subroutine w_deferred_call_frees_released_id
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -12357,5 +12364,55 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_forwarded_promise_resolve_disembargo
+
+   !> A deferred call keeps its server, while C++ frees the export id
+   !> once the peer releases it. A new export then takes that id.
+   subroutine t_deferred_call_frees_released_id(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(defer_srv_t), target :: dsrv
+      type(echo_srv_t), target :: echo_local
+      class(rpc_server_t), pointer :: srvp, ep
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(release_t) :: rel
+      character(len=:), allocatable :: a
+      integer(int64) :: id
+      integer :: fa, fb, e, idx
+
+      srvp => dsrv
+      ep => echo_local
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call raw_finish_fd(fb, 0_int64)
+      call rpc_pump_once(conn, e)
+      call defer_raw_call(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 0_int64, e)
+      call release_reference_count_set(rel, 1_int64, e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      ctx => rpc_deferred_ctx(conn, 1_int64)
+      call check_(error, associated(ctx), 'deferred id: the call is still deferred')
+      if (allocated(error)) return
+      idx = rpc_ctx_export_cap(ctx, ep, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 1_int64, e)
+      id = raw_return_hosted(fb, 1_int64)
+      call check_(error, id == 0_int64, 'deferred id: the new export takes the freed id 0')
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_deferred_call_frees_released_id
 
 end module test_rpc

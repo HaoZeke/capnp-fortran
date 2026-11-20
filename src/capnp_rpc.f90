@@ -239,6 +239,9 @@ module capnp_rpc
       !> refcount and only these pins has a free id, as in C++, and moves
       !> aside when that id is reused (move_released_export).
       integer :: answer_pins = 0
+      !> Pins of deferred calls on this server. They keep the server,
+      !> and C++ frees the id all the same.
+      integer :: call_pins = 0
       class(*), pointer :: srv => null()
       !> True when dropping the last reference must deallocate srv.
       logical :: owned = .false.
@@ -5083,6 +5086,7 @@ contains
             conn%exports(i)%refcount = 1
             conn%exports(i)%pins = 0
             conn%exports(i)%answer_pins = 0
+            conn%exports(i)%call_pins = 0
             call retain_server(srv)
             conn%exports(i)%srv => srv
             conn%exports(i)%owned = own
@@ -6275,6 +6279,8 @@ contains
       allocate (node)
       node%qid = qid
       node%eid = eid
+      if (eslot_ok(conn, int(eid, int64))) &
+         conn%exports(eid)%call_pins = conn%exports(eid)%call_pins + 1
       node%elsewhere = elsewhere
       node%quiet = quiet
       node%ctx = ctx
@@ -6369,12 +6375,22 @@ contains
             call fill_exception(r, 'export failed', e)
          end if
       end if
-      call drop_export_pin(conn, node%eid)
+      call drop_call_pin(conn, node%eid)
       call finish_answer(conn, qid, node%rm, node%ctx, err, elsewhere=node%elsewhere, &
                          pids=node%pids, quiet=node%quiet)
       deallocate (node%rm)
       deallocate (node)
    end subroutine rpc_deferred_return
+
+   subroutine drop_call_pin(conn, eid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: eid
+      if (eslot_ok(conn, int(eid, int64))) then
+         if (conn%exports(eid)%call_pins > 0) &
+            conn%exports(eid)%call_pins = conn%exports(eid)%call_pins - 1
+      end if
+      call drop_export_pin(conn, eid)
+   end subroutine drop_call_pin
 
    !> Close drops every deferred call. No Return can reach the peer.
    subroutine free_deferred(conn)
@@ -6384,7 +6400,7 @@ contains
          node => conn%deferred
          conn%deferred => node%next
          call rollback_staged(conn, node%ctx)
-         call drop_export_pin(conn, node%eid)
+         call drop_call_pin(conn, node%eid)
          call capnp_message_free(node%rm)
          deallocate (node%rm)
          deallocate (node)
@@ -9437,16 +9453,16 @@ contains
       end do
    end function pipeline_export
 
-   !> True when export `i` has no wire refcount and only answer and
-   !> dispatch pins: C++ has already freed its id and keeps the server
-   !> in the pipeline or the running call.
+   !> True when export `i` has no wire refcount and only answer, deferred
+   !> call and dispatch pins: C++ has already freed its id and keeps the
+   !> server in the pipeline or the running call.
    pure logical function export_released(conn, i)
       type(rpc_conn_t), intent(in) :: conn
       integer, intent(in) :: i
       export_released = conn%exports(i)%used .and. conn%exports(i)%refcount <= 0 .and. &
                         conn%exports(i)%pins > 0 .and. &
                         conn%exports(i)%pins == conn%exports(i)%answer_pins + &
-                        conn%exports(i)%dispatching
+                        conn%exports(i)%call_pins + conn%exports(i)%dispatching
    end function export_released
 
    !> Enter a dispatch of export `at`; the caller holds a pin on it.
@@ -9503,6 +9519,14 @@ contains
       if (conn%ndispatch > 0) then
          where (conn%dispatch_at(1:conn%ndispatch) == i) conn%dispatch_at(1:conn%ndispatch) = j
       end if
+      block
+         type(rpc_deferred_t), pointer :: d
+         d => conn%deferred
+         do while (associated(d))
+            if (d%eid == i) d%eid = j
+            d => d%next
+         end do
+      end block
       do k = 0, MAXQ - 1
          call retarget_pins(conn%answers(k), i, j)
       end do
@@ -9645,6 +9669,7 @@ contains
       conn%exports(eid)%refcount = 0
       conn%exports(eid)%pins = 0
       conn%exports(eid)%answer_pins = 0
+      conn%exports(eid)%call_pins = 0
       conn%exports(eid)%dispatching = 0
       call release_server(held)
    end subroutine drop_export_pin
@@ -9677,6 +9702,7 @@ contains
          conn%exports(eid)%refcount = 0
          conn%exports(eid)%pins = 0
          conn%exports(eid)%answer_pins = 0
+         conn%exports(eid)%call_pins = 0
          conn%exports(eid)%dispatching = 0
          call release_server(held)
       end if
