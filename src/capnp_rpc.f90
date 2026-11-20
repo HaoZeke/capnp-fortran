@@ -360,6 +360,15 @@ module capnp_rpc
       type(rpc_answer_wait_t), pointer :: next => null()
    end type rpc_answer_wait_t
 
+   !> An incoming Call on the pipeline of an answer still running.
+   type :: rpc_incoming_wait_t
+      integer(int64) :: answer_qid = -1_int64
+      integer(int64) :: call_qid = -1_int64
+      type(capnp_message_t) :: msg
+      integer(int64), allocatable :: spill(:)
+      type(rpc_incoming_wait_t), pointer :: next => null()
+   end type rpc_incoming_wait_t
+
    !> An embargo id this vat has sent in Disembargo.senderLoopback.
    type :: rpc_embargo_node_t
       integer(int64) :: id = -1_int64
@@ -493,6 +502,7 @@ module capnp_rpc
       type(rpc_embargo_node_t), pointer :: embargoes => null()
       type(rpc_pipe_wait_t), pointer :: pipe_wait => null()
       type(rpc_answer_wait_t), pointer :: answer_wait => null()
+      type(rpc_incoming_wait_t), pointer :: incoming_wait => null()
       integer(int64) :: next_embargo = 0_int64
       integer(int64) :: next_import_handle = -2_int64
       !> Shared with this vat's other connections when one is attached;
@@ -596,6 +606,7 @@ contains
       if (associated(conn%vat)) call release_hosted_provisions(conn)
       call free_pipe_waits(conn)
       call free_answer_waits(conn)
+      call free_incoming_waits(conn)
       call clear_joins(conn)
    end subroutine rpc_conn_close
 
@@ -4307,7 +4318,7 @@ contains
       case (MESSAGE_BOOTSTRAP_TAG)
          call handle_bootstrap(conn, msg, err)
       case (MESSAGE_CALL_TAG)
-         call handle_call(conn, msg, err)
+         call handle_call(conn, m, msg, err)
       case (MESSAGE_RETURN_TAG)
          call handle_return(conn, m, msg, err)
          return ! handle_return takes ownership of m
@@ -4489,19 +4500,16 @@ contains
       call finish_answer(conn, qid, rm, ctx, err)
    end subroutine handle_bootstrap
 
-   recursive subroutine handle_call(conn, msg, err)
+   recursive subroutine handle_call(conn, m, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout) :: m
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
       type(call_t) :: c
       type(payload_t) :: params
-      type(rpc_call_ctx_t) :: ctx
-      type(capnp_message_t), target :: rm
-      type(message_t) :: rmsg
-      type(return_t) :: r
-      integer(int64) :: qid
-      integer :: derr, eid
-      logical :: dispatched, elsewhere
+      integer(int64) :: qid, aqid
+      integer :: eid, terr
+      logical :: elsewhere
       character(len=:), allocatable :: reason
       integer(int64), allocatable :: spill(:)
       c = message_call_get(msg, err)
@@ -4517,49 +4525,69 @@ contains
          call abort_conn(conn, "Unsupported `Call.sendResultsTo`.", err)
          return
       end if
-      call capnp_message_init_builder(rm, err)
-      if (err /= CAPNP_OK) return
-      rmsg = message_new_root(rm, err)
-      r = message_return_init(rmsg, err)
-      call return_answer_id_set(r, qid, err)
       ! The cap table describes the message, not the dispatch: a call
       ! this vat cannot route still told us where a third party's
       ! capability lives.
       params = call_params_get(c, err)
       if (err == CAPNP_OK) call note_introductions(conn, params, err, spill=spill)
       if (err == CAPNP_OK) call note_payload_imports(conn, params, .false., err)
-      if (conn%dead .or. err /= CAPNP_OK) then
-         call capnp_message_free(rm)
-         return
-      end if
+      if (conn%dead .or. err /= CAPNP_OK) return
 
       reason = 'no such capability'
-      call resolve_target(conn, c, eid, err, reason)
-      if (conn%dead) then
-         call capnp_message_free(rm)
-         return
-      end if
+      call resolve_target(conn, c, eid, terr, reason, aqid)
+      if (conn%dead) return
       block
          type(message_target_t) :: tgt
-         integer :: terr
-         tgt = call_target_get(c, terr)
-         if (terr == CAPNP_OK) then
+         integer :: e
+         tgt = call_target_get(c, e)
+         if (e == CAPNP_OK) then
             if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
                 eid < 0) then
-               call capnp_message_free(rm)
                call abort_conn(conn, &
                                'Message target is not a current export ID.', err)
                return
             end if
          end if
       end block
-      if (err /= CAPNP_OK .or. eid < 0) then
+      ! A pipelined call on an answer still running waits for its Return,
+      ! as the C++ answer pipeline queues it (rpc.c++ QueuedPipeline).
+      if (terr == CAPNP_OK .and. aqid >= 0_int64) then
+         call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
+         return
+      end if
+      call run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+      call release_spilled_vines(conn, spill, err)
+   end subroutine handle_call
+
+   !> Dispatch an incoming Call to export `eid` and answer it, or answer
+   !> it with `reason` when the target did not resolve.
+   recursive subroutine run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(call_t), intent(in) :: c
+      integer(int64), intent(in) :: qid
+      integer, intent(in) :: eid, terr
+      character(len=*), intent(in) :: reason
+      logical, intent(in) :: elsewhere
+      integer, intent(out) :: err
+      type(payload_t) :: params
+      type(rpc_call_ctx_t) :: ctx
+      type(capnp_message_t), target :: rm
+      type(message_t) :: rmsg
+      type(return_t) :: r
+      integer :: derr
+      logical :: dispatched
+      call capnp_message_init_builder(rm, err)
+      if (err /= CAPNP_OK) return
+      rmsg = message_new_root(rm, err)
+      r = message_return_init(rmsg, err)
+      call return_answer_id_set(r, qid, err)
+      if (terr /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
          call fill_exception(r, reason, err)
          call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
-         call release_spilled_vines(conn, spill, err)
          return
       end if
+      params = call_params_get(c, err)
       ctx%interface_id = call_interface_id_get(c)
       ctx%method_id = int(call_method_id_get(c))
       ctx%params = payload_content_get(params, err)
@@ -4594,8 +4622,134 @@ contains
       conn%exports(eid)%dispatching = conn%exports(eid)%dispatching - 1
       call drop_export_pin(conn, eid)
       call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere)
-      call release_spilled_vines(conn, spill, err)
-   end subroutine handle_call
+   end subroutine run_call
+
+   !> Keep a Call made on the pipeline of answer `aqid`, which is still
+   !> running, until that answer's Return is built.
+   subroutine enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout) :: m
+      integer(int64), intent(in) :: qid, aqid
+      integer(int64), allocatable, intent(inout) :: spill(:)
+      integer, intent(out) :: err
+      type(rpc_incoming_wait_t), pointer :: node, tail
+      integer(int8), allocatable :: bytes(:)
+      allocate (node)
+      node%answer_qid = aqid
+      node%call_qid = qid
+      if (allocated(spill)) call move_alloc(spill, node%spill)
+      call capnp_serialize_bytes(m, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      if (err /= CAPNP_OK) then
+         deallocate (node)
+         return
+      end if
+      if (.not. associated(conn%incoming_wait)) then
+         conn%incoming_wait => node
+      else
+         tail => conn%incoming_wait
+         do while (associated(tail%next))
+            tail => tail%next
+         end do
+         tail%next => node
+      end if
+   end subroutine enqueue_incoming_pipeline
+
+   !> Run the Calls that waited on answer `aqid`, now that its Return
+   !> `rm` is built. They read that Return even when the answer was
+   !> finished or capless, as their queued capability already took it.
+   !> A read error fails the call instead of the connection, since C++
+   !> reads it in a continuation.
+   recursive subroutine drain_incoming_pipeline(conn, aqid, rm, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: aqid
+      type(capnp_message_t), intent(inout) :: rm
+      integer, intent(out) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev, nxt, waiting, tail
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer, allocatable :: fields(:)
+      character(len=:), allocatable :: reason
+      integer(int64) :: id
+      integer :: i, kind, eid, e
+      err = CAPNP_OK
+      waiting => null()
+      tail => null()
+      prev => null()
+      node => conn%incoming_wait
+      do while (associated(node))
+         nxt => node%next
+         if (node%answer_qid == aqid) then
+            if (associated(prev)) then
+               prev%next => nxt
+            else
+               conn%incoming_wait => nxt
+            end if
+            node%next => null()
+            if (associated(tail)) then
+               tail%next => node
+            else
+               waiting => node
+            end if
+            tail => node
+         else
+            prev => node
+         end if
+         node => nxt
+      end do
+      node => waiting
+      do while (associated(node))
+         nxt => node%next
+         if (err == CAPNP_OK .and. .not. conn%dead) then
+            msg = message_read_root(node%msg, e)
+            if (e == CAPNP_OK) c = message_call_get(msg, e)
+            if (e == CAPNP_OK) tgt = call_target_get(c, e)
+            if (e == CAPNP_OK) pa = message_target_promised_answer_get(tgt, e)
+            if (e == CAPNP_OK) ops = promised_answer_transform_get(pa, e)
+            if (e == CAPNP_OK) then
+               if (allocated(fields)) deallocate (fields)
+               allocate (fields(int(capnp_list_len(ops))))
+               do i = 0, size(fields) - 1
+                  op%p = capnp_list_get_struct(ops, i, e)
+                  fields(i + 1) = -1
+                  if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+                     fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
+               end do
+               call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, deferred=.true.)
+            end if
+            if (e == CAPNP_OK) then
+               eid = -1
+               if (kind == PIPE_EXPORT .and. id >= 0_int64 .and. id < int(MAXE, int64)) then
+                  if (conn%exports(int(id))%used) eid = int(id)
+               end if
+               call run_call(conn, c, node%call_qid, eid, CAPNP_OK, reason, &
+                             call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG, &
+                             err)
+               call release_spilled_vines(conn, node%spill, err)
+            end if
+         end if
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
+   end subroutine drain_incoming_pipeline
+
+   subroutine free_incoming_waits(conn)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_incoming_wait_t), pointer :: node, nxt
+      node => conn%incoming_wait
+      do while (associated(node))
+         nxt => node%next
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
+      conn%incoming_wait => null()
+   end subroutine free_incoming_waits
 
    subroutine release_spilled_vines(conn, spill, err)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -4616,29 +4770,34 @@ contains
    !> Find the export id a Call's target names: a direct export, or a
    !> promised answer resolved through a stored answer's capTable.
    !> eid = -1 when the target does not resolve.
-   subroutine resolve_target(conn, c, out_eid, err, reason)
+   !> `pending_qid` names the answer when the target is the pipeline of
+   !> an answer still running, and is -1 otherwise.
+   subroutine resolve_target(conn, c, out_eid, err, reason, pending_qid)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
       character(len=:), allocatable, intent(inout) :: reason
+      integer(int64), intent(out) :: pending_qid
       type(message_target_t) :: tgt
       out_eid = -1
+      pending_qid = -1_int64
       tgt = call_target_get(c, err)
       if (err /= CAPNP_OK) return
-      call resolve_message_target(conn, tgt, out_eid, err, reason)
+      call resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid)
    end subroutine resolve_target
 
    !> Resolve a MessageTarget to a local export index, or -1 when it names
    !> nothing this vat hosts. Shared by Call and Join, which address
    !> capabilities the same way. `reason` is set when the target is a
    !> broken capability with a known text.
-   subroutine resolve_message_target(conn, tgt, out_eid, err, reason)
+   subroutine resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_target_t), intent(in) :: tgt
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
       character(len=:), allocatable, intent(inout), optional :: reason
+      integer(int64), intent(out), optional :: pending_qid
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
@@ -4650,6 +4809,7 @@ contains
       logical :: afound
       out_eid = -1
       err = CAPNP_OK
+      if (present(pending_qid)) pending_qid = -1_int64
       select case (message_target_which(tgt))
       case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
          eid = message_target_imported_cap_get(tgt)
@@ -4689,7 +4849,10 @@ contains
                                           'no capabilities or was already closed.'
             return
          end if
-         if (.not. aslot%has_results) return
+         if (.not. aslot%has_results) then
+            if (present(pending_qid)) pending_qid = aqid
+            return
+         end if
          if (aslot%bootstrap .and. size(fields) > 0) then
             if (present(reason)) reason = 'Invalid pipeline transform.'
             return
@@ -4717,7 +4880,9 @@ contains
    !> C++ reads a returned answer on the spot, so a walk through a
    !> pointer that is not a struct, a non-capability pointer and a bad
    !> cap index abort the connection (layout.c++ readCapabilityPointer).
-   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err)
+   !> With `deferred`, the answer was pending when the capability was
+   !> taken, so a read error breaks the capability with that text.
+   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err, deferred)
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: retmsg
       integer, intent(in) :: fields(:)
@@ -4725,12 +4890,16 @@ contains
       integer(int64), intent(out) :: id
       character(len=:), allocatable, intent(out) :: reason
       integer, intent(out) :: err
+      logical, intent(in), optional :: deferred
       type(message_t) :: amsg
       type(return_t) :: ar
       type(payload_t) :: apl
       type(capnp_ptr_t) :: p, ctab
       type(cap_descriptor_t) :: cd
       integer :: i
+      logical :: later
+      later = .false.
+      if (present(deferred)) later = deferred
       kind = PIPE_BROKEN
       id = -1_int64
       reason = 'no such capability'
@@ -4749,8 +4918,8 @@ contains
          if (fields(i) < 0) cycle
          if (p%kind == CAPNP_PK_NULL) cycle
          if (p%kind /= CAPNP_PK_STRUCT) then
-            call abort_conn(conn, 'Schema mismatch: Message contains non-struct ' // &
-                            'pointer where struct pointer was expected.', err)
+            call read_error('Schema mismatch: Message contains non-struct ' // &
+                            'pointer where struct pointer was expected.')
             return
          end if
          p = capnp_getp(p, fields(i), err)
@@ -4761,14 +4930,14 @@ contains
          return
       end if
       if (p%kind /= CAPNP_PK_CAP) then
-         call abort_conn(conn, 'Schema mismatch: Message contains non-capability ' // &
-                         'pointer where capability pointer was expected.', err)
+         call read_error('Schema mismatch: Message contains non-capability ' // &
+                         'pointer where capability pointer was expected.')
          return
       end if
       ctab = payload_cap_table_get(apl, err)
       if (err /= CAPNP_OK) return
       if (p%capidx < 0_int64 .or. p%capidx >= capnp_list_len(ctab)) then
-         call abort_conn(conn, 'Message contains invalid capability pointer.', err)
+         call read_error('Message contains invalid capability pointer.')
          return
       end if
       cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
@@ -4784,6 +4953,15 @@ contains
          kind = PIPE_IMPORT
          id = cap_descriptor_receiver_hosted_get(cd)
       end select
+   contains
+      subroutine read_error(text)
+         character(len=*), intent(in) :: text
+         if (later) then
+            reason = text
+         else
+            call abort_conn(conn, text, err)
+         end if
+      end subroutine read_error
    end subroutine answer_pipeline_cap
 
    ! ------------------------------------------------------------------
@@ -5672,7 +5850,7 @@ contains
    !> calls can resolve against it until Finish arrives. `elsewhere`
    !> holds the results and tells the caller they were sent elsewhere.
    !> That hold is the only answer a later takeFromOtherQuestion may take.
-   subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere)
+   recursive subroutine finish_answer(conn, qid, rm, ctx, err, elsewhere)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       type(capnp_message_t), intent(inout) :: rm
@@ -5706,10 +5884,10 @@ contains
          do i = 0, ctx%nexp - 1
             if (ctx%staged_eids(i) >= 0) call drop_export(conn, ctx%staged_eids(i), 1)
          end do
-         call capnp_message_free(rm)
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
-         err = CAPNP_OK
+         call drain_incoming_pipeline(conn, qid, rm, err)
+         call capnp_message_free(rm)
          return
       end if
       if (slot%has_results) then
@@ -5781,9 +5959,10 @@ contains
       end if
       if (capless) then
          call settle_answer_promises(conn, qid, rm, err)
-         call capnp_message_free(rm)
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+         if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
+         call capnp_message_free(rm)
          return
       end if
       call capnp_serialize_bytes(rm, bytes, err)
@@ -5801,6 +5980,7 @@ contains
          ! the export id does not remove that reference.
          call pin_answer_exports(conn, slot)
          if (err == CAPNP_OK) call settle_answer_promises(conn, qid, rm, err)
+         if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
       end if
       call capnp_message_free(rm)
    end subroutine finish_answer

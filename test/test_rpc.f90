@@ -132,7 +132,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(112))
+      allocate (testsuite(113))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -345,18 +345,20 @@ contains
       testsuite(105)%test => w_resolve_pending_receiver_answer_errors
       testsuite(106)%name = "rpc-call-promised-answer-outcomes"
       testsuite(106)%test => w_call_promised_answer_outcomes
-      testsuite(107)%name = "posix-recv-eintr-retried"
-      testsuite(107)%test => t_recv_all_retries_eintr
-      testsuite(108)%name = "rpc-framing-511-accepted"
-      testsuite(108)%test => t_framing_511_accepted
-      testsuite(109)%name = "rpc-framing-512-rejected"
-      testsuite(109)%test => t_framing_512_rejected
-      testsuite(110)%name = "rpc-framing-oversized-rejected"
-      testsuite(110)%test => t_framing_oversized_rejected
-      testsuite(111)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(111)%test => t_framing_negative_traversal_rejected
-      testsuite(112)%name = "rpc-framing-short-and-padded"
-      testsuite(112)%test => t_framing_short_and_padded
+      testsuite(107)%name = "rpc-call-pending-promised-answer"
+      testsuite(107)%test => w_call_pending_promised_answer
+      testsuite(108)%name = "posix-recv-eintr-retried"
+      testsuite(108)%test => t_recv_all_retries_eintr
+      testsuite(109)%name = "rpc-framing-511-accepted"
+      testsuite(109)%test => t_framing_511_accepted
+      testsuite(110)%name = "rpc-framing-512-rejected"
+      testsuite(110)%test => t_framing_512_rejected
+      testsuite(111)%name = "rpc-framing-oversized-rejected"
+      testsuite(111)%test => t_framing_oversized_rejected
+      testsuite(112)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(112)%test => t_framing_negative_traversal_rejected
+      testsuite(113)%name = "rpc-framing-short-and-padded"
+      testsuite(113)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -698,6 +700,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_call_promised_answer_outcomes(error)
    end subroutine w_call_promised_answer_outcomes
+
+   subroutine w_call_pending_promised_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_call_pending_promised_answer(error)
+   end subroutine w_call_pending_promised_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8754,7 +8761,19 @@ contains
       integer, intent(in) :: fields(:)
       logical, intent(out) :: is_exception
       character(len=:), allocatable, intent(out) :: reason
-      type(capnp_message_t), target :: m, reply
+      logical :: got
+      integer :: e
+      call pa_send(sconn, cq, qid, fields)
+      call rpc_pump_once(cconn, e)
+      call pa_await(sconn, cq, got, is_exception, reason)
+   end subroutine pa_call
+
+   !> Send that Call without pumping `cconn`.
+   subroutine pa_send(sconn, cq, qid, fields)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: cq, qid
+      integer, intent(in) :: fields(:)
+      type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
       type(message_target_t) :: tgt
@@ -8762,8 +8781,6 @@ contains
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
       type(payload_t) :: params
-      type(return_t) :: r
-      type(exception_t) :: ex
       integer :: i, e
       call capnp_message_init_builder(m, e)
       msg = message_new_root(m, e)
@@ -8787,22 +8804,46 @@ contains
       call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
       call rpc_send_message(sconn%fd, m, e)
       call capnp_message_free(m)
-      call rpc_pump_once(cconn, e)
+   end subroutine pa_send
+
+   !> Read frames on the raw peer socket until the Return for answer
+   !> `cq`; `got` is false when none arrives.
+   subroutine pa_await(sconn, cq, got, is_exception, reason)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: cq
+      logical, intent(out) :: got, is_exception
+      character(len=:), allocatable, intent(out) :: reason
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(exception_t) :: ex
+      logical :: ready
+      integer :: n, e
+      got = .false.
       is_exception = .false.
       reason = ''
-      call rpc_recv_message(sconn%fd, reply, e)
-      if (e /= CAPNP_OK) return
-      msg = message_read_root(reply, e)
-      if (e == CAPNP_OK .and. message_which(msg) == MESSAGE_RETURN_TAG) then
-         r = message_return_get(msg, e)
-         if (return_which(r) == RETURN_EXCEPTION_TAG) then
-            is_exception = .true.
-            ex = return_exception_get(r, e)
-            call exception_reason_get(ex, reason, e)
+      do n = 1, 20
+         call px_poll_in(sconn%fd, 100, ready, e)
+         if (e /= CAPNP_OK .or. .not. ready) return
+         call rpc_recv_message(sconn%fd, reply, e)
+         if (e /= CAPNP_OK) return
+         msg = message_read_root(reply, e)
+         if (e == CAPNP_OK .and. message_which(msg) == MESSAGE_RETURN_TAG) then
+            r = message_return_get(msg, e)
+            if (return_answer_id_get(r) == cq) then
+               got = .true.
+               if (return_which(r) == RETURN_EXCEPTION_TAG) then
+                  is_exception = .true.
+                  ex = return_exception_get(r, e)
+                  call exception_reason_get(ex, reason, e)
+               end if
+               call capnp_message_free(reply)
+               return
+            end if
          end if
-      end if
-      call capnp_message_free(reply)
-   end subroutine pa_call
+         call capnp_message_free(reply)
+      end do
+   end subroutine pa_await
 
    !> A Bootstrap answer's pipeline is its one capability, so a call
    !> through any transform on it, noop included, fails with "Invalid
@@ -8904,5 +8945,50 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_call_promised_answer_outcomes
+
+   !> A promisedAnswer Call on an answer still running waits in the C++
+   !> answer pipeline (QueuedPipeline) and then reads the Return: the
+   !> returned capability is called, and a capless answer, an exception
+   !> and a read error fail the call with their text.
+   subroutine t_call_pending_promised_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      integer(int64) :: qp
+      integer :: e, k
+      logical :: got, is_exception
+      character(len=:), allocatable :: reason
+      integer, parameter :: modes(4) = [1, 2, 0, 3]
+      character(len=60), parameter :: want(4) = [character(len=60) :: '', &
+                                                 'Called null capability.', &
+                                                 'method raised error', &
+                                                 'Message contains invalid capability pointer.']
+
+      do k = 1, 4
+         pumper = pump_srv_t()
+         pumper%mode = modes(k)
+         srv => local_echo
+         pumper%inner => srv
+         call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+         call pa_send(sconn, 40_int64, qp, [0])
+         call rpc_pump_once(cconn, e)
+         call pa_await(sconn, 40_int64, got, is_exception, reason)
+         if (k == 1) then
+            call check_(error, got .and. .not. is_exception, &
+                        'pending promisedAnswer: call reaches the returned cap')
+         else
+            call check_(error, got .and. is_exception .and. reason == trim(want(k)), &
+                        'pending promisedAnswer: call fails with '//trim(want(k)))
+         end if
+         call check_(error, rpc_conn_alive(cconn), 'pending promisedAnswer: connection stays up')
+         pumper%conn => null()
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         if (allocated(error)) return
+      end do
+   end subroutine t_call_pending_promised_answer
 
 end module test_rpc
