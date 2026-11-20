@@ -586,7 +586,10 @@ contains
          if (err /= CAPNP_OK) return
          call fill_list(schema, et, p, int(off), jv, depth, err)
       case (TYPE_STRUCT)
-         if (jv%k == JK_NULL) return
+         if (jv%k /= JK_OBJ) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
             err = CAPNP_ERR_ARG
@@ -738,12 +741,14 @@ contains
       integer(int8), allocatable :: raw(:)
       err = CAPNP_OK
       if (mode == 1) then
+         if (jv%k == JK_NULL) return
          if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
          end if
          call b64_decode(jv%str, raw, err)
       else if (mode == 2) then
+         if (jv%k == JK_NULL) return
          if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
