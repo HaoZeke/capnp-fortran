@@ -1,6 +1,7 @@
 !> A raw peer scripts each session and reads every frame back as text.
-!> Each case replays a probe the differential checker runs against
-!> C++ 1.4.0 (interop/rpc-diff), and expects the frames C++ sends.
+!> Each case scripts one exchange and expects what C++ 1.4.0 does in
+!> it. Many replay a script of the differential checker
+!> (interop/rpc-diff) and expect the frames C++ sends.
 module test_rpc_peer
    use testdrive, only: unittest_type, error_type, check
    use capnp
@@ -31,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(37))
+      allocate (testsuite(38))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -106,6 +107,8 @@ contains
       testsuite(36)%test => t_fwd_rh_null
       testsuite(37)%name = "released-proxy-unindexes"
       testsuite(37)%test => t_proxy_unindexes
+      testsuite(38)%name = "resolve-to-ra-returned-npp"
+      testsuite(38)%test => t_ra_ret_npp
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1714,6 +1717,45 @@ contains
                  'unindexed: got '//c//' / '//d)
       call close_peer(conn, fd)
    end subroutine t_proxy_unindexes
+
+   !> A promise import resolves to receiverAnswer on a returned
+   !> noPromisePipelining answer whose results name our export. The
+   !> answer keeps its disabled pipeline, so the cap is broken: the import
+   !> is released, and sending a call on it fails with the hint's reason.
+   subroutine t_ra_ret_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: pl
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k, qb, q
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 2_int64, 2, -1_int64, NOCAPS, NOIDS, npp=.true.)
+      a = step(conn, fd, 1)
+      call rpc_bootstrap_send(conn, cap, e)
+      qb = cap%id
+      b = wtext(fd, k)
+      call wret(fd, qb, .false., 9_int64, promise=.true.)
+      call rpc_pump_once(conn, e)
+      call rpc_result_cap(conn, qb, [0], cap, e)
+      call wres(fd, 9_int64, 'ra', 2_int64)
+      c = step(conn, fd, 1)
+      call rpc_call_begin(conn, cap, ECHO_IFACE, 0, m, pl, q, e)
+      call payload_content_set(pl, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_call_send(conn, m, e)
+      call capnp_message_free(m)
+      d = drain(fd)
+      call check(error, c == 'REL 9 1' .and. d == '' .and. e == CAPNP_ERR_ARG .and. &
+                 index(conn%abort_reason, 'noPromisePipelining') > 0, &
+                 'resolve to returned npp: got '//a//' / '//c//' / '//d//' / '//conn%abort_reason)
+      call close_peer(conn, fd)
+   end subroutine t_ra_ret_npp
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

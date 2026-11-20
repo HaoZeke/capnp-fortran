@@ -3863,8 +3863,17 @@ contains
          end select
       end do
       if (.not. slot%has_results .or. slot%bootstrap) return
+      if (slot%no_pipeline .and. .not. results_on_wire(slot)) return
       call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, err)
    end subroutine probe_receiver_answer
+
+   !> The answer's Return carried its results to the peer. A disabled
+   !> pipeline then still walks them first (rpc.c++ PostReturnRpcPipeline).
+   logical function results_on_wire(slot)
+      type(rpc_answer_slot_t), intent(in) :: slot
+      results_on_wire = slot%has_results .and. .not. (slot%local_results .or. &
+                                                      slot%redirected .or. slot%plain_elsewhere)
+   end function results_on_wire
 
    !> Resolve a promise to a capability inside one of our answers, the
    !> way receiveCap reads `answer.pipeline` (rpc.c++ 1604-1624). Only an
@@ -3927,6 +3936,22 @@ contains
       if (active .and. n > 0) then
          if (slot%bootstrap) then
             reason = 'Invalid pipeline transform.'
+            active = .false.
+         end if
+      end if
+      if (active) then
+         if (slot%no_pipeline) then
+            ! The answer keeps the disabled pipeline, which breaks the cap.
+            if (results_on_wire(slot)) then
+               block
+                  integer :: wkind
+                  integer(int64) :: wid
+                  character(len=:), allocatable :: why
+                  call answer_pipeline_cap(conn, slot%retmsg, fields, wkind, wid, why, err)
+               end block
+               if (err /= CAPNP_OK .or. conn%dead) return
+            end if
+            reason = 'caller specified noPromisePipelining hint, but then tried to pipeline'
             active = .false.
          end if
       end if
@@ -5879,9 +5904,7 @@ contains
          ! is a local promise (rpc.c++ PostReturnRpcPipeline).
          call write_broken_promise(conn, ocd, 'caller specified noPromisePipelining ' // &
                                    'hint, but then tried to pipeline', err, &
-                                   promise=slot%has_results .and. &
-                                  .not. (slot%local_results .or. slot%redirected .or. &
-                                         slot%plain_elsewhere))
+                                   promise=results_on_wire(slot))
          return
       end if
       if (.not. slot%has_results .and. slot%plain_qid < 0_int64) then
