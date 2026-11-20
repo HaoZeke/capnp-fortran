@@ -216,8 +216,9 @@ contains
       ok = len(moddir) > 0
    end subroutine newest_module_dir
 
-   !> A node list, or a requested-file list, may not claim more elements
-   !> than the message holds.
+   !> A 4096-node zero-sized table loads as in C++ 1.4.0, charged against
+   !> the plugin's 2**30-word budget. Zero-sized requested files reach
+   !> validation.
    subroutine run_wire_count(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
@@ -255,8 +256,9 @@ contains
          '> /tmp/capnp-fortran-amp-nodes.out 2> /tmp/capnp-fortran-amp-nodes.err', &
          exitstat=stat, cmdstat=cs)
       text = slurp('/tmp/capnp-fortran-amp-nodes.out')
-      call check(error, cs == 0 .and. index(text, ', err=5') > 0, &
-                 'codegen: amplified node list')
+      call check(error, cs == 0 .and. index(text, ', err=5') == 0 .and. &
+                 index(text, 'emit failed for x.capnp') > 0, &
+                 'codegen: 4096 zero-size nodes load')
       if (allocated(error)) return
 
       call capnp_message_init_builder(msg, err)
@@ -276,8 +278,9 @@ contains
          '> /tmp/capnp-fortran-amp-files.out 2> /tmp/capnp-fortran-amp-files.err', &
          exitstat=stat, cmdstat=cs)
       text = slurp('/tmp/capnp-fortran-amp-files.out')
-      call check(error, cs == 0 .and. index(text, 'requestedFiles exceeds') > 0, &
-                 'codegen: amplified requestedFiles')
+      call check(error, cs == 0 .and. stat /= 0 .and. &
+                 index(text, 'requestedFiles exceeds') == 0, &
+                 'codegen: requested files reach list validation')
    end subroutine run_wire_count
 
    function slurp(path) result(s)

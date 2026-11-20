@@ -202,8 +202,7 @@ contains
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
-      if (.not. associated(l%msg) .or. &
-          .not. capnp_host_count_ok(n, capnp_message_nbytes(l%msg))) then
+      if (.not. associated(l%msg)) then
          err = CAPNP_ERR_ALLOC
          return
       end if

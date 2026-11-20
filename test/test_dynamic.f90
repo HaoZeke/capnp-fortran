@@ -1289,13 +1289,13 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_setp_text_nul
-   !> A zero-sized list can name more elements than the message holds.
-   !> Loading it must fail before the host array is allocated.
+   !> Zero-sized lists load like C++ 1.4.0, one traversal word per element
+   !> against the budget the reader configures. Past it the read fails.
    subroutine run_wire_count(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t) :: schema
       type(capnp_dyn_brand_t) :: brand
-      type(capnp_message_t), target :: msg
+      type(capnp_message_t), target :: msg, rd
       type(capnp_ptr_t) :: root, nodes, typed, raw, scopes
       integer(int8), allocatable :: bytes(:)
       integer :: err
@@ -1308,8 +1308,14 @@ contains
       call capnp_serialize_bytes(msg, bytes, err)
       call check_(error, err == CAPNP_OK, 'wire-count: framed')
       call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_ERR_ALLOC .and. .not. schema%loaded, &
-                  'wire-count: node count past the message')
+      call check_(error, err == CAPNP_OK .and. schema%loaded, &
+                  'wire-count: 4096 zero-size nodes load')
+      if (schema%loaded) call check_(error, size(schema%nodes) == 4096, &
+                                     'wire-count: all 4096 nodes are kept')
+      call capnp_dyn_free(schema)
+      call capnp_dyn_load(schema, bytes, err, traversal_words=4096_int64)
+      call check_(error, err /= CAPNP_OK .and. .not. schema%loaded, &
+                  'wire-count: 4096 nodes exceed a 4096-word budget')
       call capnp_dyn_free(schema)
       call capnp_message_free(msg)
 
@@ -1321,9 +1327,27 @@ contains
       call capnp_setp(raw, 0, scopes, err)
       call capnp_setp(typed, 0, raw, err)
       call capnp_dyn_load_brand(typed, brand, err)
-      call check_(error, err == CAPNP_ERR_ALLOC, &
-                  'wire-count: brand scope count past the message')
+      call check_(error, err == CAPNP_OK, 'wire-count: 4096 void brand scopes load')
+      if (err == CAPNP_OK) call check_(error, size(brand%scopes) == 4096, &
+                                       'wire-count: all 4096 scopes are kept')
+      call capnp_set_root(msg, typed, err)
+      call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
+
+      call capnp_deserialize_bytes(bytes, rd, err)
+      typed = capnp_root(rd, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_OK, 'wire-count: 4096 read brand scopes load')
+      if (err == CAPNP_OK) call check_(error, size(brand%scopes) == 4096, &
+                                       'wire-count: all 4096 read scopes are kept')
+      call capnp_message_free(rd)
+
+      call capnp_deserialize_bytes(bytes, rd, err, traversal_words=4096_int64)
+      typed = capnp_root(rd, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err /= CAPNP_OK, &
+                  'wire-count: brand scopes past the reader budget')
+      call capnp_message_free(rd)
    end subroutine run_wire_count
 
    function file_has(path, needle) result(found)
@@ -1345,8 +1369,8 @@ contains
       close (u)
    end function file_has
 
-   !> A composite list of zero-sized nodes can name far more elements than
-   !> the message has bytes. Loading it must return CAPNP_ERR_ALLOC.
+   !> Main's 10000 zero-sized nodes under a smaller configured budget.
+   !> The traversal charge refuses them before any host array is allocated.
    subroutine run_node_bomb(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
@@ -1361,8 +1385,9 @@ contains
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
-      call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_ERR_ALLOC, 'nodes: zero-size list is not allocated')
+      call capnp_dyn_load(schema, bytes, err, traversal_words=8192_int64)
+      call check_(error, err /= CAPNP_OK .and. .not. allocated(schema%nodes), &
+                  'nodes: zero-size list past the budget is not allocated')
       call capnp_dyn_free(schema)
    end subroutine run_node_bomb
 
@@ -1438,7 +1463,7 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_int_range
 
-   !> An element type tag outside the schema is not a pointer list.
+   !> An unknown dynamic element tag uses a void list, as it does in C++.
    subroutine run_unknown_list(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -1465,14 +1490,14 @@ contains
                   'unknown-list: element starts as int64')
       call capnp_set_u16(elem, 0_int64, 99_int32, err)
       made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 1_int64, err)
-      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL, &
-                  'unknown-list: init rejects the tag')
+      call check_(error, err == CAPNP_OK .and. made%esize == CAPNP_SZ_VOID, &
+                  'unknown-list: init makes a void list')
       alien = capnp_new_list(msg, CAPNP_SZ_PTR, 1_int64, err)
       call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
       call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: pointer list is not a match')
       alien = capnp_new_list(msg, CAPNP_SZ_VOID, 1_int64, err)
       call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: void list is not a match')
+      call check_(error, err == CAPNP_OK, 'unknown-list: void list is a match')
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_unknown_list

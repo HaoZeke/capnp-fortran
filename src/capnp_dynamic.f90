@@ -88,18 +88,21 @@ module capnp_dynamic
 contains
 
    !> Load a framed CodeGeneratorRequest (the bytes `capnp compile -o-`
-   !> writes).
-   subroutine capnp_dyn_load(schema, bytes, err)
+   !> writes). traversal_words sets the reader budget (default 2**30 words).
+   subroutine capnp_dyn_load(schema, bytes, err, traversal_words)
       type(capnp_dyn_schema_t), intent(inout), target :: schema
       integer(int8), intent(in) :: bytes(0:)
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: traversal_words
       type(capnp_ptr_t) :: root, l
-      integer(int64) :: n, i
+      integer(int64) :: n, i, budget
       integer :: stat
       call capnp_dyn_free(schema)
       ! Schema graphs are deep; match the plugin's generous reader guards.
+      budget = 1073741824_int64
+      if (present(traversal_words)) budget = traversal_words
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
-                                   traversal_words=1073741824_int64, depth_limit=256)
+                                   traversal_words=budget, depth_limit=256)
       if (err /= CAPNP_OK) then
          call capnp_dyn_free(schema)
          return
@@ -151,8 +154,10 @@ contains
       schema%loaded = .false.
    end subroutine capnp_dyn_free
 
-   !> A list element stored in a host array is at least one byte on the wire.
-   !> A count past the message size is a zero-size claim.
+   !> A host array sized from a wire count. A reader charged a zero-size
+   !> list one traversal word per element when it read the pointer, as C++
+   !> amplifiedRead does, so its counts fit the configured budget. A
+   !> builder has no budget.
    function wire_count_ok(p, n) result(ok)
       type(capnp_ptr_t), intent(in) :: p
       integer(int64), intent(in) :: n
@@ -161,11 +166,7 @@ contains
          ok = .false.
          return
       end if
-      if (.not. associated(p%msg)) then
-         ok = n == 0_int64
-         return
-      end if
-      ok = capnp_host_count_ok(n, capnp_message_nbytes(p%msg))
+      ok = associated(p%msg) .or. n == 0_int64
    end function wire_count_ok
 
    !> Node index for a type name: an exact displayName match, or the
@@ -320,7 +321,8 @@ contains
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       ! Brand is a pointer on struct, enum and interface only. Text, lists
@@ -329,13 +331,15 @@ contains
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
       case default
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end select
       raw = type_brand(t, err)
       if (err /= CAPNP_OK) return
       if (raw%kind == CAPNP_PK_NULL) then
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       scopes = brand_scopes(raw, err)
@@ -357,7 +361,11 @@ contains
          select case (scope_which(scope))
          case (SCOPE_INHERIT)
             brand%scopes(i + 1)%inherited = .true.
-            allocate (brand%scopes(i + 1)%bindings(0))
+            allocate (brand%scopes(i + 1)%bindings(0), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
             cycle
          case (SCOPE_BIND)
             brand%scopes(i + 1)%inherited = .false.
@@ -1191,7 +1199,7 @@ contains
       integer(int64), allocatable :: grown_slot(:), grown_foff(:)
       type(capnp_ptr_t), allocatable :: grown_view(:)
       integer(int64) :: sid, slot
-      integer :: i, n
+      integer :: i, n, stat
       err = CAPNP_OK
       if (q%kind == CAPNP_PK_NULL) return
       slot = field_slot_offset(f)
@@ -1216,11 +1224,19 @@ contains
       copied%frozen = .true.
       n = schema%n_ro
       if (.not. allocated(schema%ro_node)) then
-         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
-         allocate (schema%ro_fseg(8), schema%ro_foff(8))
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8), &
+                   schema%ro_fseg(8), schema%ro_foff(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
       else if (n >= size(schema%ro_node)) then
-         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
-         allocate (grown_fseg(n*2), grown_foff(n*2))
+         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2), &
+                   grown_fseg(n*2), grown_foff(n*2), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          grown_node(1:n) = schema%ro_node(1:n)
          grown_slot(1:n) = schema%ro_slot(1:n)
          grown_view(1:n) = schema%ro_view(1:n)
@@ -1610,9 +1626,9 @@ contains
             if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) ok = .false.
          end if
       case default
-         ! dynamic.c++ elementSizeFor (94) does not treat an unknown
-         ! element tag as a pointer. A list of that tag matches nothing.
-         ok = .false.
+         ! dynamic.c++ elementSizeFor (70-97) maps an unknown tag to
+         ! ElementSize::VOID, rather than treating it as a pointer.
+         ok = value%esize == CAPNP_SZ_VOID
       end select
    end function dyn_list_ok
 
@@ -1903,10 +1919,9 @@ contains
          case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
             esize = CAPNP_SZ_PTR
          case default
-            ! dynamic.c++ elementSizeFor (94) does not turn an unknown
-            ! element tag into a pointer list.
-            err = CAPNP_ERR_KIND
-            return
+            ! Unknown dynamic element tags are forward-compatible void lists
+            ! in Cap'n Proto C++ 1.4.0.
+            esize = CAPNP_SZ_VOID
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
