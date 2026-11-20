@@ -35,6 +35,14 @@ module test_rpc
       procedure :: dispatch => many_caps_dispatch
    end type many_caps_srv_t
 
+   !> Answers any call with one capability: receiverHosted(peer_id),
+   !> written by hand since no API puts an import in results.
+   type, extends(rpc_server_t) :: peer_cap_srv_t
+      integer(int64) :: peer_id = 0_int64
+   contains
+      procedure :: dispatch => peer_cap_dispatch
+   end type peer_cap_srv_t
+
    type, extends(rpc_server_t) :: stage_srv_t
       class(*), pointer :: staged => null()
    contains
@@ -141,7 +149,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(120))
+      allocate (testsuite(121))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -370,18 +378,20 @@ contains
       testsuite(113)%test => w_seventy_live_exports
       testsuite(114)%name = "rpc-twenty-caps-in-one-result"
       testsuite(114)%test => w_twenty_caps_in_one_result
-      testsuite(115)%name = "posix-recv-eintr-retried"
-      testsuite(115)%test => t_recv_all_retries_eintr
-      testsuite(116)%name = "rpc-framing-511-accepted"
-      testsuite(116)%test => t_framing_511_accepted
-      testsuite(117)%name = "rpc-framing-512-rejected"
-      testsuite(117)%test => t_framing_512_rejected
-      testsuite(118)%name = "rpc-framing-oversized-rejected"
-      testsuite(118)%test => t_framing_oversized_rejected
-      testsuite(119)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(119)%test => t_framing_negative_traversal_rejected
-      testsuite(120)%name = "rpc-framing-short-and-padded"
-      testsuite(120)%test => t_framing_short_and_padded
+      testsuite(115)%name = "rpc-pipelined-call-to-import-is-forwarded"
+      testsuite(115)%test => w_pipelined_call_to_import_is_forwarded
+      testsuite(116)%name = "posix-recv-eintr-retried"
+      testsuite(116)%test => t_recv_all_retries_eintr
+      testsuite(117)%name = "rpc-framing-511-accepted"
+      testsuite(117)%test => t_framing_511_accepted
+      testsuite(118)%name = "rpc-framing-512-rejected"
+      testsuite(118)%test => t_framing_512_rejected
+      testsuite(119)%name = "rpc-framing-oversized-rejected"
+      testsuite(119)%test => t_framing_oversized_rejected
+      testsuite(120)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(120)%test => t_framing_negative_traversal_rejected
+      testsuite(121)%name = "rpc-framing-short-and-padded"
+      testsuite(121)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -465,6 +475,20 @@ contains
       end do
       call payload_content_set(ctx%results, s, err)
    end subroutine many_caps_dispatch
+
+   subroutine peer_cap_dispatch(self, ctx, err)
+      class(peer_cap_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: s, ctab
+      type(cap_descriptor_t) :: cd
+      s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+      if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+      if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+      if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+      if (err == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, self%peer_id, err)
+   end subroutine peer_cap_dispatch
 
    subroutine stage_srv_dispatch(self, ctx, err)
       class(stage_srv_t), intent(inout) :: self
@@ -789,6 +813,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_twenty_caps_in_one_result(error)
    end subroutine w_twenty_caps_in_one_result
+
+   subroutine w_pipelined_call_to_import_is_forwarded(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_pipelined_call_to_import_is_forwarded(error)
+   end subroutine w_pipelined_call_to_import_is_forwarded
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -9330,6 +9359,136 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_call_promised_answer_outcomes
+
+   !> Next frame on a raw peer socket, or ok = .false. after 200 ms.
+   subroutine raw_next(fd, reply, msg, ok)
+      integer, intent(in) :: fd
+      type(capnp_message_t), intent(inout), target :: reply
+      type(message_t), intent(out) :: msg
+      logical, intent(out) :: ok
+      logical :: ready
+      integer :: e
+      ok = .false.
+      call px_poll_in(fd, 200, ready, e)
+      if (e /= CAPNP_OK .or. .not. ready) return
+      call rpc_recv_message(fd, reply, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(reply, e)
+      ok = e == CAPNP_OK
+   end subroutine raw_next
+
+   !> A pipelined call that lands on a capability the caller hosts goes
+   !> back to the caller as a tail call (rpc.c++ directTailCall): a Call
+   !> with sendResultsTo.yourself, then Return.takeFromOtherQuestion.
+   !> That question is finished once its Return and the answer's Finish
+   !> are both in.
+   subroutine t_pipelined_call_to_import_is_forwarded(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply, m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(return_t) :: r
+      type(finish_t) :: f
+      integer(int64) :: qboot, qadder, eid, tq
+      integer :: e
+      logical :: ok, forwarded, took
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send(sconn, 30_int64, qadder, [0])
+      call rpc_pump_once(cconn, e)
+      forwarded = .false.
+      tq = -1_int64
+      call raw_next(sconn%fd, reply, msg, ok)
+      if (ok .and. message_which(msg) == MESSAGE_CALL_TAG) then
+         c = message_call_get(msg, e)
+         tgt = call_target_get(c, e)
+         tq = call_question_id_get(c)
+         forwarded = message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG .and. &
+                     call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG .and. &
+                     call_interface_id_get(c) == ECHO_IFACE .and. call_method_id_get(c) == 0
+         if (forwarded) forwarded = message_target_imported_cap_get(tgt) == 77_int64
+      end if
+      call capnp_message_free(reply)
+      call check_(error, forwarded, 'forward: the call goes back to the peer')
+      if (allocated(error)) return
+      took = .false.
+      call raw_next(sconn%fd, reply, msg, ok)
+      if (ok .and. message_which(msg) == MESSAGE_RETURN_TAG) then
+         r = message_return_get(msg, e)
+         took = return_answer_id_get(r) == 30_int64 .and. &
+                return_which(r) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG
+         if (took) took = return_take_from_other_question_get(r) == tq
+      end if
+      call capnp_message_free(reply)
+      call check_(error, took, 'forward: the answer takes the forwarded results')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, tq, e)
+      call return_results_sent_elsewhere_set(r, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call raw_next(sconn%fd, reply, msg, ok)
+      call capnp_message_free(reply)
+      call check_(error, .not. ok, 'forward: no Finish while the answer is live')
+
+      call pa_send(sconn, 31_int64, 30_int64, [integer ::])
+      call rpc_pump_once(cconn, e)
+      forwarded = .false.
+      call raw_next(sconn%fd, reply, msg, ok)
+      if (ok .and. message_which(msg) == MESSAGE_CALL_TAG) then
+         c = message_call_get(msg, e)
+         tgt = call_target_get(c, e)
+         forwarded = message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG .and. &
+                     call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
+         if (forwarded) then
+            block
+               type(promised_answer_t) :: pa
+               pa = message_target_promised_answer_get(tgt, e)
+               forwarded = promised_answer_question_id_get(pa) == tq
+            end block
+         end if
+      end if
+      call capnp_message_free(reply)
+      call raw_next(sconn%fd, reply, msg, ok)
+      took = .false.
+      if (ok .and. message_which(msg) == MESSAGE_RETURN_TAG) then
+         r = message_return_get(msg, e)
+         took = return_answer_id_get(r) == 31_int64 .and. &
+                return_which(r) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG
+      end if
+      call capnp_message_free(reply)
+      call check_(error, forwarded .and. took, &
+                  'forward: a call on the forwarded answer pipelines on its question')
+
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      f = message_finish_init(msg, e)
+      call finish_question_id_set(f, 30_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      ok = .false.
+      call raw_next(sconn%fd, msg=msg, reply=reply, ok=took)
+      if (took .and. message_which(msg) == MESSAGE_FINISH_TAG) then
+         f = message_finish_get(msg, e)
+         ok = finish_question_id_get(f) == tq .and. .not. finish_release_result_caps_get(f)
+      end if
+      call capnp_message_free(reply)
+      call check_(error, ok, 'forward: the answer Finish finishes the forwarded question')
+      call check_(error, rpc_conn_alive(cconn), 'forward: connection stays up')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_pipelined_call_to_import_is_forwarded
 
    !> A promisedAnswer Call on an answer still running waits in the C++
    !> answer pipeline (QueuedPipeline) and then reads the Return: the

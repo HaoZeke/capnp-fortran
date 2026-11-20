@@ -123,6 +123,7 @@ module capnp_rpc
    integer, parameter :: PIPE_BROKEN = 0
    integer, parameter :: PIPE_EXPORT = 1
    integer, parameter :: PIPE_IMPORT = 2
+   integer, parameter :: PIPE_QUESTION = 3
 
    !> Policy shared by every wrapper belonging to one membrane. Reusing
    !> the same object gives all wrapped capabilities one revocation
@@ -253,6 +254,9 @@ module capnp_rpc
       logical :: canceled = .false.
       !> The Call asked for sendResultsTo.yourself.
       logical :: tail_call = .false.
+      !> The answer whose Return took its results from this question,
+      !> when this vat forwarded that answer's call back to the peer.
+      integer(int64) :: tail_answer = -1_int64
       !> The call was delivered to a local capability, not sent on the wire.
       logical :: local_call = .false.
       !> Caps in retmsg are exports this vat hosts, not imports.
@@ -285,6 +289,8 @@ module capnp_rpc
       !> The answer to a Bootstrap. Its pipeline is the one cap, so any
       !> transform is invalid (rpc.c++ SingleCapPipeline).
       logical :: bootstrap = .false.
+      !> The question this answer's Return took its results from.
+      integer(int64) :: forward_qid = -1_int64
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
       integer, allocatable :: exports(:)
@@ -1064,6 +1070,7 @@ contains
             conn%questions(k)%returned = .false.
             conn%questions(k)%canceled = .false.
             conn%questions(k)%tail_call = .false.
+            conn%questions(k)%tail_answer = -1_int64
             conn%questions(k)%local_call = .false.
             conn%questions(k)%local_results = .false.
             conn%questions(k)%local_export = -1
@@ -2913,6 +2920,7 @@ contains
       slot%returned = .false.
       slot%canceled = .false.
       slot%tail_call = .false.
+      slot%tail_answer = -1_int64
       slot%local_call = .false.
       slot%local_results = .false.
       slot%local_export = -1
@@ -2936,6 +2944,7 @@ contains
       slot%finished = .false.
       slot%redirected = .false.
       slot%bootstrap = .false.
+      slot%forward_qid = -1_int64
       slot%nexp = 0
       if (allocated(slot%exports)) deallocate (slot%exports)
       slot%exports_pinned = .false.
@@ -4628,6 +4637,7 @@ contains
       slot%finished = .false.
       slot%redirected = .false.
       slot%bootstrap = .false.
+      slot%forward_qid = -1_int64
       slot%nexp = 0
       if (allocated(slot%exports)) deallocate (slot%exports)
       ok = .true.
@@ -4683,11 +4693,12 @@ contains
       integer, intent(out) :: err
       type(call_t) :: c
       type(payload_t) :: params
-      integer(int64) :: qid, aqid
-      integer :: eid, terr
+      integer(int64) :: qid, aqid, fid
+      integer :: eid, terr, fkind
       logical :: elsewhere
       character(len=:), allocatable :: reason
       integer(int64), allocatable :: spill(:)
+      integer, allocatable :: fops(:)
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
@@ -4710,7 +4721,7 @@ contains
       if (conn%dead .or. err /= CAPNP_OK) return
 
       reason = 'no such capability'
-      call resolve_target(conn, c, eid, terr, reason, aqid)
+      call resolve_target(conn, c, eid, terr, reason, aqid, fkind, fid, fops)
       if (conn%dead) return
       block
          type(message_target_t) :: tgt
@@ -4731,9 +4742,179 @@ contains
          call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
          return
       end if
-      call run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+      if (terr == CAPNP_OK .and. fkind /= PIPE_BROKEN .and. &
+          can_forward(c)) then
+         call forward_call(conn, c, qid, fkind, fid, fops, err)
+      else
+         call run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+      end if
       call release_spilled_vines(conn, spill, err)
    end subroutine handle_call
+
+   !> C++ 1.4.0 forwards a call as a tail call only when the caller
+   !> takes the results and accepts promise pipelining (rpc.c++
+   !> directTailCall).
+   logical function can_forward(c)
+      type(call_t), intent(in) :: c
+      can_forward = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
+                    .not. call_no_promise_pipelining_get(c)
+   end function can_forward
+
+   !> Answer Call `c` (question `qid`) whose target the peer hosts:
+   !> PIPE_IMPORT names our import `fid`, PIPE_QUESTION the pipeline
+   !> `fops` of our question `fid`. As in C++ 1.4.0 directTailCall
+   !> (rpc.c++ 2610-2641), the call goes back with sendResultsTo.yourself
+   !> and the answer takes its results from that new question, whose
+   !> pipeline later calls on the answer use.
+   recursive subroutine forward_call(conn, c, qid, fkind, fid, fops, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(call_t), intent(in) :: c
+      integer(int64), intent(in) :: qid, fid
+      integer, intent(in) :: fkind
+      integer, intent(in) :: fops(:)
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: cm, rm
+      type(message_t) :: cmsg, rmsg
+      type(call_t) :: fc
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      type(payload_t) :: inp, outp
+      type(return_t) :: r
+      type(rpc_answer_slot_t), pointer :: slot
+      integer(int64) :: tq
+      integer(int8), allocatable :: bytes(:)
+      logical :: found
+      integer :: i
+      tq = alloc_qid(conn)
+      if (tq < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      conn%questions(int(tq))%tail_call = .true.
+      conn%questions(int(tq))%tail_answer = qid
+      call capnp_message_init_builder(cm, err)
+      if (err == CAPNP_OK) cmsg = message_new_root(cm, err)
+      if (err == CAPNP_OK) fc = message_call_init(cmsg, err)
+      if (err == CAPNP_OK) call call_question_id_set(fc, tq, err)
+      if (err == CAPNP_OK) call call_interface_id_set(fc, call_interface_id_get(c), err)
+      if (err == CAPNP_OK) call call_method_id_set(fc, call_method_id_get(c), err)
+      if (err == CAPNP_OK) &
+         call call_only_promise_pipeline_set(fc, call_only_promise_pipeline_get(c), err)
+      if (err == CAPNP_OK) tgt = call_target_init(fc, err)
+      if (err == CAPNP_OK) then
+         if (fkind == PIPE_IMPORT) then
+            call message_target_imported_cap_set(tgt, fid, err)
+         else
+            pa = message_target_promised_answer_init(tgt, err)
+            if (err == CAPNP_OK) call promised_answer_question_id_set(pa, fid, err)
+            if (err == CAPNP_OK) &
+               ops = promised_answer_transform_init(pa, int(size(fops), int64), err)
+            do i = 1, size(fops)
+               if (err /= CAPNP_OK) exit
+               op%p = capnp_list_get_struct(ops, i - 1, err)
+               if (err /= CAPNP_OK) exit
+               if (fops(i) < 0) then
+                  call promised_answer_op_noop_set(op, err)
+               else
+                  call promised_answer_op_get_pointer_field_set(op, fops(i), err)
+               end if
+            end do
+         end if
+      end if
+      if (err == CAPNP_OK) call call_send_results_to_yourself_set(fc, err)
+      if (err == CAPNP_OK) inp = call_params_get(c, err)
+      if (err == CAPNP_OK) outp = call_params_init(fc, err)
+      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, cm, err)
+      call capnp_message_free(cm)
+      if (err /= CAPNP_OK) then
+         call release_question(conn, tq)
+         return
+      end if
+      call capnp_message_init_builder(rm, err)
+      if (err == CAPNP_OK) rmsg = message_new_root(rm, err)
+      if (err == CAPNP_OK) r = message_return_init(rmsg, err)
+      if (err == CAPNP_OK) call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
+      if (err == CAPNP_OK) call return_take_from_other_question_set(r, tq, err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(rm)
+         return
+      end if
+      call answer_find(conn, qid, slot, found)
+      if (.not. found) call answer_add_hi(conn, qid, slot)
+      slot%has_results = .true.
+      slot%forward_qid = tq
+      slot%nexp = 0
+      call capnp_serialize_bytes(rm, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, slot%retmsg, err)
+      if (err == CAPNP_OK) call settle_answer_promises(conn, qid, rm, err)
+      if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
+      call capnp_message_free(rm)
+   end subroutine forward_call
+
+   !> Copy a Call's params into a Call going back to the same peer. Each
+   !> capability is written as C++ 1.4.0 writeDescriptor writes it for
+   !> that connection: the peer's own export as receiverHosted, ours as
+   !> senderHosted with one more reference, a vine as the import it is.
+   subroutine copy_forwarded_payload(conn, inp, outp, m, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(payload_t), intent(in) :: inp
+      type(payload_t), intent(inout) :: outp
+      type(capnp_message_t), intent(inout), target :: m
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: content, ictab, octab
+      type(cap_descriptor_t) :: icd, ocd
+      integer :: i, n, eid
+      integer(int64) :: id
+      err = CAPNP_OK
+      if (inp%p%kind /= CAPNP_PK_STRUCT) return
+      content = payload_content_get(inp, err)
+      if (err /= CAPNP_OK) return
+      if (content%kind /= CAPNP_PK_NULL) then
+         call payload_content_set(outp, capnp_copy(m, content, err), err)
+         if (err /= CAPNP_OK) return
+      end if
+      ictab = payload_cap_table_get(inp, err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(ictab))
+      if (n == 0) return
+      octab = payload_cap_table_init(outp, int(n, int64), err)
+      do i = 0, n - 1
+         if (err /= CAPNP_OK) return
+         icd%p = capnp_list_get_struct(ictab, i, err)
+         if (err == CAPNP_OK) ocd%p = capnp_list_get_struct(octab, i, err)
+         if (err /= CAPNP_OK) return
+         select case (cap_descriptor_which(icd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_hosted_get(icd), err)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_promise_get(icd), err)
+         case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+            id = cap_descriptor_receiver_hosted_get(icd)
+            call cap_descriptor_none_set(ocd, err)
+            if (eslot_ok(conn, id)) then
+               eid = int(id)
+               if (conn%exports(eid)%used .and. conn%exports(eid)%refcount > 0) then
+                  conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
+                  call cap_descriptor_sender_hosted_set(ocd, id, err)
+               end if
+            end if
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            block
+               type(third_party_cap_descriptor_t) :: tp
+               tp = cap_descriptor_third_party_hosted_get(icd, err)
+               if (err == CAPNP_OK) call cap_descriptor_receiver_hosted_set( &
+                  ocd, third_party_cap_descriptor_vine_id_get(tp), err)
+            end block
+         case default
+            call cap_descriptor_none_set(ocd, err)
+         end select
+      end do
+   end subroutine copy_forwarded_payload
 
    !> Dispatch an incoming Call to export `eid` and answer it, or answer
    !> it with `reason` when the target did not resolve.
@@ -4849,10 +5030,12 @@ contains
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
-      integer, allocatable :: fields(:)
+      integer, allocatable :: fields(:), qops(:)
       character(len=:), allocatable :: reason
       integer(int64) :: id
       integer :: i, kind, eid, e
+      type(rpc_answer_slot_t), pointer :: cslot
+      logical :: cfound
       err = CAPNP_OK
       waiting => null()
       tail => null()
@@ -4896,9 +5079,21 @@ contains
                   if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
                      fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
                end do
-               call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, deferred=.true.)
+               call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, &
+                                        deferred=.true., qops=qops)
             end if
-            if (e == CAPNP_OK) then
+            cfound = .false.
+            if (e == CAPNP_OK .and. (kind == PIPE_IMPORT .or. kind == PIPE_QUESTION) .and. &
+                can_forward(c)) then
+               call answer_find(conn, node%call_qid, cslot, cfound)
+               if (cfound) cfound = associated(cslot)
+               if (cfound) cfound = cslot%used .and. .not. cslot%finished
+            end if
+            if (cfound) then
+               if (.not. allocated(qops)) allocate (qops(0))
+               call forward_call(conn, c, node%call_qid, kind, id, qops, err)
+               call release_spilled_vines(conn, node%spill, err)
+            else if (e == CAPNP_OK) then
                eid = -1
                if (kind == PIPE_EXPORT .and. eslot_ok(conn, id)) then
                   if (conn%exports(int(id))%used) eid = int(id)
@@ -4949,32 +5144,43 @@ contains
    !> eid = -1 when the target does not resolve.
    !> `pending_qid` names the answer when the target is the pipeline of
    !> an answer still running, and is -1 otherwise.
-   subroutine resolve_target(conn, c, out_eid, err, reason, pending_qid)
+   subroutine resolve_target(conn, c, out_eid, err, reason, pending_qid, &
+                             fwd_kind, fwd_id, fwd_ops)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
       character(len=:), allocatable, intent(inout) :: reason
       integer(int64), intent(out) :: pending_qid
+      integer, intent(out) :: fwd_kind
+      integer(int64), intent(out) :: fwd_id
+      integer, allocatable, intent(out) :: fwd_ops(:)
       type(message_target_t) :: tgt
       out_eid = -1
       pending_qid = -1_int64
+      fwd_kind = PIPE_BROKEN
+      fwd_id = -1_int64
       tgt = call_target_get(c, err)
       if (err /= CAPNP_OK) return
-      call resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid)
+      call resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid, &
+                                  fwd_kind, fwd_id, fwd_ops)
    end subroutine resolve_target
 
    !> Resolve a MessageTarget to a local export index, or -1 when it names
    !> nothing this vat hosts. Shared by Call and Join, which address
    !> capabilities the same way. `reason` is set when the target is a
    !> broken capability with a known text.
-   subroutine resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid)
+   subroutine resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid, &
+                                     fwd_kind, fwd_id, fwd_ops)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_target_t), intent(in) :: tgt
       integer, intent(out) :: out_eid
       integer, intent(out) :: err
       character(len=:), allocatable, intent(inout), optional :: reason
       integer(int64), intent(out), optional :: pending_qid
+      integer, intent(out), optional :: fwd_kind
+      integer(int64), intent(out), optional :: fwd_id
+      integer, allocatable, intent(out), optional :: fwd_ops(:)
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
@@ -4984,9 +5190,12 @@ contains
       character(len=:), allocatable :: why
       type(rpc_answer_slot_t), pointer :: aslot
       logical :: afound
+      integer, allocatable :: qops(:)
       out_eid = -1
       err = CAPNP_OK
       if (present(pending_qid)) pending_qid = -1_int64
+      if (present(fwd_kind)) fwd_kind = PIPE_BROKEN
+      if (present(fwd_id)) fwd_id = -1_int64
       select case (message_target_which(tgt))
       case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
          eid = message_target_imported_cap_get(tgt)
@@ -5034,9 +5243,19 @@ contains
             if (present(reason)) reason = 'Invalid pipeline transform.'
             return
          end if
-         call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err)
+         call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err, qops=qops)
          if (err /= CAPNP_OK .or. conn%dead) return
          select case (kind)
+         case (PIPE_IMPORT, PIPE_QUESTION)
+            if (present(fwd_kind)) fwd_kind = kind
+            if (present(fwd_id)) fwd_id = eid
+            if (present(fwd_ops)) then
+               if (allocated(qops)) then
+                  call move_alloc(qops, fwd_ops)
+               else
+                  allocate (fwd_ops(0))
+               end if
+            end if
          case (PIPE_EXPORT)
             ! The answer's pipeline holds its result capabilities, not the
             ! export table, so a pin keeps a released export callable.
@@ -5059,7 +5278,7 @@ contains
    !> cap index abort the connection (layout.c++ readCapabilityPointer).
    !> With `deferred`, the answer was pending when the capability was
    !> taken, so a read error breaks the capability with that text.
-   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err, deferred)
+   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err, deferred, qops)
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: retmsg
       integer, intent(in) :: fields(:)
@@ -5068,6 +5287,7 @@ contains
       character(len=:), allocatable, intent(out) :: reason
       integer, intent(out) :: err
       logical, intent(in), optional :: deferred
+      integer, allocatable, intent(out), optional :: qops(:)
       type(message_t) :: amsg
       type(return_t) :: ar
       type(payload_t) :: apl
@@ -5085,6 +5305,15 @@ contains
       if (err /= CAPNP_OK) return
       if (return_which(ar) == RETURN_EXCEPTION_TAG) then
          call return_exception_reason(ar, reason)
+         return
+      end if
+      if (return_which(ar) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+         kind = PIPE_QUESTION
+         id = return_take_from_other_question_get(ar)
+         if (present(qops)) then
+            allocate (qops(size(fields)))
+            qops = fields
+         end if
          return
       end if
       if (return_which(ar) /= RETURN_RESULTS_TAG) return
@@ -5129,6 +5358,29 @@ contains
       case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
          kind = PIPE_IMPORT
          id = cap_descriptor_receiver_hosted_get(cd)
+      case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+         block
+            type(promised_answer_t) :: rpa
+            type(promised_answer_op_t) :: rop
+            type(capnp_ptr_t) :: rops
+            integer :: k
+            rpa = cap_descriptor_receiver_answer_get(cd, err)
+            if (err == CAPNP_OK) rops = promised_answer_transform_get(rpa, err)
+            if (err /= CAPNP_OK) return
+            kind = PIPE_QUESTION
+            id = promised_answer_question_id_get(rpa)
+            if (present(qops)) then
+               allocate (qops(int(capnp_list_len(rops))))
+               do k = 0, size(qops) - 1
+                  rop%p = capnp_list_get_struct(rops, k, err)
+                  if (err /= CAPNP_OK) return
+                  qops(k + 1) = -1
+                  if (promised_answer_op_which(rop) == &
+                      PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+                     qops(k + 1) = int(promised_answer_op_get_pointer_field_get(rop))
+               end do
+            end if
+         end block
       end select
    contains
       subroutine read_error(text)
@@ -6387,7 +6639,69 @@ contains
          conn%questions(q)%returned = .true.
       end if
       call capnp_message_free(m)
+      if (err == CAPNP_OK .and. conn%questions(q)%tail_answer >= 0_int64) &
+         call settle_forwarded_question(conn, q, err)
    end subroutine handle_return
+
+   !> The question a forwarded answer took its results from is finished
+   !> once both its Return and the answer's Finish are in, as the C++
+   !> answer pipeline and the call both keep the question alive.
+   subroutine settle_forwarded_question(conn, q, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: q
+      integer, intent(out) :: err
+      type(rpc_answer_slot_t), pointer :: slot
+      logical :: found
+      err = CAPNP_OK
+      call answer_find(conn, conn%questions(q)%tail_answer, slot, found)
+      if (found) found = associated(slot)
+      if (found) found = slot%used .and. slot%forward_qid == int(q, int64)
+      if (found) return
+      call send_question_finish(conn, int(q, int64), .false., err)
+      call question_slot_clear(conn%questions(q))
+   end subroutine settle_forwarded_question
+
+   !> Finish of a forwarded answer drops its hold on question `tq`. A
+   !> question still awaiting its Return is canceled; C++ then asks the
+   !> peer to release the result capabilities.
+   subroutine finish_forwarded_question(conn, tq, aqid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: tq, aqid
+      integer, intent(out) :: err
+      integer :: q
+      err = CAPNP_OK
+      if (.not. qslot_ok(conn, tq)) return
+      q = int(tq)
+      if (.not. conn%questions(q)%used) return
+      if (conn%questions(q)%tail_answer /= aqid) return
+      call send_question_finish(conn, tq, .not. conn%questions(q)%returned, err)
+      if (conn%questions(q)%returned) then
+         call question_slot_clear(conn%questions(q))
+      else
+         conn%questions(q)%canceled = .true.
+         conn%questions(q)%tail_answer = -1_int64
+      end if
+   end subroutine finish_forwarded_question
+
+   subroutine send_question_finish(conn, qid, release_caps, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      logical, intent(in) :: release_caps
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      err = CAPNP_OK
+      if (conn%dead .or. .not. associated(conn%transport)) return
+      call capnp_message_init_builder(m, err)
+      if (err == CAPNP_OK) msg = message_new_root(m, err)
+      if (err == CAPNP_OK) f = message_finish_init(msg, err)
+      if (err == CAPNP_OK) call finish_question_id_set(f, qid, err)
+      if (err == CAPNP_OK) call finish_release_result_caps_set(f, release_caps, err)
+      if (err == CAPNP_OK) call finish_require_early_cancellation_workaround_set(f, .false., err)
+      if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)
+      call capnp_message_free(m)
+   end subroutine send_question_finish
 
    !> Finish of a Provide question drops the arrangement, including one
    !> whose question id never fit in the answer table.
@@ -6474,6 +6788,10 @@ contains
       ! Finish always drops the pipeline reference, including when
       ! releaseResultCaps is false and the wire refs stay.
       call unpin_answer_exports(conn, jslot)
+      if (jslot%forward_qid >= 0_int64) then
+         call finish_forwarded_question(conn, jslot%forward_qid, qid, jerr)
+         if (jerr /= CAPNP_OK) err = jerr
+      end if
       call capnp_message_free(jslot%retmsg)
       call answer_slot_clear(jslot)
       if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
