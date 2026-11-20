@@ -1598,12 +1598,13 @@ contains
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_message_t), target :: msg
-      type(capnp_ptr_t) :: root, lst, bare
-      integer(int8), allocatable :: bytes(:)
+      type(capnp_ptr_t) :: root, lst, bare, plist, q
+      integer(int8), allocatable :: bytes(:), payload(:)
       integer(int64) :: n
       integer :: err, idx, tag
       logical :: flag
       real(real64) :: x
+      character(len=:), allocatable :: s
 
       call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
       if (err /= CAPNP_OK) then
@@ -1623,6 +1624,19 @@ contains
       x = capnp_dyn_get_f64(schema, idx, lst, 'f64', err)
       call check_(error, err == CAPNP_ERR_KIND .and. x == 0.0_real64, &
                   'bad-handle: float on a list')
+      plist = capnp_new_list(msg, CAPNP_SZ_PTR, 2_int64, err)
+      call capnp_dyn_get_text(schema, idx, plist, 'note', s, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'bad-handle: text on a pointer list')
+      call capnp_dyn_get_data(schema, idx, plist, 'blob', payload, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'bad-handle: data on a pointer list')
+      q = capnp_dyn_getp(schema, idx, plist, 'note', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'bad-handle: pointer on a pointer list')
+      idx = capnp_dyn_find(schema, 'Dynamic', err)
+      q = capnp_dyn_getp(schema, idx, plist, 'choice', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'bad-handle: group on a pointer list')
+      idx = capnp_dyn_find(schema, 'Scalars', err)
       bare = capnp_ptr_t()
       bare%kind = CAPNP_PK_STRUCT
       bare%dwords = 1

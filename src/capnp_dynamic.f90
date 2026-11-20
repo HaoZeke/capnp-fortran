@@ -694,6 +694,37 @@ contains
           byte_off + nbytes > p%msg%segs(p%seg)%len) err = CAPNP_ERR_BOUNDS
    end subroutine dyn_bits_readable
 
+   !> A pointer field beyond a struct's pointer section is null. A field
+   !> inside that section must name bytes in a message segment.
+   subroutine dyn_pointer_readable(p, slot, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: slot
+      integer, intent(out) :: err
+      integer(int64) :: byte_off
+      err = CAPNP_OK
+      if (p%kind == CAPNP_PK_NULL) return
+      if (p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (slot < 0) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (slot >= p%pwords) return
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. allocated(p%msg%segs) .or. p%seg < 1 .or. p%seg > p%msg%nsegs) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      byte_off = p%off + int(p%dwords + slot, int64)*8_int64
+      if (p%off < 0_int64 .or. byte_off < 0_int64 .or. &
+          byte_off + 8_int64 > p%msg%segs(p%seg)%len) err = CAPNP_ERR_BOUNDS
+   end subroutine dyn_pointer_readable
+
    !> C++ DynamicStruct::get rejects a union arm that is not selected.
    subroutine dyn_require_active(schema, idx, p, f, err)
       use capnp_union, only: capnp_which
@@ -1080,6 +1111,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (q%kind /= CAPNP_PK_NULL) then
@@ -1110,6 +1143,8 @@ contains
          allocate (bytes(0:-1))
          return
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (q%kind /= CAPNP_PK_NULL) then
@@ -1137,11 +1172,16 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: f, t, dv
+      q = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
+         if (p%kind /= CAPNP_PK_NULL .and. p%kind /= CAPNP_PK_STRUCT) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          q = p
          return
       end if
@@ -1153,6 +1193,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end select
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       dv = field_slot_default(f, err)
@@ -1750,6 +1792,8 @@ contains
             return
          end if
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       value = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (value%kind == CAPNP_PK_NULL) return
