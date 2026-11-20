@@ -9,7 +9,6 @@ program tester
    use test_dynamic, only: collect_dynamic
    use test_generated, only: collect_generated
    use test_generic, only: collect_generic
-   use test_codegen_parity, only: collect_codegen_parity
    use test_holder, only: collect_holder
    use test_interop, only: collect_interop
    use test_kitchen, only: collect_kitchen
@@ -18,6 +17,7 @@ program tester
    use test_rpc_handoff, only: collect_rpc_handoff
    use test_rpc_typed, only: collect_rpc_typed
    use test_stream, only: collect_stream
+   use test_codegen_parity, only: collect_codegen_parity
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -32,7 +32,6 @@ program tester
         new_testsuite("dynamic", collect_dynamic), &
         new_testsuite("generated", collect_generated), &
         new_testsuite("generic", collect_generic), &
-        new_testsuite("codegen_parity", collect_codegen_parity), &
         new_testsuite("holder", collect_holder), &
         new_testsuite("interop", collect_interop), &
         new_testsuite("kitchen", collect_kitchen), &
@@ -40,7 +39,8 @@ program tester
         new_testsuite("rpc", collect_rpc), &
         new_testsuite("rpc_handoff", collect_rpc_handoff), &
         new_testsuite("rpc_typed", collect_rpc_typed), &
-        new_testsuite("stream", collect_stream) &
+        new_testsuite("stream", collect_stream), &
+        new_testsuite("codegen_parity", collect_codegen_parity) &
         ]
 
    call get_argument(1, suite_name)

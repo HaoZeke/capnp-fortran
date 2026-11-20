@@ -220,7 +220,7 @@ Compile a schema:
 $ capnp compile -o build/gfortran_*/app/capnpc-fortran schema/addressbook.capnp
 ```
 
-This writes `addressbook_capnp.f90`. Build a message and read it back:
+This writes `schema/addressbook_capnp.f90` (the schema's directory is kept). Build a message and read it back:
 
 ```fortran
 program tutorial

@@ -51,7 +51,7 @@ module capnp_schema
    public :: node_struct_fields, node_enumerants, node_const_type, node_const_value
    public :: node_interface_methods, method_name
    public :: method_param_struct_type, method_result_struct_type
-   public :: node_interface_superclasses, superclass_id
+   public :: method_param_brand, method_result_brand
    public :: field_name, field_code_order, field_discriminant, field_which
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
    public :: field_slot_had_default
@@ -60,12 +60,24 @@ module capnp_schema
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
    public :: value_text, value_enum, value_pointer, value_data
-   public :: type_brand, type_anyptr_which, type_param_scope_id, type_param_index
+   public :: type_brand, type_anyptr_which, type_anyptr_kind
+   public :: type_param_scope_id, type_param_index
    public :: brand_scopes, scope_scope_id, scope_which, scope_bindings
    public :: binding_which, binding_type
+   public :: node_annotations, node_parameters, node_is_generic
+   public :: node_interface_superclasses, superclass_id
+   public :: field_annotations, enumerant_annotations, method_annotations
+   public :: method_implicit_count
+   public :: annotation_id, annotation_value
 
    integer, parameter, public :: ANYPTR_UNCONSTRAINED = 0
    integer, parameter, public :: ANYPTR_PARAMETER = 1
+   integer, parameter, public :: ANYPTR_IMPLICIT = 2
+   !> Type.anyPointer.unconstrained union (u16 at byte 10).
+   integer, parameter, public :: ANYPTR_KIND_ANY = 0
+   integer, parameter, public :: ANYPTR_KIND_STRUCT = 1
+   integer, parameter, public :: ANYPTR_KIND_LIST = 2
+   integer, parameter, public :: ANYPTR_KIND_CAPABILITY = 3
    integer, parameter, public :: SCOPE_BIND = 0
    integer, parameter, public :: SCOPE_INHERIT = 1
    integer, parameter, public :: BINDING_UNBOUND = 0
@@ -88,6 +100,14 @@ contains
       integer :: w
       w = int(capnp_get_u16(p, 8_int64))
    end function type_anyptr_which
+
+   !> Unconstrained AnyPointer kind, or the parameter index in the other
+   !> anyPointer variants (they share the u16 at byte 10).
+   function type_anyptr_kind(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 10_int64))
+   end function type_anyptr_kind
 
    !> Type.anyPointer.parameter: scopeId u64 at byte 16, parameterIndex
    !> u16 at byte 10.
@@ -303,18 +323,20 @@ contains
       v = capnp_get_i64(p, 16_int64)
    end function method_result_struct_type
 
-   function node_interface_superclasses(p, err) result(l)
+   !> Method.paramBrand is pointer 2; resultBrand is pointer 3.
+   function method_param_brand(p, err) result(b)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: l
-      l = capnp_getp(p, 4, err)
-   end function node_interface_superclasses
+      type(capnp_ptr_t) :: b
+      b = capnp_getp(p, 2, err)
+   end function method_param_brand
 
-   function superclass_id(p) result(v)
+   function method_result_brand(p, err) result(b)
       type(capnp_ptr_t), intent(in) :: p
-      integer(int64) :: v
-      v = capnp_get_i64(p, 0_int64)
-   end function superclass_id
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: b
+      b = capnp_getp(p, 3, err)
+   end function method_result_brand
 
    function node_const_type(p, err) result(t)
       type(capnp_ptr_t), intent(in) :: p
@@ -524,5 +546,86 @@ contains
       integer :: v
       v = int(capnp_get_u16(p, 2_int64))
    end function value_enum
+
+   ! --- Node extras: annotations @ ptr 2, parameters @ ptr 5, -----------
+   ! --- interface.superclasses @ ptr 4. Offsets from capnp 1.4.0. -------
+
+   function node_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 2, err)
+   end function node_annotations
+
+   function node_parameters(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 5, err)
+   end function node_parameters
+
+   function node_is_generic(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      logical :: v
+      v = capnp_get_bool(p, 288_int64)
+   end function node_is_generic
+
+   function node_interface_superclasses(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 4, err)
+   end function node_interface_superclasses
+
+   function superclass_id(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 0_int64)
+   end function superclass_id
+
+   function field_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 1, err)
+   end function field_annotations
+
+   function enumerant_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 1, err)
+   end function enumerant_annotations
+
+   !> Method.annotations is pointer 1; implicitParameters is pointer 4.
+   function method_annotations(p, err) result(l)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 1, err)
+   end function method_annotations
+
+   function method_implicit_count(p, err) result(n)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      integer(int64) :: n
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(p, 4, err)
+      if (err /= CAPNP_OK) return
+      n = capnp_list_len(l)
+   end function method_implicit_count
+
+   function annotation_id(p) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64) :: v
+      v = capnp_get_i64(p, 0_int64)
+   end function annotation_id
+
+   function annotation_value(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 0, err)
+   end function annotation_value
 
 end module capnp_schema

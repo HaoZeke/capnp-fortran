@@ -3,7 +3,9 @@
 !>   capnp compile -o /path/to/capnpc-fortran schema.capnp
 !>
 !> reads an unpacked CodeGeneratorRequest on stdin and writes one
-!> <schema>_capnp.f90 module per requested file into the working directory.
+!> <schema>_capnp.f90 module per requested file. The module name is the
+!> basename. A directory in the requested filename is kept, matching
+!> capnpc-c++ writeFile, so two schemas can share a basename.
 !> A file argument replaces stdin for offline runs:
 !>
 !>   capnp compile -o- schema.capnp > req.bin && capnpc-fortran req.bin

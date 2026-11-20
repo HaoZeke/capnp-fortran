@@ -170,12 +170,12 @@ program drv
    integer :: err
    call capnp_message_init_builder(m1, err)
    h = def_lists_new_root(m1, err)
-   call capnp_list_set_i32(def_lists_nums_get(h, err), 0_int64, 999_int32, err)
+   call def_lists_nums_set_elem(h, 0, 999, err)
    call capnp_message_init_builder(m2, err)
    h2 = def_lists_new_root(m2, err)
    call def_lists_tags_get_elem(h2, 0, s, err)
    e = def_lists_elems_get_elem(h2, 0, err)
-   print '(i0,1x,a,1x,i0)', capnp_list_get_i32(def_lists_nums_get(h2, err), 0_int64, err), s, elem_v_get(e)
+   print '(i0,1x,a,1x,i0)', def_lists_nums_get_elem(h2, 0, err), s, elem_v_get(e)
    deallocate (s)
    call capnp_message_free(m1)
    call capnp_message_free(m2)
@@ -202,7 +202,11 @@ EOF
   f=$(./drv)
   c=$(./cppdrv)
   cmp_out "$f" "$c"
-  [[ "$f" == "10 alpha 7" ]]
+  if [[ "$which" == g3 ]]; then
+    # The fresh builder still sees the schema default after the other
+    # builder wrote 999 into its own copy.
+    [[ "$f" == 10\ * ]]
+  fi
   echo "$which ok"
 }
 
@@ -218,8 +222,60 @@ EOF
   capnp compile -o"$BIN" ifaces.capnp
   grep -q 'extends(base_server_t)' ifaces_capnp.f90
   grep -q 'call base_dispatch' ifaces_capnp.f90
-  capnp compile -oc++ ifaces.capnp
-  grep -q 'class Server' ifaces.capnp.h
+  cat > impl.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use ifaces_capnp
+   implicit none
+   integer :: saw = 0
+   type, extends(sub_server_t) :: srv_t
+   contains
+      procedure :: ping => do_ping
+      procedure :: pong => do_pong
+   end type srv_t
+contains
+   subroutine do_ping(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(base_ping_params_t), intent(in) :: params
+      type(base_ping_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      saw = 1
+      err = CAPNP_OK
+      call base_ping_results_x_set(results, 7, err)
+   end subroutine do_ping
+   subroutine do_pong(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(sub_pong_params_t), intent(in) :: params
+      type(sub_pong_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      saw = 2
+      err = CAPNP_OK
+   end subroutine do_pong
+end module impl
+program drv
+   use capnp
+   use capnp_rpc
+   use ifaces_capnp
+   use impl
+   implicit none
+   type(srv_t) :: srv
+   type(rpc_call_ctx_t) :: ctx
+   type(capnp_message_t), target :: m
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   ctx%rmsg => m
+   ctx%interface_id = base_interface_id
+   ctx%method_id = 0
+   call srv%dispatch(ctx, err)
+   print '(i0)', saw
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc ifaces_capnp.f90 impl.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "1"
   echo "g5 ok"
 }
 
@@ -229,14 +285,62 @@ g6() {
   cd "$d"
   cat > generics.capnp << 'EOF'
 @0x8666666666666601;
-struct Item { text @0 :Text; }
-struct Five(A, B, C, D, E) { a @0 :A; e @1 :E; }
-struct Uses { five @0 :Five(Text, Text, Text, Text, Item); }
+struct Item { v @0 :Int32; }
+struct Result(T, E) {
+  union { ok @0 :T; err @1 :E; }
+}
+struct Five(A, B, C, D, E) {
+  a @0 :A; b @1 :B; c @2 :C; d @3 :D; e @4 :E;
+}
+interface GenIface(T) {
+  ident @0 (x :T) -> (y :T);
+}
+interface GenMethod {
+  identity @0 [T] (x :T) -> (y :T);
+}
+struct Use {
+  r @0 :Result(Item, Text);
+  f @1 :Five(Text, Text, Text, Text, Item);
+  g @2 :GenIface(Text);
+}
 EOF
   capnp compile -o"$BIN" generics.capnp
-  grep -q 'five_text_text_text_text_item_t' generics_capnp.f90
-  capnp compile -oc++ generics.capnp
-  grep -q 'template <typename A, typename B, typename C, typename D, typename E>' generics.capnp.h
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use generics_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(five_text_text_text_text_item_t) :: f
+   type(item_t) :: e
+   type(gen_iface_ident_params_text_t) :: p
+   type(gen_method_identity_params_t) :: gp
+   type(capnp_ptr_t) :: q
+   character(len=:), allocatable :: s
+   integer :: err
+   if (result_item_text_ok_tag /= 0) error stop 1
+   if (result_item_text_err_tag /= 1) error stop 2
+   call capnp_message_init_builder(m, err)
+   f = five_text_text_text_text_item_new(m, err)
+   e = five_text_text_text_text_item_e_init(f, err)
+   call item_v_set(e, 5, err)
+   e = five_text_text_text_text_item_e_get(f, err)
+   if (item_v_get(e) /= 5) error stop 3
+   p = gen_iface_ident_params_text_new(m, err)
+   call gen_iface_ident_params_text_x_set(p, 'hi', err)
+   call gen_iface_ident_params_text_x_get(p, s, err)
+   if (s /= 'hi') error stop 4
+   deallocate (s)
+   gp = gen_method_identity_params_new(m, err)
+   q = gen_method_identity_params_x_get(gp, err)
+   if (err /= 0) error stop 5
+   if (q%kind /= CAPNP_PK_NULL) error stop 6
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc generics_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
   echo "g6 ok"
 }
 
@@ -244,18 +348,24 @@ g7() {
   local d
   d=$(work)
   cd "$d"
-  mkdir dir_a dir_b
-  cat > dir_a/dup.capnp <<'EOF'
-@0x8777777777777701;
-struct FromA { value @0 :Int32; }
+  mkdir -p dir_a dir_b
+  cat > dir_a/dup.capnp << 'EOF'
+@0x8a7a7a7a7a7a7a01;
+struct FromA { n @0 :Int32; }
 EOF
-  cat > dir_b/dup.capnp <<'EOF'
-@0x8777777777777702;
-struct FromB { value @0 :Int32; }
+  cat > dir_b/dup.capnp << 'EOF'
+@0x8b7b7b7b7b7b7b01;
+struct FromB { n @0 :Int32; }
 EOF
   capnp compile -o"$BIN" dir_a/dup.capnp dir_b/dup.capnp
+  test -f dir_a/dup_capnp.f90
+  test -f dir_b/dup_capnp.f90
   grep -q 'type :: from_a_t' dir_a/dup_capnp.f90
   grep -q 'type :: from_b_t' dir_b/dup_capnp.f90
+  if grep -q 'from_b_t' dir_a/dup_capnp.f90; then
+    echo "dir_a was overwritten" >&2
+    exit 1
+  fi
   echo "g7 ok"
 }
 
@@ -263,35 +373,140 @@ g8() {
   local d
   d=$(work)
   cd "$d"
-  cat > server.capnp <<'EOF'
+  cat > caps.capnp << 'EOF'
 @0x8888888888888801;
-interface Echo { ping @0 () -> (); }
+interface Adder { add @0 (a :Int64, b :Int64) -> (sum :Int64); }
+struct Box { svc @0 :Adder; }
 EOF
-  capnp compile -o"$BIN" server.capnp
-  cat > impl.f90 <<'EOF'
+  capnp compile -o"$BIN" caps.capnp
+  cat > drv.f90 << 'EOF'
 module impl
    use capnp
    use capnp_rpc
-   use server_capnp
+   use caps_capnp
    implicit none
-   type, extends(echo_server_t) :: server_t
+   integer :: exported = -1
+   type, extends(adder_server_t) :: srv_t
    contains
-      procedure :: ping => ping
-   end type server_t
+      procedure :: add => do_add
+   end type srv_t
 contains
-   subroutine ping(self, ctx, params, results, err)
-      class(server_t), intent(inout) :: self
+   subroutine do_add(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
-      type(echo_ping_params_t), intent(in) :: params
-      type(echo_ping_results_t), intent(in) :: results
+      type(adder_add_params_t), intent(in) :: params
+      type(adder_add_results_t), intent(in) :: results
       integer, intent(out) :: err
-      err = CAPNP_OK
-   end subroutine ping
+      type(srv_t), pointer :: p
+      allocate (p)
+      exported = rpc_ctx_export_cap(ctx, p, err)
+   end subroutine do_add
 end module impl
+program drv
+   use capnp
+   use capnp_rpc
+   use caps_capnp
+   use impl
+   implicit none
+   type(capnp_message_t), target :: m
+   type(box_t) :: h
+   type(adder_client_t) :: c, g
+   type(capnp_ptr_t) :: ctab, cd
+   type(srv_t) :: srv
+   type(rpc_call_ctx_t) :: ctx
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = box_new_root(m, err)
+   c%cap%kind = RPC_CAP_IMPORT
+   c%cap%id = 11
+   call box_svc_set(h, c, err)
+   g = box_svc_get(h, err)
+   print '(i0)', g%cap%id
+   ctab = capnp_new_composite_list(m, 1_int64, 1, 1, err)
+   cd = capnp_list_get_struct(ctab, 0, err)
+   call capnp_set_u16(cd, 0_int64, 1_int32, err)
+   call capnp_set_u32(cd, 4_int64, 7_int64, err)
+   c%cap%id = 0
+   call box_svc_set(h, c, err)
+   g = box_svc_get(h, err, ctab)
+   print '(i0,1x,i0)', err, g%cap%id
+   ctx%rmsg => m
+   ctx%interface_id = adder_interface_id
+   ctx%method_id = 0
+   call srv%dispatch(ctx, err)
+   print '(i0)', exported
+   call capnp_message_free(m)
+end program drv
 EOF
-  fc -c server_capnp.f90 impl.f90 -I "$MOD" -J .
-  grep -q 'rpc_call_ctx_t' server_capnp.f90
+  fc caps_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" $'11\n0 7\n0'
   echo "g8 ok"
+}
+
+g9() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > surf.capnp << 'EOF'
+@0x8999999999999901;
+using Stream = import "/capnp/stream.capnp";
+annotation myTag @0x8999999999999902 (struct) :Text;
+struct S $myTag("hello") {
+  n @0 :Int32;
+  inner @1 :S;
+  nums @2 :List(Int32);
+  flags @3 :List(Bool);
+  anyS @4 :AnyStruct;
+  anyL @5 :AnyList;
+  cap @6 :Capability;
+}
+interface Streamer {
+  push @0 (x :Int64) -> stream;
+}
+EOF
+  capnp compile -o"$BIN" surf.capnp
+  grep -q 'call rpc_stream_send' surf_capnp.f90
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use surf_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(s_t) :: h, inner, back
+   type(any_struct_t) :: a
+   type(any_list_t) :: al
+   type(capability_client_t) :: cap
+   type(capnp_ptr_t) :: lst
+   integer :: err
+   logical :: fl
+   call capnp_message_init_builder(m, err)
+   h = s_new_root(m, err)
+   if (s_inner_has(h)) error stop 1
+   if (s_my_tag /= 'hello') error stop 2
+   inner = s_inner_init(h, err)
+   call s_n_set(inner, 4, err)
+   call s_inner_set(h, inner, err)
+   back = s_inner_get(h, err)
+   if (s_n_get(back) /= 4) error stop 3
+   lst = s_nums_init(h, 2_int64, err)
+   call s_nums_set_elem(h, 1, 9, err)
+   if (s_nums_get_elem(h, 1, err) /= 9) error stop 4
+   lst = s_flags_init(h, 1_int64, err)
+   call s_flags_set_elem(h, 0, .true., err)
+   fl = s_flags_get_elem(h, 0, err)
+   if (.not. fl) error stop 5
+   a = s_any_s_get(h, err)
+   al = s_any_l_get(h, err)
+   cap = s_cap_get(h, err)
+   if (err /= 0) error stop 6
+   if (my_tag_id /= -8531619134090667774_int64) error stop 7
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc surf_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g9 ok"
 }
 
 case "${1:-all}" in
@@ -303,6 +518,12 @@ case "${1:-all}" in
   g6) g6 ;;
   g7) g7 ;;
   g8) g8 ;;
-  all) g1; g2; g34 g3; g34 g4; g5; g6; g7; g8 ;;
-  *) echo "unknown gap: $1" >&2; exit 2 ;;
+  g9) g9 ;;
+  all)
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9
+    ;;
+  *)
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|all" >&2
+    exit 2
+    ;;
 esac
