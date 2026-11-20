@@ -1662,6 +1662,27 @@ contains
       call node_fname(g_nodes(ridx)%p, rn, err)
    end subroutine method_types
 
+   subroutine iface_parent(np, pname, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=:), allocatable, intent(out) :: pname
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: sl, sc
+      integer :: sidx
+      pname = ''
+      sl = node_interface_superclasses(np, err)
+      if (err /= CAPNP_OK .or. capnp_list_len(sl) < 1_int64) return
+      sc = capnp_list_get_struct(sl, 0, err)
+      if (err /= CAPNP_OK) return
+      sidx = find_node(superclass_id(sc))
+      if (sidx == 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call note_import(sidx, err)
+      if (err /= CAPNP_OK) return
+      call node_fname(g_nodes(sidx)%p, pname, err)
+   end subroutine iface_parent
+
    !> Interface declarations: the interface id, a client handle type, an
    !> abstract server base extending rpc_server_t whose generated dispatch
    !> routes method ordinals to deferred typed procedures.
@@ -1669,9 +1690,11 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp
-      character(len=:), allocatable :: tn, mn, pn, rn
+      character(len=:), allocatable :: tn, mn, pn, rn, parent
       integer(int64) :: i
       call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      call iface_parent(np, parent, err)
       if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
       if (err /= CAPNP_OK) return
@@ -1680,7 +1703,11 @@ contains
       call w('   type :: '//tn//'_client_t')
       call w('      type(rpc_cap_t) :: cap')
       call w('   end type '//tn//'_client_t')
-      call w('   type, extends(rpc_server_t), abstract :: '//tn//'_server_t')
+      if (len(parent) > 0) then
+         call w('   type, extends('//parent//'_server_t), abstract :: '//tn//'_server_t')
+      else
+         call w('   type, extends(rpc_server_t), abstract :: '//tn//'_server_t')
+      end if
       call w('   contains')
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)
@@ -1724,9 +1751,11 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp
-      character(len=:), allocatable :: tn, mn, pn, rn
+      character(len=:), allocatable :: tn, mn, pn, rn, parent
       integer(int64) :: i
       call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      call iface_parent(np, parent, err)
       if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
       if (err /= CAPNP_OK) return
@@ -1770,7 +1799,14 @@ contains
       call w('      type(rpc_call_ctx_t), intent(inout) :: ctx')
       call w('      integer, intent(out) :: err')
       call w('      err = CAPNP_ERR_ARG')
-      call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) return')
+      if (len(parent) > 0) then
+         call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) then')
+         call w('         call '//parent//'_dispatch(self, ctx, err)')
+         call w('         return')
+         call w('      end if')
+      else
+         call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) return')
+      end if
       call w('      select case (ctx%method_id)')
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)

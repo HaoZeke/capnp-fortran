@@ -206,11 +206,29 @@ EOF
   echo "$which ok"
 }
 
+g5() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > ifaces.capnp << 'EOF'
+@0x8555555555555501;
+interface Base { ping @0 () -> (x :Int32); }
+interface Sub extends(Base) { pong @0 () -> (y :Int32); }
+EOF
+  capnp compile -o"$BIN" ifaces.capnp
+  grep -q 'extends(base_server_t)' ifaces_capnp.f90
+  grep -q 'call base_dispatch' ifaces_capnp.f90
+  capnp compile -oc++ ifaces.capnp
+  grep -q 'class Server' ifaces.capnp.h
+  echo "g5 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
   g3) g34 g3 ;;
   g4) g34 g4 ;;
-  all) g1; g2; g34 g3; g34 g4 ;;
+  g5) g5 ;;
+  all) g1; g2; g34 g3; g34 g4; g5 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac
