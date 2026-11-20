@@ -307,6 +307,8 @@ module capnp_rpc
       integer(int64) :: embargo_id = -1_int64
       !> Remote references this vat still owes a Release for.
       integer :: refs = 0
+      !> Local handles remaining on a resolved promise node.
+      integer :: local_refs = 0
       logical :: released = .false.
       !> receiverHosted resolution kept one extra ref on the export.
       logical :: pinned = .false.
@@ -2656,6 +2658,7 @@ contains
             return
          end if
          node%refs = 1
+         node%local_refs = 0
          node%released = .false.
          node%received_call = .false.
          node%resolved_id = -1_int64
@@ -2922,15 +2925,18 @@ contains
       integer, intent(out) :: err
       type(rpc_import_node_t), pointer :: other
       logical :: found, held
+      integer :: nheld
       integer(int64) :: new_handle
       err = CAPNP_OK
       ! The application still holds this promise when refs remain. The
       ! promise import itself is dropped now; the replacement is what a
       ! later rpc_release_send releases.
       held = node%refs > 0 .and. .not. node%released
+      nheld = merge(node%refs, 0, held)
       call release_all_import(conn, node, err)
       if (err /= CAPNP_OK) return
       node%state = IMP_REMOTE
+      node%local_refs = nheld
       call import_receive(conn, new_id, as_promise, new_handle)
       node%resolved_id = new_handle
       if (.not. held) then
@@ -2953,8 +2959,11 @@ contains
       type(rpc_embargo_node_t), pointer :: emb
       integer(int64) :: eid
       logical :: held
+      integer :: nheld
       err = CAPNP_OK
       held = node%refs > 0 .and. .not. node%released
+      nheld = merge(node%refs, 0, held)
+      node%local_refs = nheld
       ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
       ! Reject pin-only exports: once wire refcount drops to 0, C++ has
       ! erased the export ID from its table.
@@ -3322,11 +3331,17 @@ contains
       end if
       do step = 1, 8
          if (node%state /= IMP_REMOTE) exit
+         if (node%local_refs <= 0) return
+         node%local_refs = node%local_refs - 1
+         if (node%local_refs > 0) return
          call import_find(conn, node%resolved_id, nxt, found)
          if (.not. found) return
          node => nxt
       end do
       if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO) then
+         if (node%local_refs <= 0) return
+         node%local_refs = node%local_refs - 1
+         if (node%local_refs > 0) return
          if (node%pinned .and. node%resolved_id >= 0_int64 .and. &
              node%resolved_id < int(MAXE, int64)) then
             call drop_export_pin(conn, int(node%resolved_id))

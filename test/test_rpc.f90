@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(94))
+      allocate (testsuite(95))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -292,20 +292,22 @@ contains
       testsuite(86)%test => w_result_third_party_vine_reused_id
       testsuite(87)%name = "rpc-delayed-result-cap-reused-id"
       testsuite(87)%test => w_delayed_result_cap_reused_id
-      testsuite(88)%name = "rpc-shutdown"
-      testsuite(88)%test => w_shutdown
-      testsuite(89)%name = "posix-recv-eintr-retried"
-      testsuite(89)%test => t_recv_all_retries_eintr
-      testsuite(90)%name = "rpc-framing-511-accepted"
-      testsuite(90)%test => t_framing_511_accepted
-      testsuite(91)%name = "rpc-framing-512-rejected"
-      testsuite(91)%test => t_framing_512_rejected
-      testsuite(92)%name = "rpc-framing-oversized-rejected"
-      testsuite(92)%test => t_framing_oversized_rejected
-      testsuite(93)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(93)%test => t_framing_negative_traversal_rejected
-      testsuite(94)%name = "rpc-framing-short-and-padded"
-      testsuite(94)%test => t_framing_short_and_padded
+      testsuite(88)%name = "rpc-resolve-multiref-release"
+      testsuite(88)%test => w_resolve_multiref_release
+      testsuite(89)%name = "rpc-shutdown"
+      testsuite(89)%test => w_shutdown
+      testsuite(90)%name = "posix-recv-eintr-retried"
+      testsuite(90)%test => t_recv_all_retries_eintr
+      testsuite(91)%name = "rpc-framing-511-accepted"
+      testsuite(91)%test => t_framing_511_accepted
+      testsuite(92)%name = "rpc-framing-512-rejected"
+      testsuite(92)%test => t_framing_512_rejected
+      testsuite(93)%name = "rpc-framing-oversized-rejected"
+      testsuite(93)%test => t_framing_oversized_rejected
+      testsuite(94)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(94)%test => t_framing_negative_traversal_rejected
+      testsuite(95)%name = "rpc-framing-short-and-padded"
+      testsuite(95)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -517,6 +519,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_delayed_result_cap_reused_id(error)
    end subroutine w_delayed_result_cap_reused_id
+
+   subroutine w_resolve_multiref_release(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_multiref_release(error)
+   end subroutine w_resolve_multiref_release
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6939,5 +6946,150 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_delayed_result_cap_reused_id
+
+   !> A promise delivered twice owns one Resolve reference to its target.
+   !> Releasing both promise handles must send one Release for the target,
+   !> leaving a direct handle to that same target alive.
+   subroutine t_resolve_multiref_release(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, p1, p2, direct
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(return_t) :: r
+      type(resolve_t) :: rv
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      type(release_t) :: rel
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q1, q2, q3
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+
+      ! Deliver senderPromise(1) twice (refs=2) and senderHosted(2) directly.
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q1, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q1, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, 1_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, q1, [integer ::], p1, e)
+
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q2, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q2, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, 1_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, q2, [integer ::], p2, e)
+
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, q3, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q3, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, 2_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, q3, [integer ::], direct, e)
+
+      ! Resolve 1 -> senderHosted(2); drains Release(1, 2).
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 1_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_hosted_set(cd, 2_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 1_int64 .and. &
+                  release_reference_count_get(rel) == 2_int64, &
+                  'multiref resolve: drops both promise refs')
+      call capnp_message_free(reply)
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+
+      ! First promise handle release must not release target 2 yet.
+      call rpc_release_send(cconn, p1, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'multiref resolve: first handle keeps target alive')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+
+      ! Second promise handle release drops the one Resolve ref on 2.
+      call rpc_release_send(cconn, p2, e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 2_int64 .and. &
+                  release_reference_count_get(rel) == 1_int64, &
+                  'multiref resolve: last promise handle releases target')
+      call capnp_message_free(reply)
+
+      ! A redundant release of p2 must not touch direct's ref on 2.
+      call rpc_release_send(cconn, p2, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'multiref resolve: redundant release is ignored')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn); call rpc_conn_close(sconn); return
+      end if
+
+      ! Releasing direct drops the final reference on 2.
+      call rpc_release_send(cconn, direct, e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      rel = message_release_get(rmsg, e)
+      call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                  release_id_get(rel) == 2_int64 .and. &
+                  release_reference_count_get(rel) == 1_int64, &
+                  'multiref resolve: direct handle still owns its ref')
+      call capnp_message_free(reply)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_multiref_release
 
 end module test_rpc
