@@ -387,8 +387,12 @@ contains
          return
       end if
       flags = c_fcntl(sfd, F_GETFL, 0_c_int)
-      if (flags < 0_c_int .or. &
-          c_fcntl(sfd, F_SETFL, ior(flags, capnp_posix_o_nonblock())) < 0_c_int) then
+      if (flags < 0_c_int) then
+         err = CAPNP_ERR_IO
+         call px_close(int(sfd))
+         return
+      end if
+      if (c_fcntl(sfd, F_SETFL, ior(flags, capnp_posix_o_nonblock())) < 0_c_int) then
          err = CAPNP_ERR_IO
          call px_close(int(sfd))
          return
