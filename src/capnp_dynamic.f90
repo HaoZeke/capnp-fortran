@@ -1544,7 +1544,9 @@ contains
             if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) ok = .false.
          end if
       case default
-         ok = .true.
+         ! dynamic.c++ elementSizeFor (94) does not treat an unknown
+         ! element tag as a pointer. A list of that tag matches nothing.
+         ok = .false.
       end select
    end function dyn_list_ok
 
@@ -1832,7 +1834,13 @@ contains
          case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); esize = CAPNP_SZ_TWO
          case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); esize = CAPNP_SZ_FOUR
          case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); esize = CAPNP_SZ_EIGHT
-         case default; esize = CAPNP_SZ_PTR
+         case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+            esize = CAPNP_SZ_PTR
+         case default
+            ! dynamic.c++ elementSizeFor (94) does not turn an unknown
+            ! element tag into a pointer list.
+            err = CAPNP_ERR_KIND
+            return
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
