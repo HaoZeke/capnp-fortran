@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(102))
+      allocate (testsuite(103))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -310,18 +310,20 @@ contains
       testsuite(95)%test => w_vine_past_sixteen_caps
       testsuite(96)%name = "rpc-resolve-invalid-receiver-hosted"
       testsuite(96)%test => w_resolve_invalid_receiver_hosted
-      testsuite(97)%name = "posix-recv-eintr-retried"
-      testsuite(97)%test => t_recv_all_retries_eintr
-      testsuite(98)%name = "rpc-framing-511-accepted"
-      testsuite(98)%test => t_framing_511_accepted
-      testsuite(99)%name = "rpc-framing-512-rejected"
-      testsuite(99)%test => t_framing_512_rejected
-      testsuite(100)%name = "rpc-framing-oversized-rejected"
-      testsuite(100)%test => t_framing_oversized_rejected
-      testsuite(101)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(101)%test => t_framing_negative_traversal_rejected
-      testsuite(102)%name = "rpc-framing-short-and-padded"
-      testsuite(102)%test => t_framing_short_and_padded
+      testsuite(97)%name = "rpc-resolve-receiver-answer-walk"
+      testsuite(97)%test => w_resolve_receiver_answer_walk
+      testsuite(98)%name = "posix-recv-eintr-retried"
+      testsuite(98)%test => t_recv_all_retries_eintr
+      testsuite(99)%name = "rpc-framing-511-accepted"
+      testsuite(99)%test => t_framing_511_accepted
+      testsuite(100)%name = "rpc-framing-512-rejected"
+      testsuite(100)%test => t_framing_512_rejected
+      testsuite(101)%name = "rpc-framing-oversized-rejected"
+      testsuite(101)%test => t_framing_oversized_rejected
+      testsuite(102)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(102)%test => t_framing_negative_traversal_rejected
+      testsuite(103)%name = "rpc-framing-short-and-padded"
+      testsuite(103)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -574,6 +576,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_invalid_receiver_hosted(error)
    end subroutine w_resolve_invalid_receiver_hosted
+
+   subroutine w_resolve_receiver_answer_walk(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_receiver_answer_walk(error)
+   end subroutine w_resolve_receiver_answer_walk
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7838,5 +7845,169 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_invalid_receiver_hosted
+
+
+   !> `cconn` hosts the echo bootstrap and holds two active answers for
+   !> the peer `sconn`: `qboot`, whose content is the bootstrap cap with
+   !> export id `eid`, and `qadder`, a struct holding an adder in ptr 0.
+   subroutine ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      class(rpc_server_t), pointer, intent(in) :: srv
+      integer(int64), intent(out) :: qboot, qadder, eid
+      class(rpc_server_t), pointer :: none
+      type(rpc_cap_t) :: boot
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(cconn, fa, srv)
+      none => null()
+      call rpc_conn_init(sconn, fb, none)
+      call rpc_bootstrap_send(sconn, boot, e)
+      qboot = boot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qboot, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], boot, e)
+      eid = boot%id
+      call rpc_call_begin(sconn, boot, ECHO_IFACE, 1, m, params, qadder, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qadder, e)
+   end subroutine ra_pair
+
+   !> Promise `pid` on `cconn` with one call already sent through it.
+   subroutine ra_called_promise(cconn, sconn, pid, promised)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: pid
+      type(rpc_cap_t), intent(out) :: promised
+      type(rpc_cap_t) :: base
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: q, qc
+      integer :: e
+      base = rpc_cap_t()
+      base%kind = RPC_CAP_IMPORT
+      base%id = 0_int64
+      call inject_promise(sconn%fd, cconn, base, pid, q, e)
+      call rpc_wait(cconn, q, e)
+      call rpc_result_cap(cconn, q, [integer ::], promised, e)
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 1, e), e)
+      call rpc_call_send(cconn, m, e)
+   end subroutine ra_called_promise
+
+   !> Resolve `pid` to receiverAnswer `qid` walking pointer `fields`.
+   subroutine ra_resolve(cconn, sconn, pid, qid, fields)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: pid, qid
+      integer, intent(in) :: fields(:)
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer :: i, e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, pid, e)
+      cd = resolve_cap_init(rv, e)
+      pa = cap_descriptor_receiver_answer_init(cd, e)
+      call promised_answer_question_id_set(pa, qid, e)
+      ops = promised_answer_transform_init(pa, int(size(fields), int64), e)
+      do i = 1, size(fields)
+         op%p = capnp_list_get_struct(ops, i - 1, e)
+         call promised_answer_op_get_pointer_field_set(op, int(fields(i), int32), e)
+      end do
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+   end subroutine ra_resolve
+
+   !> Drain what `cconn` sent to the raw peer socket: whether it released
+   !> promise `pid` and whether it sent a Disembargo.
+   subroutine ra_drain(sconn, pid, released, disembargo)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: pid
+      logical, intent(out) :: released, disembargo
+      integer(int64) :: a, b
+      integer :: n, tag
+      logical :: got
+      released = .false.
+      disembargo = .false.
+      do n = 1, 20
+         call scripted_frame(sconn, 100, got, tag, a, b)
+         if (.not. got) exit
+         if (tag == MESSAGE_RELEASE_TAG .and. a == pid) released = .true.
+         if (tag == MESSAGE_DISEMBARGO_TAG) disembargo = .true.
+      end do
+   end subroutine ra_drain
+
+   !> receiverAnswer as C++ 1.4.0 reads it (rpc.c++ 1604-1624): a walk
+   !> through a cap aborts with a schema mismatch, a walk to a null
+   !> pointer gives a broken promise, and an export the active answer
+   !> still pins resolves as reflected even after its last Release.
+   subroutine t_resolve_receiver_answer_walk(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised, peer_boot
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      integer(int64) :: qboot, qadder, eid, qc
+      integer :: e
+      logical :: released, disembargo
+      character(len=*), parameter :: not_struct = "Schema mismatch: Message contains " // &
+                                     "non-struct pointer where struct pointer was expected."
+      srv => local_echo
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call ra_resolve(cconn, sconn, 4_int64, qboot, [0])
+      call check_(error, .not. rpc_conn_alive(cconn) .and. &
+                  rpc_conn_reason(cconn) == not_struct, &
+                  'receiverAnswer: walk through a cap aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 5_int64, promised)
+      call ra_resolve(cconn, sconn, 5_int64, qadder, [5, 0])
+      call ra_drain(sconn, 5_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. .not. disembargo, &
+                  'receiverAnswer: null walk releases the promise')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == RPC_ERR_EXCEPTION .and. &
+                  rpc_conn_reason(cconn) == 'Called null capability.', &
+                  'receiverAnswer: null walk breaks the promise')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      peer_boot = rpc_cap_t()
+      peer_boot%kind = RPC_CAP_IMPORT
+      peer_boot%id = eid
+      call rpc_release_send(sconn, peer_boot, e)
+      call rpc_pump_once(cconn, e)
+      call check_(error, cconn%exports(int(eid))%used .and. &
+                  cconn%exports(int(eid))%refcount == 0, &
+                  'receiverAnswer: answer pins the released export')
+      call ra_called_promise(cconn, sconn, 6_int64, promised)
+      call ra_resolve(cconn, sconn, 6_int64, qboot, [integer ::])
+      call ra_drain(sconn, 6_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. disembargo, &
+                  'receiverAnswer: pinned export resolves as reflected')
+      call rpc_call_begin(cconn, promised, ECHO_IFACE, 0, m, params, qc, e)
+      call check_(error, e == CAPNP_OK, 'receiverAnswer: pinned export takes calls')
+      if (e == CAPNP_OK) call capnp_message_free(m)
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_receiver_answer_walk
 
 end module test_rpc

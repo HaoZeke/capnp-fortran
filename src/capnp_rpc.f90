@@ -3111,16 +3111,22 @@ contains
       end if
    end subroutine resolve_remote
 
-   subroutine resolve_reflected(conn, node, local_id, err)
+   !> `pipelined` marks a capability taken from one of our answers. The
+   !> answer's pipeline holds it until Finish, so a pin-only export is
+   !> still live there (rpc.c++ 1604-1615).
+   subroutine resolve_reflected(conn, node, local_id, err, pipelined)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(inout), target :: node
       integer(int64), intent(in) :: local_id
       integer, intent(out) :: err
+      logical, intent(in), optional :: pipelined
       type(rpc_embargo_node_t), pointer :: emb
       integer(int64) :: eid
-      logical :: held, valid
+      logical :: held, valid, via_answer
       integer :: nheld
       err = CAPNP_OK
+      via_answer = .false.
+      if (present(pipelined)) via_answer = pipelined
       held = node%refs > 0 .and. .not. node%released
       nheld = merge(node%refs, 0, held)
       ! receiveCap addRefs a receiverHosted export (rpc.c++ 1595-1600).
@@ -3130,7 +3136,7 @@ contains
       valid = .false.
       if (local_id >= 0_int64 .and. local_id < int(MAXE, int64)) then
          valid = conn%exports(int(local_id))%used .and. &
-                 conn%exports(int(local_id))%refcount > 0
+                 (via_answer .or. conn%exports(int(local_id))%refcount > 0)
       end if
       if (.not. valid) then
          call release_all_import(conn, node, err)
@@ -3272,8 +3278,12 @@ contains
       end select
    end subroutine handle_resolve
 
-   !> Resolve a promise to a capability inside one of our answers.
-   !> A missing answer breaks the promise. It does not abort.
+   !> Resolve a promise to a capability inside one of our answers, the
+   !> way receiveCap reads `answer.pipeline` (rpc.c++ 1604-1624). Only an
+   !> answer that is still active and has results can supply one; any
+   !> other answer, and a walk that reaches a null pointer, gives a broken
+   !> capability. An unknown op or a walk through a pointer that is not a
+   !> struct makes C++ 1.4.0 abort the connection, so it does here too.
    subroutine resolve_receiver_answer(conn, node, cd, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(inout), target :: node
@@ -3287,63 +3297,90 @@ contains
       type(payload_t) :: apl
       type(cap_descriptor_t) :: acd
       type(rpc_answer_slot_t), pointer :: slot
-      logical :: found
-      integer(int64) :: aqid, eid
-      integer :: i
+      logical :: active
+      integer(int64) :: aqid
+      integer :: i, n
+      character(len=:), allocatable :: reason
+      character(len=*), parameter :: not_struct = "Schema mismatch: Message contains " // &
+                                     "non-struct pointer where struct pointer was expected."
+      character(len=*), parameter :: not_cap = "Schema mismatch: Message contains " // &
+                                     "non-capability pointer where capability pointer was expected."
       err = CAPNP_OK
+      reason = "invalid 'receiverAnswer'"
       pa = cap_descriptor_receiver_answer_get(cd, err)
       if (err /= CAPNP_OK) return
       aqid = promised_answer_question_id_get(pa)
-      call answer_find(conn, aqid, slot, found)
-      if (found) then
-         if (associated(slot)) then
-            if (slot%used .and. slot%has_results) then
-               amsg = message_read_root(slot%retmsg, err)
-               if (err /= CAPNP_OK) return
-               ar = message_return_get(amsg, err)
-               if (err == CAPNP_OK .and. return_which(ar) == RETURN_RESULTS_TAG) then
-                  apl = return_results_get(ar, err)
-                  p = payload_content_get(apl, err)
-                  ops = promised_answer_transform_get(pa, err)
-                  if (err /= CAPNP_OK) return
-                  do i = 0, int(capnp_list_len(ops)) - 1
-                     op%p = capnp_list_get_struct(ops, i, err)
-                     if (err /= CAPNP_OK) return
-                     select case (promised_answer_op_which(op))
-                     case (PROMISED_ANSWER_OP_NOOP_TAG)
-                     case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
-                        p = capnp_getp(p, &
-                                       int(promised_answer_op_get_pointer_field_get(op)), err)
-                        if (err /= CAPNP_OK) return
-                     case default
-                        call abort_conn(conn, 'Unsupported pipeline op.', err)
-                        return
-                     end select
-                  end do
-                  if (p%kind == CAPNP_PK_CAP) then
-                     ctab = payload_cap_table_get(apl, err)
-                     if (err == CAPNP_OK) then
-                        if (p%capidx >= 0_int64 .and. p%capidx < capnp_list_len(ctab)) then
-                           acd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
-                           if (err == CAPNP_OK) then
-                              if (cap_descriptor_which(acd) == &
-                                  CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
-                                 eid = cap_descriptor_sender_hosted_get(acd)
-                                 call resolve_reflected(conn, node, eid, err)
-                                 return
-                              end if
-                           end if
-                        end if
-                     end if
+      call answer_find(conn, aqid, slot, active)
+      if (active) active = associated(slot)
+      if (active) active = slot%used .and. slot%has_results .and. .not. slot%finished
+      if (active) then
+         amsg = message_read_root(slot%retmsg, err)
+         if (err == CAPNP_OK) ar = message_return_get(amsg, err)
+         active = err == CAPNP_OK
+         if (active) active = return_which(ar) == RETURN_RESULTS_TAG
+         err = CAPNP_OK
+      end if
+      if (active) then
+         ops = promised_answer_transform_get(pa, err)
+         if (err /= CAPNP_OK) return
+         n = int(capnp_list_len(ops))
+         ! toPipelineOps reads every op before the walk starts.
+         do i = 0, n - 1
+            op%p = capnp_list_get_struct(ops, i, err)
+            if (err /= CAPNP_OK) return
+            select case (promised_answer_op_which(op))
+            case (PROMISED_ANSWER_OP_NOOP_TAG, PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+            case default
+               call abort_conn(conn, 'Unsupported pipeline op.', err)
+               return
+            end select
+         end do
+         apl = return_results_get(ar, err)
+         if (err == CAPNP_OK) p = payload_content_get(apl, err)
+         if (err /= CAPNP_OK) return
+         do i = 0, n - 1
+            op%p = capnp_list_get_struct(ops, i, err)
+            if (err /= CAPNP_OK) return
+            if (promised_answer_op_which(op) /= PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) cycle
+            ! A null pointer reads as the default struct, whose fields
+            ! are null too.
+            if (p%kind == CAPNP_PK_NULL) cycle
+            if (p%kind /= CAPNP_PK_STRUCT) then
+               call abort_conn(conn, not_struct, err)
+               return
+            end if
+            p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
+            if (err /= CAPNP_OK) then
+               call abort_conn(conn, not_struct, err)
+               return
+            end if
+         end do
+         if (p%kind == CAPNP_PK_NULL) then
+            reason = 'Called null capability.'
+         else if (p%kind /= CAPNP_PK_CAP) then
+            call abort_conn(conn, not_cap, err)
+            return
+         else
+            ctab = payload_cap_table_get(apl, err)
+            if (err == CAPNP_OK .and. p%capidx >= 0_int64 .and. &
+                p%capidx < capnp_list_len(ctab)) then
+               acd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
+               if (err == CAPNP_OK) then
+                  if (cap_descriptor_which(acd) == CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
+                     call resolve_reflected(conn, node, &
+                                            cap_descriptor_sender_hosted_get(acd), err, &
+                                            pipelined=.true.)
+                     return
                   end if
                end if
             end if
+            err = CAPNP_OK
          end if
       end if
       call release_all_import(conn, node, err)
       if (err /= CAPNP_OK) return
       node%state = IMP_BROKEN
-      node%reason = "invalid 'receiverAnswer'"
+      node%reason = reason
    end subroutine resolve_receiver_answer
 
    pure function hi_bucket(qid) result(b)
