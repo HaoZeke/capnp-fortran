@@ -134,7 +134,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(117))
+      allocate (testsuite(118))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -357,18 +357,20 @@ contains
       testsuite(110)%test => w_cancel_call_on_pending_answer
       testsuite(111)%name = "rpc-close-forgets-introductions"
       testsuite(111)%test => w_close_forgets_introductions
-      testsuite(112)%name = "posix-recv-eintr-retried"
-      testsuite(112)%test => t_recv_all_retries_eintr
-      testsuite(113)%name = "rpc-framing-511-accepted"
-      testsuite(113)%test => t_framing_511_accepted
-      testsuite(114)%name = "rpc-framing-512-rejected"
-      testsuite(114)%test => t_framing_512_rejected
-      testsuite(115)%name = "rpc-framing-oversized-rejected"
-      testsuite(115)%test => t_framing_oversized_rejected
-      testsuite(116)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(116)%test => t_framing_negative_traversal_rejected
-      testsuite(117)%name = "rpc-framing-short-and-padded"
-      testsuite(117)%test => t_framing_short_and_padded
+      testsuite(112)%name = "rpc-seventy-concurrent-questions"
+      testsuite(112)%test => w_seventy_concurrent_questions
+      testsuite(113)%name = "posix-recv-eintr-retried"
+      testsuite(113)%test => t_recv_all_retries_eintr
+      testsuite(114)%name = "rpc-framing-511-accepted"
+      testsuite(114)%test => t_framing_511_accepted
+      testsuite(115)%name = "rpc-framing-512-rejected"
+      testsuite(115)%test => t_framing_512_rejected
+      testsuite(116)%name = "rpc-framing-oversized-rejected"
+      testsuite(116)%test => t_framing_oversized_rejected
+      testsuite(117)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(117)%test => t_framing_negative_traversal_rejected
+      testsuite(118)%name = "rpc-framing-short-and-padded"
+      testsuite(118)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -736,6 +738,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_close_forgets_introductions(error)
    end subroutine w_close_forgets_introductions
+
+   subroutine w_seventy_concurrent_questions(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_seventy_concurrent_questions(error)
+   end subroutine w_seventy_concurrent_questions
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -7067,6 +7074,75 @@ contains
       call check_(error, e /= CAPNP_OK, 'close: a later pickup is refused')
       call rpc_conn_close(sconn)
    end subroutine t_close_forgets_introductions
+
+   !> C++ 1.4.0 grows its question table on demand, so a client may have
+   !> more calls in flight than the table first holds. A reader taken
+   !> before the table grows must stay valid after it.
+   subroutine t_seventy_concurrent_questions(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer, parameter :: ncalls = 70
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s, content, first
+      integer(int64) :: qboot, qids(ncalls)
+      integer :: fa, fb, e, i, nok
+      call px_socketpair(fa, fb, e)
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_finish_send(cconn, qboot, .true., e)
+      call check_(error, e == CAPNP_OK, 'seventy: bootstrap')
+      if (allocated(error)) return
+      nok = 0
+      do i = 1, ncalls
+         call capnp_message_init_builder(m, e)
+         call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, qids(i), e)
+         if (e /= CAPNP_OK) exit
+         s = capnp_new_struct(m, 1, 1, e)
+         call capnp_set_i64(s, 0_int64, int(i, int64), e)
+         call capnp_set_text(s, 0, 'x', e)
+         call payload_content_set(params, s, e)
+         call rpc_call_send(cconn, m, e)
+         if (e /= CAPNP_OK) exit
+         nok = nok + 1
+         if (i == 1) then
+            call rpc_pump_once(sconn, e)
+            call rpc_pump_once(sconn, e)
+            call rpc_wait(cconn, qids(1), e)
+            call rpc_result_content(cconn, qids(1), first, e)
+         end if
+      end do
+      call check_(error, nok == ncalls, 'seventy: every call is sent')
+      if (allocated(error)) return
+      do i = 2, ncalls
+         call rpc_pump_once(sconn, e)
+      end do
+      nok = 0
+      do i = 1, ncalls
+         call rpc_wait(cconn, qids(i), e)
+         if (e /= CAPNP_OK) cycle
+         call rpc_result_content(cconn, qids(i), content, e)
+         if (e == CAPNP_OK .and. capnp_get_i64(content, 0_int64) == 2_int64 * i) nok = nok + 1
+      end do
+      call check_(error, nok == ncalls, 'seventy: every call returns its own result')
+      call check_(error, capnp_get_i64(first, 0_int64) == 2_int64, &
+                  'seventy: an earlier reader survives the growth')
+      do i = 1, ncalls
+         call rpc_finish_send(cconn, qids(i), .false., e)
+      end do
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_seventy_concurrent_questions
 
    !> A Finish that released a thirdPartyHosted vine frees its export id.
    !> When the peer hands that id out again, a late `rpc_introduction_done`

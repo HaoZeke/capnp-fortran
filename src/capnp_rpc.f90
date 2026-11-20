@@ -264,7 +264,9 @@ module capnp_rpc
       integer(int64), allocatable :: result_handles(:)
       !> Result caps whose reference an introduction pickup has released.
       logical, allocatable :: result_released(:)
-      type(capnp_message_t) :: retmsg ! the Return message, kept until finish
+      !> The Return message, kept until finish. On the heap so readers
+      !> of it stay valid when the question table grows.
+      type(capnp_message_t), pointer :: retmsg => null()
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
    end type rpc_question_slot_t
@@ -489,7 +491,8 @@ module capnp_rpc
       character(len=:), allocatable :: abort_reason
       class(rpc_server_t), pointer :: bootstrap_srv => null()
       type(rpc_export_slot_t) :: exports(0:MAXE - 1)
-      type(rpc_question_slot_t) :: questions(0:MAXQ - 1)
+      !> Grows when every id is taken, as C++ 1.4.0 has no limit.
+      type(rpc_question_slot_t), allocatable :: questions(:)
       type(rpc_answer_slot_t) :: answers(0:MAXQ - 1)
       !> Inbound answers with question ids at or above MAXQ, hashed.
       !> The bucket count is fixed. The node count is not: C++ 1.4.0
@@ -538,6 +541,7 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
+      if (.not. allocated(conn%questions)) allocate (conn%questions(0:MAXQ - 1))
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -567,6 +571,7 @@ contains
       if (allocated(conn%abort_reason)) deallocate (conn%abort_reason)
       conn%bootstrap_srv => bootstrap
       conn%own_vat = rpc_vat_t()
+      if (.not. allocated(conn%questions)) allocate (conn%questions(0:MAXQ - 1))
       call intro_table_reset(conn)
       conn%joins = rpc_join_slot_t()
       conn%next_qid = 0_int64
@@ -595,10 +600,13 @@ contains
          if (.not. conn%exports(i)%used) cycle
          call drop_export(conn, i, conn%exports(i)%refcount)
       end do
+      if (allocated(conn%questions)) then
+         do i = 0, size(conn%questions) - 1
+            call question_slot_clear(conn%questions(i))
+         end do
+      end if
       do i = 0, MAXQ - 1
-         if (conn%questions(i)%used) call capnp_message_free(conn%questions(i)%retmsg)
          if (conn%answers(i)%used) call capnp_message_free(conn%answers(i)%retmsg)
-         call question_slot_clear(conn%questions(i))
          call answer_slot_clear(conn%answers(i))
       end do
       call free_hi_answers(conn)
@@ -998,14 +1006,34 @@ contains
    ! Client side
    ! ------------------------------------------------------------------
 
+   pure logical function qslot_ok(conn, qid)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: qid
+      qslot_ok = .false.
+      if (.not. allocated(conn%questions)) return
+      qslot_ok = qid >= 0_int64 .and. qid < int(size(conn%questions), int64)
+   end function qslot_ok
+
    function alloc_qid(conn) result(qid)
       type(rpc_conn_t), intent(inout) :: conn
       integer(int64) :: qid
       integer :: i, k
+      integer :: n
+      type(rpc_question_slot_t), allocatable :: grown(:)
       qid = -1_int64
-      do i = 0, MAXQ - 1
-         k = int(mod(conn%next_qid + int(i, int64), int(MAXQ, int64)))
+      if (.not. allocated(conn%questions)) allocate (conn%questions(0:MAXQ - 1))
+      n = size(conn%questions)
+      if (all(conn%questions%used)) then
+         allocate (grown(0:2 * n - 1))
+         grown(0:n - 1) = conn%questions
+         call move_alloc(grown, conn%questions)
+         conn%next_qid = int(n, int64)
+         n = 2 * n
+      end if
+      do i = 0, n - 1
+         k = int(mod(conn%next_qid + int(i, int64), int(n, int64)))
          if (.not. conn%questions(k)%used) then
+            allocate (conn%questions(k)%retmsg)
             conn%questions(k)%used = .true.
             conn%questions(k)%returned = .false.
             conn%questions(k)%canceled = .false.
@@ -1269,7 +1297,7 @@ contains
       logical :: found
       integer :: rerr
       qid = call_question_of(m)
-      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+      if (qslot_ok(conn, qid)) then
          msg = message_read_root(m, rerr)
          if (rerr == CAPNP_OK .and. message_which(msg) == MESSAGE_CALL_TAG) then
             c = message_call_get(msg, rerr)
@@ -1280,7 +1308,7 @@ contains
          end if
       end if
       ! A call on a capability this vat hosts never goes on the wire.
-      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+      if (qslot_ok(conn, qid)) then
          if (conn%questions(int(qid))%local_export >= 0) then
             call fulfill_local_call(conn, conn%questions(int(qid))%local_export, &
                                     m, qid, err)
@@ -1303,7 +1331,7 @@ contains
                   pa = message_target_promised_answer_get(tgt, rerr)
                   if (rerr == CAPNP_OK) then
                      tqid = promised_answer_question_id_get(pa)
-                     if (tqid >= 0_int64 .and. tqid < int(MAXQ, int64)) then
+                     if (qslot_ok(conn, tqid)) then
                         tq = int(tqid)
                         if (conn%questions(tq)%local_call .or. &
                             conn%questions(tq)%local_results) then
@@ -1330,7 +1358,7 @@ contains
          if (rerr == CAPNP_OK) then
             if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
                target_id = message_target_imported_cap_get(tgt)
-               if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+               if (qslot_ok(conn, qid)) then
                   if (conn%questions(int(qid))%import_handle /= -1_int64) &
                      target_id = conn%questions(int(qid))%import_handle
                end if
@@ -1416,7 +1444,7 @@ contains
          end do
          tail%next => q
       end if
-      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) &
+      if (qslot_ok(conn, qid)) &
          conn%questions(int(qid))%local_call = .true.
       err = CAPNP_OK
    end subroutine enqueue_embargo_call
@@ -1440,7 +1468,7 @@ contains
       logical :: dispatched
       integer(int8), allocatable :: bytes(:)
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, qid)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -1527,7 +1555,7 @@ contains
       type(return_t) :: r
       integer(int8), allocatable :: bytes(:)
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      if (.not. qslot_ok(conn, qid)) return
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
       rmsg = message_new_root(rm, err)
@@ -1643,7 +1671,7 @@ contains
       type(return_t) :: r
       integer(int8), allocatable :: bytes(:)
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
+      if (.not. qslot_ok(conn, qid)) return
       if (conn%questions(int(qid))%returned) return
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) return
@@ -1692,7 +1720,7 @@ contains
          end do
          tail%next => node
       end if
-      if (call_qid >= 0_int64 .and. call_qid < int(MAXQ, int64)) &
+      if (qslot_ok(conn, call_qid)) &
          conn%questions(int(call_qid))%local_call = .true.
       err = CAPNP_OK
    end subroutine enqueue_pipeline
@@ -1724,7 +1752,7 @@ contains
          end do
          tail%next => node
       end if
-      if (call_qid >= 0_int64 .and. call_qid < int(MAXQ, int64)) &
+      if (qslot_ok(conn, call_qid)) &
          conn%questions(int(call_qid))%local_call = .true.
       err = CAPNP_OK
    end subroutine enqueue_answer_pipeline
@@ -1790,7 +1818,7 @@ contains
       integer(int64) :: eid
       integer :: i, tq
       err = CAPNP_OK
-      if (target_qid < 0_int64 .or. target_qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, target_qid)) then
          call fulfill_local_call(conn, -1, callmsg, call_qid, err)
          return
       end if
@@ -1800,7 +1828,7 @@ contains
       tr = message_return_get(tmsg, err)
       if (err /= CAPNP_OK) return
       if (return_which(tr) /= RETURN_RESULTS_TAG) then
-         if (call_qid < 0_int64 .or. call_qid >= int(MAXQ, int64)) return
+         if (.not. qslot_ok(conn, call_qid)) return
          call capnp_serialize_bytes(conn%questions(tq)%retmsg, bytes, err)
          if (err /= CAPNP_OK) return
          call capnp_deserialize_bytes(bytes, conn%questions(int(call_qid))%retmsg, err)
@@ -1893,7 +1921,7 @@ contains
       do while (associated(q))
          nxt => q%next
          if (err == CAPNP_OK) then
-            if (q%qid >= 0_int64 .and. q%qid < int(MAXQ, int64)) &
+            if (qslot_ok(conn, q%qid)) &
                conn%questions(int(q%qid))%local_call = .false.
             call rpc_call_send(conn, q%msg, err)
          else
@@ -2123,7 +2151,7 @@ contains
       ! Same inheritance as rpc_result_cap: a revoke must stop pipelined
       ! calls, not only calls on the settled import.
       q = int(qid)
-      if (q >= 0 .and. q < MAXQ) then
+      if (qslot_ok(conn, int(q, int64))) then
          if (conn%questions(q)%used) then
             cap%membrane => conn%questions(q)%membrane
             cap%membrane_reverse = conn%questions(q)%membrane_reverse
@@ -2236,7 +2264,7 @@ contains
       gone = conn%dead .or. .not. associated(conn%transport)
       do i = 1, size(qids)
          q = int(qids(i))
-         if (q < 0 .or. q >= MAXQ) cycle
+         if (.not. qslot_ok(conn, int(q, int64))) cycle
          if (.not. conn%questions(q)%used) cycle
          if (gone) then
             if (conn%questions(q)%returned) &
@@ -2315,7 +2343,7 @@ contains
       integer, intent(out) :: err
       integer :: q
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, qid)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -2357,7 +2385,7 @@ contains
       integer :: q
       err = CAPNP_OK
       q = int(qid)
-      if (q < 0 .or. q >= MAXQ) then
+      if (.not. qslot_ok(conn, int(q, int64))) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -2510,7 +2538,7 @@ contains
       integer :: q, relerr
       logical :: release_flag, explicit_release, ignored
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, qid)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -2572,6 +2600,7 @@ contains
       type(capnp_ptr_t) :: ctab
       integer :: ierr
       has = .false.
+      if (.not. associated(conn%questions(q)%retmsg)) return
       if (conn%questions(q)%retmsg%nsegs < 1) return
       msg = message_read_root(conn%questions(q)%retmsg, ierr)
       if (ierr /= CAPNP_OK) return
@@ -2796,7 +2825,7 @@ contains
       type(finish_t) :: f
       integer :: q
       err = CAPNP_OK
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, qid)) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -2866,6 +2895,10 @@ contains
       if (allocated(slot%result_released)) deallocate (slot%result_released)
       slot%membrane => null()
       slot%membrane_reverse = .false.
+      if (associated(slot%retmsg)) then
+         call capnp_message_free(slot%retmsg)
+         deallocate (slot%retmsg)
+      end if
    end subroutine question_slot_clear
 
    !> Clear an answer slot; see question_slot_clear.
@@ -3186,7 +3219,7 @@ contains
       if (message_target_which(tgt) /= MESSAGE_TARGET_IMPORTED_CAP_TAG) return
       id = message_target_imported_cap_get(tgt)
       if (present(qid)) then
-         if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+         if (qslot_ok(conn, qid)) then
             if (conn%questions(int(qid))%import_handle /= -1_int64) &
                id = conn%questions(int(qid))%import_handle
          end if
@@ -3963,7 +3996,7 @@ contains
       if (e == CAPNP_OK) c = message_call_get(msg, e)
       if (e == CAPNP_OK) tgt = call_target_get(c, e)
       if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
-      if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+      if (qslot_ok(conn, qid)) then
          conn%questions(int(qid))%import_handle = final_id
          conn%questions(int(qid))%local_call = .false.
       end if
@@ -4288,7 +4321,7 @@ contains
       integer(int64), intent(in) :: qid
       integer :: q
       q = int(qid)
-      if (q >= 0 .and. q < MAXQ) then
+      if (qslot_ok(conn, int(q, int64))) then
          if (conn%questions(q)%used .and. .not. conn%questions(q)%returned) &
             call question_slot_clear(conn%questions(q))
       end if
@@ -5302,7 +5335,7 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_introduction_t), intent(in) :: intro
       integer :: q
-      if (intro%qid < 0_int64 .or. intro%qid >= int(MAXQ, int64)) return
+      if (.not. qslot_ok(conn, intro%qid)) return
       q = int(intro%qid)
       if (.not. conn%questions(q)%used .or. .not. conn%questions(q)%returned) return
       if (.not. allocated(conn%questions(q)%result_released)) return
@@ -6176,7 +6209,7 @@ contains
          call capnp_message_free(m)
          return
       end if
-      if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) then
+      if (.not. qslot_ok(conn, qid)) then
          call capnp_message_free(m)
          call abort_conn(conn, 'Invalid question ID in Return message.', err)
          return
