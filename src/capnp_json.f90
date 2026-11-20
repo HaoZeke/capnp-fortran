@@ -25,10 +25,10 @@ module capnp_json
    integer(int64), parameter :: ANN_B64 = int(z'D7D879450A253E4B', int64)
    integer(int64), parameter :: ANN_HEX = int(z'F061E22F0AE5C7B5', int64)
    integer, parameter :: MAX_DEPTH = 64
-   integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
-   integer, parameter :: JK_ARR = 4, JK_OBJ = 5
    integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
    integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
+   integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
+   integer, parameter :: JK_ARR = 4, JK_OBJ = 5
    character(len=*), parameter :: B64 = &
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -36,6 +36,11 @@ module capnp_json
       character(len=:), allocatable :: s
       logical :: multi = .false.
    end type piece_t
+
+   type :: buf_t
+      character(len=:), allocatable :: s
+      integer :: n = 0
+   end type buf_t
 
    type :: jname_t
       character(len=:), allocatable :: key
@@ -67,7 +72,8 @@ module capnp_json
 
 contains
 
-   subroutine capnp_json_encode(schema, idx, p, text, err, pretty, brand_env)
+   subroutine capnp_json_encode(schema, idx, p, text, err, pretty, brand_env, &
+                                 traversal_words)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -75,10 +81,12 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
       type(capnp_brand_env_t), intent(in), optional :: brand_env
+      integer(int64), intent(in), optional :: traversal_words
       type(capnp_brand_env_t) :: env
       type(disc_opts_t) :: no_disc
       type(jval) :: root
       logical :: do_pretty, multi
+      integer(int64) :: limit
       err = CAPNP_OK
       text = ''
       if (.not. schema%loaded) then
@@ -91,6 +99,10 @@ contains
       end if
       call audit_json(schema, idx, err)
       if (err /= CAPNP_OK) return
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) limit = traversal_words
+      call guard_traversal(p, limit, err)
+      if (err /= CAPNP_OK) return
       if (node_which(schema%nodes(idx)) /= NODE_STRUCT) then
          err = CAPNP_ERR_ARG
          return
@@ -100,7 +112,7 @@ contains
       if (present(brand_env)) env = brand_env
       call build_struct(schema, idx, p, env, no_disc, 0, root, err)
       if (err /= CAPNP_OK) return
-      call emit_jval(root, 0, .false., do_pretty, text, multi)
+      call emit_jval(root, 0, .false., do_pretty, text, multi, err)
    end subroutine capnp_json_encode
 
    subroutine capnp_json_decode(schema, idx, text, msg, err)
@@ -275,7 +287,8 @@ contains
             call build_field_value(schema, f, p, env, depth + 1, one, err)
             if (err /= CAPNP_OK) return
             one%key = pfx//nm
-            call append_kid(kids, n, one)
+            call append_kid(kids, n, one, err)
+            if (err /= CAPNP_OK) return
          end if
       end do
 
@@ -317,7 +330,8 @@ contains
                dtag%k = JK_STR
                dtag%str = nm
                dtag%key = dkey
-               call append_kid(kids, n, dtag)
+               call append_kid(kids, n, dtag, err)
+               if (err /= CAPNP_OK) return
             end if
             if (field_which(f) == FIELD_SLOT) then
                raw_t = field_slot_type(f, err)
@@ -383,7 +397,8 @@ contains
             call build_field_value(schema, f, p, env, depth + 1, one, err)
             if (err /= CAPNP_OK) return
             one%key = vkey
-            call append_kid(kids, n, one)
+            call append_kid(kids, n, one, err)
+            if (err /= CAPNP_OK) return
          end if
          exit
       end do
@@ -555,7 +570,8 @@ contains
       do i = 0_int64, nlen - 1_int64
          call build_element(schema, et, lst, i, env, depth + 1, one, err)
          if (err /= CAPNP_OK) return
-         call append_kid(jv%kids, n, one)
+         call append_kid(jv%kids, n, one, err)
+         if (err /= CAPNP_OK) return
       end do
       call trim_kids(jv%kids, n)
    end subroutine build_list
@@ -721,16 +737,18 @@ contains
       call capnp_fmt_i64(int(ord, int64), jv%str)
    end subroutine build_enum_jval
 
-   recursive subroutine emit_jval(jv, indent, has_prefix, pretty, out, multi)
+   recursive subroutine emit_jval(jv, indent, has_prefix, pretty, out, multi, err)
       type(jval), intent(in) :: jv
       integer, intent(in) :: indent
       logical, intent(in) :: has_prefix, pretty
       character(len=:), allocatable, intent(out) :: out
       logical, intent(out) :: multi
+      integer, intent(out) :: err
       type(piece_t), allocatable :: items(:)
       character(len=:), allocatable :: val, body, colon
       integer :: i, m, n, sub
       logical :: child_multi
+      err = CAPNP_OK
       multi = .false.
       select case (jv%k)
       case (JK_NULL)
@@ -752,10 +770,13 @@ contains
          if (n > 1) sub = indent + 1
          m = 0
          do i = 1, n
-            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi)
-            call push(items, m, val, child_multi)
+            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi, err)
+            if (err /= CAPNP_OK) return
+            call push(items, m, val, child_multi, err)
+            if (err /= CAPNP_OK) return
          end do
-         call jjoin(items, m, indent, has_prefix, pretty, multi, body)
+         call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
+         if (err /= CAPNP_OK) return
          out = '['//body//']'
       case (JK_OBJ)
          n = 0
@@ -769,10 +790,13 @@ contains
          end if
          m = 0
          do i = 1, n
-            call emit_jval(jv%kids(i), sub, .true., pretty, val, child_multi)
-            call push(items, m, json_quote(jv%kids(i)%key)//colon//val, child_multi)
+            call emit_jval(jv%kids(i), sub, .true., pretty, val, child_multi, err)
+            if (err /= CAPNP_OK) return
+            call push(items, m, json_quote(jv%kids(i)%key)//colon//val, child_multi, err)
+            if (err /= CAPNP_OK) return
          end do
-         call jjoin(items, m, indent, has_prefix, pretty, multi, body)
+         call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
+         if (err /= CAPNP_OK) return
          out = '{'//body//'}'
       case default
          out = 'null'
@@ -1486,7 +1510,8 @@ contains
          call parse_value(sc, one, depth + 1, err)
          if (err /= CAPNP_OK) return
          one%key = key
-         call append_kid(jv%kids, n, one)
+         call append_kid(jv%kids, n, one, err)
+         if (err /= CAPNP_OK) return
          call jskip(sc)
          if (jpeek(sc) == ',') then
             sc%i = sc%i + 1
@@ -1522,7 +1547,8 @@ contains
       do
          call parse_value(sc, one, depth + 1, err)
          if (err /= CAPNP_OK) return
-         call append_kid(jv%kids, n, one)
+         call append_kid(jv%kids, n, one, err)
+         if (err /= CAPNP_OK) return
          call jskip(sc)
          if (jpeek(sc) == ',') then
             sc%i = sc%i + 1
@@ -2069,15 +2095,28 @@ contains
       end do
    end function find_union_json_field
 
-   subroutine push(items, n, s, multi)
+   subroutine push(items, n, s, multi, err)
       type(piece_t), allocatable, intent(inout) :: items(:)
       integer, intent(inout) :: n
       character(len=*), intent(in) :: s
       logical, intent(in) :: multi
+      integer, intent(out) :: err
       type(piece_t), allocatable :: tmp(:)
-      if (.not. allocated(items)) allocate (items(8))
+      integer :: stat
+      err = CAPNP_OK
+      if (.not. allocated(items)) then
+         allocate (items(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
       if (n >= size(items)) then
-         allocate (tmp(size(items)*2))
+         allocate (tmp(size(items)*2), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          if (n > 0) tmp(1:n) = items(1:n)
          call move_alloc(tmp, items)
       end if
@@ -2097,16 +2136,28 @@ contains
       src%k = JK_NULL
    end subroutine take_jval
 
-   subroutine append_kid(kids, n, src)
+   subroutine append_kid(kids, n, src, err)
       type(jval), allocatable, intent(inout) :: kids(:)
       integer, intent(inout) :: n
       type(jval), intent(inout) :: src
+      integer, intent(out) :: err
       type(jval), allocatable :: tmp(:)
-      integer :: i, cap
-      if (.not. allocated(kids)) allocate (kids(4))
+      integer :: i, cap, stat
+      err = CAPNP_OK
+      if (.not. allocated(kids)) then
+         allocate (kids(4), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
       if (n >= size(kids)) then
          cap = size(kids)*2
-         allocate (tmp(cap))
+         allocate (tmp(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          do i = 1, n
             call take_jval(tmp(i), kids(i))
          end do
@@ -2132,15 +2183,18 @@ contains
       call move_alloc(tmp, kids)
    end subroutine trim_kids
 
-   subroutine jjoin(items, n, indent, has_prefix, pretty, multi, out)
+   subroutine jjoin(items, n, indent, has_prefix, pretty, multi, out, err)
       type(piece_t), allocatable, intent(in) :: items(:)
       integer, intent(in) :: n, indent
       logical, intent(in) :: has_prefix, pretty
       logical, intent(inout) :: multi
       character(len=:), allocatable, intent(out) :: out
+      integer, intent(out) :: err
       integer :: i, mx
       logical :: any_multi
       character(len=:), allocatable :: delim, prefix, suffix, sp
+      type(buf_t) :: buf
+      err = CAPNP_OK
       out = ''
       any_multi = .false.
       mx = 0
@@ -2173,11 +2227,15 @@ contains
          out = prefix//suffix
          return
       end if
-      out = prefix//items(1)%s
+      call buf_add(buf, prefix//items(1)%s, err)
+      if (err /= CAPNP_OK) return
       do i = 2, n
-         out = out//delim//items(i)%s
+         call buf_add(buf, delim//items(i)%s, err)
+         if (err /= CAPNP_OK) return
       end do
-      out = out//suffix
+      call buf_add(buf, suffix, err)
+      if (err /= CAPNP_OK) return
+      call buf_take(buf, out)
    end subroutine jjoin
 
    subroutine jskip(sc)
@@ -2216,6 +2274,75 @@ contains
       y = ieee_is_finite(x)
    end function ieee_finite
 
+   subroutine buf_add(buf, piece, err)
+      type(buf_t), intent(inout) :: buf
+      character(len=*), intent(in) :: piece
+      integer, intent(out) :: err
+      integer :: need, cap, stat
+      character(len=:), allocatable :: tmp
+      err = CAPNP_OK
+      need = buf%n + len(piece)
+      if (need < buf%n) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (.not. allocated(buf%s)) then
+         cap = max(need, 64)
+         allocate (character(len=cap) :: buf%s, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      else if (need > len(buf%s)) then
+         cap = len(buf%s)
+         do while (cap < need)
+            if (cap > ishft(huge(cap), -1)) then
+               cap = need
+               exit
+            end if
+            cap = cap*2
+         end do
+         allocate (character(len=cap) :: tmp, stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         if (buf%n > 0) tmp(1:buf%n) = buf%s(1:buf%n)
+         call move_alloc(tmp, buf%s)
+      end if
+      if (len(piece) > 0) buf%s(buf%n + 1:need) = piece
+      buf%n = need
+   end subroutine buf_add
+
+   subroutine buf_take(buf, out)
+      type(buf_t), intent(in) :: buf
+      character(len=:), allocatable, intent(out) :: out
+      if (.not. allocated(buf%s) .or. buf%n <= 0) then
+         out = ''
+      else
+         out = buf%s(1:buf%n)
+      end if
+   end subroutine buf_take
+
+   subroutine guard_traversal(p, limit, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: limit
+      integer, intent(out) :: err
+      integer(int64) :: words
+      err = CAPNP_OK
+      if (limit < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. associated(p%msg)) return
+      if (.not. p%msg%is_builder) return
+      words = capnp_total_size(p, err)
+      if (err /= CAPNP_OK) return
+      if (words > limit) err = CAPNP_ERR_TRAVERSAL
+   end subroutine guard_traversal
+
+   !> Reject the name collisions C++ raises while building an annotated
+   !> JSON handler: flattened fields, $Json.name, and discriminator keys.
    subroutine audit_json(schema, idx, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
