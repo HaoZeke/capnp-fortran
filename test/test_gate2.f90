@@ -5,6 +5,7 @@ program test_gate2
    call case_1()
    call case_2()
    call case_3()
+   call case_4()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -160,4 +161,20 @@ contains
          achar(10) // &
          'cmp -s /tmp/g2-bt.o /tmp/g2-bt.r')
    end subroutine case_3
+
+   subroutine case_4()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"big": 1.6}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-fr.in; "$CAP" convert json:json schema/codec.capn' // &
+         'p Sample < /tmp/g2-fr.in > /tmp/g2-fr.o; test $? -ne 0')
+   end subroutine case_4
 end program test_gate2

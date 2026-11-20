@@ -768,11 +768,7 @@ contains
       if (jv%k == JK_STR) then
          call capnp_parse_i64(jv%str, iv, err)
       else if (jv%k == JK_NUM) then
-         if (jv%num < -9223372036854775808.0_real64 .or. jv%num > 9223372036854774784.0_real64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         iv = int(jv%num, int64)
+         call capnp_f64_to_i64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
@@ -786,11 +782,7 @@ contains
       if (jv%k == JK_STR) then
          call capnp_parse_u64(jv%str, iv, err)
       else if (jv%k == JK_NUM) then
-         if (jv%num < 0.0_real64 .or. jv%num > 18446744073709549568.0_real64) then
-            err = CAPNP_ERR_ARG
-            return
-         end if
-         iv = int(jv%num, int64)
+         call capnp_f64_to_u64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
