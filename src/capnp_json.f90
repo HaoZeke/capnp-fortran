@@ -40,7 +40,8 @@ module capnp_json
    integer, parameter :: MAX_DEPTH = 64
    ! Schema graphs are not the message nesting limit. The compiler uses
    ! an unbounded nesting limit and still accepts chains far past 64.
-   ! Stop before a recursion that would exhaust the stack.
+   ! The 8 MB default stack ends near 4400 chained struct types, so the
+   ! audit counts one level per struct type and stops at 4096.
    integer, parameter :: SCHEMA_WALK_LIMIT = 4096
    integer, parameter :: UNION_SEEN_START = 16
    integer, save :: union_seen_n = 0
@@ -3336,7 +3337,7 @@ contains
          else
             raw_t = field_slot_type(f, err)
             if (err /= CAPNP_OK) return
-            call audit_field_type(schema, raw_t, done, err, d + 1)
+            call audit_field_type(schema, raw_t, done, err, d)
          end if
          if (err /= CAPNP_OK) return
       end do

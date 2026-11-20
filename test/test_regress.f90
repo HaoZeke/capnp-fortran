@@ -86,6 +86,7 @@ contains
          new_unittest("cli-sources", run_cli_sources), &
          new_unittest("json-union-many", run_json_union_many), &
          new_unittest("json-union-nested", run_json_union_nested), &
+         new_unittest("json-schema-chain", run_json_schema_chain), &
          new_unittest("group-clear-depth", run_group_clear_depth) &
          ]
    end subroutine collect_regress
@@ -1893,6 +1894,102 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_union_nested
+   !> A chain of 2100 struct types, each a field of the one before. The
+   !> request is built here, so the audit runs even when capnp compile
+   !> cannot finish the same chain on a small stack.
+   subroutine run_json_schema_chain(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx
+      call build_type_chain(2100, bytes, err)
+      call check_(error, err == CAPNP_OK, 'schema-chain: build')
+      if (allocated(error)) return
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'S1', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'schema-chain: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_json_decode(schema, idx, '{"v":7}', msg, err)
+      call check_(error, err == CAPNP_OK, 'schema-chain: 2100 types decode')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_schema_chain
+
+   !> CodeGeneratorRequest for struct S1 through SN. A flat node list
+   !> stays inside the schema reader depth limit.
+   subroutine build_type_chain(ntypes, bytes, err)
+      integer, intent(in) :: ntypes
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, nodes, node, fields, field, typ
+      character(len=16) :: name
+      integer :: i, nfields
+      call capnp_message_init_builder(msg, err)
+      if (err /= CAPNP_OK) return
+      root = capnp_new_struct(msg, 0, 4, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, root, err)
+      if (err == CAPNP_OK) nodes = capnp_new_composite_list(msg, int(ntypes, int64), 6, 6, err)
+      if (err == CAPNP_OK) call capnp_setp(root, 0, nodes, err)
+      do i = 1, ntypes
+         if (err /= CAPNP_OK) exit
+         node = capnp_list_get_struct(nodes, i - 1, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_i64(node, 0_int64, 1000_int64 + int(i, int64), err)
+         if (err /= CAPNP_OK) exit
+         write (name, '(a,i0)') 'S', i
+         call capnp_set_text(node, 0, trim(name), err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_u16(node, 12_int64, 1, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_u16(node, 14_int64, 1, err)
+         if (err /= CAPNP_OK) exit
+         nfields = 1
+         if (i < ntypes) nfields = 2
+         call capnp_set_u16(node, 24_int64, nfields - 1, err)
+         if (err /= CAPNP_OK) exit
+         fields = capnp_new_composite_list(msg, int(nfields, int64), 3, 4, err)
+         if (err /= CAPNP_OK) exit
+         field = capnp_list_get_struct(fields, 0, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_text(field, 0, 'v', err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_u16(field, 2_int64, 65535, err)
+         if (err /= CAPNP_OK) exit
+         typ = capnp_new_struct(msg, 3, 1, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_u16(typ, 0_int64, 4, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_setp(field, 2, typ, err)
+         if (err /= CAPNP_OK) exit
+         if (nfields == 2) then
+            field = capnp_list_get_struct(fields, 1, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_u16(field, 0_int64, 1, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_text(field, 0, 'next', err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_u16(field, 2_int64, 65535, err)
+            if (err /= CAPNP_OK) exit
+            typ = capnp_new_struct(msg, 3, 1, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_u16(typ, 0_int64, 16, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_i64(typ, 8_int64, 1000_int64 + int(i + 1, int64), err)
+            if (err /= CAPNP_OK) exit
+            call capnp_setp(field, 2, typ, err)
+            if (err /= CAPNP_OK) exit
+         end if
+         call capnp_setp(node, 3, fields, err)
+      end do
+      if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+   end subroutine build_type_chain
+
 
    !> A chain of 100 nested groups still clears. Groups add no pointer
    !> nesting, so the reader limit of 64 does not apply, and capnp 1.4.0
