@@ -6930,6 +6930,93 @@ contains
       end do
    end subroutine release_finished_provide
 
+   !> Release the caps a call's params named, for a call that ends with
+   !> releaseParamCaps false. C++ imported each senderHosted and
+   !> senderPromise entry and releases it when the params die.
+   subroutine release_call_params(conn, c, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(call_t), intent(in) :: c
+      integer, intent(inout) :: err
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer :: i, e
+      pl = call_params_get(c, e)
+      if (e /= CAPNP_OK) return
+      if (pl%p%kind /= CAPNP_PK_STRUCT) return
+      ctab = payload_cap_table_get(pl, e)
+      if (e /= CAPNP_OK) return
+      do i = 0, int(capnp_list_len(ctab)) - 1
+         cd%p = capnp_list_get_struct(ctab, i, e)
+         if (e /= CAPNP_OK) cycle
+         select case (cap_descriptor_which(cd))
+         case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+            call send_release(conn, cap_descriptor_sender_hosted_get(cd), 1_int64, e)
+         case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+            call send_release(conn, cap_descriptor_sender_promise_get(cd), 1_int64, e)
+         end select
+         if (e /= CAPNP_OK) then
+            if (err == CAPNP_OK) err = e
+            return
+         end if
+      end do
+   end subroutine release_call_params
+
+   !> A Finish for a call still queued on a pending answer drops it, as
+   !> C++ drops the call's task (rpc.c++ handleFinish). The caller gets a
+   !> canceled Return at once and the call never runs.
+   logical function cancel_queued_call(conn, qid, err) result(found)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(inout) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev
+      type(message_t) :: msg
+      type(call_t) :: c
+      integer :: e
+      found = .false.
+      prev => null()
+      node => conn%incoming_wait
+      do while (associated(node))
+         if (node%call_qid == qid) exit
+         prev => node
+         node => node%next
+      end do
+      if (.not. associated(node)) return
+      found = .true.
+      if (associated(prev)) then
+         prev%next => node%next
+      else
+         conn%incoming_wait => node%next
+      end if
+      if (.not. conn%dead .and. associated(conn%transport)) then
+         call send_canceled_return(conn, qid, e)
+         if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+      end if
+      msg = message_read_root(node%msg, e)
+      if (e == CAPNP_OK) c = message_call_get(msg, e)
+      if (e == CAPNP_OK) call release_call_params(conn, c, err)
+      call release_spilled_vines(conn, node%spill, err)
+      call capnp_message_free(node%msg)
+      deallocate (node)
+   end function cancel_queued_call
+
+   !> True when a call waits on the pipeline of the queued call `qid`.
+   logical function queued_answer_has_waiters(conn, qid) result(any)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: qid
+      type(rpc_incoming_wait_t), pointer :: node
+      logical :: queued
+      any = .false.
+      queued = .false.
+      node => conn%incoming_wait
+      do while (associated(node))
+         if (node%call_qid == qid) queued = .true.
+         if (node%answer_qid == qid) any = .true.
+         node => node%next
+      end do
+      if (.not. queued) any = .false.
+   end function queued_answer_has_waiters
+
    subroutine handle_finish(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_t), intent(in) :: msg
@@ -6976,6 +7063,17 @@ contains
       if (.not. jfound) return
       if (.not. jslot%used) return
       if (.not. jslot%has_results) then
+         ! A call pipelined on this queued call holds its pipeline, so the
+         ! call still runs and only its Return becomes canceled.
+         if (queued_answer_has_waiters(conn, qid)) then
+            jslot%finished = .true.
+            return
+         end if
+         if (cancel_queued_call(conn, qid, err)) then
+            call answer_slot_clear(jslot)
+            if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+            return
+         end if
          jslot%finished = .true.
          return
       end if
