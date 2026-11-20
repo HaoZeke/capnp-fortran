@@ -2628,7 +2628,8 @@ contains
       ! (rpc.c++ ~QuestionRef). A Return with no capabilities to release
       ! needs none.
       if (conn%questions(q)%returned .and. .not. result_has_caps(conn, q)) release_flag = .false.
-      if (.not. conn%questions(q)%local_call) then
+      if (.not. conn%questions(q)%local_call .and. .not. conn%dead .and. &
+          associated(conn%transport)) then
          call capnp_message_init_builder(m, err)
          if (err /= CAPNP_OK) return
          msg = message_new_root(m, err)

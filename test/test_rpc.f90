@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(133))
+      allocate (testsuite(134))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -419,18 +419,20 @@ contains
       testsuite(126)%test => w_resolve_unknown_descriptor_aborts
       testsuite(127)%name = "rpc-forward-needs-live-question"
       testsuite(127)%test => w_forward_needs_live_question
-      testsuite(128)%name = "posix-recv-eintr-retried"
-      testsuite(128)%test => t_recv_all_retries_eintr
-      testsuite(129)%name = "rpc-framing-511-accepted"
-      testsuite(129)%test => t_framing_511_accepted
-      testsuite(130)%name = "rpc-framing-512-rejected"
-      testsuite(130)%test => t_framing_512_rejected
-      testsuite(131)%name = "rpc-framing-oversized-rejected"
-      testsuite(131)%test => t_framing_oversized_rejected
-      testsuite(132)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(132)%test => t_framing_negative_traversal_rejected
-      testsuite(133)%name = "rpc-framing-short-and-padded"
-      testsuite(133)%test => t_framing_short_and_padded
+      testsuite(128)%name = "rpc-finish-after-abort-is-silent"
+      testsuite(128)%test => w_finish_after_abort_is_silent
+      testsuite(129)%name = "posix-recv-eintr-retried"
+      testsuite(129)%test => t_recv_all_retries_eintr
+      testsuite(130)%name = "rpc-framing-511-accepted"
+      testsuite(130)%test => t_framing_511_accepted
+      testsuite(131)%name = "rpc-framing-512-rejected"
+      testsuite(131)%test => t_framing_512_rejected
+      testsuite(132)%name = "rpc-framing-oversized-rejected"
+      testsuite(132)%test => t_framing_oversized_rejected
+      testsuite(133)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(133)%test => t_framing_negative_traversal_rejected
+      testsuite(134)%name = "rpc-framing-short-and-padded"
+      testsuite(134)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -969,6 +971,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_forward_needs_live_question(error)
    end subroutine w_forward_needs_live_question
+
+   subroutine w_finish_after_abort_is_silent(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_finish_after_abort_is_silent(error)
+   end subroutine w_finish_after_abort_is_silent
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10641,5 +10648,45 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_forward_needs_live_question
+
+   !> After this vat aborts the connection, a Finish of a question it
+   !> still has sends nothing more. The Abort is the last frame.
+   subroutine t_finish_after_abort_is_silent(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(release_t) :: rel
+      integer(int64) :: qboot, qadder, eid
+      integer :: e, n, after
+      logical :: ok, aborted
+
+      srv => echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rel = message_release_init(msg, e)
+      call release_id_set(rel, 77_int64, e)
+      call release_reference_count_set(rel, 1_int64, e)
+      call rpc_send_message(cconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(sconn, e)
+      call rpc_finish_send(sconn, qadder, .false., e)
+      aborted = .false.
+      after = 0
+      do n = 1, 4
+         call raw_next(cconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (aborted) after = after + 1
+         if (message_which(msg) == MESSAGE_ABORT_TAG) aborted = .true.
+         call capnp_message_free(reply)
+      end do
+      call check_(error, aborted .and. after == 0 .and. .not. rpc_conn_alive(sconn), &
+                  'no Finish follows the Abort')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_after_abort_is_silent
 
 end module test_rpc
