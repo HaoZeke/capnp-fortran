@@ -93,7 +93,8 @@ contains
          new_unittest("json-union-clear", run_json_union_clear), &
          new_unittest("json-nul-eof", run_json_nul_eof), &
          new_unittest("json-nest-limit", run_json_nest_limit), &
-         new_unittest("cli-json-stream", run_cli_json_stream) &
+         new_unittest("cli-json-stream", run_cli_json_stream), &
+         new_unittest("text-ws-vt-ff", run_text_ws_vt_ff) &
          ]
    end subroutine collect_regress
 
@@ -2393,5 +2394,40 @@ contains
          end if
       end subroutine check_stream
    end subroutine run_cli_json_stream
+
+   subroutine run_text_ws_vt_ff(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call load_codec(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call one(achar(11)//'(big = -88)', '"-88"')
+      call one('(big = 55, title = "hi", hue ='//achar(12)//'red)', 'display_name')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine one(text, frag)
+         character(len=*), intent(in) :: text, frag
+         type(capnp_message_t) :: msg
+         type(capnp_ptr_t) :: root
+         character(len=:), allocatable :: out
+         integer :: e2
+         if (allocated(error)) return
+         call capnp_text_decode(schema, idx, text, msg, e2)
+         call check_(error, e2 == CAPNP_OK, 'vt ff decode')
+         if (allocated(error)) then
+            call capnp_message_free(msg)
+            return
+         end if
+         root = capnp_root(msg, e2)
+         call capnp_json_encode(schema, idx, root, out, e2, pretty=.false.)
+         call check_(error, e2 == CAPNP_OK .and. index(out, frag) > 0, 'vt ff json '//frag)
+         call capnp_message_free(msg)
+      end subroutine one
+   end subroutine run_text_ws_vt_ff
 
 end module test_regress

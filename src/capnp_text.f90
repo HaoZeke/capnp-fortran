@@ -1280,7 +1280,8 @@ contains
       do
          if (sc%i > sc%n) return
          c = sc%s(sc%i:sc%i)
-         if (c == ' ' .or. c == achar(9) .or. c == achar(10) .or. c == achar(13)) then
+         if (c == ' ' .or. c == achar(9) .or. c == achar(10) .or. c == achar(11) .or. &
+             c == achar(12) .or. c == achar(13)) then
             sc%i = sc%i + 1
          else if (c == '#') then
             do
