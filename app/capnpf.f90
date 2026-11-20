@@ -761,7 +761,8 @@ contains
       integer(int8) :: w8(0:7)
       integer(int8) :: hdr(0:2055)
       integer(int64) :: nsegs64, header_words, total_words, nwords, i, n
-      integer :: zero_left, raw_left
+      integer(int64) :: rem, room
+      integer :: zero_left, raw_left, stat
       err = CAPNP_OK
       zero_left = 0
       raw_left = 0
@@ -792,10 +793,22 @@ contains
       total_words = 0_int64
       do i = 1_int64, nsegs64
          n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
-         total_words = total_words + n
+         call capnp_add_segment_words(total_words, n, err)
+         if (err /= CAPNP_OK) return
       end do
+      rem = size(raw, kind=int64) - off
+      call capnp_packed_room(rem, zero_left, raw_left, room, err)
+      if (err /= CAPNP_OK) return
+      if (total_words > room) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
       nwords = header_words + total_words
-      allocate (framed(0:nwords*8_int64 - 1))
+      allocate (framed(0:nwords*8_int64 - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       framed = 0_int8
       framed(0:header_words*8_int64 - 1) = hdr(0:header_words*8_int64 - 1)
       do i = header_words + 1_int64, nwords

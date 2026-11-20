@@ -21,6 +21,7 @@ program test_gate2
    call case_17()
    call case_18()
    call case_19()
+   call case_20()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -570,4 +571,24 @@ contains
          achar(10) // &
          'done')
    end subroutine case_19
+
+   subroutine case_20()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         'abc' // &
+         achar(39) // &
+         ' > /tmp/g2-ph.in; "$CAP" convert packed:binary schema/common' // &
+         '.capnp Vec3 < /tmp/g2-ph.in > /tmp/g2-ph.o; echo $? > /tmp/g' // &
+         '2-ph.e1; capnp convert packed:binary schema/common.capnp Vec' // &
+         '3 < /tmp/g2-ph.in > /tmp/g2-ph.r; echo $? > /tmp/g2-ph.e2; c' // &
+         'mp -s /tmp/g2-ph.e1 /tmp/g2-ph.e2 && test "$(cat /tmp/g2-ph.' // &
+         'e1)" != 0')
+   end subroutine case_20
 end program test_gate2
