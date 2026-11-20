@@ -4,7 +4,7 @@
 module capnp_rpc_transport
    use capnp_kinds
    use capnp_endian, only: cp_get_i32
-   use capnp_arena, only: capnp_message_t
+   use capnp_arena, only: capnp_message_t, capnp_message_free
    use capnp_serialize, only: capnp_serialize_bytes, capnp_deserialize_bytes
    use capnp_posix, only: px_send_all, px_recv_all
    implicit none
@@ -25,44 +25,63 @@ contains
    end subroutine rpc_send_message
 
    !> Read exactly one framed message off the socket (blocking). EOF or a
-   !> short read surfaces as CAPNP_ERR_IO.
-   subroutine rpc_recv_message(fd, msg, err)
+   !> short read surfaces as CAPNP_ERR_IO. Mirrors Cap'n Proto C++ 1.4.0
+   !> AsyncMessageReader: firstWord[0] < 511 (at most 511 segments) and
+   !> total segment words <= traversal_words (default
+   !> CAPNP_DEFAULT_TRAVERSAL_WORDS) checked before allocating the body.
+   subroutine rpc_recv_message(fd, msg, err, traversal_words)
       integer, intent(in) :: fd
       type(capnp_message_t), intent(inout) :: msg
       integer, intent(out) :: err
-      integer(int8) :: head(0:3)
-      integer(int8), allocatable :: rest(:), whole(:)
-      integer(int64) :: nsegs64, header_bytes, total, i, n
-      call px_recv_all(fd, head, err)
+      integer(int64), intent(in), optional :: traversal_words
+      integer(int8), target :: hdr(0:2047)
+      integer(int8), allocatable, target :: whole(:)
+      integer(int64) :: raw_count, nsegs64, header_bytes, total_words, total_bytes
+      integer(int64) :: limit, i, n
+      integer :: astat
+      call capnp_message_free(msg)
+      limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      if (present(traversal_words)) then
+         if (traversal_words < 0_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         limit = traversal_words
+      end if
+      call px_recv_all(fd, hdr(0:7), err)
       if (err /= CAPNP_OK) return
-      nsegs64 = iand(int(cp_get_i32(head, 0_int64), int64), 4294967295_int64) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      raw_count = iand(int(cp_get_i32(hdr, 0_int64), int64), 4294967295_int64)
+      if (raw_count >= 511_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
+      nsegs64 = raw_count + 1_int64
       header_bytes = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64*8_int64
-      allocate (rest(0:header_bytes - 5_int64))
-      call px_recv_all(fd, rest, err)
-      if (err /= CAPNP_OK) return
-      total = 0_int64
-      do i = 1_int64, nsegs64
-         ! Size entries start at header byte 4; rest lacks the first word.
-         n = iand(int(cp_get_i32(rest, (i - 1_int64)*4_int64), int64), 4294967295_int64)
-         total = total + n*CAPNP_WORD_BYTES
-      end do
-      allocate (whole(0:header_bytes + total - 1_int64))
-      whole(0:3) = head
-      whole(4:header_bytes - 1) = rest
-      if (total > 0_int64) then
-         block
-            integer(int8), allocatable :: body(:)
-            allocate (body(0:total - 1_int64))
-            call px_recv_all(fd, body, err)
-            if (err /= CAPNP_OK) return
-            whole(header_bytes:) = body
-         end block
+      if (header_bytes > 8_int64) then
+         call px_recv_all(fd, hdr(8:header_bytes - 1_int64), err)
+         if (err /= CAPNP_OK) return
       end if
-      call capnp_deserialize_bytes(whole, msg, err)
+      total_words = 0_int64
+      do i = 1_int64, nsegs64
+         n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
+         total_words = total_words + n
+      end do
+      if (total_words > limit) then
+         err = CAPNP_ERR_TRAVERSAL
+         return
+      end if
+      total_bytes = total_words*CAPNP_WORD_BYTES
+      allocate (whole(0:header_bytes + total_bytes - 1_int64), stat=astat)
+      if (astat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      whole(0:header_bytes - 1_int64) = hdr(0:header_bytes - 1_int64)
+      if (total_bytes > 0_int64) then
+         call px_recv_all(fd, whole(header_bytes:), err)
+         if (err /= CAPNP_OK) return
+      end if
+      call capnp_deserialize_bytes(whole, msg, err, traversal_words=limit)
    end subroutine rpc_recv_message
 
 end module capnp_rpc_transport
