@@ -30,6 +30,7 @@ contains
            new_unittest("far-pointer", test_far_pointer), &
            new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
+           new_unittest("far-segment-overflow-zero", test_far_segment_overflow_zero), &
            new_unittest("wire-capability", test_wire_capability), &
            new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
@@ -585,6 +586,48 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_far_pointer
+
+   subroutine test_far_segment_overflow_zero(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 2, 0, err)
+      call capnp_set_root(msg, root, err)
+      ! 2^31 - 1 overflows int32 addition `int(seg) + 1` before bounds checks.
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.false., 0_int64, 2147483647_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'far-segment: max int32 id is ignored while zeroing')
+      if (allocated(error)) return
+
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.false., 0_int64, 2147483648_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64, &
+                 'far-segment: bit-31 id is ignored while zeroing')
+      if (allocated(error)) return
+
+      ! Double-far with out-of-range pad word 0 still zeroes its 16-byte pad.
+      call cp_put_i64(msg%segs(1)%bytes, 8_int64, &
+                      wp_make_far(.false., 0_int64, 2147483647_int64))
+      call cp_put_i64(msg%segs(1)%bytes, 16_int64, &
+                      wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(msg%segs(1)%bytes, 0_int64, &
+                      wp_make_far(.true., 1_int64, 0_int64))
+      call capnp_set_root(msg, capnp_ptr_t(), err)
+      call check(error, err == CAPNP_OK .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 0_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 8_int64) == 0_int64 .and. &
+                 cp_get_i64(msg%segs(1)%bytes, 16_int64) == 0_int64, &
+                 'far-segment: double-far out-of-range id zeroes landing pad')
+      call capnp_message_free(msg)
+   end subroutine test_far_segment_overflow_zero
    !> A single far whose landing pad is another far is not a struct.
    !> C++ 1.4.0 layout.c++ readStructPointer rejects kind FAR there.
    subroutine test_far_chain_rejected(error)

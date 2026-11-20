@@ -741,14 +741,16 @@ contains
       integer, intent(in) :: seg, depth
       integer(int64), intent(in) :: slot, w
       integer :: tseg, oseg
-      integer(int64) :: base, padoff, w0, tag
+      integer(int64) :: base, padoff, w0, tag, tseg64, oseg64
       if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
       select case (wp_kind(w))
       case (CAPNP_WK_STRUCT, CAPNP_WK_LIST)
          base = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
          call zero_at(msg, seg, base, w, depth)
       case (CAPNP_WK_FAR)
-         tseg = int(wp_far_seg(w)) + 1
+         tseg64 = wp_far_seg(w)
+         if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) return
+         tseg = int(tseg64) + 1
          padoff = wp_far_off(w)*8_int64
          if (.not. wp_far_two(w)) then
             if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
@@ -760,8 +762,11 @@ contains
             w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
             tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
             if (wp_kind(w0) == CAPNP_WK_FAR .and. .not. wp_far_two(w0)) then
-               oseg = int(wp_far_seg(w0)) + 1
-               call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth + 1)
+               oseg64 = wp_far_seg(w0)
+               if (oseg64 >= 0_int64 .and. oseg64 < int(msg%nsegs, int64)) then
+                  oseg = int(oseg64) + 1
+                  call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth + 1)
+               end if
             end if
             call zero_bytes(msg, tseg, padoff, 16_int64)
          end if
@@ -777,7 +782,7 @@ contains
       integer(int64), intent(out) :: obase, onbytes
       logical, intent(out) :: ok
       integer :: tseg
-      integer(int64) :: padoff, w0, tag
+      integer(int64) :: padoff, w0, tag, tseg64, oseg64
       ok = .false.
       oseg = 0
       obase = 0_int64
@@ -795,7 +800,9 @@ contains
          onbytes = list_payload_bytes(w)
          ok = onbytes >= 0_int64
       case (CAPNP_WK_FAR)
-         tseg = int(wp_far_seg(w)) + 1
+         tseg64 = wp_far_seg(w)
+         if (tseg64 < 0_int64 .or. tseg64 >= int(msg%nsegs, int64)) return
+         tseg = int(tseg64) + 1
          padoff = wp_far_off(w)*8_int64
          if (.not. wp_far_two(w)) then
             if (.not. span_ok(msg, tseg, padoff, 8_int64)) return
@@ -807,7 +814,9 @@ contains
             w0 = cp_get_i64(msg%segs(tseg)%bytes, padoff)
             tag = cp_get_i64(msg%segs(tseg)%bytes, padoff + 8_int64)
             if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) return
-            oseg = int(wp_far_seg(w0)) + 1
+            oseg64 = wp_far_seg(w0)
+            if (oseg64 < 0_int64 .or. oseg64 >= int(msg%nsegs, int64)) return
+            oseg = int(oseg64) + 1
             obase = wp_far_off(w0)*8_int64
             if (wp_kind(tag) == CAPNP_WK_STRUCT) then
                onbytes = int(wp_struct_dwords(tag) + wp_struct_pwords(tag), int64)*8_int64
