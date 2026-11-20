@@ -121,7 +121,9 @@ ids, `E<n>` for its export ids (a new name once the driver has released
 every reference) and `m<n>` for its embargo ids. Driver ids are
 `q<n>` and `D<n>`. A `Return.releaseParamCaps` or a
 `Finish.releaseResultCaps` is written as the `REL` line of each release
-it implies.
+it implies. A Return that sets `releaseParamCaps` also shows
+`rpc=1`, since a Return with no param caps implies no Release. A Finish
+sent before its Return shows `rrc=1` or `rrc=0`.
 
 `run.py` then applies these rules to both logs:
 

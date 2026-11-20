@@ -528,13 +528,21 @@ void onReturn(rpc::Return::Reader r) {
   } else {
     head += " UNKNOWN";
   }
+  // releaseParamCaps is shown as well as the Releases it implies: a
+  // Return with no param caps still sets it.
+  if (r.getReleaseParamCaps()) body += " rpc=1";
   emit(head + " " + body);
 }
 
 void onFinish(rpc::Finish::Reader f) {
   uint32_t wire = f.getQuestionId();
-  emit("P> FIN " + peerQName(wire, false));
   auto it = peerQs.find(wire);
+  // Before the Return the flag says whether the caller drops the result
+  // caps; after it, the flag shows up as the Releases it implies.
+  std::string flag;
+  if (it == peerQs.end() || !it->second.answered)
+    flag = f.getReleaseResultCaps() ? " rrc=1" : " rrc=0";
+  emit("P> FIN " + peerQName(wire, false) + flag);
   if (it != peerQs.end()) {
     if (f.getReleaseResultCaps()) {
       for (auto id : it->second.resultExports) peerReleases(id, 1);
