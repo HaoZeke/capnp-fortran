@@ -1089,13 +1089,15 @@ contains
    end subroutine test_framing_many_segments
 
    !> The file reader applies the stream reader limits (C++
-   !> InputStreamMessageReader): fewer than 513 segments and a total size
-   !> within the traversal limit, checked before any body is read.
+   !> InputStreamMessageReader): `firstWord[0] < 511` so 511 segments pass
+   !> and 512 do not, and the total size stays within the traversal limit.
+   !> Both checks run before any body is read. Flat arrays have no such cap.
    subroutine test_framing_file_limits(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
       integer(int8), allocatable :: frame(:)
-      integer :: err, i
+      integer(int8) :: packed511(0:4), packed512(0:4)
+      integer :: err, i, unit
       character(len=*), parameter :: path = 'framing-file-limits.bin'
       allocate (frame(0:6159))
       frame = 0_int8
@@ -1110,6 +1112,72 @@ contains
       call capnp_message_free(msg)
       deallocate (frame)
 
+      call zero_sized_segments(frame, 511)
+      call capnp_deserialize_bytes(frame, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 511, &
+                 'file-limits: flat 511 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_write_file(path, frame, err)
+      call capnp_read_message(path, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 511, &
+                 'file-limits: 511 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      open (newunit=unit, file=path, access='stream', form='unformatted', status='old')
+      call capnp_read_message_unit(unit, msg, err)
+      close (unit)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 511, &
+                 'file-limits: unit 511 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call zero_sized_segments(frame, 512)
+      call capnp_deserialize_bytes(frame, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 512, &
+                 'file-limits: flat 512 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_write_file(path, frame, err)
+      call capnp_read_message(path, msg, err)
+      call check(error, err == CAPNP_ERR_FRAMING, 'file-limits: 512 segments rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      open (newunit=unit, file=path, access='stream', form='unformatted', status='old')
+      call capnp_read_message_unit(unit, msg, err)
+      close (unit)
+      call check(error, err == CAPNP_ERR_FRAMING, 'file-limits: unit 512 segments rejected')
+      if (allocated(error)) return
+      ! 511 zero-size segments pack as one literal word plus 255 zero words.
+      packed511 = [3_int8, -2_int8, 1_int8, 0_int8, -2_int8]
+      call capnp_deserialize_packed_bytes(packed511, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 511, &
+                 'file-limits: packed 511 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_write_file(path, packed511, err)
+      open (newunit=unit, file=path, access='stream', form='unformatted', status='old')
+      call capnp_read_message_packed_unit(unit, msg, err)
+      close (unit)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 511, &
+                 'file-limits: packed unit 511 segments accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      ! 512 zero-size segments: literal word plus 256 zero words.
+      packed512 = [3_int8, -1_int8, 1_int8, 0_int8, -1_int8]
+      call capnp_deserialize_packed_bytes(packed512, msg, err)
+      call check(error, err == CAPNP_ERR_FRAMING, 'file-limits: packed 512 segments rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_write_file(path, packed512, err)
+      open (newunit=unit, file=path, access='stream', form='unformatted', status='old')
+      call capnp_read_message_packed_unit(unit, msg, err)
+      close (unit)
+      call check(error, err == CAPNP_ERR_FRAMING, 'file-limits: packed unit 512 segments rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      deallocate (frame)
       allocate (frame(0:7))
       frame = 0_int8
       frame(4) = 100_int8
@@ -1120,6 +1188,18 @@ contains
       open (newunit=i, file=path, status='old')
       close (i, status='delete')
    end subroutine test_framing_file_limits
+
+   !> Header for `nsegs` zero-sized segments and no body.
+   subroutine zero_sized_segments(frame, nsegs)
+      integer(int8), allocatable, intent(out) :: frame(:)
+      integer, intent(in) :: nsegs
+      integer(int64) :: nbytes
+      nbytes = (int(1 + nsegs, int64)*4_int64 + 7_int64)/8_int64*8_int64
+      if (allocated(frame)) deallocate (frame)
+      allocate (frame(0:nbytes - 1))
+      frame = 0_int8
+      call cp_put_i32(frame, 0_int64, int(nsegs - 1, int32))
+   end subroutine zero_sized_segments
 
    subroutine test_read_empty_file(error)
       type(error_type), allocatable, intent(out) :: error

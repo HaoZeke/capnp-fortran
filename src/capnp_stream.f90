@@ -40,7 +40,7 @@ contains
       integer, intent(in), optional :: depth_limit
       type(pk_source_t) :: st
       integer(int8) :: w8(0:7)
-      integer(int8) :: hdr(0:2055) ! 257 words: table for the 512-segment cap
+      integer(int8) :: hdr(0:2055) ! 257 words; 511 segments need 256
       integer(int8), allocatable :: flat(:)
       integer(int64) :: ipos, nsegs64, header_words, total_words, nwords, limit, i, n
       err = CAPNP_OK
@@ -59,7 +59,7 @@ contains
          return
       end if
       nsegs64 = iand(int(cp_get_i32(w8, 0_int64), int64), 4294967295_int64) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      if (nsegs64 < 1_int64 .or. nsegs64 > 511_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
@@ -128,8 +128,9 @@ contains
    end subroutine capnp_read_message
 
    !> Segment count and total size limits of the C++ stream reader
-   !> (InputStreamMessageReader), applied before any body is parsed.
-   !> A table that is cut short is left for the deserializer to report.
+   !> (`InputStreamMessageReader`), applied before any body is parsed.
+   !> `firstWord[0] < 511` rejects a count of 512 or more. A table that
+   !> is cut short is left for the deserializer to report.
    subroutine check_stream_framing(bytes, traversal_words, err)
       use capnp_endian, only: cp_get_i32
       integer(int8), intent(in) :: bytes(0:)
@@ -145,7 +146,7 @@ contains
       end if
       if (size(bytes, kind=int64) < 4_int64) return
       nsegs64 = iand(int(cp_get_i32(bytes, 0_int64), int64), 4294967295_int64) + 1_int64
-      if (nsegs64 > 512_int64) then
+      if (nsegs64 > 511_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
@@ -203,7 +204,7 @@ contains
          return
       end if
       nsegs64 = iand(int(cp_get_i32(head, 0_int64), int64), 4294967295_int64) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      if (nsegs64 < 1_int64 .or. nsegs64 > 511_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
@@ -252,7 +253,7 @@ contains
       integer, intent(in), optional :: depth_limit
       type(pk_source_t) :: st
       integer(int8) :: w8(0:7)
-      integer(int8) :: hdr(0:2055) ! 257 words: table for the 512-segment cap
+      integer(int8) :: hdr(0:2055) ! 257 words; 511 segments need 256
       integer(int8), allocatable :: flat(:)
       integer(int64) :: nsegs64, header_words, total_words, nwords, limit, i, n
       err = CAPNP_OK
@@ -265,7 +266,7 @@ contains
          return
       end if
       nsegs64 = iand(int(cp_get_i32(w8, 0_int64), int64), 4294967295_int64) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      if (nsegs64 < 1_int64 .or. nsegs64 > 511_int64) then
          err = CAPNP_ERR_FRAMING
          return
       end if
