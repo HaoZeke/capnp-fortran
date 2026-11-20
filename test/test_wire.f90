@@ -65,7 +65,8 @@ contains
            new_unittest("far-depth-one", test_far_depth_one), &
            new_unittest("reader-options", test_reader_options), &
            new_unittest("builder-options", test_builder_options), &
-           new_unittest("alloc-in-bounds", test_alloc_in_bounds)]
+           new_unittest("alloc-in-bounds", test_alloc_in_bounds), &
+           new_unittest("root-uninit", test_root_uninit)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2725,6 +2726,18 @@ contains
                  'alloc-in: full cap does not fit beside the object')
       call capnp_message_free(msg)
    end subroutine test_alloc_in_bounds
+
+   !> capnp_root must return CAPNP_ERR_BOUNDS on an uninitialized or empty
+   !> message without indexing an unallocated segment table.
+   subroutine test_root_uninit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer :: err
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_BOUNDS .and. root%kind == CAPNP_PK_NULL, &
+                 'root-uninit: empty message returns bounds error')
+   end subroutine test_root_uninit
 
    subroutine unlink_path(path)
       character(len=*), intent(in) :: path
