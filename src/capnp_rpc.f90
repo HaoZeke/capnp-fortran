@@ -2632,44 +2632,25 @@ contains
          if (present(handle)) handle = id
          return
       end if
-      ! A released id can be handed out again. The old node would ignore
-      ! the new Resolve and the new refs.
+      ! A released id can be handed out again. The old node keeps its own
+      ! handle: a handle recorded before the Release or Finish that freed
+      ! the id may still be in use, and reviving the node in place would
+      ! make that stale handle name the new import. Every reuse gets a new
+      ! node and a new handle.
       if (node%released .or. node%refs <= 0) then
-         ! A resolved promise keeps naming its replacement, a reflected
-         ! local client, or a broken capability after its wire import is
-         ! released, and a handle for it may still be in use. Never
-         ! overwrite that identity when the peer reuses the export id.
-         if (node%state == IMP_LOCAL .or. node%state == IMP_EMBARGO .or. &
-             node%state == IMP_REMOTE .or. node%state == IMP_BROKEN) then
-            allocate (node)
-            node%id = conn%next_import_handle
-            conn%next_import_handle = conn%next_import_handle - 1_int64
-            node%wire_id = id
-            node%refs = 1
-            node%released = .false.
-            if (promise) then
-               node%state = IMP_PROMISE
-            else
-               node%state = IMP_HOSTED
-            end if
-            node%next => conn%imports
-            conn%imports => node
-            if (present(handle)) handle = node%id
-            return
-         end if
+         allocate (node)
+         node%id = conn%next_import_handle
+         conn%next_import_handle = conn%next_import_handle - 1_int64
+         node%wire_id = id
          node%refs = 1
-         node%local_refs = 0
          node%released = .false.
-         node%received_call = .false.
-         node%resolved_id = -1_int64
-         node%embargo_id = -1_int64
-         node%pinned = .false.
-         if (allocated(node%reason)) deallocate (node%reason)
          if (promise) then
             node%state = IMP_PROMISE
          else
             node%state = IMP_HOSTED
          end if
+         node%next => conn%imports
+         conn%imports => node
          if (present(handle)) handle = node%id
          return
       end if

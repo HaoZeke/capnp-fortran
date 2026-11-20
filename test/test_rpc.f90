@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(96))
+      allocate (testsuite(97))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -296,20 +296,22 @@ contains
       testsuite(88)%test => w_resolve_multiref_release
       testsuite(89)%name = "rpc-disembargo-promised-bad-walk"
       testsuite(89)%test => w_disembargo_promised_bad_walk
-      testsuite(90)%name = "rpc-shutdown"
-      testsuite(90)%test => w_shutdown
-      testsuite(91)%name = "posix-recv-eintr-retried"
-      testsuite(91)%test => t_recv_all_retries_eintr
-      testsuite(92)%name = "rpc-framing-511-accepted"
-      testsuite(92)%test => t_framing_511_accepted
-      testsuite(93)%name = "rpc-framing-512-rejected"
-      testsuite(93)%test => t_framing_512_rejected
-      testsuite(94)%name = "rpc-framing-oversized-rejected"
-      testsuite(94)%test => t_framing_oversized_rejected
-      testsuite(95)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(95)%test => t_framing_negative_traversal_rejected
-      testsuite(96)%name = "rpc-framing-short-and-padded"
-      testsuite(96)%test => t_framing_short_and_padded
+      testsuite(90)%name = "rpc-vine-done-after-finish-reused-id"
+      testsuite(90)%test => w_vine_done_after_finish_reused_id
+      testsuite(91)%name = "rpc-shutdown"
+      testsuite(91)%test => w_shutdown
+      testsuite(92)%name = "posix-recv-eintr-retried"
+      testsuite(92)%test => t_recv_all_retries_eintr
+      testsuite(93)%name = "rpc-framing-511-accepted"
+      testsuite(93)%test => t_framing_511_accepted
+      testsuite(94)%name = "rpc-framing-512-rejected"
+      testsuite(94)%test => t_framing_512_rejected
+      testsuite(95)%name = "rpc-framing-oversized-rejected"
+      testsuite(95)%test => t_framing_oversized_rejected
+      testsuite(96)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(96)%test => t_framing_negative_traversal_rejected
+      testsuite(97)%name = "rpc-framing-short-and-padded"
+      testsuite(97)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -527,6 +529,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_multiref_release(error)
    end subroutine w_resolve_multiref_release
+
+   subroutine w_vine_done_after_finish_reused_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_vine_done_after_finish_reused_id(error)
+   end subroutine w_vine_done_after_finish_reused_id
 
    subroutine w_disembargo_promised_bad_walk(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6807,6 +6814,97 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_result_third_party_vine_finish
+
+   !> A Finish that released a thirdPartyHosted vine frees its export id.
+   !> When the peer hands that id out again, a late `rpc_introduction_done`
+   !> for the first Return must not release the new reference.
+   subroutine t_vine_done_after_finish_reused_id(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap, cap2
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(return_t) :: r
+      type(release_t) :: rel
+      type(payload_t) :: params, results
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      integer :: fa, fb, e
+      integer(int64) :: qboot, qcall, qcall2
+      logical :: readable
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qcall, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call rpc_write_third_party_cap(cd, '10.1.0.4', 5004, 911_int64, 81_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_finish_send(cconn, qcall, .false., e)
+      call rpc_recv_message(sconn%fd, reply, e)
+      rmsg = message_read_root(reply, e)
+      call check_(error, e == CAPNP_OK .and. message_which(rmsg) == MESSAGE_FINISH_TAG, &
+                  'vine reuse: Finish tag')
+      call capnp_message_free(reply)
+      call rpc_call_begin(cconn, cap, 1_int64, 0, m, params, qcall2, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, qcall2, e)
+      results = return_results_init(r, e)
+      call payload_content_set(results, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, 81_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call rpc_result_cap(cconn, qcall2, [integer ::], cap2, e)
+      call check_(error, e == CAPNP_OK .and. cap2%kind == RPC_CAP_IMPORT, &
+                  'vine reuse: second result cap')
+      call rpc_introduction_done(cconn, 911_int64, e)
+      call px_poll_in(sconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'vine reuse: stale done leaves the new reference alone')
+      call rpc_release_send(cconn, cap2, e)
+      call px_poll_in(sconn%fd, 1000, readable, e)
+      call check_(error, e == CAPNP_OK .and. readable, &
+                  'vine reuse: releasing the new capability sends Release')
+      if (.not. allocated(error)) then
+         call rpc_recv_message(sconn%fd, reply, e)
+         rmsg = message_read_root(reply, e)
+         call check_(error, e == CAPNP_OK .and. message_which(rmsg) == MESSAGE_RELEASE_TAG, &
+                     'vine reuse: Release tag')
+         if (.not. allocated(error)) then
+            rel = message_release_get(rmsg, e)
+            call check_(error, release_id_get(rel) == 81_int64 .and. &
+                        release_reference_count_get(rel) == 1_int64, &
+                        'vine reuse: Release names the reused id once')
+         end if
+         call capnp_message_free(reply)
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_vine_done_after_finish_reused_id
 
    !> A thirdPartyHosted vine whose wire id collides with a resolved promise
    !> uses its private import handle in rpc_introduction_done.
