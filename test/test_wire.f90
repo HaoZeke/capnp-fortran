@@ -1125,7 +1125,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: bytes(:)
       type(capnp_message_t), target :: msg
-      integer :: err, unit, ios
+      integer :: err, efile, unit, ios
       logical :: canonical
       character(len=*), parameter :: path = 'empty-file.bin'
       open (newunit=unit, file=path, access='stream', form='unformatted', &
@@ -1135,10 +1135,14 @@ contains
          return
       end if
       close (unit)
-      call capnp_read_file(path, bytes, err)
+      call capnp_read_file(path, bytes, efile)
+      call capnp_read_message(path, msg, err)
+      call check(error, err == CAPNP_ERR_FRAMING, 'empty-file: stream reader rejects empty input')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
       open (newunit=unit, file=path, status='old', iostat=ios)
       if (ios == 0) close (unit, status='delete')
-      call check(error, err == CAPNP_OK .and. size(bytes) == 0, 'empty-file: zero bytes returned')
+      call check(error, efile == CAPNP_OK .and. size(bytes) == 0, 'empty-file: zero bytes returned')
       if (allocated(error)) return
       call capnp_deserialize_bytes(bytes, msg, err)
       canonical = capnp_is_canonical(msg, err)

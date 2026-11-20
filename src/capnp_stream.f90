@@ -118,6 +118,10 @@ contains
       integer(int8), allocatable :: bytes(:)
       call capnp_read_file(path, bytes, err)
       if (err /= CAPNP_OK) return
+      if (size(bytes, kind=int64) == 0_int64) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
       call check_stream_framing(bytes, traversal_words, err)
       if (err /= CAPNP_OK) return
       call capnp_deserialize_bytes(bytes, msg, err, traversal_words, depth_limit)
@@ -135,6 +139,10 @@ contains
       err = CAPNP_OK
       limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       if (present(traversal_words)) limit = traversal_words
+      if (size(bytes, kind=int64) == 0_int64) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
       if (size(bytes, kind=int64) < 4_int64) return
       nsegs64 = iand(int(cp_get_i32(bytes, 0_int64), int64), 4294967295_int64) + 1_int64
       if (nsegs64 > 512_int64) then
