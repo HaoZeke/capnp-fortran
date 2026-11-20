@@ -9,7 +9,7 @@ module test_edges
    use cli_path, only: capnpf_setup
    implicit none
    private
-   public :: collect_edges
+   public :: collect_edges, release_edges_tmp
 
    character(len=:), allocatable :: tmp
 
@@ -29,6 +29,7 @@ contains
       tmp = '/tmp/capnpf-edges-'//trim(buf)
       testsuite = [ &
          new_unittest("cpp-match", run_cpp_match), &
+         new_unittest("text-layout", run_text_layout), &
          new_unittest("nest-depth", run_nest_depth), &
          new_unittest("text-depth", run_text_depth), &
          new_unittest("segment-sweep", run_segment_sweep), &
@@ -37,6 +38,10 @@ contains
          new_unittest("oversize-flat", run_oversize_flat) &
          ]
    end subroutine collect_edges
+
+   subroutine release_edges_tmp()
+      if (allocated(tmp)) call execute_command_line('rm -rf -- '//tmp, wait=.true.)
+   end subroutine release_edges_tmp
 
    subroutine check_(error, cond, name)
       type(error_type), allocatable, intent(inout) :: error
@@ -168,6 +173,42 @@ contains
       call check_(error, sh(cmd), 'edges: '//label)
    end subroutine match
 
+   subroutine run_text_layout(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sch = &
+         '@0xe82731ac4d9bf560;'//achar(10)// &
+         'struct Two { a @0 :Text; b @1 :Text; }'//achar(10)
+      integer :: err
+      character(len=:), allocatable :: cmd
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call spit(tmp//'/two.capnp', sch, err)
+      call check_(error, err == 0, 'layout: schema')
+      call spit(tmp//'/two.txt', '(b = "B", a = "A")', err)
+      if (err /= 0) then
+         call test_failed(error, 'layout: input')
+         return
+      end if
+      cmd = capnpf_setup()//' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" text:binary '//tmp//'/two.capnp Two < ' &
+         //tmp//'/two.txt > '//tmp//'/two.binary.ref' &
+         //' && "$CAP" convert -I"$INC" text:binary '//tmp//'/two.capnp Two < ' &
+         //tmp//'/two.txt > '//tmp//'/two.binary.ours' &
+         //' && cmp -s '//tmp//'/two.binary.ref '//tmp//'/two.binary.ours' &
+         //' && capnp convert -I"$INC" text:flat '//tmp//'/two.capnp Two < ' &
+         //tmp//'/two.txt > '//tmp//'/two.flat.ref' &
+         //' && "$CAP" convert -I"$INC" text:flat '//tmp//'/two.capnp Two < ' &
+         //tmp//'/two.txt > '//tmp//'/two.flat.ours' &
+         //' && cmp -s '//tmp//'/two.flat.ref '//tmp//'/two.flat.ours'
+      call check_(error, sh(cmd), 'edges: shuffled text layout')
+   end subroutine run_text_layout
+
    subroutine run_nest_depth(error)
       type(error_type), allocatable, intent(out) :: error
       character(len=*), parameter :: sch = &
@@ -188,6 +229,8 @@ contains
       call one_depth(error, 100, 'json')
       call one_depth(error, 300, 'text')
       call one_depth(error, 300, 'json')
+      call json_depth(error, 64, .true.)
+      call json_depth(error, 65, .false.)
    end subroutine run_nest_depth
 
    subroutine one_depth(error, depth, fmt)
@@ -228,9 +271,43 @@ contains
          'edges: depth '//trim(dbuf)//' binary:'//fmt)
    end subroutine one_depth
 
-   !> Text input at 101, 1000, and 1735. 1735 is the deepest nest capnp
-   !> 1.4.0 still accepts on an 8 MiB stack; 1739 is the first depth it
-   !> rejects, by a segmentation fault rather than a nesting counter.
+   subroutine json_depth(error, depth, expect_ok)
+      type(error_type), allocatable, intent(inout) :: error
+      integer, intent(in) :: depth
+      logical, intent(in) :: expect_ok
+      character(len=:), allocatable :: json, cmd
+      character(len=16) :: buf
+      integer :: err, i
+      if (allocated(error)) return
+      json = '{"v":1}'
+      do i = 0, depth - 2
+         write (buf, '(i0)') i
+         json = '{"kid":'//json//',"v":'//trim(buf)//'}'
+      end do
+      call spit(tmp//'/nest.json', json, err)
+      if (err /= 0) then
+         call test_failed(error, 'json depth: write')
+         return
+      end if
+      cmd = capnpf_setup()//' && capnp convert json:binary '//tmp//'/node.capnp Node < ' &
+         //tmp//'/nest.json > '//tmp//'/jd.ref 2>'//tmp//'/jd.ref.err; echo $? > ' &
+         //tmp//'/jd.ref.rc' &
+         //' && "$CAP" convert json:binary '//tmp//'/node.capnp Node < ' &
+         //tmp//'/nest.json > '//tmp//'/jd.ours 2>'//tmp//'/jd.ours.err; echo $? > ' &
+         //tmp//'/jd.ours.rc' &
+         //' && cmp -s '//tmp//'/jd.ref.rc '//tmp//'/jd.ours.rc'
+      if (expect_ok) then
+         cmd = cmd//' && grep -qx 0 '//tmp//'/jd.ref.rc' &
+            //' && cmp -s '//tmp//'/jd.ref '//tmp//'/jd.ours'
+      else
+         cmd = cmd//' && ! grep -qx 0 '//tmp//'/jd.ref.rc'
+      end if
+      write (buf, '(i0)') depth
+      call check_(error, sh(cmd), 'edges: json depth '//trim(buf))
+   end subroutine json_depth
+
+   !> Check a shallow value and a deeper value without pinning a
+   !> stack-size-dependent capnp implementation detail.
    subroutine run_text_depth(error)
       type(error_type), allocatable, intent(out) :: error
       character(len=*), parameter :: sch = &
@@ -249,7 +326,6 @@ contains
       call check_(error, err == 0, 'text-depth: schema')
       call text_depth(error, 101)
       call text_depth(error, 1000)
-      call text_depth(error, 1735)
    end subroutine run_text_depth
 
    subroutine text_depth(error, depth)

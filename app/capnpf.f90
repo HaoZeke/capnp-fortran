@@ -876,10 +876,9 @@ contains
             call capnp_serialize_bytes(reseg, outb, err)
          end if
          call capnp_message_free(reseg)
-      else if (.not. msg%is_builder .and. (to == 'binary' .or. to == 'packed')) then
-         ! A reader segment keeps every word from the table, including a
-         ! zero tail the object does not use. The capnp tool copies the
-         ! root into a fresh builder, so that tail is not written back.
+      else if (to == 'binary' .or. to == 'packed') then
+         ! Copy the root into a fresh builder. This gives builders and readers
+         ! the deterministic object order used by the capnp tool.
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) return
          call capnp_message_init_builder(reseg, err)
@@ -915,16 +914,6 @@ contains
       type(capnp_ptr_t) :: root, croot
       integer(int64) :: n, need
       err = CAPNP_OK
-      if (msg%nsegs == 1) then
-         n = msg%segs(1)%len
-         if (n <= 0_int64) then
-            allocate (flatb(0))
-         else
-            allocate (flatb(0:n - 1))
-            flatb = msg%segs(1)%bytes(0:n - 1)
-         end if
-         return
-      end if
       root = capnp_root(msg, err)
       if (err /= CAPNP_OK) return
       need = 1_int64 + capnp_total_size(root, err)

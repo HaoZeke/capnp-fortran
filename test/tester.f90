@@ -22,7 +22,7 @@ program tester
    use test_codegen_parity, only: collect_codegen_parity
    use test_idents, only: collect_idents
    use test_regress, only: collect_regress, release_regress_tmp
-   use test_edges, only: collect_edges
+   use test_edges, only: collect_edges, release_edges_tmp
    use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
@@ -98,5 +98,6 @@ contains
    subroutine release_temps()
       call release_codecs_tmp()
       call release_regress_tmp()
+      call release_edges_tmp()
    end subroutine release_temps
 end program tester
