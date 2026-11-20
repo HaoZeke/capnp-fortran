@@ -41,7 +41,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(24))
+      allocate (testsuite(25))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -90,6 +90,8 @@ contains
       testsuite(23)%test => run_pin_only_call_aborts
       testsuite(24)%name = "release and disembargo on pin-only export abort"
       testsuite(24)%test => run_pin_only_release_aborts
+      testsuite(25)%name = "promised answer on pin-only export is dispatched"
+      testsuite(25)%test => run_pin_only_promised_answer
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -1431,5 +1433,82 @@ contains
                                                  'pin-only disembargo: freed once')
       end if
    end subroutine run_pin_only_release_aborts
+
+   !> A promisedAnswer resolves through the answer, which C++ 1.4.0 keeps
+   !> callable until Finish after the peer released the export id
+   !> (`rpc.c++:3109-3125`). The pinned server still receives the call.
+   subroutine run_pin_only_promised_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: vat
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: intro, prov_a
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: boot_cap, owned_cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ops, s
+      integer(int64) :: qboot, qown, pq
+      integer :: ia, pa_fd, err
+
+      final_count = 0
+      touched = 0
+      call px_socketpair(ia, pa_fd, err)
+      boot => factory
+      call rpc_conn_init(prov_a, pa_fd, boot)
+      call rpc_conn_set_vat(prov_a, vat)
+      boot => null()
+      call rpc_conn_init(intro, ia, boot)
+      call rpc_bootstrap_send(intro, boot_cap, err)
+      qboot = boot_cap%id
+      call rpc_pump_once(prov_a, err)
+      call rpc_wait(intro, qboot, err)
+      call rpc_result_cap(intro, qboot, [integer ::], boot_cap, err)
+      if (.not. allocated(error)) then
+         call call_method(intro, prov_a, boot_cap, 7, err, qown)
+         if (err == CAPNP_OK) call rpc_result_cap(intro, qown, [0], owned_cap, err)
+         call check_(error, err == CAPNP_OK, 'pin-only promised answer: owned result')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_provide_send(intro, owned_cap%id, '127.0.0.1', 9, &
+                               76_int64, pq, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_wait(intro, pq, err)
+         if (err == CAPNP_OK) call rpc_release_send(intro, owned_cap, err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'pin-only promised answer: provision pin alive')
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         c = message_call_init(msg, err)
+         call call_question_id_set(c, 501_int64, err)
+         call call_interface_id_set(c, LIFE_IFACE, err)
+         call call_method_id_set(c, 10_int32, err)
+         tgt = call_target_init(c, err)
+         pa = message_target_promised_answer_init(tgt, err)
+         call promised_answer_question_id_set(pa, qown, err)
+         ops = promised_answer_transform_init(pa, 1_int64, err)
+         op%p = capnp_list_get_struct(ops, 0, err)
+         call promised_answer_op_get_pointer_field_set(op, 0, err)
+         pl = call_params_init(c, err)
+         s = capnp_new_struct(m, 0, 0, err)
+         call payload_content_set(pl, s, err)
+         call rpc_send_message(intro%fd, m, err)
+         call capnp_message_free(m)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         call check_(error, err == CAPNP_OK .and. rpc_conn_alive(prov_a) .and. &
+                     touched /= 0, 'pin-only promised answer: dispatched')
+      end if
+      call rpc_conn_close(intro)
+      call rpc_conn_close(prov_a)
+      if (.not. allocated(error)) call check_(error, final_count == 1, &
+                                              'pin-only promised answer: freed once')
+   end subroutine run_pin_only_promised_answer
 
 end module test_rpc_lifetime

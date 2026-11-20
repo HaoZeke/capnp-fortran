@@ -3771,6 +3771,9 @@ contains
          cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
          if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_SENDER_HOSTED_TAG) return
          eid = cap_descriptor_sender_hosted_get(cd)
+         ! rpc.c++ 3109-3125 resolves a promisedAnswer through the answer's
+         ! own pipeline, not the export table. A peer's Release of the
+         ! export id does not end the answer, so a pin keeps it callable.
          if (eid >= 0_int64 .and. eid < int(MAXE, int64)) then
             if (conn%exports(int(eid))%used) out_eid = int(eid)
          end if
