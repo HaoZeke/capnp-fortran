@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(104))
+      allocate (testsuite(105))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -314,18 +314,20 @@ contains
       testsuite(97)%test => w_resolve_receiver_answer_walk
       testsuite(98)%name = "rpc-resolve-pending-receiver-answer"
       testsuite(98)%test => w_resolve_pending_receiver_answer
-      testsuite(99)%name = "posix-recv-eintr-retried"
-      testsuite(99)%test => t_recv_all_retries_eintr
-      testsuite(100)%name = "rpc-framing-511-accepted"
-      testsuite(100)%test => t_framing_511_accepted
-      testsuite(101)%name = "rpc-framing-512-rejected"
-      testsuite(101)%test => t_framing_512_rejected
-      testsuite(102)%name = "rpc-framing-oversized-rejected"
-      testsuite(102)%test => t_framing_oversized_rejected
-      testsuite(103)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(103)%test => t_framing_negative_traversal_rejected
-      testsuite(104)%name = "rpc-framing-short-and-padded"
-      testsuite(104)%test => t_framing_short_and_padded
+      testsuite(99)%name = "rpc-resolve-receiver-answer-reflected-caps"
+      testsuite(99)%test => w_resolve_receiver_answer_reflected_caps
+      testsuite(100)%name = "posix-recv-eintr-retried"
+      testsuite(100)%test => t_recv_all_retries_eintr
+      testsuite(101)%name = "rpc-framing-511-accepted"
+      testsuite(101)%test => t_framing_511_accepted
+      testsuite(102)%name = "rpc-framing-512-rejected"
+      testsuite(102)%test => t_framing_512_rejected
+      testsuite(103)%name = "rpc-framing-oversized-rejected"
+      testsuite(103)%test => t_framing_oversized_rejected
+      testsuite(104)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(104)%test => t_framing_negative_traversal_rejected
+      testsuite(105)%name = "rpc-framing-short-and-padded"
+      testsuite(105)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -588,6 +590,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_pending_receiver_answer(error)
    end subroutine w_resolve_pending_receiver_answer
+
+   subroutine w_resolve_receiver_answer_reflected_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_receiver_answer_reflected_caps(error)
+   end subroutine w_resolve_receiver_answer_reflected_caps
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8037,5 +8044,57 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_pending_receiver_answer
+
+   subroutine t_resolve_receiver_answer_reflected_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(message_t) :: msg
+      type(return_t) :: ret
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: qboot, qadder, eid
+      integer :: e
+      logical :: released, disembargo
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      msg = message_read_root(cconn%answers(int(qboot))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      if (e == CAPNP_OK) pl = return_results_get(ret, e)
+      if (e == CAPNP_OK) ctab = payload_cap_table_get(pl, e)
+      if (e == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (e == CAPNP_OK) call cap_descriptor_sender_promise_set(cd, eid, e)
+      call check_(error, e == CAPNP_OK, 'receiverAnswer: senderPromise prepared')
+      if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 9_int64, promised)
+         call ra_resolve(cconn, sconn, 9_int64, qboot, [integer ::])
+         call ra_drain(sconn, 9_int64, released, disembargo)
+         call check_(error, disembargo, 'receiverAnswer: senderPromise is reflected')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+      if (allocated(error)) return
+
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      msg = message_read_root(cconn%answers(int(qboot))%retmsg, e)
+      if (e == CAPNP_OK) ret = message_return_get(msg, e)
+      if (e == CAPNP_OK) pl = return_results_get(ret, e)
+      if (e == CAPNP_OK) ctab = payload_cap_table_get(pl, e)
+      if (e == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, e)
+      if (e == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, eid, e)
+      call check_(error, e == CAPNP_OK, 'receiverAnswer: receiverHosted prepared')
+      if (.not. allocated(error)) then
+         call ra_called_promise(cconn, sconn, 10_int64, promised)
+         call ra_resolve(cconn, sconn, 10_int64, qboot, [integer ::])
+         call ra_drain(sconn, 10_int64, released, disembargo)
+         call check_(error, disembargo, 'receiverAnswer: receiverHosted is reflected')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_receiver_answer_reflected_caps
 
 end module test_rpc

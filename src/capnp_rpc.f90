@@ -3482,12 +3482,23 @@ contains
                 p%capidx < capnp_list_len(ctab)) then
                acd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
                if (err == CAPNP_OK) then
-                  if (cap_descriptor_which(acd) == CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
+                  select case (cap_descriptor_which(acd))
+                  case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
                      call resolve_reflected(conn, node, &
                                             cap_descriptor_sender_hosted_get(acd), err, &
                                             pipelined=.true.)
                      return
-                  end if
+                  case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+                     call resolve_reflected(conn, node, &
+                                            cap_descriptor_sender_promise_get(acd), err, &
+                                            pipelined=.true.)
+                     return
+                  case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+                     call resolve_reflected(conn, node, &
+                                            cap_descriptor_receiver_hosted_get(acd), err, &
+                                            pipelined=.true.)
+                     return
+                  end select
                end if
             end if
             err = CAPNP_OK
@@ -3554,17 +3565,28 @@ contains
                else
                   cd%p = capnp_list_get_struct(ctab, int(content%capidx), err)
                   if (err /= CAPNP_OK) return
-                  if (cap_descriptor_which(cd) == CAP_DESCRIPTOR_SENDER_HOSTED_TAG) then
+                  select case (cap_descriptor_which(cd))
+                  case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
                      call resolve_reflected(conn, node, &
                                             cap_descriptor_sender_hosted_get(cd), err, &
                                             pipelined=.true.)
                      if (err /= CAPNP_OK) return
-                  else
+                  case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+                     call resolve_reflected(conn, node, &
+                                            cap_descriptor_sender_promise_get(cd), err, &
+                                            pipelined=.true.)
+                     if (err /= CAPNP_OK) return
+                  case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+                     call resolve_reflected(conn, node, &
+                                            cap_descriptor_receiver_hosted_get(cd), err, &
+                                            pipelined=.true.)
+                     if (err /= CAPNP_OK) return
+                  case default
                      call release_all_import(conn, node, err)
                      if (err /= CAPNP_OK) return
                      node%state = IMP_BROKEN
                      node%reason = "invalid 'receiverAnswer'"
-                  end if
+                  end select
                end if
             end if
             call drain_answer_pipeline(conn, node%id, err)
