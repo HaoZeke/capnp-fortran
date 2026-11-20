@@ -28,6 +28,7 @@ contains
            new_unittest("far-chain-rejected", test_far_chain_rejected), &
            new_unittest("double-far-e2e", test_double_far_e2e), &
            new_unittest("wire-capability", test_wire_capability), &
+           new_unittest("cap-reserved-bits", test_cap_reserved_bits), &
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
            new_unittest("packed-roundtrip", test_packed_roundtrip), &
            new_unittest("packed-incremental", test_packed_incremental), &
@@ -579,6 +580,36 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_wire_capability
+   !> Low word 0x7 is kind OTHER with reserved bits. isCapability() is false
+   !> (layout.c++). A clean capability word still resolves.
+   subroutine test_cap_reserved_bits(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:15))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i64(buf, 8_int64, 7_int64)
+      call capnp_deserialize_bytes(buf, msg, err)
+      call check(error, err == CAPNP_OK, 'cap-reserved: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_KIND, 'cap-reserved: word 7 rejected')
+      if (allocated(error)) return
+      call check(error, root%kind /= CAPNP_PK_CAP, 'cap-reserved: not a capability')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call cp_put_i64(buf, 8_int64, wp_make_cap(4_int64))
+      call capnp_deserialize_bytes(buf, msg, err)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_CAP .and. &
+                  root%capidx == 4_int64, 'cap-reserved: clean cap still resolves')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_cap_reserved_bits
    !> Vectors from https://capnproto.org/encoding.html#packing
    subroutine test_packed_spec_vectors(error)
       type(error_type), allocatable, intent(out) :: error

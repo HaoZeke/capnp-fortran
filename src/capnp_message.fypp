@@ -154,6 +154,12 @@ contains
          end if
 
       case (CAPNP_WK_CAP)
+         ! layout.c++ WirePointer::isCapability requires the whole low word
+         ! to be OTHER. Any of bits 2-31 set is a reserved pointer.
+         if (ibits(w, 2, 30) /= 0_int64) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          p%kind = CAPNP_PK_CAP
          p%capidx = wp_cap_index(w)
          p%depth = depth
