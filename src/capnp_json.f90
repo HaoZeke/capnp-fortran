@@ -81,7 +81,11 @@ contains
       logical :: do_pretty, multi
       err = CAPNP_OK
       text = ''
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -112,7 +116,11 @@ contains
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      if (.not. schema%loaded .or. idx < 1 .or. idx > size(schema%nodes)) then
+      if (.not. schema%loaded) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
       end if

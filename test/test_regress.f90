@@ -24,7 +24,8 @@ contains
          new_unittest("json-collisions", run_json_collisions), &
          new_unittest("json-void-and-missing", run_json_void_missing), &
          new_unittest("text-leniency", run_text_leniency), &
-         new_unittest("unloaded-guard", run_unloaded) &
+         new_unittest("unloaded-guard", run_unloaded), &
+         new_unittest("json-unloaded-guard", run_json_unloaded) &
          ]
    end subroutine collect_regress
 
@@ -473,4 +474,35 @@ contains
          call test_failed(error, 'guard: bounds-checked text encode')
       end if
    end subroutine check_text_bounds
+   subroutine run_json_unloaded(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('mkdir -p '//tmp//'/mods' &
+         //' && mod=$(find build -name capnp_json.mod | xargs ls -t | head -1)' &
+         //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
+         //' && test -n "$mod" && test -n "$lib"' &
+         //' && dir=$(dirname "$mod")' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_json.f90 -o ' &
+         //tmp//'/json_check.o' &
+         //' && cat > '//tmp//'/jbounds.f90 <<''EOF'' &&'//achar(10)// &
+         'program u'//achar(10)// &
+         '   use capnp_json, only: capnp_json_encode'//achar(10)// &
+         '   use capnp_dynamic, only: capnp_dyn_schema_t'//achar(10)// &
+         '   use capnp_message, only: capnp_ptr_t'//achar(10)// &
+         '   use capnp_kinds, only: capnp_err_arg'//achar(10)// &
+         '   implicit none'//achar(10)// &
+         '   type(capnp_dyn_schema_t) :: schema'//achar(10)// &
+         '   type(capnp_ptr_t) :: p'//achar(10)// &
+         '   character(len=:), allocatable :: text'//achar(10)// &
+         '   integer :: err'//achar(10)// &
+         '   call capnp_json_encode(schema, 1, p, text, err)'//achar(10)// &
+         '   if (err /= capnp_err_arg) stop 1'//achar(10)// &
+         'end program'//achar(10)// &
+         'EOF'//achar(10)// &
+         'gfortran $san -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/jbounds.f90 ' &
+         //tmp//'/json_check.o "$lib" -o '//tmp//'/jbounds' &
+         //' && ASAN_OPTIONS=detect_leaks=0 '//tmp//'/jbounds')) then
+         call test_failed(error, 'guard: bounds-checked json encode')
+      end if
+   end subroutine run_json_unloaded
 end module test_regress
