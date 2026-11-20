@@ -6,7 +6,7 @@ module test_dynamic
    use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
+   use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, TYPE_INT64, &
                                 TYPE_STRUCT, TYPE_ANY_POINTER, type_which, &
                                 type_list_element, type_type_id, type_anyptr_which, &
                                 type_param_scope_id, ANYPTR_PARAMETER, &
@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(18))
+      allocate (testsuite(19))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -67,6 +67,8 @@ contains
       testsuite(17)%test => run_wire_count
       testsuite(18)%name = "dynamic-int-range"
       testsuite(18)%test => run_int_range
+      testsuite(19)%name = "dynamic-unknown-list"
+      testsuite(19)%test => run_unknown_list
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1105,6 +1107,45 @@ contains
                   'null reader: builder flag is not read through or')
       call capnp_dyn_free(schema)
    end subroutine run_null_reader
+
+   !> An element type tag outside the schema is not a pointer list.
+   subroutine run_unknown_list(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: sink, elem, made, alien, field_t
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      call capnp_message_init_builder(msg, err)
+      sink = capnp_dyn_new_root(schema, sink_idx, msg, err)
+      made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 2_int64, err)
+      call check_(error, err == CAPNP_OK .and. made%esize == CAPNP_SZ_EIGHT, &
+                  'unknown-list: int64 list still inits')
+      field_t = capnp_dyn_field_schema(schema, sink_idx, 'scores', err)
+      elem = type_list_element(field_t, err)
+      call check_(error, err == CAPNP_OK .and. type_which(elem) == TYPE_INT64, &
+                  'unknown-list: element starts as int64')
+      call capnp_set_u16(elem, 0_int64, 99_int32, err)
+      made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 1_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL, &
+                  'unknown-list: init rejects the tag')
+      alien = capnp_new_list(msg, CAPNP_SZ_PTR, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: pointer list is not a match')
+      alien = capnp_new_list(msg, CAPNP_SZ_VOID, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: void list is not a match')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_unknown_list
 
    !> Values that do not fit the field width are rejected and leave the
    !> previous bits alone.

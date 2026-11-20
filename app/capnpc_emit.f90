@@ -1654,6 +1654,10 @@ contains
          newexpr = 'capnp_new_composite_list(h%p%msg, n, '//upcase(st)// &
                    '_DWORDS, '//upcase(st)//'_PWORDS, err)'
       case default
+         if (list_esize_for(type_which(et)) < 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          newexpr = 'capnp_new_list(h%p%msg, '// &
                    itoa(int(list_esize_for(type_which(et)), int64))//', n, err)'
       end select
@@ -2140,7 +2144,9 @@ contains
       case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
       case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
       case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
-      case default; es = CAPNP_SZ_PTR ! text, data, list, anyPointer
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         es = CAPNP_SZ_PTR
+      case default; es = -1
       end select
    end function list_esize_for
 
