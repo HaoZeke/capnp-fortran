@@ -1212,6 +1212,9 @@ contains
       call f32_match_encode(error, schema, idx, '(x = 1.1760532587147835e-38)')
       call f32_match_encode(error, schema, idx, '(x = -1.176472387085463e-38)')
       call f32_match_encode(error, schema, idx, '(x = -0.0)')
+      call f32_match_encode(error, schema, idx, '(x = 4611686843061108735)')
+      call f32_match_encode(error, schema, idx, '(x = 9223373686122217471)')
+      call f32_match_encode(error, schema, idx, '(x = 0x8000017fffffffff)')
       call capnp_dyn_free(schema)
    end subroutine run_f32_text
 
