@@ -110,7 +110,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(84))
+      allocate (testsuite(88))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -265,20 +265,28 @@ contains
       testsuite(76)%test => w_resolve_accepted
       testsuite(77)%name = "rpc-unknown-tags"
       testsuite(77)%test => w_unknown_tags
-      testsuite(78)%name = "rpc-shutdown"
-      testsuite(78)%test => w_shutdown
-      testsuite(79)%name = "posix-recv-eintr-retried"
-      testsuite(79)%test => t_recv_all_retries_eintr
-      testsuite(80)%name = "rpc-framing-511-accepted"
-      testsuite(80)%test => t_framing_511_accepted
-      testsuite(81)%name = "rpc-framing-512-rejected"
-      testsuite(81)%test => t_framing_512_rejected
-      testsuite(82)%name = "rpc-framing-oversized-rejected"
-      testsuite(82)%test => t_framing_oversized_rejected
-      testsuite(83)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(83)%test => t_framing_negative_traversal_rejected
-      testsuite(84)%name = "rpc-framing-short-and-padded"
-      testsuite(84)%test => t_framing_short_and_padded
+      testsuite(78)%name = "rpc-resolve-chained-local"
+      testsuite(78)%test => w_resolve_chained_local
+      testsuite(79)%name = "rpc-resolve-reused-id-target"
+      testsuite(79)%test => w_resolve_reused_id_target
+      testsuite(80)%name = "rpc-resolve-released-no-embargo"
+      testsuite(80)%test => w_resolve_released_no_embargo
+      testsuite(81)%name = "rpc-reused-handle-provide-join"
+      testsuite(81)%test => w_reused_handle_provide_join
+      testsuite(82)%name = "rpc-shutdown"
+      testsuite(82)%test => w_shutdown
+      testsuite(83)%name = "posix-recv-eintr-retried"
+      testsuite(83)%test => t_recv_all_retries_eintr
+      testsuite(84)%name = "rpc-framing-511-accepted"
+      testsuite(84)%test => t_framing_511_accepted
+      testsuite(85)%name = "rpc-framing-512-rejected"
+      testsuite(85)%test => t_framing_512_rejected
+      testsuite(86)%name = "rpc-framing-oversized-rejected"
+      testsuite(86)%test => t_framing_oversized_rejected
+      testsuite(87)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(87)%test => t_framing_negative_traversal_rejected
+      testsuite(88)%name = "rpc-framing-short-and-padded"
+      testsuite(88)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -420,6 +428,26 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_unknown_tags(error)
    end subroutine w_unknown_tags
+
+   subroutine w_resolve_chained_local(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_chained_local(error)
+   end subroutine w_resolve_chained_local
+
+   subroutine w_resolve_reused_id_target(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_reused_id_target(error)
+   end subroutine w_resolve_reused_id_target
+
+   subroutine w_resolve_released_no_embargo(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_released_no_embargo(error)
+   end subroutine w_resolve_released_no_embargo
+
+   subroutine w_reused_handle_provide_join(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_reused_handle_provide_join(error)
+   end subroutine w_reused_handle_provide_join
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -5870,5 +5898,469 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_unknown_tags
+
+   !> Calling an original promise handle after chained Resolve
+   !> (promise -> senderPromise -> receiverHosted) must dispatch locally
+   !> and record `received_call` on the followed promise handle.
+   subroutine t_resolve_chained_local(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, p10, p11
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q10, q11, qcall
+      logical :: readable
+
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => local_echo
+      call rpc_conn_init(cconn, fa, boot)
+      ! Give cconn export 0 so receiverHosted(0) is a live export on cconn.
+      call rpc_bootstrap_send(sconn, echo_cap, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, echo_cap%id, e)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+
+      ! Part A: 10 -> senderPromise(20) -> receiverHosted(0).
+      call inject_promise(sconn%fd, cconn, echo_cap, 10_int64, q10, e)
+      call rpc_wait(cconn, q10, e)
+      call rpc_result_cap(cconn, q10, [integer ::], p10, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 10_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_sender_promise_set(cd, 20_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call recv_within(sconn%fd, reply, error, 'chained: release 10')
+      if (.not. allocated(error)) call capnp_message_free(reply)
+
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 20_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'chained: release 20')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+
+      if (.not. allocated(error)) then
+         call rpc_call_begin(cconn, p10, ECHO_IFACE, 0, m, params, qcall, e)
+         if (e == CAPNP_OK) call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+         if (e == CAPNP_OK) call rpc_call_send(cconn, m, e)
+         call px_poll_in(sconn%fd, 50, readable, e)
+         call check_(error, e == CAPNP_OK .and. .not. readable, &
+                     'chained: call on original handle dispatches locally')
+         if (.not. allocated(error)) then
+            call rpc_wait(cconn, qcall, e)
+            call check_(error, e == CAPNP_OK, 'chained: local call returns ok')
+         end if
+      end if
+
+      ! Part B: 11 -> senderPromise(21), call on p11, then 21 -> receiverHosted(0).
+      if (.not. allocated(error)) then
+         call inject_promise(sconn%fd, cconn, echo_cap, 11_int64, q11, e)
+         call rpc_wait(cconn, q11, e)
+         call rpc_result_cap(cconn, q11, [integer ::], p11, e)
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 11_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_sender_promise_set(cd, 21_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'chained-call: release 11')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call rpc_call_begin(cconn, p11, ECHO_IFACE, 0, m, params, qcall, e)
+         if (e == CAPNP_OK) call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+         if (e == CAPNP_OK) call rpc_call_send(cconn, m, e)
+         call recv_within(sconn%fd, reply, error, 'chained-call: wire call to 21')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 21_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'chained-call: disembargo arrives')
+         if (.not. allocated(error)) then
+            rmsg = message_read_root(reply, e)
+            call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                        'chained-call: sends Disembargo on followed promise')
+            if (.not. allocated(error)) then
+               d = message_disembargo_get(rmsg, e)
+               tgt = disembargo_target_get(d, e)
+               call check_(error, message_target_imported_cap_get(tgt) == 21_int64, &
+                           'chained-call: Disembargo targets wire id 21')
+            end if
+            call capnp_message_free(reply)
+         end if
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_chained_local
+
+   !> When Resolve names a reused wire id that was previously reflected
+   !> to IMP_LOCAL, `resolve_remote` must act on the new private handle:
+   !> release it when the promise was already dropped, and propagate
+   !> `received_call` onto it when the promise had a call.
+   subroutine t_resolve_reused_id_target(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, p4, p5, p6
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(release_t) :: rel
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q4, q5, q6, qcall
+
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => local_echo
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(sconn, echo_cap, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, echo_cap%id, e)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+
+      ! Turn wire id 4 into a reflected local capability.
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, q4, e)
+      call rpc_wait(cconn, q4, e)
+      call rpc_result_cap(cconn, q4, [integer ::], p4, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call recv_within(sconn%fd, reply, error, 'reused-target: release 4')
+      if (.not. allocated(error)) call capnp_message_free(reply)
+
+      ! Part A: drop promise 5, then Resolve(5 -> senderHosted(4)).
+      if (.not. allocated(error)) then
+         call inject_promise(sconn%fd, cconn, echo_cap, 5_int64, q5, e)
+         call rpc_wait(cconn, q5, e)
+         call rpc_result_cap(cconn, q5, [integer ::], p5, e)
+         call rpc_release_send(cconn, p5, e)
+         call recv_within(sconn%fd, reply, error, 'reused-target: release 5')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 5_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_sender_hosted_set(cd, 4_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'reused-target: release reused 4')
+         if (.not. allocated(error)) then
+            rmsg = message_read_root(reply, e)
+            rel = message_release_get(rmsg, e)
+            call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                        release_id_get(rel) == 4_int64, &
+                        'reused-target: released promise drops reused replacement')
+            call capnp_message_free(reply)
+         end if
+      end if
+
+      ! Part B: call promise 6, Resolve(6 -> senderPromise(4)), then
+      ! Resolve(4 -> receiverHosted(0)) must emit Disembargo for 4.
+      if (.not. allocated(error)) then
+         call inject_promise(sconn%fd, cconn, echo_cap, 6_int64, q6, e)
+         call rpc_wait(cconn, q6, e)
+         call rpc_result_cap(cconn, q6, [integer ::], p6, e)
+         call rpc_call_begin(cconn, p6, ECHO_IFACE, 0, m, params, qcall, e)
+         if (e == CAPNP_OK) call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+         if (e == CAPNP_OK) call rpc_call_send(cconn, m, e)
+         call recv_within(sconn%fd, reply, error, 'reused-target: wire call to 6')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 6_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_sender_promise_set(cd, 4_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'reused-target: release 6')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 4_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'reused-target: disembargo for 4')
+         if (.not. allocated(error)) then
+            rmsg = message_read_root(reply, e)
+            call check_(error, message_which(rmsg) == MESSAGE_DISEMBARGO_TAG, &
+                        'reused-target: propagated call sends Disembargo')
+            if (.not. allocated(error)) then
+               d = message_disembargo_get(rmsg, e)
+               tgt = disembargo_target_get(d, e)
+               call check_(error, message_target_imported_cap_get(tgt) == 4_int64, &
+                           'reused-target: Disembargo targets wire id 4')
+            end if
+            call capnp_message_free(reply)
+         end if
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_reused_id_target
+
+   !> A reflected Resolve arriving after the client already released a
+   !> called promise must not emit Disembargo. A Resolve naming a
+   !> thirdPartyHosted cap for an unknown or already-released import must
+   !> release the vine without aborting.
+   subroutine t_resolve_released_no_embargo(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, p7
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg, rmsg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      type(release_t) :: rel
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q7, qcall
+      logical :: readable
+
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      boot => local_echo
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(sconn, echo_cap, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, echo_cap%id, e)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+
+      ! Part A: call promise 7, release 7, then Resolve(7 -> receiverHosted(0)).
+      call inject_promise(sconn%fd, cconn, echo_cap, 7_int64, q7, e)
+      call rpc_wait(cconn, q7, e)
+      call rpc_result_cap(cconn, q7, [integer ::], p7, e)
+      call rpc_call_begin(cconn, p7, ECHO_IFACE, 0, m, params, qcall, e)
+      if (e == CAPNP_OK) call payload_content_set(params, capnp_new_struct(m, 0, 0, e), e)
+      if (e == CAPNP_OK) call rpc_call_send(cconn, m, e)
+      call recv_within(sconn%fd, reply, error, 'released-resolve: call on 7')
+      if (.not. allocated(error)) call capnp_message_free(reply)
+      if (.not. allocated(error)) then
+         call rpc_release_send(cconn, p7, e)
+         call recv_within(sconn%fd, reply, error, 'released-resolve: release 7')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 7_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call px_poll_in(sconn%fd, 50, readable, e)
+         call check_(error, e == CAPNP_OK .and. .not. readable, &
+                     'released-resolve: no Disembargo after Release')
+      end if
+
+      ! Part B: Resolve(99 -> thirdPartyHosted(vine=8)) releases vine 8.
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, 99_int64, e)
+         cd = resolve_cap_init(rv, e)
+         call rpc_write_third_party_cap(cd, '127.0.0.1', 9, 55_int64, 8_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call recv_within(sconn%fd, reply, error, 'released-resolve: vine release arrives')
+         if (.not. allocated(error)) then
+            rmsg = message_read_root(reply, e)
+            rel = message_release_get(rmsg, e)
+            call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                        release_id_get(rel) == 8_int64, &
+                        'released-resolve: unknown promise releases thirdParty vine')
+            call capnp_message_free(reply)
+         end if
+      end if
+
+      ! Part C: late Resolve for an already-released IMP_HOSTED import
+      ! does not abort and releases the replacement.
+      if (.not. allocated(error)) then
+         call rpc_release_send(cconn, echo_cap, e)
+         call recv_within(sconn%fd, reply, error, 'released-resolve: release echo_cap')
+         if (.not. allocated(error)) call capnp_message_free(reply)
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         rv = message_resolve_init(msg, e)
+         call resolve_promise_id_set(rv, echo_cap%id, e)
+         cd = resolve_cap_init(rv, e)
+         call cap_descriptor_sender_hosted_set(cd, 12_int64, e)
+         call rpc_send_message(sconn%fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(cconn, e)
+         call check_(error, rpc_conn_alive(cconn), &
+                     'released-resolve: late Resolve on released hosted import ignored')
+         call recv_within(sconn%fd, reply, error, 'released-resolve: replacement released')
+         if (.not. allocated(error)) then
+            rmsg = message_read_root(reply, e)
+            rel = message_release_get(rmsg, e)
+            call check_(error, message_which(rmsg) == MESSAGE_RELEASE_TAG .and. &
+                        release_id_get(rel) == 12_int64, &
+                        'released-resolve: late Resolve drops replacement 12')
+            call capnp_message_free(reply)
+         end if
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_released_no_embargo
+
+   !> Provide and Join must translate private import handles allocated
+   !> for reused wire ids back to the peer's wire export id.
+   subroutine t_reused_handle_provide_join(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_vat_t), target :: vat
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: echo_cap, p4, reused, parts(2)
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(cap_descriptor_t) :: cd
+      integer :: fa, fb, e
+      integer(int64) :: qboot, q4, qreuse, pq, jq(2)
+
+      call px_socketpair(fa, fb, e)
+      boot => local_echo
+      call rpc_conn_init(sconn, fb, boot)
+      call rpc_conn_set_vat(sconn, vat)
+      boot => local_echo
+      call rpc_conn_init(cconn, fa, boot)
+      call rpc_bootstrap_send(sconn, echo_cap, e)
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, echo_cap%id, e)
+      call rpc_bootstrap_send(cconn, echo_cap, e)
+      qboot = echo_cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], echo_cap, e)
+
+      ! Reflect wire id 4 to IMP_LOCAL so a later delivery of wire id 4
+      ! receives a negative private handle.
+      call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, q4, e)
+      call rpc_wait(cconn, q4, e)
+      call rpc_result_cap(cconn, q4, [integer ::], p4, e)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      rv = message_resolve_init(msg, e)
+      call resolve_promise_id_set(rv, 4_int64, e)
+      cd = resolve_cap_init(rv, e)
+      call cap_descriptor_receiver_hosted_set(cd, 0_int64, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+      call recv_within(sconn%fd, reply, error, 'reused-handle: release 4')
+      if (.not. allocated(error)) call capnp_message_free(reply)
+
+      if (.not. allocated(error)) then
+         sconn%exports(4)%used = .true.
+         sconn%exports(4)%refcount = 1
+         sconn%exports(4)%srv => local_echo
+         call inject_promise(sconn%fd, cconn, echo_cap, 4_int64, qreuse, e)
+         call rpc_wait(cconn, qreuse, e)
+         call rpc_result_cap(cconn, qreuse, [integer ::], reused, e)
+         call check_(error, e == CAPNP_OK .and. reused%id < 0_int64, &
+                     'reused-handle: got private handle')
+      end if
+
+      if (.not. allocated(error)) then
+         call rpc_provide_send(cconn, reused%id, '127.0.0.1', 9, 88_int64, pq, e)
+         if (e == CAPNP_OK) call rpc_pump_once(sconn, e)
+         if (e == CAPNP_OK) call rpc_wait(cconn, pq, e)
+         call check_(error, e == CAPNP_OK .and. rpc_conn_alive(sconn), &
+                     'reused-handle: Provide translates private handle to wire id')
+      end if
+
+      if (.not. allocated(error)) then
+         parts(1) = reused
+         parts(2) = reused
+         call rpc_join_send(cconn, parts, 91_int64, jq, e)
+         if (e == CAPNP_OK) call rpc_pump_once(sconn, e)
+         if (e == CAPNP_OK) call rpc_pump_once(sconn, e)
+         if (e == CAPNP_OK) call rpc_wait(cconn, jq(1), e)
+         if (e == CAPNP_OK) call rpc_wait(cconn, jq(2), e)
+         call check_(error, e == CAPNP_OK .and. rpc_conn_alive(sconn), &
+                     'reused-handle: Join translates private handle to wire id')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_reused_handle_provide_join
 
 end module test_rpc

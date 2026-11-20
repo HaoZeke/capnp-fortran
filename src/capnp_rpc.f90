@@ -945,6 +945,7 @@ contains
             conn%questions(k)%local_call = .false.
             conn%questions(k)%local_results = .false.
             conn%questions(k)%local_export = -1
+            conn%questions(k)%import_handle = -1_int64
             conn%questions(k)%membrane => null()
             conn%questions(k)%membrane_reverse = .false.
             conn%next_qid = int(k + 1, int64)
@@ -977,7 +978,18 @@ contains
       type(message_target_t) :: tgt
       type(recipient_id_t) :: rid
       type(vat_id_t) :: vat
+      integer(int64) :: target_id, wire_id
+      logical :: broken
+      character(len=:), allocatable :: breason
       err = CAPNP_OK
+      call import_follow(conn, imported_cap, target_id, broken, breason)
+      if (broken) then
+         if (allocated(breason)) conn%abort_reason = breason
+         err = RPC_ERR_EXCEPTION
+         qid = -1_int64
+         return
+      end if
+      call import_wire_id(conn, target_id, wire_id)
       qid = alloc_qid(conn)
       if (qid < 0_int64) then
          err = CAPNP_ERR_ALLOC
@@ -988,7 +1000,7 @@ contains
       if (err == CAPNP_OK) pv = message_provide_init(msg, err)
       if (err == CAPNP_OK) call provide_question_id_set(pv, qid, err)
       if (err == CAPNP_OK) tgt = provide_target_init(pv, err)
-      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, imported_cap, err)
+      if (err == CAPNP_OK) call message_target_imported_cap_set(tgt, wire_id, err)
       if (err == CAPNP_OK) rid = recipient_id_new(m, err)
       if (err == CAPNP_OK) call recipient_id_nonce_set(rid, nonce, err)
       if (err == CAPNP_OK) vat = recipient_id_vat_init(rid, err)
@@ -1129,7 +1141,7 @@ contains
          return
       end if
       if (target%kind == RPC_CAP_IMPORT) then
-         conn%questions(int(qid))%import_handle = target%id
+         conn%questions(int(qid))%import_handle = target_id
          call import_wire_id(conn, target_id, wire_id)
          target_id = wire_id
       end if
@@ -1250,12 +1262,11 @@ contains
          if (rerr == CAPNP_OK) then
             if (message_target_which(tgt) == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
                target_id = message_target_imported_cap_get(tgt)
-               if (qid >= 0_int64 .and. qid < int(MAXQ, int64) .and. &
-                   conn%questions(int(qid))%import_handle /= -1_int64) then
-                  call import_find(conn, conn%questions(int(qid))%import_handle, node, found)
-               else
-                  call import_find(conn, target_id, node, found)
+               if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+                  if (conn%questions(int(qid))%import_handle /= -1_int64) &
+                     target_id = conn%questions(int(qid))%import_handle
                end if
+               call import_find(conn, target_id, node, found)
                if (found) then
                   if (node%state == IMP_EMBARGO .or. node%state == IMP_LOCAL) then
                      call deliver_local_promise(conn, node, m, qid, err)
@@ -1918,7 +1929,19 @@ contains
          if (err == CAPNP_OK) then
             select case (caps(i)%kind)
             case (RPC_CAP_IMPORT)
-               call message_target_imported_cap_set(tgt, caps(i)%id, err)
+               block
+                  integer(int64) :: target_id, wire_id
+                  logical :: broken
+                  character(len=:), allocatable :: breason
+                  call import_follow(conn, caps(i)%id, target_id, broken, breason)
+                  if (broken) then
+                     if (allocated(breason)) conn%abort_reason = breason
+                     err = RPC_ERR_EXCEPTION
+                  else
+                     call import_wire_id(conn, target_id, wire_id)
+                     call message_target_imported_cap_set(tgt, wire_id, err)
+                  end if
+               end block
             case (RPC_CAP_PIPELINE)
                pa = message_target_promised_answer_init(tgt, err)
                if (err == CAPNP_OK) call promised_answer_question_id_set(pa, caps(i)%id, err)
@@ -2673,15 +2696,12 @@ contains
       if (message_target_which(tgt) /= MESSAGE_TARGET_IMPORTED_CAP_TAG) return
       id = message_target_imported_cap_get(tgt)
       if (present(qid)) then
-         if (qid >= 0_int64 .and. qid < int(MAXQ, int64) .and. &
-             conn%questions(int(qid))%import_handle /= -1_int64) then
-            call import_find(conn, conn%questions(int(qid))%import_handle, node, found)
-         else
-            call import_find(conn, id, node, found)
+         if (qid >= 0_int64 .and. qid < int(MAXQ, int64)) then
+            if (conn%questions(int(qid))%import_handle /= -1_int64) &
+               id = conn%questions(int(qid))%import_handle
          end if
-      else
-         call import_find(conn, id, node, found)
       end if
+      call import_find(conn, id, node, found)
       if (.not. found) return
       if (node%state == IMP_PROMISE) node%received_call = .true.
    end subroutine note_sent_promise
@@ -2729,12 +2749,12 @@ contains
       call import_receive(conn, new_id, as_promise, new_handle)
       node%resolved_id = new_handle
       if (.not. held) then
-         call import_find(conn, new_id, other, found)
+         call import_find(conn, new_handle, other, found)
          if (found) call release_one_import(conn, other, err)
          return
       end if
       if (.not. node%received_call) return
-      call import_find(conn, new_id, other, found)
+      call import_find(conn, new_handle, other, found)
       if (found) then
          if (other%state == IMP_PROMISE) other%received_call = .true.
       end if
@@ -2767,7 +2787,7 @@ contains
       else
          node%resolved_id = -1_int64
       end if
-      if (.not. node%received_call) then
+      if (.not. held .or. .not. node%received_call) then
          node%state = IMP_LOCAL
          call release_all_import(conn, node, err)
          return
@@ -2791,7 +2811,9 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: cd
       integer, intent(out) :: err
+      type(third_party_cap_descriptor_t) :: tp
       integer(int64) :: id
+      integer :: ierr
       err = CAPNP_OK
       id = -1_int64
       select case (cap_descriptor_which(cd))
@@ -2799,6 +2821,9 @@ contains
          id = cap_descriptor_sender_hosted_get(cd)
       case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
          id = cap_descriptor_sender_promise_get(cd)
+      case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+         tp = cap_descriptor_third_party_hosted_get(cd, ierr)
+         if (ierr == CAPNP_OK) id = third_party_cap_descriptor_vine_id_get(tp)
       end select
       if (id >= 0_int64) call send_release(conn, id, 1_int64, err)
    end subroutine release_resolve_cap
@@ -2824,7 +2849,7 @@ contains
          call import_find_wire(conn, pid, node, found)
          if (.not. found) return
          if (node%state /= IMP_PROMISE) then
-            if (node%state == IMP_HOSTED) then
+            if (node%state == IMP_HOSTED .and. .not. node%released) then
                call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
             end if
             return
@@ -2858,7 +2883,7 @@ contains
       ! superseded. C++ has already erased that import and ignores it.
       ! A hosted import that was never a promise is still an error.
       if (node%state /= IMP_PROMISE) then
-         if (node%state == IMP_HOSTED) then
+         if (node%state == IMP_HOSTED .and. .not. node%released) then
             call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
          else
             call release_resolve_cap(conn, cd, err)
