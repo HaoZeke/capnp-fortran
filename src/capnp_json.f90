@@ -42,11 +42,11 @@ module capnp_json
    ! an unbounded nesting limit and still accepts chains far past 64.
    ! Stop before a recursion that would exhaust the stack.
    integer, parameter :: SCHEMA_WALK_LIMIT = 4096
-   integer, parameter :: UNION_SEEN_MAX = 64
+   integer, parameter :: UNION_SEEN_START = 16
    integer, save :: union_seen_n = 0
-   integer, save :: union_seen_seg(UNION_SEEN_MAX)
-   integer(int64), save :: union_seen_off(UNION_SEEN_MAX)
-   integer, save :: union_seen_disc(UNION_SEEN_MAX)
+   integer, allocatable, save :: union_seen_seg(:)
+   integer(int64), allocatable, save :: union_seen_off(:)
+   integer, allocatable, save :: union_seen_disc(:)
    integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
    integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
    integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
@@ -890,6 +890,35 @@ contains
       end do
    end function union_was_seen
 
+   !> Make room for one more note. Every object that is still open keeps
+   !> its notes, so the record grows with nesting, not with a fixed cap.
+   subroutine union_seen_room(err)
+      integer, intent(out) :: err
+      integer, allocatable :: seg(:), disc(:)
+      integer(int64), allocatable :: off(:)
+      integer :: stat, cap
+      err = CAPNP_OK
+      if (.not. allocated(union_seen_seg)) then
+         allocate (union_seen_seg(UNION_SEEN_START), union_seen_off(UNION_SEEN_START), &
+                   union_seen_disc(UNION_SEEN_START), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
+         return
+      end if
+      cap = size(union_seen_seg)
+      if (union_seen_n < cap) return
+      allocate (seg(2*cap), off(2*cap), disc(2*cap), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      seg(1:cap) = union_seen_seg
+      off(1:cap) = union_seen_off
+      disc(1:cap) = union_seen_disc
+      call move_alloc(seg, union_seen_seg)
+      call move_alloc(off, union_seen_off)
+      call move_alloc(disc, union_seen_disc)
+   end subroutine union_seen_room
+
    subroutine union_note(p, disc, err)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: disc
@@ -900,10 +929,8 @@ contains
          if (union_seen_seg(i) == p%seg .and. union_seen_off(i) == p%off .and. &
              union_seen_disc(i) == disc) return
       end do
-      if (union_seen_n >= UNION_SEEN_MAX) then
-         err = CAPNP_ERR_DEPTH
-         return
-      end if
+      call union_seen_room(err)
+      if (err /= CAPNP_OK) return
       union_seen_n = union_seen_n + 1
       union_seen_seg(union_seen_n) = p%seg
       union_seen_off(union_seen_n) = p%off

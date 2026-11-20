@@ -85,6 +85,7 @@ contains
          new_unittest("regress-tmp", run_regress_tmp), &
          new_unittest("cli-sources", run_cli_sources), &
          new_unittest("json-union-many", run_json_union_many), &
+         new_unittest("json-union-nested", run_json_union_nested), &
          new_unittest("group-clear-depth", run_group_clear_depth) &
          ]
    end subroutine collect_regress
@@ -1821,6 +1822,77 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_union_many
+
+   !> Forty nested objects, each with two flattened discriminated unions.
+   !> Every open object keeps its notes, so the record holds eighty at the
+   !> deepest level. capnp 1.4.0 decodes the same text.
+   subroutine run_json_union_nested(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: cur
+      character(len=:), allocatable :: src, js
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, i
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x8011223344556678;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+            'struct Node {'//achar(10)// &
+            '  u1 :union $Json.flatten() $Json.discriminator(name = "k1") {'//achar(10)// &
+            '    a @0 :Int32;'//achar(10)// &
+            '    b @1 :Int32;'//achar(10)// &
+            '  }'//achar(10)// &
+            '  u2 :union $Json.flatten() $Json.discriminator(name = "k2") {'//achar(10)// &
+            '    c @2 :Int32;'//achar(10)// &
+            '    d @3 :Int32;'//achar(10)// &
+            '  }'//achar(10)// &
+            '  child @4 :Node;'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/nested.capnp', src, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- '//tmp//'/nested.capnp > '//tmp//'/nested.cgr')) then
+         call test_failed(error, 'union-nested: compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/nested.cgr', bytes, err)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Node', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'union-nested: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      js = '{"k1":"a","a":1,"k2":"c","c":2}'
+      do i = 2, 40
+         js = '{"k1":"a","a":1,"k2":"c","c":2,"child":'//js//'}'
+      end do
+      call capnp_json_decode(schema, idx, js, msg, err)
+      call check_(error, err == CAPNP_OK, 'union-nested: 40 levels decode')
+      if (allocated(error)) then
+         call capnp_message_free(msg)
+         call capnp_dyn_free(schema)
+         return
+      end if
+      cur = capnp_root(msg, err)
+      do i = 2, 40
+         cur = capnp_dyn_getp(schema, idx, cur, 'child', err)
+         if (err /= CAPNP_OK .or. cur%kind /= CAPNP_PK_STRUCT) exit
+      end do
+      call check_(error, err == CAPNP_OK .and. i == 41 .and. cur%kind == CAPNP_PK_STRUCT, &
+                  'union-nested: all 40 levels present')
+      cur = capnp_dyn_getp(schema, idx, cur, 'child', err)
+      call check_(error, err == CAPNP_OK .and. cur%kind == CAPNP_PK_NULL, &
+                  'union-nested: nothing below the deepest level')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_union_nested
 
    !> A chain of 100 nested groups still clears. Groups add no pointer
    !> nesting, so the reader limit of 64 does not apply, and capnp 1.4.0
