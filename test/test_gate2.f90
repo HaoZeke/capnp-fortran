@@ -15,6 +15,7 @@ program test_gate2
    call case_11()
    call case_12()
    call case_13()
+   call case_14()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -376,4 +377,68 @@ contains
          '; cmp -s /tmp/g2-fp.o /tmp/g2-fp.r && cmp -s /tmp/g2-fp.e1 /' // &
          'tmp/g2-fp.e2')
    end subroutine case_13
+
+   subroutine case_14()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'for v in ' // &
+         achar(39) // &
+         '{"big": 3.0}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"big": 3.5}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"big": -9223372036854775808.0}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"ubig": 1e3}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"ubig": -0.0}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"ubig": 0.5}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"wide": -0.0}' // &
+         achar(39) // &
+         ' ' // &
+         achar(39) // &
+         '{"tiny": -0.0}' // &
+         achar(39) // &
+         '; do' // &
+         achar(10) // &
+         '  printf ' // &
+         achar(39) // &
+         '%s\n' // &
+         achar(39) // &
+         ' "$v" > /tmp/g2-rc.in' // &
+         achar(10) // &
+         '  "$CAP" convert json:json schema/codec.capnp Sample < /tmp/' // &
+         'g2-rc.in > /tmp/g2-rc.o 2> /dev/null; r1=$?' // &
+         achar(10) // &
+         '  capnp convert json:json schema/codec.capnp Sample < /tmp/g' // &
+         '2-rc.in > /tmp/g2-rc.r 2> /dev/null; r2=$?' // &
+         achar(10) // &
+         '  test $r1 = $r2 || exit 1' // &
+         achar(10) // &
+         '  test $r2 != 0 || cmp -s /tmp/g2-rc.o /tmp/g2-rc.r || exit ' // &
+         '1' // &
+         achar(10) // &
+         'done')
+   end subroutine case_14
 end program test_gate2

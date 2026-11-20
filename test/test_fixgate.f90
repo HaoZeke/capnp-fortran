@@ -11,6 +11,7 @@ program test_fixgate
    call case_oct()
    call case_esc()
    call case_span()
+   call case_real()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -57,5 +58,14 @@ contains
       call capnp_json_span('{"a":1} {"b":2}', 1, beg, to, err)
       if (err /= 0 .or. beg < 1 .or. to < beg) call bad()
    end subroutine case_span
+
+
+   subroutine case_real()
+      integer(int64) :: iv
+      integer :: err
+      call capnp_f64_to_i64(-9223372036854775808.0_real64, iv, err)
+      if (err /= 0) call bad()
+      if (iv /= -9223372036854775807_int64 - 1_int64) call bad()
+   end subroutine case_real
 
 end program
