@@ -6,6 +6,7 @@ module test_limits
    use capnp_dynamic
    use capnp_text
    use capnp_json
+   use cli_path, only: capnpf_setup
    implicit none
    private
    public :: collect_limits
@@ -18,11 +19,14 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(4))
+      allocate (testsuite(7))
       testsuite(1) = new_unittest("json-audit-depth", run_json_audit_depth)
       testsuite(2) = new_unittest("group-encode-depth", run_group_encode_depth)
       testsuite(3) = new_unittest("json-flat-depth", run_json_flat_depth)
       testsuite(4) = new_unittest("json-nul-stream", run_json_nul_stream)
+      testsuite(5) = new_unittest("json-dfud70", run_json_dfud70)
+      testsuite(6) = new_unittest("json-dfu65", run_json_dfu65)
+      testsuite(7) = new_unittest("json-fs70", run_json_fs70)
    end subroutine collect_limits
 
    subroutine check_(error, cond, name)
@@ -237,6 +241,105 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_flat_depth
+
+   !> Flattened groups inside a named union do not consume container depth.
+   subroutine run_json_dfud70(error)
+      type(error_type), allocatable, intent(out) :: error
+      call flat_union_case(error, 70, .true., 'DFUD70', '{"kind":"g0","v":7}', 'dfud70')
+   end subroutine run_json_dfud70
+
+   !> Flattened groups inside an anonymous union do not consume container depth.
+   subroutine run_json_dfu65(error)
+      type(error_type), allocatable, intent(out) :: error
+      call flat_union_case(error, 65, .false., 'DFU65', '{"v": 7}', 'dfu65')
+   end subroutine run_json_dfu65
+
+   subroutine flat_union_case(error, n, named, typ, payload, tag)
+      type(error_type), allocatable, intent(inout) :: error
+      integer, intent(in) :: n
+      logical, intent(in) :: named
+      character(len=*), intent(in) :: typ, payload, tag
+      character(len=:), allocatable :: src, num
+      character(len=8) :: buf
+      integer :: i
+      if (allocated(error)) return
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      src = '@0xd1e2f30415263748;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)
+      if (named) then
+         src = src//'struct '//typ//' $Json.discriminator(name = "kind") {'//achar(10)
+      else
+         src = src//'struct '//typ//' {'//achar(10)
+      end if
+      src = src//'  union {'//achar(10)//'    none @0 :Void;'//achar(10)
+      do i = 0, n - 1
+         write (buf, '(i0)') i
+         num = trim(buf)
+         src = src//'    g'//num//' :group $Json.flatten() {'//achar(10)
+      end do
+      src = src//'      v @1 :UInt32;'//achar(10)
+      do i = 1, n
+         src = src//'    }'//achar(10)
+      end do
+      src = src//'  }'//achar(10)//'}'//achar(10)
+      call cmp_json(error, src, typ, payload, tag)
+   end subroutine flat_union_case
+
+   !> A chain of flattened struct fields does not consume container depth.
+   subroutine run_json_fs70(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: src, num, nxt
+      character(len=8) :: buf
+      integer :: i
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      src = '@0xe2f3041526374859;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)
+      do i = 0, 68
+         write (buf, '(i0)') i
+         num = trim(buf)
+         write (buf, '(i0)') i + 1
+         nxt = trim(buf)
+         src = src//'struct FS'//num//' { s @0 :FS'//nxt//' $Json.flatten(); }'//achar(10)
+      end do
+      src = src//'struct FS69 { v @0 :UInt32; }'//achar(10)
+      call cmp_json(error, src, 'FS0', '{"v": 7}', 'fs70')
+   end subroutine run_json_fs70
+
+   subroutine cmp_json(error, src, typ, payload, tag)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: src, typ, payload, tag
+      integer :: err
+      if (allocated(error)) return
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call write_text(tmp//'/'//tag//'.capnp', src, err)
+      call write_text(tmp//'/'//tag//'.json', payload, err)
+      if (err /= 0) then
+         call test_failed(error, tag//' write')
+         return
+      end if
+      if (.not. sh(capnpf_setup() &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp convert -I"$INC" json:text --short '//tmp//'/'//tag//'.capnp '//typ &
+         //' < '//tmp//'/'//tag//'.json > '//tmp//'/'//tag//'.ref 2>/dev/null' &
+         //'; echo $? > '//tmp//'/'//tag//'.ref.rc' &
+         //' && "$CAP" convert -I"$INC" json:text --short '//tmp//'/'//tag//'.capnp '//typ &
+         //' < '//tmp//'/'//tag//'.json > '//tmp//'/'//tag//'.ours 2>/dev/null' &
+         //'; echo $? > '//tmp//'/'//tag//'.ours.rc' &
+         //' && cmp -s '//tmp//'/'//tag//'.ref '//tmp//'/'//tag//'.ours' &
+         //' && cmp -s '//tmp//'/'//tag//'.ref.rc '//tmp//'/'//tag//'.ours.rc' &
+         //' && grep -qx 0 '//tmp//'/'//tag//'.ours.rc')) then
+         call test_failed(error, tag//' does not match capnp')
+      end if
+   end subroutine cmp_json
 
    !> A NUL ends one JSON message. Garbage up to the next object is kept
    !> out of that message, and a leading NUL is not a message boundary.

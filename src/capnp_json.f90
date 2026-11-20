@@ -1066,7 +1066,7 @@ contains
                end if
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
-               call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', jv, depth + 1, hit, err)
+               call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', jv, depth, hit, err)
                if (err /= CAPNP_OK) return
                if (.not. hit) cycle
                q = capnp_getp(p, int(field_slot_offset(f)), err)
@@ -1080,7 +1080,7 @@ contains
                   if (err /= CAPNP_OK) return
                end if
                call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, &
-                                    depth + 1, .false., err)
+                                    depth, .false., err)
                if (err /= CAPNP_OK) return
             end if
          else
@@ -1418,7 +1418,7 @@ contains
             have_child = .true.
          end if
          call fill_struct_pfx(schema, sidx, child, cenv, pfx//fpfx, no_disc, '', one, &
-                              depth + 1, .false., err, nested_deferred)
+                              depth, .false., err, nested_deferred)
          if (err == CAPNP_OK .and. nested_deferred) defer = .true.
       end subroutine apply_key
    end subroutine decode_union_keys
@@ -1465,7 +1465,7 @@ contains
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
                call struct_matches_any(schema, gidx, env, pfx//fpfx, gdisc, raw_nm, jv, &
-                                       depth + 1, hit, err)
+                                       depth, hit, err)
             else
                raw_t = field_slot_type(f, err)
                if (err /= CAPNP_OK) return
@@ -1476,7 +1476,7 @@ contains
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
                call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', jv, &
-                                       depth + 1, hit, err)
+                                       depth, hit, err)
             end if
             if (err /= CAPNP_OK .or. hit) return
          else
@@ -3104,7 +3104,7 @@ contains
             call read_disc_opts(al, gdisc, err)
             if (err /= CAPNP_OK) return
             call struct_matches_any(schema, gidx, env, pfx//fpfx, gdisc, raw_nm, one, &
-                                    depth + 1, hit, err)
+                                    depth, hit, err)
          else
             raw_t = field_slot_type(f, err)
             if (err /= CAPNP_OK) return
@@ -3115,7 +3115,7 @@ contains
             call capnp_brand_enter(env, t, cenv, err)
             if (err /= CAPNP_OK) return
             call struct_matches_any(schema, sidx, cenv, pfx//fpfx, no_disc, '', one, &
-                                    depth + 1, hit, err)
+                                    depth, hit, err)
          end if
          if (err /= CAPNP_OK) return
          if (hit) then
