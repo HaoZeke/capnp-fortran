@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(16))
+      allocate (testsuite(17))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -64,6 +64,8 @@ contains
       testsuite(15)%test => t_fwd_ra_running
       testsuite(16)%name = "disembargo-running-answer-proxy"
       testsuite(16)%test => t_dis_ra_running
+      testsuite(17)%name = "param-promise-resolve-to-live-import"
+      testsuite(17)%test => t_live_import
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -996,6 +998,38 @@ contains
                  'disembargo running answer: reason '//conn%abort_reason)
       call close_peer(conn, fd)
    end subroutine t_dis_ra_running
+
+   !> A param promise resolves to a cap a plain forward's answer imports.
+   !> The call keeps that import, and one Release counts both refs.
+   subroutine t_live_import(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 2, 1_int64, NOCAPS, NOIDS, npp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wret(fd, k, .false., 9_int64)
+      a = step(conn, fd, 1)
+      call wcall(fd, 6_int64, 1, -1_int64, ['sp'], [7_int64])
+      a = step(conn, fd, 1)
+      call wres(fd, 7_int64, 'sh', 9_int64)
+      b = step(conn, fd, 1)
+      call wfin(fd, 3_int64, .true.)
+      c = step(conn, fd, 1)
+      call wfin(fd, 6_int64, .true.)
+      d = step(conn, fd, 1)
+      call check(error, b == 'REL 7 1' .and. c == '' .and. d == 'REL 9 2', &
+                 'live import: got '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_live_import
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

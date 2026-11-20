@@ -592,6 +592,10 @@ module capnp_rpc
       !> The hold this one merged into when its promise resolved to an id
       !> another hold names. It counts as one holder of that hold.
       integer(int64) :: into = -1_int64
+      !> The live import this hold's promise resolved to. The hold owns
+      !> one of its refs, and is one of the users C++ counts on the one
+      !> ImportClient.
+      integer(int64) :: node = -1_int64
    end type rpc_param_hold_t
 
    !> A call whose server answers later, as a C++ server returns a
@@ -4660,6 +4664,15 @@ contains
          node%owed = node%owed + 1
          return
       end if
+      ! A param hold went first and left its ref owed: the last user
+      ! releases every ref at once.
+      if (node%owed > 0) then
+         node%owed = node%owed + 1
+         if (node%owed < node%refs) return
+         call release_all_import(conn, node, err)
+         node%owed = 0
+         return
+      end if
       call release_one_import(conn, node, err)
    end subroutine rpc_release_send
 
@@ -8669,7 +8682,7 @@ contains
       integer(int64), allocatable, intent(inout) :: ids(:)
       integer, intent(inout) :: err
       integer :: i, k, e
-      integer(int64) :: refs, wire, cur
+      integer(int64) :: refs, wire, cur, nid
       if (.not. allocated(ids)) return
       do i = 1, size(ids)
          cur = ids(i)
@@ -8682,6 +8695,7 @@ contains
             refs = conn%param_holds(k)%refs
             wire = conn%param_holds(k)%wire
             cur = conn%param_holds(k)%into
+            nid = conn%param_holds(k)%node
             ! Section assignment into a sized array, so emptying the table
             ! never reallocates to zero bytes.
             block
@@ -8691,6 +8705,7 @@ contains
                kept(k:) = conn%param_holds(k + 1:)
                call move_alloc(kept, conn%param_holds)
             end block
+            if (nid >= 0_int64) call unhold_import(conn, nid, err)
             if (wire < 0_int64) cycle
             call send_release(conn, wire, refs, e)
             if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
@@ -8698,6 +8713,31 @@ contains
       end do
       deallocate (ids)
    end subroutine drop_param_holds
+
+   !> A param hold on import node `nid` goes, with the ref it owned.
+   !> C++ releases an ImportClient once, with every ref, when its last
+   !> user goes, so the Release waits until each ref is owed.
+   subroutine unhold_import(conn, nid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: nid
+      integer, intent(inout) :: err
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      integer :: n, e
+      call import_find(conn, nid, node, found)
+      if (.not. found) return
+      node%holds = node%holds - 1
+      node%owed = node%owed + 1
+      if (node%holds > 0 .or. node%owed < node%refs) return
+      n = node%refs
+      node%owed = 0
+      if (node%released .or. n <= 0) return
+      node%refs = 0
+      node%released = .true.
+      if (conn%dead .or. .not. associated(conn%transport)) return
+      call send_release(conn, node%wire_id, int(n, int64), e)
+      if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+   end subroutine unhold_import
 
    !> Resolve of a senderPromise that only call params hold. C++ swaps
    !> the promise import for its resolution and Releases the promise at
@@ -8735,6 +8775,8 @@ contains
          call import_find_live(conn, next, node, found)
          if (found) then
             node%refs = node%refs + 1
+            node%holds = node%holds + 1
+            conn%param_holds(k)%node = node%id
             next = -1_int64
          end if
       end if
