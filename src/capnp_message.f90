@@ -74,6 +74,11 @@ module capnp_message
       type(capnp_message_t), pointer :: msg => null()
    end type capnp_ptr_t
 
+   !> Objects entered by the current deep copy. A repeated address is a cycle.
+   integer, save :: copy_n = 0
+   integer, allocatable, save :: copy_seg(:)
+   integer(int64), allocatable, save :: copy_off(:)
+
 contains
 
    ! ------------------------------------------------------------------
@@ -2301,7 +2306,9 @@ contains
       integer :: seg
       seg = 1
       if (present(from_seg)) seg = from_seg
+      copy_n = 0
       q = copy_depth(msg, src, 0, seg, err)
+      copy_n = 0
    end function capnp_copy
 
    recursive function copy_depth(msg, src, depth, from_seg, err) result(q)
@@ -2312,64 +2319,132 @@ contains
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: r, c
       integer(int64) :: i, nb
+      logical :: tracked
       err = CAPNP_OK
       q = capnp_ptr_t()
+      tracked = .false.
       if (depth > msg%depth_limit) then
          err = CAPNP_ERR_DEPTH
          return
       end if
-      select case (src%kind)
-      case (CAPNP_PK_NULL)
-         return
-      case (CAPNP_PK_CAP)
-         q%msg => msg
-         q%kind = CAPNP_PK_CAP
-         q%capidx = src%capidx
-      case (CAPNP_PK_STRUCT)
-         q = capnp_new_struct(msg, src%dwords, src%pwords, err, from_seg)
+      ! A pointer back to an object already on this copy is a cycle.
+      ! Builders have no nesting cap, so the cycle would recurse until
+      ! the stack dies. capnp 1.4.0 exits 1 on that message.
+      if (src%kind == CAPNP_PK_STRUCT .or. src%kind == CAPNP_PK_LIST) then
+         if (copy_on_stack(src%seg, src%off)) then
+            err = CAPNP_ERR_DEPTH
+            return
+         end if
+         call copy_push(src%seg, src%off, err)
          if (err /= CAPNP_OK) return
-         call copy_struct_body(q, src, depth, err)
-      case (CAPNP_PK_LIST)
-         select case (src%esize)
-         case (CAPNP_SZ_COMPOSITE)
-            q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, err, from_seg)
-            if (err /= CAPNP_OK) return
-            r = capnp_ptr_t()
-            r%msg => src%msg
-            r%kind = CAPNP_PK_STRUCT
-            r%seg = src%seg
-            r%dwords = src%dwords
-            r%pwords = src%pwords
-            r%depth = src%depth
-            do i = 0_int64, src%nelem - 1_int64
-               c = capnp_list_get_struct(q, int(i), err)
-               if (err /= CAPNP_OK) return
-               r%off = src%off + i*int(src%dwords + src%pwords, int64)*8_int64
-               call copy_struct_body(c, r, depth + 1, err)
-               if (err /= CAPNP_OK) return
-            end do
-         case (CAPNP_SZ_PTR)
-            q = capnp_new_list(msg, CAPNP_SZ_PTR, src%nelem, err, from_seg)
-            if (err /= CAPNP_OK) return
-            do i = 0_int64, src%nelem - 1_int64
-               r = capnp_getp(src, int(i), err)
-               if (err /= CAPNP_OK) return
-               c = copy_depth(msg, r, depth + 1, q%seg, err)
-               if (err /= CAPNP_OK) return
-               call capnp_setp(q, int(i), c, err)
-               if (err /= CAPNP_OK) return
-            end do
-         case default
-            q = capnp_new_list(msg, src%esize, src%nelem, err, from_seg)
-            if (err /= CAPNP_OK) return
-            nb = (int(capnp_list_step_bits(src%esize), int64)*src%nelem + 7_int64)/8_int64
-            if (nb > 0_int64) then
-               q%msg%segs(q%seg)%bytes(q%off:q%off + nb - 1) = &
-                  src%msg%segs(src%seg)%bytes(src%off:src%off + nb - 1)
-            end if
+         tracked = .true.
+      end if
+      copy_walk: block
+         select case (src%kind)
+         case (CAPNP_PK_NULL)
+            exit copy_walk
+         case (CAPNP_PK_CAP)
+            q%msg => msg
+            q%kind = CAPNP_PK_CAP
+            q%capidx = src%capidx
+         case (CAPNP_PK_STRUCT)
+            q = capnp_new_struct(msg, src%dwords, src%pwords, err, from_seg)
+            if (err /= CAPNP_OK) exit copy_walk
+            call copy_struct_body(q, src, depth, err)
+         case (CAPNP_PK_LIST)
+            select case (src%esize)
+            case (CAPNP_SZ_COMPOSITE)
+               q = capnp_new_composite_list(msg, src%nelem, src%dwords, src%pwords, &
+                                            err, from_seg)
+               if (err /= CAPNP_OK) exit copy_walk
+               r = capnp_ptr_t()
+               r%msg => src%msg
+               r%kind = CAPNP_PK_STRUCT
+               r%seg = src%seg
+               r%dwords = src%dwords
+               r%pwords = src%pwords
+               r%depth = src%depth
+               do i = 0_int64, src%nelem - 1_int64
+                  c = capnp_list_get_struct(q, int(i), err)
+                  if (err /= CAPNP_OK) exit copy_walk
+                  r%off = src%off + i*int(src%dwords + src%pwords, int64)*8_int64
+                  call copy_struct_body(c, r, depth + 1, err)
+                  if (err /= CAPNP_OK) exit copy_walk
+               end do
+            case (CAPNP_SZ_PTR)
+               q = capnp_new_list(msg, CAPNP_SZ_PTR, src%nelem, err, from_seg)
+               if (err /= CAPNP_OK) exit copy_walk
+               do i = 0_int64, src%nelem - 1_int64
+                  r = capnp_getp(src, int(i), err)
+                  if (err /= CAPNP_OK) exit copy_walk
+                  c = copy_depth(msg, r, depth + 1, q%seg, err)
+                  if (err /= CAPNP_OK) exit copy_walk
+                  call capnp_setp(q, int(i), c, err)
+                  if (err /= CAPNP_OK) exit copy_walk
+               end do
+            case default
+               q = capnp_new_list(msg, src%esize, src%nelem, err, from_seg)
+               if (err /= CAPNP_OK) exit copy_walk
+               nb = (int(capnp_list_step_bits(src%esize), int64)*src%nelem + 7_int64)/8_int64
+               if (nb > 0_int64) then
+                  q%msg%segs(q%seg)%bytes(q%off:q%off + nb - 1) = &
+                     src%msg%segs(src%seg)%bytes(src%off:src%off + nb - 1)
+               end if
+            end select
          end select
-      end select
+      end block copy_walk
+      if (tracked) call copy_pop()
    end function copy_depth
+
+   !> True when this copy already entered the object at seg/off.
+   logical function copy_on_stack(seg, off)
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: off
+      integer :: i
+      copy_on_stack = .false.
+      do i = 1, copy_n
+         if (copy_seg(i) == seg .and. copy_off(i) == off) then
+            copy_on_stack = .true.
+            return
+         end if
+      end do
+   end function copy_on_stack
+
+   subroutine copy_push(seg, off, err)
+      integer, intent(in) :: seg
+      integer(int64), intent(in) :: off
+      integer, intent(out) :: err
+      integer, allocatable :: grown_seg(:)
+      integer(int64), allocatable :: grown_off(:)
+      integer :: n, stat
+      err = CAPNP_OK
+      if (.not. allocated(copy_seg)) then
+         allocate (copy_seg(64), copy_off(64), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
+      if (copy_n >= size(copy_seg)) then
+         n = size(copy_seg)*2
+         allocate (grown_seg(n), grown_off(n), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown_seg(1:copy_n) = copy_seg(1:copy_n)
+         grown_off(1:copy_n) = copy_off(1:copy_n)
+         call move_alloc(grown_seg, copy_seg)
+         call move_alloc(grown_off, copy_off)
+      end if
+      copy_n = copy_n + 1
+      copy_seg(copy_n) = seg
+      copy_off(copy_n) = off
+   end subroutine copy_push
+
+   subroutine copy_pop()
+      if (copy_n > 0) copy_n = copy_n - 1
+   end subroutine copy_pop
 
    !> Copy the contents of struct src into the (already allocated) struct
    !> dst: overlapping data bytes verbatim, pointer fields recursively.

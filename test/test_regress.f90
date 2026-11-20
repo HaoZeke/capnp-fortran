@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(45))
+      allocate (testsuite(46))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -108,6 +108,7 @@ contains
       testsuite(43) = new_unittest("codec-parity", run_codec_parity)
       testsuite(44) = new_unittest("shorthand-first-field", run_shorthand_first)
       testsuite(45) = new_unittest("stream-pointer-kind", run_stream_kind)
+      testsuite(46) = new_unittest("cycle-guard", run_cycle_guard)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3253,5 +3254,34 @@ contains
          call test_failed(error, 'stream pointer kind')
       end if
    end subroutine run_stream_kind
+
+   !> A struct whose pointer names itself. capnp 1.4.0 exits 1 after
+   !> signal 11. A nest of 100 structs still converts.
+   subroutine run_cycle_guard(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && python3 - <<''PY'' &&'//achar(10)// &
+         'import struct'//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'def sp(off, dw, pw):'//achar(10)// &
+         '    return (off & 0x3FFFFFFF) << 2 | dw << 32 | pw << 48'//achar(10)// &
+         'def msg(words):'//achar(10)// &
+         '    body = b"".join(struct.pack("<Q", w) for w in words)'//achar(10)// &
+         '    return struct.pack("<II", 0, len(words)) + body'//achar(10)// &
+         'd = Path("'//tmp//'")'//achar(10)// &
+         'd.joinpath("cycle.bin").write_bytes(msg([sp(0,0,1), sp(-1,0,1)]))'//achar(10)// &
+         'words = [sp(0,0,1)]'//achar(10)// &
+         'for i in range(100):'//achar(10)// &
+         '    words.append(0 if i == 99 else sp(0,0,1))'//achar(10)// &
+         'd.joinpath("deep.bin").write_bytes(msg(words))'//achar(10)// &
+         'PY'//achar(10)// &
+         'rc=0; "$CAP" convert binary:binary < '//tmp//'/cycle.bin > ' &
+         //tmp//'/cycle.out 2>'//tmp//'/cycle.err || rc=$?' &
+         //'; test "$rc" -eq 1 && test -s '//tmp//'/cycle.err' &
+         //' && "$CAP" convert binary:binary < '//tmp//'/deep.bin > ' &
+         //tmp//'/deep.out && test -s '//tmp//'/deep.out')) then
+         call test_failed(error, 'cycle: binary copy exits 1')
+      end if
+   end subroutine run_cycle_guard
 
 end module test_regress
