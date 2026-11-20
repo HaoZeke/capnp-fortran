@@ -41,7 +41,7 @@ contains
 
    subroutine collect_rpc_lifetime(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(25))
+      allocate (testsuite(26))
       testsuite(1)%name = "staged owned server is released after failure"
       testsuite(1)%test => run_fail_one
       testsuite(2)%name = "server staged twice is released once"
@@ -92,6 +92,8 @@ contains
       testsuite(24)%test => run_pin_only_release_aborts
       testsuite(25)%name = "promised answer on pin-only export is dispatched"
       testsuite(25)%test => run_pin_only_promised_answer
+      testsuite(26)%name = "released result export still receives a pipelined call"
+      testsuite(26)%test => run_released_result_pipeline
    end subroutine collect_rpc_lifetime
 
    subroutine counted_final(self)
@@ -951,6 +953,17 @@ contains
          call check_(error, err == CAPNP_OK .and. final_count == 0, &
                      'owned handoff: accept')
       end if
+      ! Finish drops the answer pipeline reference on each side and
+      ! leaves the wire references. The last Release then frees the
+      ! server, which is what C++ does once the pipeline is gone.
+      if (.not. allocated(error)) then
+         call rpc_finish_send(intro, qown, .true., err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_finish_send(recip, aq, .true., err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_b, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0, &
+                     'owned handoff: Finish leaves the wire references')
+      end if
       if (.not. allocated(error) .and. recipient_first) then
          call rpc_release_send(recip, got, err)
          call rpc_pump_once(prov_b, err)
@@ -1510,5 +1523,76 @@ contains
       if (.not. allocated(error)) call check_(error, final_count == 1, &
                                               'pin-only promised answer: freed once')
    end subroutine run_pin_only_promised_answer
+
+   !> A peer may Release a result export before Finish. C++ keeps the
+   !> answer pipeline's reference, so a later promisedAnswer still runs.
+   !> Finish then drops that reference and the server is freed once.
+   subroutine run_released_result_pipeline(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(life_srv_t), target :: factory
+      type(rpc_conn_t), target :: cli, srv
+      type(rpc_cap_t) :: settled, owned_cap
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ops, s
+      logical :: opened
+      integer(int64) :: qown
+      integer :: err
+
+      gsrv => null()
+      touched = 0
+      qown = -1_int64
+      call open_pair(cli, srv, factory, settled, opened, error)
+      if (.not. allocated(error)) then
+         final_count = 0
+         call call_method(cli, srv, settled, 7, err, qown)
+         if (err == CAPNP_OK) call rpc_result_cap(cli, qown, [0], owned_cap, err)
+         call check_(error, err == CAPNP_OK, 'released pipeline: owned result')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_release_send(cli, owned_cap, err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 0 .and. &
+                     rpc_conn_alive(srv), &
+                     'released pipeline: answer keeps the server')
+      end if
+      if (.not. allocated(error)) then
+         call capnp_message_init_builder(m, err)
+         msg = message_new_root(m, err)
+         c = message_call_init(msg, err)
+         call call_question_id_set(c, 502_int64, err)
+         call call_interface_id_set(c, LIFE_IFACE, err)
+         call call_method_id_set(c, 10_int32, err)
+         tgt = call_target_init(c, err)
+         pa = message_target_promised_answer_init(tgt, err)
+         call promised_answer_question_id_set(pa, qown, err)
+         ops = promised_answer_transform_init(pa, 1_int64, err)
+         op%p = capnp_list_get_struct(ops, 0, err)
+         call promised_answer_op_get_pointer_field_set(op, 0, err)
+         pl = call_params_init(c, err)
+         s = capnp_new_struct(m, 0, 0, err)
+         call payload_content_set(pl, s, err)
+         call rpc_send_message(cli%fd, m, err)
+         call capnp_message_free(m)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         call check_(error, err == CAPNP_OK .and. rpc_conn_alive(srv) .and. &
+                     touched /= 0, 'released pipeline: call is dispatched')
+      end if
+      if (.not. allocated(error)) then
+         call rpc_finish_send(cli, qown, .true., err)
+         if (err == CAPNP_OK) call rpc_pump_once(srv, err)
+         call check_(error, err == CAPNP_OK .and. final_count == 1, &
+                     'released pipeline: Finish frees the server once')
+      end if
+      call close_pair(cli, srv, opened)
+      if (opened .and. .not. allocated(error)) &
+         call check_(error, final_count == 1, &
+                     'released pipeline: close does not free it again')
+   end subroutine run_released_result_pipeline
 
 end module test_rpc_lifetime

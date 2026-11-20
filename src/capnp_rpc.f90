@@ -265,6 +265,9 @@ module capnp_rpc
       type(capnp_message_t) :: retmsg ! copy of the Return we sent
       integer :: nexp = 0
       integer :: exports(0:MAXCAPS - 1) = -1
+      !> Set once the answer has pinned each result export. Finish
+      !> drops those pins. The wire refcount is a separate count.
+      logical :: exports_pinned = .false.
    end type rpc_answer_slot_t
 
    !> One inbound answer whose question id does not fit in `answers`.
@@ -525,6 +528,10 @@ contains
       conn%transport => null()
       conn%fd = PX_BAD_FD
       conn%dead = .true.
+      ! Drop answer-pipeline pins before the wire refcounts. A peer that
+      ! already Released an export leaves only that pin, and the server
+      ! is freed here. A remaining wire refcount is dropped below.
+      call unpin_all_answers(conn)
       ! The peer will not Release what it still imports. Internal pins keep
       ! a dispatch, reflected capability, or provision alive independently
       ! of the wire reference count.
@@ -2399,6 +2406,7 @@ contains
       slot%redirected = .false.
       slot%nexp = 0
       slot%exports = -1
+      slot%exports_pinned = .false.
    end subroutine answer_slot_clear
 
    !> Drop every overflow answer. Export refcounts are the export
@@ -4645,6 +4653,10 @@ contains
          do i = 0, ctx%nexp - 1
             slot%exports(i) = ctx%staged_eids(i)
          end do
+         ! The answer pipeline keeps each result capability until Finish
+         ! (rpc.c++ PostReturnRpcPipeline / answer.pipeline). A Release of
+         ! the export id does not remove that reference.
+         call pin_answer_exports(conn, slot)
       end if
       call capnp_message_free(rm)
    end subroutine finish_answer
@@ -4895,6 +4907,9 @@ contains
             if (eid >= 0 .and. eid < MAXE) call drop_export(conn, eid, 1)
          end do
       end if
+      ! Finish always drops the pipeline reference, including when
+      ! releaseResultCaps is false and the wire refs stay.
+      call unpin_answer_exports(conn, jslot)
       call capnp_message_free(jslot%retmsg)
       call answer_slot_clear(jslot)
       if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
@@ -4939,6 +4954,55 @@ contains
       if (.not. conn%exports(eid)%used) return
       conn%exports(eid)%pins = conn%exports(eid)%pins + 1
    end subroutine pin_export
+
+   !> Pin every result export recorded on an answer. One pin per entry,
+   !> so a server listed twice keeps two pins.
+   subroutine pin_answer_exports(conn, slot)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_answer_slot_t), intent(inout) :: slot
+      integer :: i, eid, n
+      n = 0
+      do i = 0, slot%nexp - 1
+         eid = slot%exports(i)
+         if (eid >= 0 .and. eid < MAXE) then
+            call pin_export(conn, eid)
+            n = n + 1
+         end if
+      end do
+      if (n > 0) slot%exports_pinned = .true.
+   end subroutine pin_answer_exports
+
+   !> Drop the pins `pin_answer_exports` took. A slot whose wire
+   !> refcount is already zero is freed with the last pin.
+   subroutine unpin_answer_exports(conn, slot)
+      type(rpc_conn_t), intent(inout) :: conn
+      type(rpc_answer_slot_t), intent(inout) :: slot
+      integer :: i, eid
+      if (.not. slot%exports_pinned) return
+      slot%exports_pinned = .false.
+      do i = 0, slot%nexp - 1
+         eid = slot%exports(i)
+         if (eid >= 0 .and. eid < MAXE) call drop_export_pin(conn, eid)
+      end do
+   end subroutine unpin_answer_exports
+
+   subroutine unpin_all_answers(conn)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_hi_node_t), pointer :: node
+      integer :: i, b
+      do i = 0, MAXQ - 1
+         if (conn%answers(i)%exports_pinned) &
+            call unpin_answer_exports(conn, conn%answers(i))
+      end do
+      do b = 0, HIBUCKETS - 1
+         node => conn%hi_buckets(b)%head
+         do while (associated(node))
+            if (node%slot%exports_pinned) &
+               call unpin_answer_exports(conn, node%slot)
+            node => node%next
+         end do
+      end do
+   end subroutine unpin_all_answers
 
    !> Count one more export that owns `srv` after a handoff.
    subroutine shared_owner_add(srv)

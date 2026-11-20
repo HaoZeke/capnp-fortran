@@ -665,6 +665,13 @@ contains
          if (err == CAPNP_OK) call rpc_pump_once(prov_b, err)
          if (err == CAPNP_OK) call rpc_wait(recip, aq, err)
          if (err == CAPNP_OK) call rpc_result_cap(recip, aq, [integer ::], got, err)
+         ! The call answer and the Accept answer keep pipeline pins until
+         ! Finish. Drop those pins first so the Releases are the last
+         ! references, which is when the owned inner server is freed.
+         if (err == CAPNP_OK) call rpc_finish_send(intro, qo, .true., err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
+         if (err == CAPNP_OK) call rpc_finish_send(recip, aq, .true., err)
+         if (err == CAPNP_OK) call rpc_pump_once(prov_b, err)
          if (err == CAPNP_OK) call rpc_release_send(intro, ocap, err)
          if (err == CAPNP_OK) call rpc_pump_once(prov_a, err)
          if (err == CAPNP_OK) call rpc_release_send(recip, got, err)

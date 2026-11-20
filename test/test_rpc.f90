@@ -4401,10 +4401,16 @@ contains
                   'resolve: replacement release arrives')
       if (allocated(error)) return
       call rpc_pump_once(sconn, e)
-      call check_(error, .not. sconn%exports(0)%used, &
+      ! Release drops the wire refcount. The bootstrap answer keeps a
+      ! pipeline pin until Finish, so the slot stays until then.
+      call check_(error, sconn%exports(0)%refcount == 0, &
                   'resolve: dropping the client releases the replacement')
       call check_(error, rpc_conn_alive(sconn), &
                   'resolve: replacement release leaves the server up')
+      call rpc_finish_send(cconn, qboot, .true., e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == CAPNP_OK .and. .not. sconn%exports(0)%used, &
+                  'resolve: Finish frees the replacement')
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_to_hosted
