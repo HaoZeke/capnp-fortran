@@ -103,6 +103,7 @@ contains
       end if
       call spit(tmp//'/all.capnp', sch, err)
       call check_(error, err == 0, 'edges: wrote schema')
+      call match(error, '((i8 = 1))', 'text:text', 'nested root struct')
       call match(error, '(i32 = - 1)', 'text:text', 'space after minus')
       call match(error, '(i32=-1)', 'text:text', 'glued minus fails')
       call match(error, '(u64 = -0)', 'text:text', 'unsigned negative zero')

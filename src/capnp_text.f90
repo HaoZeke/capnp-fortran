@@ -643,6 +643,13 @@ contains
       end if
       call expect_ch(sc, '(', err)
       if (err /= CAPNP_OK) return
+      call skip_ws(sc)
+      if (peek(sc) == '(') then
+         call parse_struct(schema, idx, p, env, sc, depth + 1, err)
+         if (err /= CAPNP_OK) return
+         call expect_ch(sc, ')', err)
+         return
+      end if
       do
          call skip_ws(sc)
          if (peek(sc) == ')') then
