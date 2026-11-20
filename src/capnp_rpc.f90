@@ -5015,6 +5015,12 @@ contains
       integer(int64), allocatable :: held(:)
       logical :: found
       integer :: i
+      ! A pipeline on our question needs that question on the wire.
+      if (fkind == PIPE_QUESTION .and. .not. live_question(conn, fid)) then
+         call run_call(conn, c, qid, -1, RPC_ERR_EXCEPTION, "invalid 'receiverAnswer'", &
+                       .false., err)
+         return
+      end if
       tq = alloc_qid(conn)
       if (tq < 0_int64) then
          err = CAPNP_ERR_ALLOC

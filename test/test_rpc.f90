@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(132))
+      allocate (testsuite(133))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -417,18 +417,20 @@ contains
       testsuite(125)%test => w_pipeline_on_none_entry
       testsuite(126)%name = "rpc-resolve-unknown-descriptor-aborts"
       testsuite(126)%test => w_resolve_unknown_descriptor_aborts
-      testsuite(127)%name = "posix-recv-eintr-retried"
-      testsuite(127)%test => t_recv_all_retries_eintr
-      testsuite(128)%name = "rpc-framing-511-accepted"
-      testsuite(128)%test => t_framing_511_accepted
-      testsuite(129)%name = "rpc-framing-512-rejected"
-      testsuite(129)%test => t_framing_512_rejected
-      testsuite(130)%name = "rpc-framing-oversized-rejected"
-      testsuite(130)%test => t_framing_oversized_rejected
-      testsuite(131)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(131)%test => t_framing_negative_traversal_rejected
-      testsuite(132)%name = "rpc-framing-short-and-padded"
-      testsuite(132)%test => t_framing_short_and_padded
+      testsuite(127)%name = "rpc-forward-needs-live-question"
+      testsuite(127)%test => w_forward_needs_live_question
+      testsuite(128)%name = "posix-recv-eintr-retried"
+      testsuite(128)%test => t_recv_all_retries_eintr
+      testsuite(129)%name = "rpc-framing-511-accepted"
+      testsuite(129)%test => t_framing_511_accepted
+      testsuite(130)%name = "rpc-framing-512-rejected"
+      testsuite(130)%test => t_framing_512_rejected
+      testsuite(131)%name = "rpc-framing-oversized-rejected"
+      testsuite(131)%test => t_framing_oversized_rejected
+      testsuite(132)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(132)%test => t_framing_negative_traversal_rejected
+      testsuite(133)%name = "rpc-framing-short-and-padded"
+      testsuite(133)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -962,6 +964,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_unknown_descriptor_aborts(error)
    end subroutine w_resolve_unknown_descriptor_aborts
+
+   subroutine w_forward_needs_live_question(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_forward_needs_live_question(error)
+   end subroutine w_forward_needs_live_question
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10588,5 +10595,51 @@ contains
          if (allocated(error)) return
       end do
    end subroutine t_resolve_unknown_descriptor_aborts
+
+   !> An answer whose cap is receiverAnswer on a question this vat no
+   !> longer has cannot be forwarded there. The pipelined call fails
+   !> with "invalid 'receiverAnswer'" and nothing goes to the peer.
+   subroutine t_forward_needs_live_question(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(own_pipeline_srv_t), target :: local_pipe
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer(int64) :: qboot, qadder, eid
+      integer :: e, n
+      logical :: ok, sent, failed
+
+      local_pipe%qid = 50_int64
+      local_pipe%op = 1
+      srv => local_pipe
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send(sconn, 30_int64, qadder, [0])
+      call rpc_pump_once(cconn, e)
+      sent = .false.
+      failed = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) sent = .true.
+         if (message_which(msg) == MESSAGE_RETURN_TAG) then
+            r = message_return_get(msg, e)
+            if (return_answer_id_get(r) == 30_int64 .and. &
+                return_which(r) == RETURN_EXCEPTION_TAG) then
+               ex = return_exception_get(r, e)
+               call exception_reason_get(ex, reason, e)
+               failed = reason == "invalid 'receiverAnswer'"
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, rpc_conn_alive(cconn) .and. .not. sent .and. failed, &
+                  'dead pipeline question: the call fails here')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_forward_needs_live_question
 
 end module test_rpc
