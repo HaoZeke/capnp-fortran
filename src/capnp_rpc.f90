@@ -267,9 +267,8 @@ module capnp_rpc
       !> That answer's call hinted onlyPromisePipeline. C++ attaches its
       !> context to the answer task, so the params live until Finish.
       logical :: tail_opp = .false.
-      !> senderHosted and senderPromise ids in the params of the call that
-      !> was forwarded as this question. C++ holds them as imports until
-      !> the original call ends, then releases them.
+      !> Param holds of the call that was forwarded as this question.
+      !> C++ keeps them as imports until the original call ends.
       integer(int64), allocatable :: param_ids(:)
       !> The call was delivered to a local capability, not sent on the wire.
       logical :: local_call = .false.
@@ -399,7 +398,9 @@ module capnp_rpc
       integer(int64) :: answer_qid = -1_int64
       integer(int64) :: call_qid = -1_int64
       type(capnp_message_t) :: msg
-      integer(int64), allocatable :: spill(:)
+      !> Param holds taken when the call arrived, as C++ imports the
+      !> param caps before the call waits (rpc.c++ handleCall).
+      integer(int64), allocatable :: pids(:)
       type(rpc_incoming_wait_t), pointer :: next => null()
    end type rpc_incoming_wait_t
 
@@ -5005,7 +5006,7 @@ contains
       integer :: eid, terr, fkind
       logical :: elsewhere
       character(len=:), allocatable :: reason
-      integer(int64), allocatable :: spill(:)
+      integer(int64), allocatable :: spill(:), pids(:)
       integer, allocatable :: fops(:)
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
@@ -5061,13 +5062,17 @@ contains
          call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
          return
       end if
+      ! The refused vines go with the param caps, until the call is over.
+      if (allocated(spill)) then
+         call hold_call_params(conn, c, pids)
+         call hold_param_vines(conn, spill, pids)
+      end if
       if (terr == CAPNP_OK .and. fkind /= PIPE_BROKEN .and. &
           can_forward(c)) then
-         call forward_call(conn, c, qid, fkind, fid, fops, err)
+         call forward_call(conn, c, qid, fkind, fid, fops, err, held=pids)
       else
-         call run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+         call run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held=pids)
       end if
-      call release_spilled_vines(conn, spill, err)
    end subroutine handle_call
 
    !> C++ 1.4.0 forwards a call as a tail call only when the caller
@@ -5085,13 +5090,15 @@ contains
    !> (rpc.c++ 2610-2641), the call goes back with sendResultsTo.yourself
    !> and the answer takes its results from that new question, whose
    !> pipeline later calls on the answer use.
-   recursive subroutine forward_call(conn, c, qid, fkind, fid, fops, err)
+   recursive subroutine forward_call(conn, c, qid, fkind, fid, fops, err, held)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer(int64), intent(in) :: qid, fid
       integer, intent(in) :: fkind
       integer, intent(in) :: fops(:)
       integer, intent(out) :: err
+      !> Param holds the call took when it arrived, if it was queued.
+      integer(int64), allocatable, intent(inout), optional :: held(:)
       type(capnp_message_t), target :: cm, rm
       type(message_t) :: cmsg, rmsg
       type(call_t) :: fc
@@ -5104,18 +5111,25 @@ contains
       type(rpc_answer_slot_t), pointer :: slot
       integer(int64) :: tq
       integer(int8), allocatable :: bytes(:)
-      integer(int64), allocatable :: held(:)
+      integer(int64), allocatable :: pids(:)
       logical :: found
-      integer :: i
+      integer :: i, e
+      if (present(held)) then
+         if (allocated(held)) call move_alloc(held, pids)
+      end if
       ! A pipeline on our question needs that question on the wire.
       if (fkind == PIPE_QUESTION .and. .not. live_question(conn, fid)) then
          call run_call(conn, c, qid, -1, RPC_ERR_EXCEPTION, "invalid 'receiverAnswer'", &
-                       .false., err)
+                       .false., err, held=pids)
          return
       end if
       tq = alloc_qid(conn)
       if (tq < 0_int64) then
          err = CAPNP_ERR_ALLOC
+         if (allocated(pids)) then
+            e = CAPNP_OK
+            call drop_param_holds(conn, pids, e)
+         end if
          return
       end if
       conn%questions(int(tq))%tail_call = .true.
@@ -5153,14 +5167,21 @@ contains
       if (err == CAPNP_OK) call call_send_results_to_yourself_set(fc, err)
       if (err == CAPNP_OK) inp = call_params_get(c, err)
       if (err == CAPNP_OK) outp = call_params_init(fc, err)
-      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, held, err)
+      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, cm, err)
       call capnp_message_free(cm)
       if (err /= CAPNP_OK) then
          call release_question(conn, tq)
+         if (allocated(pids)) then
+            e = CAPNP_OK
+            call drop_param_holds(conn, pids, e)
+         end if
          return
       end if
-      if (size(held) > 0) call move_alloc(held, conn%questions(int(tq))%param_ids)
+      ! The call context keeps the param caps until the forwarded
+      ! question returns or our answer is finished.
+      if (.not. allocated(pids)) call hold_call_params(conn, c, pids)
+      call move_alloc(pids, conn%questions(int(tq))%param_ids)
       call capnp_message_init_builder(rm, err)
       if (err == CAPNP_OK) rmsg = message_new_root(rm, err)
       if (err == CAPNP_OK) r = message_return_init(rmsg, err)
@@ -5188,21 +5209,17 @@ contains
    !> capability is written as C++ 1.4.0 writeDescriptor writes it for
    !> that connection: the peer's own export as receiverHosted, ours as
    !> senderHosted with one more reference, a vine as the import it is.
-   !> `held` lists the senderHosted and senderPromise ids the params
-   !> named, which the caller still owes the peer a Release for.
-   subroutine copy_forwarded_payload(conn, inp, outp, m, held, err)
+   subroutine copy_forwarded_payload(conn, inp, outp, m, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: inp
       type(payload_t), intent(inout) :: outp
       type(capnp_message_t), intent(inout), target :: m
-      integer(int64), allocatable, intent(out) :: held(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
       integer :: i, n, eid
       integer(int64) :: id
       err = CAPNP_OK
-      allocate (held(0))
       if (inp%p%kind /= CAPNP_PK_STRUCT) return
       content = payload_content_get(inp, err)
       if (err /= CAPNP_OK) return
@@ -5223,10 +5240,8 @@ contains
          select case (cap_descriptor_which(icd))
          case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_hosted_get(icd), err)
-            held = [held, cap_descriptor_sender_hosted_get(icd)]
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
             call cap_descriptor_receiver_hosted_set(ocd, cap_descriptor_sender_promise_get(icd), err)
-            held = [held, cap_descriptor_sender_promise_get(icd)]
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
             id = cap_descriptor_receiver_hosted_get(icd)
             call cap_descriptor_none_set(ocd, err)
@@ -5319,7 +5334,7 @@ contains
 
    !> Dispatch an incoming Call to export `eid` and answer it, or answer
    !> it with `reason` when the target did not resolve.
-   recursive subroutine run_call(conn, c, qid, eid, terr, reason, elsewhere, err)
+   recursive subroutine run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer(int64), intent(in) :: qid
@@ -5327,6 +5342,8 @@ contains
       character(len=*), intent(in) :: reason
       logical, intent(in) :: elsewhere
       integer, intent(out) :: err
+      !> Param holds the call took when it arrived, if it was queued.
+      integer(int64), allocatable, intent(inout), optional :: held(:)
       type(payload_t) :: params
       type(rpc_call_ctx_t) :: ctx
       type(capnp_message_t), pointer :: rm
@@ -5344,9 +5361,18 @@ contains
       call capnp_message_init_builder(rm, err)
       if (err /= CAPNP_OK) then
          deallocate (rm)
+         if (present(held)) then
+            if (allocated(held)) then
+               derr = CAPNP_OK
+               call drop_param_holds(conn, held, derr)
+            end if
+         end if
          return
       end if
-      call hold_call_params(conn, c, pids)
+      if (present(held)) then
+         if (allocated(held)) call move_alloc(held, pids)
+      end if
+      if (.not. allocated(pids)) call hold_call_params(conn, c, pids)
       rmsg = message_new_root(rm, err)
       r = message_return_init(rmsg, err)
       call return_answer_id_set(r, qid, err)
@@ -5549,16 +5575,22 @@ contains
       integer, intent(out) :: err
       type(rpc_incoming_wait_t), pointer :: node, tail
       integer(int8), allocatable :: bytes(:)
+      type(message_t) :: qmsg
+      type(call_t) :: qc
+      integer :: e
       allocate (node)
       node%answer_qid = aqid
       node%call_qid = qid
-      if (allocated(spill)) call move_alloc(spill, node%spill)
       call capnp_serialize_bytes(m, bytes, err)
       if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
       if (err /= CAPNP_OK) then
          deallocate (node)
          return
       end if
+      qmsg = message_read_root(node%msg, e)
+      if (e == CAPNP_OK) qc = message_call_get(qmsg, e)
+      if (e == CAPNP_OK) call hold_call_params(conn, qc, node%pids)
+      call hold_param_vines(conn, spill, node%pids)
       if (.not. associated(conn%incoming_wait)) then
          conn%incoming_wait => node
       else
@@ -5648,8 +5680,7 @@ contains
             end if
             if (cfound) then
                if (.not. allocated(qops)) allocate (qops(0))
-               call forward_call(conn, c, node%call_qid, kind, id, qops, err)
-               call release_spilled_vines(conn, node%spill, err)
+               call forward_call(conn, c, node%call_qid, kind, id, qops, err, held=node%pids)
             else if (e == CAPNP_OK) then
                eid = -1
                if (kind == PIPE_EXPORT .and. eslot_ok(conn, id)) then
@@ -5657,9 +5688,12 @@ contains
                end if
                call run_call(conn, c, node%call_qid, eid, CAPNP_OK, reason, &
                              call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG, &
-                             err)
-               call release_spilled_vines(conn, node%spill, err)
+                             err, held=node%pids)
             end if
+         end if
+         if (allocated(node%pids)) then
+            e = CAPNP_OK
+            call drop_param_holds(conn, node%pids, e)
          end if
          call capnp_message_free(node%msg)
          deallocate (node)
@@ -5679,22 +5713,6 @@ contains
       end do
       conn%incoming_wait => null()
    end subroutine free_incoming_waits
-
-   subroutine release_spilled_vines(conn, spill, err)
-      type(rpc_conn_t), intent(inout), target :: conn
-      integer(int64), allocatable, intent(in) :: spill(:)
-      integer, intent(inout) :: err
-      integer :: i, e
-      if (.not. allocated(spill)) return
-      if (conn%dead .or. .not. associated(conn%transport)) return
-      do i = 1, size(spill)
-         call send_release(conn, spill(i), 1_int64, e)
-         if (e /= CAPNP_OK) then
-            if (err == CAPNP_OK) err = e
-            return
-         end if
-      end do
-   end subroutine release_spilled_vines
 
    !> Find the export id a Call's target names: a direct export, or a
    !> promised answer resolved through a stored answer's capTable.
@@ -5974,7 +5992,7 @@ contains
    !> acted on here.
    !> Past MAXINTRO_HELD an entry is not kept. A result's vine is then an
    !> ordinary import of that result; a call's vine is appended to
-   !> `spill`, for the caller to release once the call is done, as C++
+   !> `spill`, for the caller to hold with the call's param caps, as C++
    !> 1.4.0 drops it with the params (rpc.c++ 1628-1630).
    subroutine note_introductions(conn, pl, err, handles, nhandles, qid, spill)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -7251,13 +7269,12 @@ contains
       integer, intent(in) :: q
       integer, intent(inout) :: err
       integer(int64), allocatable :: ids(:)
-      integer :: i, e
+      integer :: e
       if (.not. allocated(conn%questions(q)%param_ids)) return
       call move_alloc(conn%questions(q)%param_ids, ids)
-      do i = 1, size(ids)
-         call send_release(conn, ids(i), 1_int64, e)
-         if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
-      end do
+      e = CAPNP_OK
+      call drop_param_holds(conn, ids, e)
+      if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
    end subroutine release_forwarded_params
 
    !> The question a forwarded answer took its results from is finished
@@ -7357,11 +7374,8 @@ contains
       type(payload_t) :: pl
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
-      type(rpc_import_node_t), pointer :: node
-      type(rpc_param_hold_t), allocatable :: grown(:)
       integer(int64) :: id
-      integer :: i, k, e, n
-      logical :: found
+      integer :: i, e
       allocate (ids(0))
       pl = call_params_get(c, e)
       if (e /= CAPNP_OK) return
@@ -7379,29 +7393,56 @@ contains
          case default
             cycle
          end select
-         call import_find_live(conn, id, node, found)
-         if (found) then
-            node%refs = node%refs + 1
-            cycle
-         end if
-         if (.not. allocated(conn%param_holds)) allocate (conn%param_holds(0))
-         n = size(conn%param_holds)
-         k = hold_index(conn, id)
-         if (k < 0) then
-            allocate (grown(n + 1))
-            grown(1:n) = conn%param_holds
-            grown(n + 1)%id = id
-            grown(n + 1)%wire = id
-            call move_alloc(grown, conn%param_holds)
-            k = n + 1
-         end if
-         conn%param_holds(k)%refs = conn%param_holds(k)%refs + 1_int64
-         if (.not. any(ids == id)) then
-            conn%param_holds(k)%holders = conn%param_holds(k)%holders + 1
-            ids = [ids, id]
-         end if
+         call hold_param_wire(conn, id, ids)
       end do
    end subroutine hold_call_params
+
+   !> Hold the vines of the thirdPartyHosted params this vat refused to
+   !> keep, as C++ keeps each one imported until the params go.
+   subroutine hold_param_vines(conn, vines, ids)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), allocatable, intent(in) :: vines(:)
+      integer(int64), allocatable, intent(inout) :: ids(:)
+      integer :: i
+      if (.not. allocated(vines)) return
+      if (.not. allocated(ids)) allocate (ids(0))
+      do i = 1, size(vines)
+         call hold_param_wire(conn, vines(i), ids)
+      end do
+   end subroutine hold_param_vines
+
+   !> One param cap naming import `id`: a live import gains the ref, any
+   !> other id is held for the call and added to `ids`.
+   subroutine hold_param_wire(conn, id, ids)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: id
+      integer(int64), allocatable, intent(inout) :: ids(:)
+      type(rpc_import_node_t), pointer :: node
+      type(rpc_param_hold_t), allocatable :: grown(:)
+      integer :: k, n
+      logical :: found
+      call import_find_live(conn, id, node, found)
+      if (found) then
+         node%refs = node%refs + 1
+         return
+      end if
+      if (.not. allocated(conn%param_holds)) allocate (conn%param_holds(0))
+      n = size(conn%param_holds)
+      k = hold_index(conn, id)
+      if (k < 0) then
+         allocate (grown(n + 1))
+         grown(1:n) = conn%param_holds
+         grown(n + 1)%id = id
+         grown(n + 1)%wire = id
+         call move_alloc(grown, conn%param_holds)
+         k = n + 1
+      end if
+      conn%param_holds(k)%refs = conn%param_holds(k)%refs + 1_int64
+      if (.not. any(ids == id)) then
+         conn%param_holds(k)%holders = conn%param_holds(k)%holders + 1
+         ids = [ids, id]
+      end if
+   end subroutine hold_param_wire
 
    integer function hold_index(conn, id) result(k)
       type(rpc_conn_t), intent(in) :: conn
@@ -7504,7 +7545,6 @@ contains
       type(rpc_incoming_wait_t), pointer :: node, prev
       type(message_t) :: msg
       type(call_t) :: c
-      integer(int64), allocatable :: ids(:)
       integer :: e
       found = .false.
       prev => null()
@@ -7535,11 +7575,7 @@ contains
          end if
          e = CAPNP_OK
       end if
-      if (e == CAPNP_OK) then
-         call hold_call_params(conn, c, ids)
-         call drop_param_holds(conn, ids, err)
-      end if
-      call release_spilled_vines(conn, node%spill, err)
+      if (allocated(node%pids)) call drop_param_holds(conn, node%pids, err)
       call capnp_message_free(node%msg)
       deallocate (node)
    end function cancel_queued_call

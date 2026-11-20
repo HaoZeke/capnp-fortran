@@ -171,7 +171,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(144))
+      allocate (testsuite(145))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -448,18 +448,20 @@ contains
       testsuite(137)%test => w_no_pipelining_broken_target
       testsuite(138)%name = "rpc-deferred-call-answers-later"
       testsuite(138)%test => w_deferred_call_answers_later
-      testsuite(139)%name = "posix-recv-eintr-retried"
-      testsuite(139)%test => t_recv_all_retries_eintr
-      testsuite(140)%name = "rpc-framing-511-accepted"
-      testsuite(140)%test => t_framing_511_accepted
-      testsuite(141)%name = "rpc-framing-512-rejected"
-      testsuite(141)%test => t_framing_512_rejected
-      testsuite(142)%name = "rpc-framing-oversized-rejected"
-      testsuite(142)%test => t_framing_oversized_rejected
-      testsuite(143)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(143)%test => t_framing_negative_traversal_rejected
-      testsuite(144)%name = "rpc-framing-short-and-padded"
-      testsuite(144)%test => t_framing_short_and_padded
+      testsuite(139)%name = "rpc-queued-call-param-promise-resolve"
+      testsuite(139)%test => w_queued_call_param_promise_resolve
+      testsuite(140)%name = "posix-recv-eintr-retried"
+      testsuite(140)%test => t_recv_all_retries_eintr
+      testsuite(141)%name = "rpc-framing-511-accepted"
+      testsuite(141)%test => t_framing_511_accepted
+      testsuite(142)%name = "rpc-framing-512-rejected"
+      testsuite(142)%test => t_framing_512_rejected
+      testsuite(143)%name = "rpc-framing-oversized-rejected"
+      testsuite(143)%test => t_framing_oversized_rejected
+      testsuite(144)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(144)%test => t_framing_negative_traversal_rejected
+      testsuite(145)%name = "rpc-framing-short-and-padded"
+      testsuite(145)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1061,7 +1063,13 @@ contains
    subroutine w_deferred_call_answers_later(error)
       type(error_type), allocatable, intent(out) :: error
       call t_deferred_call_answers_later(error)
+      if (.not. allocated(error)) call t_deferred_call_refused_vine(error)
    end subroutine w_deferred_call_answers_later
+
+   subroutine w_queued_call_param_promise_resolve(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_queued_call_param_promise_resolve(error)
+   end subroutine w_queued_call_param_promise_resolve
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11417,6 +11425,67 @@ contains
       call px_close(fb)
    end subroutine t_deferred_call_answers_later
 
+   !> A thirdPartyHosted param this vat refuses to keep stays imported
+   !> while a deferred call runs. C++ drops its vine with the params, so
+   !> the Release comes with the Return.
+   subroutine t_deferred_call_refused_vine(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(defer_srv_t), target :: dsrv
+      class(rpc_server_t), pointer :: srvp
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      character(len=:), allocatable :: a, f1, f2
+      character(len=MAXHOST + 8) :: host
+      integer :: fa, fb, e
+      logical :: early
+
+      srvp => dsrv
+      host = repeat('h', len(host))
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, 1_int64, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call rpc_write_third_party_cap(cd, host, 5000, 65261_int64, 90_int64, e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call px_poll_in(fb, 50, early, e)
+      call check_(error, dsrv%last == 1_int64 .and. .not. early, &
+                  'refused vine: kept while the call runs')
+      if (.not. allocated(error)) then
+         ctx => rpc_deferred_ctx(conn, 1_int64)
+         call set_struct_n(ctx, 5_int64, e)
+         call rpc_deferred_return(conn, 1_int64, e)
+         f1 = raw_frame_text(fb)
+         f2 = raw_frame_text(fb)
+         call check_(error, (f1 == 'REL 90 1' .and. f2(1:5) == 'RET 1') .or. &
+                     (f2 == 'REL 90 1' .and. f1(1:5) == 'RET 1'), &
+                     'refused vine: released with the Return, got '//f1//' '//f2)
+      end if
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_deferred_call_refused_vine
+
    subroutine defer_raw_call(fd, q)
       integer, intent(in) :: fd
       integer(int64), intent(in) :: q
@@ -11449,5 +11518,90 @@ contains
       if (err == CAPNP_OK) call capnp_set_i64(s, 0_int64, n, err)
       if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
    end subroutine set_struct_n
+
+   !> A call queued on a pending answer takes its param caps when it
+   !> arrives, as C++ imports them in handleCall. A Resolve of a param
+   !> promise meanwhile releases the promise, and the call ends by
+   !> releasing what it resolved to.
+   subroutine t_queued_call_param_promise_resolve(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(defer_srv_t), target :: dsrv
+      type(echo_srv_t), target :: echo_local
+      class(rpc_server_t), pointer :: srvp, ep
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, rel1, ret1, ret2, rel2
+      integer :: fa, fb, e, idx
+
+      srvp => dsrv
+      ep => echo_local
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srvp)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call defer_raw_call(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      call raw_pa_promise_call(fb, 2_int64, 1_int64, 40_int64)
+      call rpc_pump_once(conn, e)
+      call send_resolve_hosted(fb, 40_int64, 41_int64, e)
+      call rpc_pump_once(conn, e)
+      rel1 = raw_frame_text(fb)
+      ctx => rpc_deferred_ctx(conn, 1_int64)
+      idx = rpc_ctx_export_cap(ctx, ep, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 1_int64, e)
+      ret1 = raw_frame_text(fb)
+      ret2 = raw_frame_text(fb)
+      call raw_finish_fd(fb, 2_int64)
+      call rpc_pump_once(conn, e)
+      rel2 = raw_frame_text(fb)
+      call check_(error, rel1 == 'REL 40 1', 'queued call: Resolve releases the promise, got '//rel1)
+      if (allocated(error)) return
+      call check_(error, ret1 == 'RET 1 F' .and. ret2 == 'RET 2 F' .and. rel2 == 'REL 41 1', &
+                  'queued call: the resolved cap goes with the call, got '//ret1//'|'//ret2// &
+                  '|'//rel2)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_queued_call_param_promise_resolve
+
+   !> Call echo on pointer 0 of answer `aq`. The params content is cap 0,
+   !> senderPromise `id`.
+   subroutine raw_pa_promise_call(fd, q, aq, id)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: q, aq, id
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops, ctab
+      type(cap_descriptor_t) :: cd
+      type(payload_t) :: params
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, q, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, aq, e)
+      ops = promised_answer_transform_init(pa, 1_int64, e)
+      op%p = capnp_list_get_struct(ops, 0, e)
+      call promised_answer_op_get_pointer_field_set(op, 0_int32, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(params, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_promise_set(cd, id, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine raw_pa_promise_call
 
 end module test_rpc
