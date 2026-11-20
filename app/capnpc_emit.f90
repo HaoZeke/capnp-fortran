@@ -65,11 +65,18 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
       integer(int64) :: n, i
+      integer :: stat
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
+      call capnp_count_fits(l, n, err)
+      if (err /= CAPNP_OK) return
       if (allocated(g_nodes)) deallocate (g_nodes)
-      allocate (g_nodes(n))
+      allocate (g_nodes(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1_int64, n
          g_nodes(i)%p = capnp_list_get_struct(l, int(i - 1), err)
          if (err /= CAPNP_OK) return
@@ -1803,6 +1810,8 @@ contains
       if (b%kind == CAPNP_PK_NULL) return
       scopes = brand_scopes(b, err)
       if (err /= CAPNP_OK) return
+      call capnp_count_fits(scopes, capnp_list_len(scopes), err)
+      if (err /= CAPNP_OK) return
       n = 0
       do i = 0_int64, capnp_list_len(scopes) - 1_int64
          sc = capnp_list_get_struct(scopes, int(i), err)
@@ -1810,6 +1819,8 @@ contains
          if (scope_scope_id(sc) /= g_nodes(gidx)%id) cycle
          if (scope_which(sc) /= SCOPE_BIND) cycle
          binds = scope_bindings(sc, err)
+         if (err /= CAPNP_OK) return
+         call capnp_count_fits(binds, capnp_list_len(binds), err)
          if (err /= CAPNP_OK) return
          do j = 0_int64, capnp_list_len(binds) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)

@@ -18,6 +18,7 @@ program capnpc_fortran
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: fname
    character(len=4096) :: arg
+   integer(int64) :: n64
    integer :: err, i, n
 
    if (command_argument_count() >= 1) then
@@ -38,7 +39,10 @@ program capnpc_fortran
 
    files = cgr_requested_files(root, err)
    if (err /= CAPNP_OK) call die('cannot read requestedFiles', err)
-   n = int(capnp_list_len(files))
+   n64 = capnp_list_len(files)
+   call capnp_count_fits(files, n64, err)
+   if (err /= CAPNP_OK) call die('requestedFiles exceeds the message', err)
+   n = int(n64)
    if (n == 0) call die('no requested files', CAPNP_ERR_ARG)
 
    do i = 0, n - 1

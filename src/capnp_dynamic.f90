@@ -85,34 +85,13 @@ module capnp_dynamic
 
 contains
 
-   !> A list element count is safe to allocate when it does not exceed the
-   !> words stored in the message. Cap'n Proto 1.4.0 rejects a zero-sized
-   !> list that claims more elements than the read limit allows
-   !> (`layout.c++` amplified-list checks). The schema loader raises that
-   !> limit to 2^30 words, so the bytes actually present are the cap.
+   !> `capnp_count_fits`: a zero-sized list may not claim more elements
+   !> than the message holds. `layout.c++` calls that an amplified list.
    subroutine dyn_guard_count(host, n, err)
       type(capnp_ptr_t), intent(in) :: host
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
-      integer(int64) :: words
-      integer :: i
-      err = CAPNP_OK
-      if (n == 0_int64) return
-      if (n < 0_int64 .or. n > int(huge(0), int64)) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      if (.not. associated(host%msg)) then
-         err = CAPNP_ERR_BOUNDS
-         return
-      end if
-      words = 0_int64
-      if (allocated(host%msg%segs)) then
-         do i = 1, host%msg%nsegs
-            words = words + host%msg%segs(i)%len/CAPNP_WORD_BYTES
-         end do
-      end if
-      if (n > words) err = CAPNP_ERR_BOUNDS
+      call capnp_count_fits(host, n, err)
    end subroutine dyn_guard_count
 
    !> Load a framed CodeGeneratorRequest (the bytes `capnp compile -o-`

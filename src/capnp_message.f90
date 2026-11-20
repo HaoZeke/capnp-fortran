@@ -19,7 +19,7 @@ module capnp_message
    public :: capnp_ptr_t
    public :: capnp_root, capnp_set_root, capnp_getp, capnp_setp
    public :: capnp_new_struct, capnp_new_list, capnp_new_composite_list
-   public :: capnp_list_len, capnp_list_getp, capnp_list_get_struct
+   public :: capnp_list_len, capnp_count_fits, capnp_list_getp, capnp_list_get_struct
    public :: capnp_get_text, capnp_set_text, capnp_get_data, capnp_set_data
    public :: capnp_get_bool, capnp_set_bool
    public :: capnp_list_get_bool, capnp_list_set_bool
@@ -448,6 +448,35 @@ contains
       n = 0_int64
       if (p%kind == CAPNP_PK_LIST) n = p%nelem
    end function capnp_list_len
+
+   !> A list count is safe to allocate when it does not exceed the words
+   !> stored in the message. `layout.c++` rejects a zero-sized list that
+   !> claims more elements than the read allows. A loader that raises the
+   !> traversal limit still has only the bytes on hand.
+   subroutine capnp_count_fits(host, n, err)
+      type(capnp_ptr_t), intent(in) :: host
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      integer(int64) :: words
+      integer :: i
+      err = CAPNP_OK
+      if (n == 0_int64) return
+      if (n < 0_int64 .or. n > int(huge(0), int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (.not. associated(host%msg)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      words = 0_int64
+      if (allocated(host%msg%segs)) then
+         do i = 1, host%msg%nsegs
+            words = words + host%msg%segs(i)%len/CAPNP_WORD_BYTES
+         end do
+      end if
+      if (n > words) err = CAPNP_ERR_BOUNDS
+   end subroutine capnp_count_fits
 
    ! ------------------------------------------------------------------
    ! Builder: object allocation and pointer writing
