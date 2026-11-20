@@ -60,6 +60,15 @@ contains
       integer(int64) :: pos, n
       integer :: i, nsegs
       call capnp_message_free(msg)
+      if (size(bytes, kind=int64) == 0_int64) then
+         if (present(traversal_words)) msg%traversal_words = traversal_words
+         if (present(depth_limit)) msg%depth_limit = depth_limit
+         msg%is_builder = .false.
+         msg%nsegs = 0
+         allocate (msg%segs(0))
+         err = CAPNP_OK
+         return
+      end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
       if (present(traversal_words)) msg%traversal_words = traversal_words
@@ -94,6 +103,15 @@ contains
       integer(int64) :: pos, n
       integer :: i, nsegs
       call capnp_message_free(msg)
+      if (size(bytes, kind=int64) == 0_int64) then
+         if (present(traversal_words)) msg%traversal_words = traversal_words
+         if (present(depth_limit)) msg%depth_limit = depth_limit
+         msg%is_builder = .false.
+         msg%nsegs = 0
+         allocate (msg%segs(0))
+         err = CAPNP_OK
+         return
+      end if
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
       if (present(traversal_words)) msg%traversal_words = traversal_words
@@ -133,7 +151,7 @@ contains
          return
       end if
       nsegs64 = wire_u32(cp_get_i32(bytes, 0_int64)) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      if (nsegs64 < 1_int64 .or. nsegs64 > int(huge(nsegs), int64)) then
          err = CAPNP_ERR_FRAMING
          return
       end if
@@ -176,7 +194,7 @@ contains
          return
       end if
       inquire (unit=unit, size=sz)
-      allocate (bytes(0:max(sz, 1_int64) - 1))
+      allocate (bytes(0:sz - 1))
       if (sz > 0_int64) read (unit, iostat=ios) bytes(0:sz - 1)
       close (unit)
       if (ios /= 0) err = CAPNP_ERR_IO

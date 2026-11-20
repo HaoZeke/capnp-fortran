@@ -12,7 +12,7 @@ module capnp_packed
    private
 
    public :: capnp_pack, capnp_unpack
-   public :: capnp_unpacker_t, capnp_unpack_push
+   public :: capnp_unpacker_t, capnp_unpack_push, capnp_unpack_finish
    public :: capnp_packer_t, capnp_pack_push, capnp_pack_finish
 
    !> Incremental unpacker (capn-stream parity): feed arbitrary chunk
@@ -120,16 +120,29 @@ contains
    end subroutine capnp_pack
 
    !> Unpack into a word-aligned buffer.
-   subroutine capnp_unpack(inb, outb, err)
+   subroutine capnp_unpack(inb, outb, err, max_words)
       integer(int8), intent(in) :: inb(0:)
       integer(int8), allocatable, intent(out) :: outb(:)
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: max_words
       integer(int8), allocatable :: buf(:)
-      integer(int64) :: ipos, opos, cap, n, j
+      integer(int64) :: ipos, opos, cap, n, j, limit
       integer :: tag, k, cnt
       err = CAPNP_OK
       n = size(inb, kind=int64)
-      cap = max(8_int64*n, 64_int64)
+      limit = huge(0_int64)
+      if (present(max_words)) then
+         if (max_words < 0_int64) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         if (max_words > ishft(huge(0_int64), -3)) then
+            limit = huge(0_int64)
+         else
+            limit = max_words*CAPNP_WORD_BYTES
+         end if
+      end if
+      cap = min(max(8_int64*n, 64_int64), max(limit, 1_int64))
       allocate (buf(0:cap - 1))
       buf = 0_int8
       ipos = 0_int64
@@ -137,6 +150,10 @@ contains
       do while (ipos < n)
          tag = cp_u8(inb(ipos))
          ipos = ipos + 1
+         if (8_int64 > limit - opos) then
+            err = CAPNP_ERR_TRAVERSAL
+            return
+         end if
          call ensure(buf, cap, opos + 8_int64)
          do k = 0, 7
             if (btest(tag, k)) then
@@ -158,6 +175,10 @@ contains
             end if
             cnt = cp_u8(inb(ipos))
             ipos = ipos + 1
+            if (int(cnt, int64)*8_int64 > limit - opos) then
+               err = CAPNP_ERR_TRAVERSAL
+               return
+            end if
             call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
             buf(opos:opos + int(cnt, int64)*8_int64 - 1) = 0_int8
             opos = opos + int(cnt, int64)*8_int64
@@ -170,6 +191,10 @@ contains
             ipos = ipos + 1
             if (ipos + int(cnt, int64)*8_int64 > n) then
                err = CAPNP_ERR_PACKED
+               return
+            end if
+            if (int(cnt, int64)*8_int64 > limit - opos) then
+               err = CAPNP_ERR_TRAVERSAL
                return
             end if
             call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
@@ -400,6 +425,14 @@ contains
          end select
       end do
    end subroutine capnp_unpack_push
+
+   !> Reject a stream that ended inside a packed tag, word payload, or run.
+   subroutine capnp_unpack_finish(u, err)
+      type(capnp_unpacker_t), intent(in) :: u
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      if (u%state /= US_TAG) err = CAPNP_ERR_PACKED
+   end subroutine capnp_unpack_finish
 
    pure integer function word_zero_count(word) result(z)
       integer(int8), intent(in) :: word(:)
