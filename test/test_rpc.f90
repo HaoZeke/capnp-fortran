@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(142))
+      allocate (testsuite(143))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -437,18 +437,20 @@ contains
       testsuite(135)%test => w_no_pipelining_answer_refuses_pipeline
       testsuite(136)%name = "rpc-finish-queued-yourself-call"
       testsuite(136)%test => w_finish_queued_yourself_call
-      testsuite(137)%name = "posix-recv-eintr-retried"
-      testsuite(137)%test => t_recv_all_retries_eintr
-      testsuite(138)%name = "rpc-framing-511-accepted"
-      testsuite(138)%test => t_framing_511_accepted
-      testsuite(139)%name = "rpc-framing-512-rejected"
-      testsuite(139)%test => t_framing_512_rejected
-      testsuite(140)%name = "rpc-framing-oversized-rejected"
-      testsuite(140)%test => t_framing_oversized_rejected
-      testsuite(141)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(141)%test => t_framing_negative_traversal_rejected
-      testsuite(142)%name = "rpc-framing-short-and-padded"
-      testsuite(142)%test => t_framing_short_and_padded
+      testsuite(137)%name = "rpc-no-pipelining-broken-target"
+      testsuite(137)%test => w_no_pipelining_broken_target
+      testsuite(138)%name = "posix-recv-eintr-retried"
+      testsuite(138)%test => t_recv_all_retries_eintr
+      testsuite(139)%name = "rpc-framing-511-accepted"
+      testsuite(139)%test => t_framing_511_accepted
+      testsuite(140)%name = "rpc-framing-512-rejected"
+      testsuite(140)%test => t_framing_512_rejected
+      testsuite(141)%name = "rpc-framing-oversized-rejected"
+      testsuite(141)%test => t_framing_oversized_rejected
+      testsuite(142)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(142)%test => t_framing_negative_traversal_rejected
+      testsuite(143)%name = "rpc-framing-short-and-padded"
+      testsuite(143)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1032,6 +1034,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_queued_yourself_call(error)
    end subroutine w_finish_queued_yourself_call
+
+   subroutine w_no_pipelining_broken_target(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_no_pipelining_broken_target(error)
+   end subroutine w_no_pipelining_broken_target
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -11267,5 +11274,61 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_finish_queued_yourself_call
+
+   !> A noPromisePipelining call on a broken target keeps that broken
+   !> pipeline, as in C++. A call made on its answer gets the target's
+   !> own exception, not the noPromisePipelining text.
+   subroutine t_no_pipelining_broken_target(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn, raw
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(payload_t) :: params
+      character(len=:), allocatable :: a, r1, r2
+      character(len=*), parameter :: gone = 'Pipeline call on a request that ' // &
+                                             'returned no capabilities or was already closed.'
+      integer :: fa, fb, e
+      logical :: got1, got2, x1, x2
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      raw%fd = fb
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, 1_int64, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 1_int32, e)
+      call call_no_promise_pipelining_set(c, .true., e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, 9_int64, e)
+      params = call_params_init(c, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_send_message(fb, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call pa_await(raw, 1_int64, got1, x1, r1)
+      call pa_send(raw, 2_int64, 1_int64, [0])
+      call rpc_pump_once(conn, e)
+      call pa_await(raw, 2_int64, got2, x2, r2)
+      call check_(error, got1 .and. x1 .and. got2 .and. x2, &
+                  'broken npp target: both calls fail')
+      if (allocated(error)) return
+      call check_(error, r1 == gone .and. r2 == gone, &
+                  'broken npp target: the target text, got '//r2)
+      raw%fd = PX_BAD_FD
+      call rpc_conn_close(conn)
+      call px_close(fb)
+   end subroutine t_no_pipelining_broken_target
 
 end module test_rpc

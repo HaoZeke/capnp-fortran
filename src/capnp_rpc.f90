@@ -306,8 +306,9 @@ module capnp_rpc
       logical :: exports_pinned = .false.
       !> Peer export ids this call's params hold until Finish.
       integer(int64), allocatable :: held_params(:)
-      !> The call set noPromisePipelining. C++ gives it a disabled
-      !> pipeline, so a call on any of its caps fails at once.
+      !> The call set noPromisePipelining and reached a server, a queue
+      !> or the peer. C++ gives it a disabled pipeline, so a call on any
+      !> of its caps fails at once.
       logical :: no_pipeline = .false.
    end type rpc_answer_slot_t
 
@@ -4987,14 +4988,6 @@ contains
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
       if (.not. claim_question(conn, qid, err)) return
-      if (call_no_promise_pipelining_get(c)) then
-         block
-            type(rpc_answer_slot_t), pointer :: own
-            logical :: have
-            call answer_find(conn, qid, own, have)
-            if (have) own%no_pipeline = .true.
-         end block
-      end if
       elsewhere = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
       if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_THIRD_PARTY_TAG .or. &
           (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
@@ -5028,6 +5021,17 @@ contains
             end if
          end if
       end block
+      ! A call that reaches a server, a queue or the peer with the hint
+      ! gets a disabled pipeline. A broken target keeps its own pipeline.
+      if (call_no_promise_pipelining_get(c) .and. terr == CAPNP_OK .and. &
+          (eid >= 0 .or. aqid >= 0_int64 .or. fkind /= PIPE_BROKEN)) then
+         block
+            type(rpc_answer_slot_t), pointer :: own
+            logical :: have
+            call answer_find(conn, qid, own, have)
+            if (have) own%no_pipeline = .true.
+         end block
+      end if
       ! A pipelined call on an answer still running waits for its Return,
       ! as the C++ answer pipeline queues it (rpc.c++ QueuedPipeline).
       if (terr == CAPNP_OK .and. aqid >= 0_int64) then
