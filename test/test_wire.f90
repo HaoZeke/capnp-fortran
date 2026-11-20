@@ -37,6 +37,9 @@ contains
            new_unittest("packed-incremental", test_packed_incremental), &
            new_unittest("framing-errors", test_framing_errors), &
            new_unittest("traversal-limit", test_traversal_limit), &
+           new_unittest("traversal-root-words", test_traversal_root_words), &
+           new_unittest("traversal-single-far", test_traversal_single_far), &
+           new_unittest("traversal-double-far", test_traversal_double_far), &
            new_unittest("depth-limit", test_depth_limit), &
            new_unittest("depth-limit-nested", test_depth_limit_nested), &
            new_unittest("nest-limit-64", test_nest_limit_64), &
@@ -933,6 +936,91 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine test_traversal_limit
+   !> An 8-word struct costs 2 root words plus 8 body words. Limit 9 fails
+   !> and limit 10 reads it (message.c++:100, layout.c++:2707).
+   subroutine test_traversal_root_words(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:79))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 0_int32)
+      call cp_put_i32(buf, 4_int64, 9_int32)
+      call cp_put_i64(buf, 8_int64, wp_make_struct(0_int32, 8_int32, 0_int32))
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=9_int64)
+      call check(error, err == CAPNP_OK, 'trav-root: framing')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-root: limit 9 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=10_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
+                  'trav-root: limit 10 reads the struct')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_root_words
+   !> Single-far 1-word struct costs 2 root + 1 pad + 1 body. Limit 3 fails,
+   !> limit 4 yields 55 (layout.c++:586).
+   subroutine test_traversal_single_far(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:39))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 1_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.false., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 32_int64, 55_int64)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=3_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-sfar: limit 3 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=4_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 55_int64, &
+                  'trav-sfar: limit 4 reads 55')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_single_far
+   !> Double-far 1-word struct costs 2 root + 2 pad + 1 body. Limit 4 fails,
+   !> limit 5 yields 123 (layout.c++:586).
+   subroutine test_traversal_double_far(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: buf(:)
+      integer :: err
+      allocate (buf(0:47))
+      buf = 0_int8
+      call cp_put_i32(buf, 0_int64, 2_int32)
+      call cp_put_i32(buf, 4_int64, 1_int32)
+      call cp_put_i32(buf, 8_int64, 2_int32)
+      call cp_put_i32(buf, 12_int64, 1_int32)
+      call cp_put_i64(buf, 16_int64, wp_make_far(.true., 0_int64, 1_int64))
+      call cp_put_i64(buf, 24_int64, wp_make_far(.false., 0_int64, 2_int64))
+      call cp_put_i64(buf, 32_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(buf, 40_int64, 123_int64)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=4_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'trav-dfar: limit 4 rejects')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(buf, msg, err, traversal_words=5_int64)
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 123_int64, &
+                  'trav-dfar: limit 5 reads 123')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+   end subroutine test_traversal_double_far
    !> nestingLimit must be greater than zero to read the root
    !> (layout.c++:2186). Limit 1 allows the root and rejects the first getp.
    subroutine test_depth_limit(error)

@@ -151,6 +151,9 @@ contains
                err = CAPNP_ERR_BOUNDS
                return
             end if
+            ! followFars charges the landing pad before reading it
+            ! (layout.c++:586-587, arena.h:430).
+            if (.not. charge(msg, 8_int64, err)) return
             if (wp_kind(cp_get_i64(msg%segs(tseg)%bytes, pad_off)) == CAPNP_WK_FAR) then
                err = CAPNP_ERR_KIND
                return
@@ -192,6 +195,8 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
+      ! A double-far pad is two words (layout.c++:586).
+      if (.not. charge(msg, 16_int64, err)) return
       w0 = cp_get_i64(msg%segs(pseg)%bytes, pad_off)
       tag = cp_get_i64(msg%segs(pseg)%bytes, pad_off + 8_int64)
       if (wp_kind(w0) /= CAPNP_WK_FAR .or. wp_far_two(w0)) then
@@ -340,6 +345,16 @@ contains
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_ptr_t) :: p
+      p = capnp_ptr_t()
+      ! An out-of-range root is not charged (arena.h:430 short-circuits).
+      if (msg%nsegs < 1 .or. msg%segs(1)%len < 8_int64) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      ! The root pointer word is charged twice: MessageReader::getRootInternal
+      ! (message.c++:100) and PointerReader::getRoot (layout.c++:2707).
+      if (.not. charge(msg, 8_int64, err)) return
+      if (.not. charge(msg, 8_int64, err)) return
       call resolve_at(msg, 1, 0_int64, 0, p, err)
    end function capnp_root
 
