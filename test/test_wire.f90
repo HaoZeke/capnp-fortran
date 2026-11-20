@@ -36,6 +36,8 @@ contains
            new_unittest("packed-roundtrip", test_packed_roundtrip), &
            new_unittest("packed-incremental", test_packed_incremental), &
            new_unittest("framing-errors", test_framing_errors), &
+           new_unittest("framing-many-segments", test_framing_many_segments), &
+           new_unittest("read-empty-file", test_read_empty_file), &
            new_unittest("traversal-limit", test_traversal_limit), &
            new_unittest("traversal-root-words", test_traversal_root_words), &
            new_unittest("traversal-single-far", test_traversal_single_far), &
@@ -919,6 +921,41 @@ contains
       call check(error, err == CAPNP_ERR_FRAMING, 'framing: truncated segment rejected')
       if (allocated(error)) return
    end subroutine test_framing_errors
+
+   subroutine test_framing_many_segments(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8), allocatable :: frame(:)
+      integer :: err, i
+      allocate (frame(0:6159))
+      frame = 0_int8
+      frame(1) = 2_int8
+      do i = 1, 513
+         frame(4*i) = 1_int8
+      end do
+      call capnp_deserialize_bytes(frame, msg, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 513, 'framing: 513 segments accepted')
+      call capnp_message_free(msg)
+   end subroutine test_framing_many_segments
+
+   subroutine test_read_empty_file(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, unit, ios
+      character(len=*), parameter :: path = 'empty-file.bin'
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='write', iostat=ios)
+      if (ios /= 0) then
+         call check(error, .false., 'empty-file: fixture open')
+         return
+      end if
+      close (unit)
+      call capnp_read_file(path, bytes, err)
+      open (newunit=unit, file=path, status='old', iostat=ios)
+      if (ios == 0) close (unit, status='delete')
+      call check(error, err == CAPNP_OK .and. size(bytes) == 0, 'empty-file: zero bytes returned')
+   end subroutine test_read_empty_file
+
    subroutine test_traversal_limit(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg

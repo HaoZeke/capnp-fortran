@@ -133,7 +133,7 @@ contains
          return
       end if
       nsegs64 = wire_u32(cp_get_i32(bytes, 0_int64)) + 1_int64
-      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+      if (nsegs64 < 1_int64 .or. nsegs64 > int(huge(nsegs), int64)) then
          err = CAPNP_ERR_FRAMING
          return
       end if
@@ -176,7 +176,7 @@ contains
          return
       end if
       inquire (unit=unit, size=sz)
-      allocate (bytes(0:max(sz, 1_int64) - 1))
+      allocate (bytes(0:sz - 1))
       if (sz > 0_int64) read (unit, iostat=ios) bytes(0:sz - 1)
       close (unit)
       if (ios /= 0) err = CAPNP_ERR_IO
