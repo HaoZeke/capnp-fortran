@@ -397,7 +397,6 @@ contains
       type(capnp_ptr_t) :: root, q
       integer(int8), allocatable :: ba(:), bb(:)
       integer :: err, unit, ios
-      character(len=*), parameter :: path = 'build/two_messages.bin'
       call capnp_message_init_builder(a, err)
       root = capnp_new_struct(a, 1, 0, err)
       call capnp_set_i64(root, 0_int64, 111_int64, err)
@@ -408,9 +407,14 @@ contains
       call capnp_set_i64(root, 0_int64, 222_int64, err)
       call capnp_set_root(b, root, err)
       call capnp_serialize_bytes(b, bb, err)
-      open (newunit=unit, file=path, access='stream', form='unformatted', &
-            status='replace', action='readwrite', iostat=ios)
+      open (newunit=unit, access='stream', form='unformatted', status='scratch', &
+            action='readwrite', iostat=ios)
       call check_(error, ios == 0, 'stream: scratch file opens')
+      if (ios /= 0) then
+         call capnp_message_free(a)
+         call capnp_message_free(b)
+         return
+      end if
       write (unit) ba, bb
       rewind (unit)
       call capnp_read_message_unit(unit, r1, err)
@@ -439,7 +443,6 @@ contains
       integer(int8), allocatable :: pa(:), pb(:)
       character(len=:), allocatable :: s
       integer :: err, unit, ios
-      character(len=*), parameter :: path = 'build/two_messages.packed.bin'
       call capnp_message_init_builder(a, err)
       root = capnp_new_struct(a, 1, 0, err)
       call capnp_set_i64(root, 0_int64, 333_int64, err)
@@ -452,9 +455,14 @@ contains
       call capnp_set_root(b, root, err)
       call capnp_serialize_packed_bytes(b, pb, err)
       call check_(error, err == CAPNP_OK, 'packed stream: built')
-      open (newunit=unit, file=path, access='stream', form='unformatted', &
-            status='replace', action='readwrite', iostat=ios)
+      open (newunit=unit, access='stream', form='unformatted', status='scratch', &
+            action='readwrite', iostat=ios)
       call check_(error, ios == 0, 'packed stream: scratch file opens')
+      if (ios /= 0) then
+         call capnp_message_free(a)
+         call capnp_message_free(b)
+         return
+      end if
       write (unit) pa, pb
       rewind (unit)
       call capnp_read_message_packed_unit(unit, r1, err)

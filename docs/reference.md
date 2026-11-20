@@ -185,10 +185,10 @@ are ignored on decode. Pretty output matches `capnp convert binary:json`; pass
 multi-value JSON streams. A high UTF-16 surrogate followed by a low
 surrogate is one Unicode scalar. capnp 1.4.0 keeps the two UTF-16
 surrogate code units as six CESU-8 bytes. An unquoted integer past 2^53 keeps every digit.
-capnp 1.4.0 rounds that token through a double, so it rejects an
-integer the double cannot hold. `{"i64":9223372036854775807}` and
-`{"u64":18446744073709551615}` are two such inputs: this decoder
-accepts them and capnp 1.4.0 does not.
+capnp 1.4.0 rounds that token through a double, so it rejects an integer
+the double cannot hold. `{"i64":9223372036854775807}` and
+`{"u64":18446744073709551615}` are two such inputs: this decoder accepts
+them and capnp 1.4.0 does not.
 
 ## capnpf
 
