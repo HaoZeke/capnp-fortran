@@ -339,6 +339,10 @@ module capnp_rpc
       logical :: plain_elsewhere = .false.
       logical :: plain_opp = .false.
       logical :: plain_npp = .false.
+      !> A yourself call under noPromisePipelining. C++ never runs its
+      !> task before Finish, so the plain forward's question lives until
+      !> then and finishes ahead of resultsSentElsewhere.
+      logical :: plain_lazy = .false.
       !> Imports the forwarded results named, released at Finish.
       integer(int64), allocatable :: plain_imports(:)
       !> Import nodes this answer's Return wrote, unpinned at Finish.
@@ -3131,6 +3135,7 @@ contains
       slot%plain_elsewhere = .false.
       slot%plain_opp = .false.
       slot%plain_npp = .false.
+      slot%plain_lazy = .false.
       if (allocated(slot%plain_imports)) deallocate (slot%plain_imports)
       if (allocated(slot%import_pins)) deallocate (slot%import_pins)
       slot%nexp = 0
@@ -5278,6 +5283,7 @@ contains
       slot%plain_elsewhere = .false.
       slot%plain_opp = .false.
       slot%plain_npp = .false.
+      slot%plain_lazy = .false.
       if (allocated(slot%plain_imports)) deallocate (slot%plain_imports)
       if (allocated(slot%import_pins)) deallocate (slot%import_pins)
       slot%nexp = 0
@@ -8326,9 +8332,10 @@ contains
       character(len=:), allocatable :: why
       integer(int64), allocatable :: pids(:)
       integer(int64) :: aqid
-      logical :: found, yourself, finished, npp, ignored
+      logical :: found, yourself, finished, npp, ignored, results, lazy
       integer :: e
       err = CAPNP_OK
+      results = .false.
       call settle_proxies(conn, q)
       aqid = conn%questions(q)%plain_answer
       call answer_find(conn, aqid, slot, found)
@@ -8354,6 +8361,11 @@ contains
       yourself = slot%plain_elsewhere
       finished = slot%finished
       npp = slot%plain_npp .and. .not. finished
+      ! The task of a yourself call is a lazy continuation (rpc.c++
+      ! handleCall), so the response and its question wait for Finish
+      ! even without a pipeline, after an exception too.
+      lazy = npp .and. yourself
+      if (lazy) npp = .false.
       allocate (rm)
       call capnp_message_init_builder(rm, err)
       if (err == CAPNP_OK) rmsg = message_new_root(rm, err)
@@ -8364,6 +8376,7 @@ contains
       if (err == CAPNP_OK) qr = message_return_get(qmsg, err)
       if (err == CAPNP_OK) then
          if (return_which(qr) == RETURN_RESULTS_TAG) then
+            results = .true.
             inp = return_results_get(qr, err)
             if (err == CAPNP_OK) outp = return_results_init(r, err)
             if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, rm, err)
@@ -8421,10 +8434,12 @@ contains
          call replay_plain_loopbacks(conn, aqid, err)
          return
       end if
+      ! Only results keep a pipeline on the question; a failure ends it.
       call answer_find(conn, aqid, slot, found)
       if (found) found = associated(slot)
-      if (found) found = slot%used .and. slot%has_results
+      if (found) found = slot%used .and. slot%has_results .and. (results .or. lazy)
       if (found) then
+         slot%plain_lazy = lazy
          slot%forward_qid = int(q, int64)
          conn%questions(q)%tail_answer = aqid
          if (.not. yourself) then
@@ -8980,6 +8995,11 @@ contains
       end if
       ! Finish always drops the pipeline reference, including when
       ! releaseResultCaps is false and the wire refs stay.
+      if (jslot%plain_lazy .and. jslot%forward_qid >= 0_int64) then
+         call finish_forwarded_question(conn, jslot%forward_qid, qid, jerr)
+         if (jerr /= CAPNP_OK) err = jerr
+         jslot%forward_qid = -1_int64
+      end if
       ! A yourself answer nobody took ends with its call context, which
       ! sends resultsSentElsewhere (rpc.c++ ~RpcCallContext).
       if (jslot%redirected .and. .not. conn%dead .and. associated(conn%transport)) then

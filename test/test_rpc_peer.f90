@@ -31,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(17))
+      allocate (testsuite(18))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -66,6 +66,8 @@ contains
       testsuite(16)%test => t_dis_ra_running
       testsuite(17)%name = "param-promise-resolve-to-live-import"
       testsuite(17)%test => t_live_import
+      testsuite(18)%name = "yourself-npp-plain-fwd"
+      testsuite(18)%test => t_yourself_npp
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1030,6 +1032,34 @@ contains
                  'live import: got '//b//' / '//c//' / '//d)
       call close_peer(conn, fd)
    end subroutine t_live_import
+
+   !> A yourself call with noPromisePipelining goes on as a plain call.
+   !> C++ leaves its result chain unconsumed, so the question lives until
+   !> Finish, and goes before resultsSentElsewhere.
+   subroutine t_yourself_npp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, yourself=.true., npp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wret(fd, k, .false.)
+      b = step(conn, fd, 1)
+      call wfin(fd, 3_int64, .true.)
+      c = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. b == '' .and. &
+                 c == 'FIN '//itoa(k)//' F | RET 3 else', &
+                 'yourself npp: got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_yourself_npp
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

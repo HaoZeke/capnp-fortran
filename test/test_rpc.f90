@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(149))
+      allocate (testsuite(150))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -477,18 +477,20 @@ contains
       testsuite(142)%test => w_released_result_export_id_reused
       testsuite(143)%name = "rpc-npp-call-forwards-plain"
       testsuite(143)%test => w_npp_call_forwards_plain
-      testsuite(144)%name = "posix-recv-eintr-retried"
-      testsuite(144)%test => t_recv_all_retries_eintr
-      testsuite(145)%name = "rpc-framing-511-accepted"
-      testsuite(145)%test => t_framing_511_accepted
-      testsuite(146)%name = "rpc-framing-512-rejected"
-      testsuite(146)%test => t_framing_512_rejected
-      testsuite(147)%name = "rpc-framing-oversized-rejected"
-      testsuite(147)%test => t_framing_oversized_rejected
-      testsuite(148)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(148)%test => t_framing_negative_traversal_rejected
-      testsuite(149)%name = "rpc-framing-short-and-padded"
-      testsuite(149)%test => t_framing_short_and_padded
+      testsuite(144)%name = "rpc-failed-plain-forward-finishes"
+      testsuite(144)%test => w_failed_plain_forward_finishes
+      testsuite(145)%name = "posix-recv-eintr-retried"
+      testsuite(145)%test => t_recv_all_retries_eintr
+      testsuite(146)%name = "rpc-framing-511-accepted"
+      testsuite(146)%test => t_framing_511_accepted
+      testsuite(147)%name = "rpc-framing-512-rejected"
+      testsuite(147)%test => t_framing_512_rejected
+      testsuite(148)%name = "rpc-framing-oversized-rejected"
+      testsuite(148)%test => t_framing_oversized_rejected
+      testsuite(149)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(149)%test => t_framing_negative_traversal_rejected
+      testsuite(150)%name = "rpc-framing-short-and-padded"
+      testsuite(150)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1170,6 +1172,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_npp_call_forwards_plain(error)
    end subroutine w_npp_call_forwards_plain
+
+   subroutine w_failed_plain_forward_finishes(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_failed_plain_forward_finishes(error)
+   end subroutine w_failed_plain_forward_finishes
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -12002,5 +12009,59 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_npp_call_forwards_plain
+
+   !> A yourself call whose plain forward fails has no pipeline left, so
+   !> C++ finishes the forwarded question as soon as it returns.
+   subroutine t_failed_plain_forward_finishes(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(finish_t) :: f
+      integer(int64) :: qboot, qadder, eid, fq, finq
+      integer :: e, n, which
+      logical :: ok
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send_cap(sconn, 30_int64, qadder, [0], 55_int64, yourself=.true.)
+      call rpc_pump_once(cconn, e)
+      fq = -1_int64
+      which = -1
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            fq = call_question_id_get(c)
+            which = call_send_results_to_which(c)
+            call capnp_message_free(reply)
+            exit
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, fq >= 0_int64 .and. which == CALL_SEND_RESULTS_TO_CALLER_TAG, &
+                  'failed forward: a yourself call goes on as a plain call')
+      if (allocated(error)) return
+      call send_raw_return(sconn%fd, fq, 'exception', e)
+      call rpc_pump_once(cconn, e)
+      finq = -1_int64
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_FINISH_TAG) then
+            f = message_finish_get(msg, e)
+            finq = finish_question_id_get(f)
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, finq == fq, 'failed forward: the question is finished at its Return')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_failed_plain_forward_finishes
 
 end module test_rpc
