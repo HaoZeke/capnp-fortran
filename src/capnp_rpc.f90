@@ -5648,6 +5648,9 @@ contains
       cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
       if (err /= CAPNP_OK) return
       select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_NONE_TAG)
+         ! C++ writes a null cap as none; its pipeline holds the null cap.
+         reason = 'Called null capability.'
       case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
          kind = PIPE_EXPORT
          id = cap_descriptor_sender_hosted_get(cd)

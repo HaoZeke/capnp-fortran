@@ -79,7 +79,8 @@ module test_rpc
    !> in pointer 0 (mode 1), returns a struct with no caps (mode 2),
    !> returns a cap pointer to index 5 of an empty cap table (mode 3), or
    !> returns receiverAnswer(ref_id, [1]) in pointer 0 (mode 4), a pipeline
-   !> on a question of this vat, or returns receiverHosted(ref_id) (mode 5).
+   !> on a question of this vat, returns receiverHosted(ref_id) (mode 5),
+   !> or returns a none entry in pointer 0 (mode 6).
    type, extends(rpc_server_t) :: pump_srv_t
       type(rpc_conn_t), pointer :: conn => null()
       integer :: mode = 0
@@ -163,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(130))
+      allocate (testsuite(131))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -412,18 +413,20 @@ contains
       testsuite(123)%test => w_forward_releases_param_caps
       testsuite(124)%name = "rpc-forward-opp-keeps-param-caps"
       testsuite(124)%test => w_forward_opp_keeps_param_caps
-      testsuite(125)%name = "posix-recv-eintr-retried"
-      testsuite(125)%test => t_recv_all_retries_eintr
-      testsuite(126)%name = "rpc-framing-511-accepted"
-      testsuite(126)%test => t_framing_511_accepted
-      testsuite(127)%name = "rpc-framing-512-rejected"
-      testsuite(127)%test => t_framing_512_rejected
-      testsuite(128)%name = "rpc-framing-oversized-rejected"
-      testsuite(128)%test => t_framing_oversized_rejected
-      testsuite(129)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(129)%test => t_framing_negative_traversal_rejected
-      testsuite(130)%name = "rpc-framing-short-and-padded"
-      testsuite(130)%test => t_framing_short_and_padded
+      testsuite(125)%name = "rpc-pipeline-on-none-entry"
+      testsuite(125)%test => w_pipeline_on_none_entry
+      testsuite(126)%name = "posix-recv-eintr-retried"
+      testsuite(126)%test => t_recv_all_retries_eintr
+      testsuite(127)%name = "rpc-framing-511-accepted"
+      testsuite(127)%test => t_framing_511_accepted
+      testsuite(128)%name = "rpc-framing-512-rejected"
+      testsuite(128)%test => t_framing_512_rejected
+      testsuite(129)%name = "rpc-framing-oversized-rejected"
+      testsuite(129)%test => t_framing_oversized_rejected
+      testsuite(130)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(130)%test => t_framing_negative_traversal_rejected
+      testsuite(131)%name = "rpc-framing-short-and-padded"
+      testsuite(131)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -731,6 +734,13 @@ contains
          if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
          if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
          if (err == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, self%ref_id, err)
+      case (6)
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+         if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+         if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+         if (err == CAPNP_OK) call cap_descriptor_none_set(cd, err)
       case default
          err = CAPNP_ERR_ARG
       end select
@@ -941,6 +951,10 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_forward_opp_keeps_param_caps(error)
    end subroutine w_forward_opp_keeps_param_caps
+   subroutine w_pipeline_on_none_entry(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_pipeline_on_none_entry(error)
+   end subroutine w_pipeline_on_none_entry
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10502,5 +10516,28 @@ contains
       call rpc_send_message(sconn%fd, m, e)
       call capnp_message_free(m)
    end subroutine pa_send_cap_opp
+   !> A pipelined call on a returned answer whose cap entry is none fails
+   !> as a call on a null capability. C++ 1.4.0 writes a null cap as none,
+   !> and its answer pipeline gives "Called null capability." for it.
+   subroutine t_pipeline_on_none_entry(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      integer(int64) :: qboot, qnone, eid
+      logical :: is_exception
+      character(len=:), allocatable :: reason
+
+      pumper = pump_srv_t()
+      pumper%mode = 6
+      srv => pumper
+      call ra_pair(cconn, sconn, srv, qboot, qnone, eid)
+      call pa_call(cconn, sconn, 30_int64, qnone, [0], is_exception, reason)
+      call check_(error, rpc_conn_alive(cconn) .and. is_exception .and. &
+                  reason == 'Called null capability.', &
+                  'none entry: the pipelined call is a null capability call')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_pipeline_on_none_entry
 
 end module test_rpc
