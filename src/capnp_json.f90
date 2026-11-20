@@ -848,10 +848,6 @@ contains
          if (err /= CAPNP_OK) return
          call enumerant_name(e, nm, err)
          if (err /= CAPNP_OK) return
-         if (nm == jv%str) then
-            ord = i
-            return
-         end if
          al = enumerant_annotations(e, err)
          if (err /= CAPNP_OK) return
          call name_override(al, nm, err)
@@ -1374,7 +1370,7 @@ contains
             if (err /= CAPNP_OK) return
             call value_text(v, alt, err)
             if (err /= CAPNP_OK) return
-            if (len(alt) > 0) name = alt
+            name = alt
             return
          end if
       end do

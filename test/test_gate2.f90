@@ -7,6 +7,7 @@ program test_gate2
    call case_3()
    call case_4()
    call case_5()
+   call case_6()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -194,4 +195,24 @@ contains
          ' > /tmp/g2-nd.in; "$CAP" convert json:json schema/codec.capn' // &
          'p Sample < /tmp/g2-nd.in > /tmp/g2-nd.o; test $? -eq 0')
    end subroutine case_5
+
+   subroutine case_6()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"hue": "azure"}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-az.in; "$CAP" convert json:json schema/codec.capn' // &
+         'p Sample < /tmp/g2-az.in > /tmp/g2-az.o; echo $? > /tmp/g2-a' // &
+         'z.e1; capnp convert json:json schema/codec.capnp Sample < /t' // &
+         'mp/g2-az.in > /tmp/g2-az.r; echo $? > /tmp/g2-az.e2; cmp -s ' // &
+         '/tmp/g2-az.o /tmp/g2-az.r && cmp -s /tmp/g2-az.e1 /tmp/g2-az' // &
+         '.e2')
+   end subroutine case_6
 end program test_gate2
