@@ -6,6 +6,7 @@ program rpc_client
    use rpc_capnp
    use capnp_posix
    use capnp_rpc
+   use capnp_rpc_transport, only: rpc_recv_message
    implicit none
 
    ! Signed container for interface id 0xea01e10cbc414411 (adder.capnp).
@@ -14,12 +15,18 @@ program rpc_client
    type(rpc_conn_t), target :: conn
    class(rpc_server_t), pointer :: nosrv
    type(rpc_cap_t) :: bootcap, adder
-   type(capnp_message_t), target :: m
+   type(capnp_message_t), target :: m, reply
+   type(message_t) :: rmsg
+   type(bootstrap_t) :: bs
+   type(return_t) :: ret
    type(payload_t) :: params
    type(capnp_ptr_t) :: s, content
+   integer(int8), allocatable :: wire(:), frame511(:)
+   integer(int8) :: oversize_hdr(0:7)
+   integer(int64) :: header_bytes, seg0_bytes, seg0_words
    character(len=16) :: arg
    integer(int64) :: q1, q2
-   integer :: port, fd, err, i, nfail
+   integer :: port, fd, fd2, fd3, err, i, nfail
 
    nfail = 0
    nosrv => null()
@@ -79,6 +86,68 @@ program rpc_client
    call rpc_finish_send(conn, q2, .false., err)
    call rpc_finish_send(conn, bootcap%id, .true., err)
    call rpc_conn_close(conn)
+
+   ! 511-segment Bootstrap frame accepted by the Cap'n Proto C++ 1.4.0 peer.
+   call px_tcp_connect(port, fd2, err)
+   call check_(err == CAPNP_OK, '511-seg interop connected')
+   if (err == CAPNP_OK) then
+      call capnp_message_init_builder(m, err)
+      rmsg = message_new_root(m, err)
+      bs = message_bootstrap_init(rmsg, err)
+      call bootstrap_question_id_set(bs, 99_int64, err)
+      call capnp_serialize_bytes(m, wire, err)
+      call capnp_message_free(m)
+      header_bytes = 2048_int64
+      seg0_bytes = size(wire, kind=int64) - 8_int64
+      seg0_words = seg0_bytes/CAPNP_WORD_BYTES
+      allocate (frame511(0:header_bytes + seg0_bytes - 1_int64))
+      frame511 = 0_int8
+      call cp_put_i32(frame511, 0_int64, 510_int32)
+      call cp_put_i32(frame511, 4_int64, int(seg0_words, int32))
+      frame511(header_bytes:header_bytes + seg0_bytes - 1_int64) = &
+         wire(8:8 + seg0_bytes - 1_int64)
+      call px_send_all(fd2, frame511, err)
+      call check_(err == CAPNP_OK, '511-seg bootstrap sent')
+      call rpc_recv_message(fd2, reply, err)
+      call check_(err == CAPNP_OK, '511-seg bootstrap reply received')
+      if (err == CAPNP_OK) then
+         rmsg = message_read_root(reply, err)
+         call check_(err == CAPNP_OK .and. message_which(rmsg) == MESSAGE_RETURN_TAG, &
+                     '511-seg bootstrap reply is Return')
+         if (err == CAPNP_OK .and. message_which(rmsg) == MESSAGE_RETURN_TAG) then
+            ret = message_return_get(rmsg, err)
+            call check_(err == CAPNP_OK .and. return_answer_id_get(ret) == 99_int64, &
+                        '511-seg bootstrap answerId == 99')
+         end if
+      end if
+      call capnp_message_free(reply)
+      if (allocated(wire)) deallocate (wire)
+      if (allocated(frame511)) deallocate (frame511)
+      call px_close(fd2)
+   end if
+
+   ! Oversized header (> traversalLimitInWords) rejected by the C++ 1.4.0 peer
+   ! before reading a body (peer responds with Abort or closes the stream).
+   call px_tcp_connect(port, fd3, err)
+   call check_(err == CAPNP_OK, 'oversized interop connected')
+   if (err == CAPNP_OK) then
+      oversize_hdr = 0_int8
+      call cp_put_i32(oversize_hdr, 0_int64, 0_int32)
+      call cp_put_i32(oversize_hdr, 4_int64, &
+                      int(CAPNP_DEFAULT_TRAVERSAL_WORDS + 1_int64, int32))
+      call px_send_all(fd3, oversize_hdr, err)
+      call check_(err == CAPNP_OK, 'oversized header sent')
+      call rpc_recv_message(fd3, reply, err)
+      if (err == CAPNP_OK) then
+         rmsg = message_read_root(reply, err)
+         call check_(err == CAPNP_OK .and. message_which(rmsg) == MESSAGE_ABORT_TAG, &
+                     'oversized header rejected with Abort')
+      else
+         call check_(err == CAPNP_ERR_IO, 'oversized header rejected with disconnect')
+      end if
+      call capnp_message_free(reply)
+      call px_close(fd3)
+   end if
 
    if (nfail > 0) then
       print '(a,i0,a)', 'FAILED: ', nfail, ' assertion(s)'
