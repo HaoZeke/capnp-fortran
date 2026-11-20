@@ -1894,7 +1894,7 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_union_nested
-   !> A chain of 2100 struct types, each a field of the one before. The
+   !> A chain of 4100 struct types, each a field of the one before. The
    !> request is built here, so the audit runs even when capnp compile
    !> cannot finish the same chain on a small stack.
    subroutine run_json_schema_chain(error)
@@ -1903,7 +1903,7 @@ contains
       type(capnp_message_t), target :: msg
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx
-      call build_type_chain(2100, bytes, err)
+      call build_type_chain(4100, bytes, err)
       call check_(error, err == CAPNP_OK, 'schema-chain: build')
       if (allocated(error)) return
       call capnp_dyn_load(schema, bytes, err)
@@ -1914,7 +1914,7 @@ contains
          return
       end if
       call capnp_json_decode(schema, idx, '{"v":7}', msg, err)
-      call check_(error, err == CAPNP_OK, 'schema-chain: 2100 types decode')
+      call check_(error, err == CAPNP_OK, 'schema-chain: 4100 types decode')
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_json_schema_chain
@@ -1989,6 +1989,7 @@ contains
       if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
    end subroutine build_type_chain
+
 
 
    !> A chain of 100 nested groups still clears. Groups add no pointer
