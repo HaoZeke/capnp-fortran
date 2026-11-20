@@ -35,9 +35,15 @@ contains
            new_unittest("packed-spec-vectors", test_packed_spec_vectors), &
            new_unittest("packed-roundtrip", test_packed_roundtrip), &
            new_unittest("packed-incremental", test_packed_incremental), &
+           new_unittest("packed-unpack-finish", test_packed_unpack_finish), &
+           new_unittest("packed-size-limit", test_packed_size_limit), &
+           new_unittest("packed-segment-boundary", test_packed_segment_boundary), &
+           new_unittest("packed-header-boundary", test_packed_header_boundary), &
            new_unittest("framing-errors", test_framing_errors), &
            new_unittest("framing-many-segments", test_framing_many_segments), &
+           new_unittest("framing-file-limits", test_framing_file_limits), &
            new_unittest("read-empty-file", test_read_empty_file), &
+           new_unittest("stream-reader-options", test_stream_reader_options), &
            new_unittest("traversal-limit", test_traversal_limit), &
            new_unittest("traversal-root-words", test_traversal_root_words), &
            new_unittest("traversal-single-far", test_traversal_single_far), &
@@ -905,6 +911,147 @@ contains
       call check(error, err == CAPNP_ERR_ARG, 'packed-incr: finish partial word rejected')
       if (allocated(error)) return
    end subroutine test_packed_incremental
+
+   subroutine test_packed_unpack_finish(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_unpacker_t) :: unpacker
+      integer(int8) :: truncated(0:2)
+      integer(int8), allocatable :: out(:)
+      integer(int64) :: outn
+      integer :: err
+      truncated = [-1_int8, 1_int8, 2_int8]
+      outn = 0_int64
+      call capnp_unpack_push(unpacker, truncated, out, outn, err)
+      call check(error, err == CAPNP_OK .and. outn == 0_int64, 'packed-finish: partial push')
+      if (allocated(error)) return
+      call capnp_unpack_finish(unpacker, err)
+      call check(error, err == CAPNP_ERR_PACKED, 'packed-finish: truncated input rejected')
+   end subroutine test_packed_unpack_finish
+
+   subroutine test_packed_size_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8), allocatable :: packed(:), flat(:)
+      integer(int8) :: small_bomb(0:3), exact16(0:3), over17(0:3)
+      integer :: err, i
+      allocate (packed(0:402))
+      packed = 0_int8
+      packed(0:2) = [48_int8, -1_int8, -57_int8]
+      do i = 3, 402, 2
+         packed(i:i + 1) = [0_int8, -1_int8]
+      end do
+      call capnp_deserialize_packed_bytes(packed, msg, err, traversal_words=16_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'packed-limit: expansion rejected before allocation')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      small_bomb = [16_int8, 100_int8, 0_int8, 99_int8]
+      call capnp_deserialize_packed_bytes(small_bomb, msg, err, traversal_words=16_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'packed-limit: 100-word payload rejected at limit 16')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      exact16 = [16_int8, 16_int8, 0_int8, 15_int8]
+      call capnp_deserialize_packed_bytes(exact16, msg, err, traversal_words=16_int64)
+      call check(error, err == CAPNP_OK, 'packed-limit: exact limit accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      over17 = [16_int8, 17_int8, 0_int8, 16_int8]
+      call capnp_deserialize_packed_bytes(over17, msg, err, traversal_words=16_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'packed-limit: limit+1 rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_deserialize_packed_bytes(exact16, msg, err, traversal_words=huge(0_int64))
+      call check(error, err == CAPNP_OK, 'packed-limit: huge traversal limit accepted')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_unpack(exact16, flat, err, max_words=huge(0_int64))
+      call check(error, err == CAPNP_OK .and. size(flat) == 136, 'packed-limit: huge unpack max_words accepted')
+   end subroutine test_packed_size_limit
+
+   !> A run that starts in the first word or the segment table must end
+   !> there: C++ PackedInputStream bounds each read by its own end, so a
+   !> run that leaks into the next region is rejected even when the total
+   !> length would still add up.
+   subroutine test_packed_header_boundary(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8) :: zero_into_body(0:4), raw_into_body(0:27), raw_into_table(0:28)
+      integer(int8) :: cases(0:28, 3)
+      integer :: lens(3)
+      integer :: err, unit, ios, k
+      character(len=*), parameter :: path = 'packed-header-boundary.bin'
+      zero_into_body = [17_int8, 1_int8, 1_int8, 0_int8, 1_int8]
+      raw_into_body = [17_int8, 1_int8, 1_int8, -1_int8, 1_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, &
+                       1_int8, 1_int8, 2_int8, 3_int8, 4_int8, 5_int8, 6_int8, 7_int8, 8_int8, 0_int8, 0_int8, 0_int8, &
+                       0_int8, 0_int8, 0_int8, 0_int8]
+      raw_into_table = [-1_int8, 1_int8, 0_int8, 0_int8, 0_int8, 1_int8, 0_int8, 0_int8, 0_int8, 1_int8, &
+                        1_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 1_int8, &
+                        0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8, 0_int8]
+      cases = 0_int8
+      cases(0:4, 1) = zero_into_body
+      cases(0:27, 2) = raw_into_body
+      cases(0:28, 3) = raw_into_table
+      lens = [5, 23, 20]
+      do k = 1, 3
+         call capnp_deserialize_packed_bytes(cases(0:lens(k) - 1, k), msg, err)
+         call check(error, err == CAPNP_ERR_PACKED, 'packed-header: bytes run crosses a region')
+         if (allocated(error)) return
+         call capnp_message_free(msg)
+
+         open (newunit=unit, file=path, access='stream', form='unformatted', &
+               status='replace', action='readwrite', iostat=ios)
+         if (ios /= 0) then
+            call check(error, .false., 'packed-header: fixture open')
+            return
+         end if
+         write (unit) cases(0:lens(k) - 1, k)
+         rewind (unit)
+         call capnp_read_message_packed_unit(unit, msg, err)
+         close (unit, status='delete')
+         call check(error, err == CAPNP_ERR_PACKED, 'packed-header: unit run crosses a region')
+         if (allocated(error)) return
+         call capnp_message_free(msg)
+      end do
+   end subroutine test_packed_header_boundary
+
+   subroutine test_packed_segment_boundary(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8) :: packed(0:3), raw_overrun(0:27)
+      integer :: err, unit, ios
+      character(len=*), parameter :: path = 'packed-segment-boundary.bin'
+      packed = [16_int8, 1_int8, 0_int8, 5_int8]
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='readwrite', iostat=ios)
+      if (ios /= 0) then
+         call check(error, .false., 'packed-boundary: fixture open')
+         return
+      end if
+      write (unit) packed
+      rewind (unit)
+      call capnp_read_message_packed_unit(unit, msg, err)
+      close (unit, status='delete')
+      call check(error, err == CAPNP_ERR_PACKED, 'packed-boundary: unit zero run exceeds segment')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_deserialize_packed_bytes(packed, msg, err)
+      call check(error, err == CAPNP_ERR_PACKED, 'packed-boundary: bytes zero run exceeds segment')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      raw_overrun = [16_int8, 1_int8, -1_int8, 1_int8, 2_int8, 3_int8, 4_int8, 5_int8, 6_int8, 7_int8, 8_int8, 2_int8, &
+                     1_int8, 1_int8, 1_int8, 1_int8, 1_int8, 1_int8, 1_int8, 1_int8, &
+                     2_int8, 2_int8, 2_int8, 2_int8, 2_int8, 2_int8, 2_int8, 2_int8]
+      call capnp_deserialize_packed_bytes(raw_overrun, msg, err)
+      call check(error, err == CAPNP_ERR_PACKED, 'packed-boundary: bytes raw run exceeds segment')
+      call capnp_message_free(msg)
+   end subroutine test_packed_segment_boundary
+
    subroutine test_framing_errors(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: rmsg
@@ -938,6 +1085,39 @@ contains
       call capnp_message_free(msg)
    end subroutine test_framing_many_segments
 
+   !> The file reader applies the stream reader limits (C++
+   !> InputStreamMessageReader): fewer than 513 segments and a total size
+   !> within the traversal limit, checked before any body is read.
+   subroutine test_framing_file_limits(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      integer(int8), allocatable :: frame(:)
+      integer :: err, i
+      character(len=*), parameter :: path = 'framing-file-limits.bin'
+      allocate (frame(0:6159))
+      frame = 0_int8
+      frame(1) = 2_int8
+      do i = 1, 513
+         frame(4*i) = 1_int8
+      end do
+      call capnp_write_file(path, frame, err)
+      call capnp_read_message(path, msg, err)
+      call check(error, err == CAPNP_ERR_FRAMING, 'file-limits: 513 segments rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      deallocate (frame)
+
+      allocate (frame(0:7))
+      frame = 0_int8
+      frame(4) = 100_int8
+      call capnp_write_file(path, frame, err)
+      call capnp_read_message(path, msg, err, traversal_words=10_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'file-limits: size above traversal limit')
+      call capnp_message_free(msg)
+      open (newunit=i, file=path, status='old')
+      close (i, status='delete')
+   end subroutine test_framing_file_limits
+
    subroutine test_read_empty_file(error)
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: bytes(:)
@@ -955,6 +1135,61 @@ contains
       if (ios == 0) close (unit, status='delete')
       call check(error, err == CAPNP_OK .and. size(bytes) == 0, 'empty-file: zero bytes returned')
    end subroutine test_read_empty_file
+
+   subroutine test_stream_reader_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, child, q
+      integer(int8), allocatable :: bytes(:), packed(:)
+      integer :: err, unit, ios
+      character(len=*), parameter :: plain_path = 'stream-options.bin'
+      character(len=*), parameter :: packed_path = 'stream-options-packed.bin'
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_setp(root, 0, child, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_serialize_packed_bytes(msg, packed, err)
+      call capnp_write_file(plain_path, bytes, err)
+      call capnp_write_file(packed_path, packed, err)
+
+      call capnp_read_message(plain_path, rmsg, err, traversal_words=0_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'stream-options: file traversal limit')
+      if (allocated(error)) return
+      call capnp_message_free(rmsg)
+
+      call capnp_read_message_packed(packed_path, rmsg, err, traversal_words=0_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'stream-options: packed file limit')
+      if (allocated(error)) return
+      call capnp_message_free(rmsg)
+
+      call capnp_read_message_packed(packed_path, rmsg, err, depth_limit=0)
+      call check(error, err == CAPNP_OK, 'stream-options: packed file read depth_limit=0')
+      if (allocated(error)) return
+      q = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'stream-options: packed file root depth limit')
+      if (allocated(error)) return
+      call capnp_message_free(rmsg)
+
+      open (newunit=unit, file=plain_path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      call capnp_read_message_unit(unit, rmsg, err, traversal_words=0_int64)
+      close (unit)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'stream-options: unit traversal limit')
+      if (allocated(error)) return
+      call capnp_message_free(rmsg)
+
+      open (newunit=unit, file=packed_path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      call capnp_read_message_packed_unit(unit, rmsg, err, traversal_words=0_int64)
+      close (unit, status='delete')
+      open (newunit=unit, file=plain_path, status='old', iostat=ios)
+      if (ios == 0) close (unit, status='delete')
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'stream-options: packed unit limit')
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_stream_reader_options
 
    subroutine test_traversal_limit(error)
       type(error_type), allocatable, intent(out) :: error
