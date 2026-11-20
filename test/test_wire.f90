@@ -63,7 +63,8 @@ contains
            new_unittest("nest-limit-64", test_nest_limit_64), &
            new_unittest("far-depth-one", test_far_depth_one), &
            new_unittest("reader-options", test_reader_options), &
-           new_unittest("builder-options", test_builder_options)]
+           new_unittest("builder-options", test_builder_options), &
+           new_unittest("alloc-in-bounds", test_alloc_in_bounds)]
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2658,6 +2659,39 @@ contains
       close (unit, status='delete', iostat=ios)
       if (ios /= 0) call unlink_path(path)
    end subroutine close_delete
+
+   !> A non-empty segment must not grow by a negative count or by a count
+   !> past the segment cap. The used length stays where it was.
+   subroutine test_alloc_in_bounds(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: a
+      integer(int64) :: off, len0
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      a = capnp_new_struct(msg, 1, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs >= 1, 'alloc-in: builder')
+      if (allocated(error)) return
+      len0 = msg%segs(1)%len
+      call capnp_arena_alloc_in(msg, 1, -1_int64, off, err)
+      call check(error, err == CAPNP_ERR_ARG .and. msg%segs(1)%len == len0, &
+                 'alloc-in: negative count')
+      if (allocated(error)) return
+      call capnp_arena_alloc_in(msg, 1, 1152921504606846976_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: word count past the segment cap')
+      if (allocated(error)) return
+      ! One past the cap, and the cap itself beside an object already in
+      ! the segment. Both are refused before any multi-gigabyte allocate.
+      call capnp_arena_alloc_in(msg, 1, 536870913_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: one past the segment cap')
+      if (allocated(error)) return
+      call capnp_arena_alloc_in(msg, 1, 536870912_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: full cap does not fit beside the object')
+      call capnp_message_free(msg)
+   end subroutine test_alloc_in_bounds
 
    subroutine unlink_path(path)
       character(len=*), intent(in) :: path

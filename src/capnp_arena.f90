@@ -253,15 +253,30 @@ contains
       integer(int64), intent(in) :: nwords
       integer(int64), intent(out) :: byte_off
       integer, intent(out) :: err
-      integer(int64) :: need
+      integer(int64) :: need, used
       err = CAPNP_OK
       byte_off = 0_int64
       if (.not. msg%is_builder .or. seg_idx < 1 .or. seg_idx > msg%nsegs) then
          err = CAPNP_ERR_ARG
          return
       end if
-      need = nwords*CAPNP_WORD_BYTES
+      ! message.c++ refuses a segment above MAX_SEGMENT_WORDS before it
+      ! allocates. A negative count is not a size.
+      if (nwords < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (nwords > MAX_SEGMENT_WORDS) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       associate (seg => msg%segs(seg_idx))
+         used = (max(seg%len, 0_int64) + CAPNP_WORD_BYTES - 1_int64)/CAPNP_WORD_BYTES
+         if (used > MAX_SEGMENT_WORDS - nwords) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         need = nwords*CAPNP_WORD_BYTES
          if (seg%len + need > size(seg%bytes, kind=int64)) then
             if (msg%alloc_strategy == CAPNP_ALLOC_FIXED_SIZE) then
                call seg_reserve(seg, seg%len + need, err)
@@ -271,9 +286,15 @@ contains
             end if
             if (err /= CAPNP_OK) return
          end if
+         if (need > 0_int64 .and. seg%len + need > size(seg%bytes, kind=int64)) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          byte_off = seg%len
-         seg%bytes(seg%len:seg%len + need - 1) = 0_int8
-         seg%len = seg%len + need
+         if (need > 0_int64) then
+            seg%bytes(seg%len:seg%len + need - 1) = 0_int8
+            seg%len = seg%len + need
+         end if
       end associate
    end subroutine capnp_arena_alloc_in
 
