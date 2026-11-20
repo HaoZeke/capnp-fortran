@@ -226,7 +226,7 @@ contains
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 3, err)
+      l = sink_tags_get(h, err)
       if (err == CAPNP_OK) call capnp_list_get_text(l, i, s, err)
    end subroutine sink_tags_get_elem
 
@@ -328,7 +328,7 @@ contains
       integer, intent(out) :: err
       type(vec3_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 7, err)
+      l = sink_spots_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function sink_spots_get_elem
 

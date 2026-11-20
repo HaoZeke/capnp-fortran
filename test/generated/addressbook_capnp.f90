@@ -108,7 +108,7 @@ contains
       integer, intent(out) :: err
       type(person_phone_number_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 2, err)
+      l = person_phones_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function person_phones_get_elem
 
@@ -253,7 +253,7 @@ contains
       integer, intent(out) :: err
       type(person_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 0, err)
+      l = address_book_people_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function address_book_people_get_elem
 

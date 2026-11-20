@@ -1419,7 +1419,7 @@ contains
       integer, intent(out) :: err
       type(cap_descriptor_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 1, err)
+      l = payload_cap_table_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function payload_cap_table_get_elem
 
@@ -1480,7 +1480,7 @@ contains
       integer, intent(out) :: err
       type(promised_answer_op_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 0, err)
+      l = promised_answer_transform_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function promised_answer_transform_get_elem
 

@@ -148,7 +148,7 @@ contains
       integer, intent(out) :: err
       type(box_any_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 1, err)
+      l = nest_boxes_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function nest_boxes_get_elem
 
@@ -226,7 +226,7 @@ contains
       integer, intent(out) :: err
       type(box_text_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 2, err)
+      l = box_use_boxes_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function box_use_boxes_get_elem
 
@@ -380,7 +380,7 @@ contains
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 0, err)
+      l = box_list_text_value_get(h, err)
       if (err == CAPNP_OK) call capnp_list_get_text(l, i, s, err)
    end subroutine box_list_text_value_get_elem
 
@@ -459,7 +459,7 @@ contains
       integer, intent(out) :: err
       type(box_text_t) :: o
       type(capnp_ptr_t) :: l
-      l = capnp_getp(h%p, 1, err)
+      l = nest_text_boxes_get(h, err)
       if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
    end function nest_text_boxes_get_elem
 

@@ -176,13 +176,18 @@ program drv
    implicit none
    type(capnp_message_t), target :: m1, m2
    type(def_lists_t) :: h, h2
+   type(elem_t) :: e
+   character(len=:), allocatable :: s
    integer :: err
    call capnp_message_init_builder(m1, err)
    h = def_lists_new_root(m1, err)
    call capnp_list_set_i32(def_lists_nums_get(h, err), 0_int64, 999_int32, err)
    call capnp_message_init_builder(m2, err)
    h2 = def_lists_new_root(m2, err)
-   print '(i0)', capnp_list_get_i32(def_lists_nums_get(h2, err), 0_int64, err)
+   call def_lists_tags_get_elem(h2, 0, s, err)
+   e = def_lists_elems_get_elem(h2, 0, err)
+   print '(i0,1x,a,1x,i0)', capnp_list_get_i32(def_lists_nums_get(h2, err), 0_int64, err), s, elem_v_get(e)
+   deallocate (s)
    call capnp_message_free(m1)
    call capnp_message_free(m2)
 end program drv
@@ -199,7 +204,8 @@ int main() {
   d1.getNums().set(0, 999);
   capnp::MallocMessageBuilder m2;
   auto d2 = m2.initRoot<DefLists>();
-  std::printf("%d\n", d2.getNums()[0]);
+  auto t = d2.getTags()[0];
+  std::printf("%d %s %d\n", d2.getNums()[0], t.cStr(), d2.getElems()[0].getV());
 }
 EOF
   "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
@@ -207,7 +213,7 @@ EOF
   f=$(./drv)
   c=$(./cppdrv)
   cmp_out "$f" "$c"
-  [[ "$f" == 10 ]]
+  [[ "$f" == "10 alpha 7" ]]
   echo "$which ok"
 }
 
@@ -215,6 +221,7 @@ case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
   g3) g34 g3 ;;
-  all) g1; g2; g34 g3 ;;
+  g4) g34 g4 ;;
+  all) g1; g2; g34 g3; g34 g4 ;;
   *) echo "unknown gap: $1" >&2; exit 2 ;;
 esac
