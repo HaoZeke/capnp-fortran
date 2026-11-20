@@ -3875,6 +3875,7 @@ contains
       type(capnp_message_t), intent(inout) :: rm
       integer, intent(out) :: err
       type(rpc_import_node_t), pointer :: node
+      integer, allocatable :: tops(:)
       type(message_t) :: msg
       type(return_t) :: ret
       type(payload_t) :: pl
@@ -3901,8 +3902,10 @@ contains
          node => conn%imports
          do while (associated(node))
             if (node%state == IMP_ANSWER .and. node%answer_qid == qid) then
+               ! A copy, as settle_answer_pipeline replaces node%answer_ops.
+               tops = node%answer_ops
                call settle_answer_pipeline(conn, node, return_take_from_other_question_get(ret), &
-                                           node%answer_ops)
+                                           tops)
                call drain_answer_pipeline(conn, node%id, err)
                if (err /= CAPNP_OK) return
             end if
@@ -4167,9 +4170,10 @@ contains
       type(rpc_import_node_t), intent(inout) :: node
       integer(int64), intent(in) :: q
       integer, intent(in) :: ops(:)
-      if (allocated(node%answer_ops)) deallocate (node%answer_ops)
-      allocate (node%answer_ops(size(ops)))
-      node%answer_ops = ops
+      integer, allocatable :: kept(:)
+      ! ops may be node%answer_ops itself.
+      kept = ops
+      call move_alloc(kept, node%answer_ops)
       node%fwd_qid = q
       node%resolved_id = -1_int64
       node%borrowed = .true.

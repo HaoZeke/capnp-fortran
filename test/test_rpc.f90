@@ -78,14 +78,14 @@ module test_rpc
    !> once if set, and fails the call (mode 0), returns a cap to `inner`
    !> in pointer 0 (mode 1), returns a struct with no caps (mode 2),
    !> returns a cap pointer to index 5 of an empty cap table (mode 3), or
-   !> returns receiverAnswer(own_q, [1]) in pointer 0 (mode 4), a pipeline
-   !> on a question of this vat.
+   !> returns receiverAnswer(ref_id, [1]) in pointer 0 (mode 4), a pipeline
+   !> on a question of this vat, or returns receiverHosted(ref_id) (mode 5).
    type, extends(rpc_server_t) :: pump_srv_t
       type(rpc_conn_t), pointer :: conn => null()
       integer :: mode = 0
       !> Messages pumped before answering.
       integer :: npump = 1
-      integer(int64) :: own_q = 0_int64
+      integer(int64) :: ref_id = 0_int64
       class(rpc_server_t), pointer :: inner => null()
       type(rpc_cap_t) :: probe
       integer(int64) :: probe_q = -1_int64
@@ -163,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(123))
+      allocate (testsuite(124))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -398,18 +398,20 @@ contains
       testsuite(116)%test => w_resolve_to_own_receiver_answer
       testsuite(117)%name = "rpc-queued-call-is-retargeted"
       testsuite(117)%test => w_queued_call_is_retargeted
-      testsuite(118)%name = "posix-recv-eintr-retried"
-      testsuite(118)%test => t_recv_all_retries_eintr
-      testsuite(119)%name = "rpc-framing-511-accepted"
-      testsuite(119)%test => t_framing_511_accepted
-      testsuite(120)%name = "rpc-framing-512-rejected"
-      testsuite(120)%test => t_framing_512_rejected
-      testsuite(121)%name = "rpc-framing-oversized-rejected"
-      testsuite(121)%test => t_framing_oversized_rejected
-      testsuite(122)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(122)%test => t_framing_negative_traversal_rejected
-      testsuite(123)%name = "rpc-framing-short-and-padded"
-      testsuite(123)%test => t_framing_short_and_padded
+      testsuite(118)%name = "rpc-take-answer-keeps-promise-transform"
+      testsuite(118)%test => w_take_answer_keeps_promise_transform
+      testsuite(119)%name = "posix-recv-eintr-retried"
+      testsuite(119)%test => t_recv_all_retries_eintr
+      testsuite(120)%name = "rpc-framing-511-accepted"
+      testsuite(120)%test => t_framing_511_accepted
+      testsuite(121)%name = "rpc-framing-512-rejected"
+      testsuite(121)%test => t_framing_512_rejected
+      testsuite(122)%name = "rpc-framing-oversized-rejected"
+      testsuite(122)%test => t_framing_oversized_rejected
+      testsuite(123)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(123)%test => t_framing_negative_traversal_rejected
+      testsuite(124)%name = "rpc-framing-short-and-padded"
+      testsuite(124)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -706,10 +708,17 @@ contains
          if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
          if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
          if (err == CAPNP_OK) pa = cap_descriptor_receiver_answer_init(cd, err)
-         if (err == CAPNP_OK) call promised_answer_question_id_set(pa, self%own_q, err)
+         if (err == CAPNP_OK) call promised_answer_question_id_set(pa, self%ref_id, err)
          if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, 1_int64, err)
          if (err == CAPNP_OK) op%p = capnp_list_get_struct(ops, 0, err)
          if (err == CAPNP_OK) call promised_answer_op_get_pointer_field_set(op, 1, err)
+      case (5)
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+         if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+         if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+         if (err == CAPNP_OK) call cap_descriptor_receiver_hosted_set(cd, self%ref_id, err)
       case default
          err = CAPNP_ERR_ARG
       end select
@@ -885,6 +894,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_queued_call_is_retargeted(error)
    end subroutine w_queued_call_is_retargeted
+
+   subroutine w_take_answer_keeps_promise_transform(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_take_answer_keeps_promise_transform(error)
+   end subroutine w_take_answer_keeps_promise_transform
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -9776,7 +9790,7 @@ contains
 
       pumper = pump_srv_t()
       pumper%mode = 4
-      pumper%own_q = 0_int64
+      pumper%ref_id = 0_int64
       srv => local_echo
       pumper%inner => srv
       call pa_pending_pair(cconn, sconn, pumper, promised, qp)
@@ -9799,5 +9813,137 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_queued_call_is_retargeted
+
+   !> pa_pending_pair, with `cconn` also importing the peer's export
+   !> `hosted` before the pending call arrives.
+   subroutine pa_hosted_pending_pair(cconn, sconn, pumper, hosted, promised, qp)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      type(pump_srv_t), intent(inout), target :: pumper
+      integer(int64), intent(in) :: hosted
+      type(rpc_cap_t), intent(out) :: promised
+      integer(int64), intent(out) :: qp
+      class(rpc_server_t), pointer :: srv, none
+      type(rpc_cap_t) :: peer_boot, base, held
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params, pl
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(cap_descriptor_t) :: cd
+      type(capnp_ptr_t) :: ctab
+      integer(int64) :: qboot, q
+      integer :: fa, fb, e
+      call px_socketpair(fa, fb, e)
+      pumper%conn => cconn
+      srv => pumper
+      call rpc_conn_init(cconn, fa, srv)
+      none => null()
+      call rpc_conn_init(sconn, fb, none)
+      call rpc_bootstrap_send(sconn, peer_boot, e)
+      qboot = peer_boot%id
+      call rpc_pump_once(cconn, e)
+      call rpc_wait(sconn, qboot, e)
+      call rpc_result_cap(sconn, qboot, [integer ::], peer_boot, e)
+      base = rpc_cap_t()
+      base%kind = RPC_CAP_IMPORT
+      base%id = 0_int64
+      call rpc_call_begin(cconn, base, ECHO_IFACE, 0, m, params, q, e)
+      call capnp_message_free(m)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, q, e)
+      pl = return_results_init(r, e)
+      call payload_content_set(pl, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(pl, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, hosted, e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_wait(cconn, q, e)
+      call rpc_result_cap(cconn, q, [integer ::], held, e)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call rpc_call_begin(sconn, peer_boot, ECHO_IFACE, 0, m, params, qp, e)
+      call payload_content_set(params, capnp_new_struct(m, 1, 0, e), e)
+      call rpc_call_send(sconn, m, e)
+   end subroutine pa_hosted_pending_pair
+
+   !> Promise 4 resolves to receiverAnswer(30, [0]) while answer 30 waits
+   !> on a pending answer. The pending answer then returns a peer export,
+   !> so 30 is forwarded and returns takeFromOtherQuestion(tq). A call
+   !> made on the promise meanwhile must pipeline on tq with the
+   !> promise's own transform.
+   subroutine t_take_answer_keeps_promise_transform(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: lst
+      integer(int64) :: qp, tq, pq
+      integer :: e, n, nops, op0
+      logical :: ok
+
+      pumper = pump_srv_t()
+      pumper%mode = 5
+      pumper%npump = 2
+      pumper%ref_id = 77_int64
+      srv => local_echo
+      pumper%inner => srv
+      call pa_hosted_pending_pair(cconn, sconn, pumper, 77_int64, promised, qp)
+      pumper%probe = promised
+      call pa_send(sconn, 30_int64, qp, [0])
+      call ra_resolve(cconn, sconn, 4_int64, 30_int64, [0])
+      call check_(error, rpc_conn_alive(cconn) .and. pumper%probe_q >= 0_int64, &
+                  'take transform: a call is made while the answer is pending')
+      if (allocated(error)) then
+         pumper%conn => null()
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         return
+      end if
+      if (associated(cconn%embargoes)) &
+         call ra_loopback(cconn, sconn, 4_int64, cconn%embargoes%id)
+      tq = -1_int64
+      pq = -2_int64
+      nops = -1
+      op0 = -1
+      do n = 1, 30
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            tgt = call_target_get(c, e)
+            if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) &
+               tq = call_question_id_get(c)
+            if (call_question_id_get(c) == pumper%probe_q .and. &
+                message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+               pa = message_target_promised_answer_get(tgt, e)
+               pq = promised_answer_question_id_get(pa)
+               lst = promised_answer_transform_get(pa, e)
+               nops = int(capnp_list_len(lst))
+               if (nops == 1) then
+                  op%p = capnp_list_get_struct(lst, 0, e)
+                  op0 = promised_answer_op_get_pointer_field_get(op)
+               end if
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, tq >= 0_int64 .and. pq == tq, &
+                  'take transform: the call pipelines on the forwarded question')
+      if (.not. allocated(error)) &
+         call check_(error, nops == 1 .and. op0 == 0, &
+                     'take transform: the promise transform is kept')
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_take_answer_keeps_promise_transform
 
 end module test_rpc
