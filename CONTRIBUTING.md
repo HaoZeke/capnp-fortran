@@ -10,6 +10,10 @@ local development; the full tutorial lives in the README and Sphinx docs.
 - Optional: [Cap'n Proto](https://capnproto.org/) `capnp` for schema compile
   and interop tiers; C compiler for the cmocka/c-capnproto interop suite
 
+If Pixi is not installed, follow its
+[installation instructions](https://pixi.sh/latest/installation/) before
+running the Pixi setup commands.
+
 ## Setup
 
 ```bash

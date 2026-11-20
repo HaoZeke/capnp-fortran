@@ -62,6 +62,9 @@ set(CAPNP_FORTRAN_SOURCES
   src/capnp_rpc.f90
   src/capnp_schema.f90
   src/capnp_dynamic.f90
+  src/capnp_codec.f90
+  src/capnp_text.f90
+  src/capnp_json.f90
   src/stream_capnp.f90
 )
 
@@ -98,12 +101,18 @@ if(CAPNP_FORTRAN_BUILD_PLUGIN)
     app/capnpc_emit.f90
     app/main.f90
   )
+  enable_language(C)
+  add_executable(capnpf app/os_errno.c app/os_errno.f90 app/capnpf.f90)
   target_link_libraries(capnpc-fortran PRIVATE capnp_fortran::capnp_fortran)
-  set_target_properties(capnpc-fortran PROPERTIES
+  target_link_libraries(capnpf PRIVATE capnp_fortran::capnp_fortran)
+  set_target_properties(capnpc-fortran capnpf PROPERTIES
     Fortran_MODULE_DIRECTORY "${_capnp_fortran_mod_dir}"
   )
   if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU|LLVMFlang|Flang")
     target_compile_options(capnpc-fortran PRIVATE -std=f2018 -ffree-line-length-none)
+    target_compile_options(capnpf PRIVATE
+      $<$<COMPILE_LANGUAGE:Fortran>:-std=f2018>
+      $<$<COMPILE_LANGUAGE:Fortran>:-ffree-line-length-none>)
   endif()
 endif()
 
@@ -115,7 +124,7 @@ if(CAPNP_FORTRAN_INSTALL)
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
   )
   if(CAPNP_FORTRAN_BUILD_PLUGIN)
-    install(TARGETS capnpc-fortran
+    install(TARGETS capnpc-fortran capnpf
       EXPORT capnp_fortranTargets
       RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     )

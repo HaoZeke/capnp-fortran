@@ -36,6 +36,10 @@ an integer =err=; =CAPNP_OK= (0) is success. Byte buffers are
      - Two-party RPC (separate ``use``)
    * - ``capnp_dynamic`` / ``capnp_schema``
      - Dynamic reflection over CGR
+   * - ``capnp_text``
+     - Text format (``capnp decode`` / ``encode``)
+   * - ``capnp_json``
+     - JSON codec (``capnp/compat/json.h`` defaults)
    * - Generated ``<file>_capnp``
      - Schema-specific handles (see :doc:`codegen`)
 #+end_export

@@ -23,6 +23,8 @@ contains
       type(stream_result_t), intent(in) :: results
       integer, intent(out) :: err
       integer(int8), allocatable :: b(:)
+      associate (unused_results => results)
+      end associate
       call writer_write_params_chunk_get(params, b, err)
       if (err /= CAPNP_OK) return
       self%total = self%total + size(b, kind=int64)
@@ -34,6 +36,8 @@ contains
       type(writer_done_results_t), intent(in) :: results
       integer, intent(out) :: err
       err = CAPNP_OK
+      associate (unused_params => params)
+      end associate
       call writer_done_results_total_set(results, self%total, err)
    end subroutine my_done
 

@@ -32,7 +32,10 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   bootstrap capnpc-c uses). Generates one module per schema file: handle
   types, accessors with scalar defaults, Text/Data/struct/list pointer
   defaults embedded as blobs, enums, constants, unions and groups,
-  cross-file imports, `List(Text)`/`List(Data)` element helpers, anyPointer.
+  cross-file imports, schema annotations, `List(Text)`/`List(Data)` element
+  helpers, anyPointer.
+- Text format and JSON codecs (`capnp_text`, `capnp_json`) and `capnpf`
+  for encode, decode, convert, and eval.
 - A `bind(c)` shim (`capnp_cabi`) and a cmocka golden-master tier that
   builds identical messages with this runtime and with
   [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
@@ -64,15 +67,19 @@ and capnp-C++:
 | Canonical form | yes (0.3.0) | yes | yes (byte-parity tested) |
 | Code generator plugin (`capnp compile -o`) | yes | yes | yes (`capnpc-fortran`) |
 | Generated: unions, groups, defaults, imports, constants incl. pointer-valued | yes | yes | yes |
+| Generated annotations and reflection metadata | no | yes | partial (annotation constants only) |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
 | RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | yes (`rpc-threeparty.capnp` network layer, both halves, three-vat tested) |
-| RPC level 4 (`Join`, reference equality) | no | no | yes, two-party (upstream C++ has none) |
+| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | partial (project-specific network layer; both halves and three-vat tests) |
+| RPC level 4 (`Join`, reference equality) | no | no | yes (two-party Join; C++ replies unimplemented) |
 | `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
-| Typed interface stubs in generated code | no | yes | yes (client helpers + abstract server base) |
-| Generics in generated code | no | yes | brand-resolved instantiations (direct, list-element, list-binding, nested) |
-| Dynamic reflection API | no | yes | yes (`capnp_dynamic`, by-name read/write) |
+| Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
+| Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
+| Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
+| Text format (`capnp decode` / `encode`) | no | yes | yes (`capnp_text`) |
+| JSON codec (`capnp/compat/json.h` defaults) | no | yes | yes (`capnp_json`, `$Json.name` / flatten / discriminator / base64 / hex) |
+| `capnp` encode, decode, convert, eval | no | yes | yes (`capnpf`) |
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
@@ -135,16 +142,26 @@ alone; equal export ids then mean the same object, and exactly one
 `JoinResult` carries the joined capability. Upstream C++ has no `Join`
 case at all -- it falls through to the default branch and replies
 `unimplemented` -- so this is the one place the family is ahead of the
-reference implementation rather than catching up to it. Generics and
-reflection sit outside both this project's and capnpc-c's generated-code
-scope; the wire format carries generic types either way, so messages
-produced by C++ users of those features still read correctly here.
+reference implementation rather than catching up to it. Generics are
+generated as brand-resolved instantiations, and reflection is the
+dynamic API; the generated reflection metadata is annotation constants
+only. capnpc-c generates neither. The wire format carries generic types
+either way, so messages produced by C++ users of those features still
+read correctly here.
 
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Install
+
+Install [Pixi](https://pixi.sh/latest/installation/) before running the Pixi
+commands when it is not already on `PATH`:
+
+```console
+$ curl -fsSL https://pixi.sh/install.sh | bash
+$ export PATH="$HOME/.pixi/bin:$PATH"
+```
 
 With [fpm](https://fpm.fortran-lang.org), to build this repository:
 

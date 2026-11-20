@@ -8,13 +8,46 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- Text-format encode and decode (`capnp_text`), matching `capnp decode` /
+  `capnp encode` for structs, lists, unions, groups, enums, and Data.
+- JSON encode and decode (`capnp_json`) with the `capnp/compat/json.h`
+  defaults and annotations (`$Json.name`, `$Json.flatten`,
+  `$Json.discriminator`, `$Json.base64`, and `$Json.hex`).
+- `capnpf`, a command-line encode, decode, convert, and eval tool
+  supporting `binary`, `packed`, `flat`, `flat-packed`, `canonical`,
+  `text`, and `json`, plus deep `eval` paths and binary `eval` outputs.
+
 ### Fixed
 
+- Stream readers take a reader options value (traversal budget and nesting
+  limit) and builder messages take a builder options value (first segment
+  size and allocation strategy). The defaults stay 8 Mi words, nesting 64,
+  a 1024-word first segment, and doubling of later segments. A first
+  segment above the segment cap is rejected, later segments stop at that
+  cap, and packed input is not expanded past the traversal budget.
+- Float32 text matches capnp 1.4.0 on glibc: subnormals are printed with
+  eight digits, an integer token `-0` decodes as +0, and a decimal
+  literal is parsed as a double and then cast to float32. An integer
+  token is converted to float32 in one rounding.
+- JSON union keys are applied in document order. An unknown discriminator
+  does not select an arm, but a plain member key in the same object still
+  does. A repeated known tag is rejected, and a void value accepts any
+  payload. A flattened struct is reused for later keys in the same
+  object, and a nested flattened union keeps the tag it already saw.
+- Text and JSON strings, and hex or base64 data, are copied into one
+  buffer. A buffer that cannot grow reports an allocation error.
+- `capnpf decode`, `convert`, and `encode` exit 1 when stdout cannot be
+  written. The help and version options, and text eval, exit 0 in that
+  case. JSON, binary, and packed eval exit 1. A write interrupted by a
+  signal is retried.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.
-- `capnpc-fortran` frees its request buffer and file name before exit, so
-  LeakSanitizer builds of the plugin run clean.
+- `capnpc-fortran` frees the command argument, request buffer, file
+  name, and message on success and on every error exit, so a leak
+  checker sees a clean run.
 - Zero-copy Text and Data views associate through the segment byte pointer,
   preserving the Fortran pointer-target invariant across compilers.
 - RPC capability-table lengths convert explicitly to the loop-index kind, and
@@ -22,6 +55,13 @@ Pre-1.0 minor releases may include breaking API changes.
 - Missing optional c-capnproto/cmocka golden dependencies do not bypass the
   independent live capnp-C++ RPC interop target.
 - The golden-master C harness is clean under strict compiler warnings.
+- A JSON integer above 2^53 keeps every digit. capnp 1.4.0 rounds it
+  through a double and rejects a value that double cannot hold, including
+  `{"i64":9223372036854775807}` and `{"u64":18446744073709551615}`,
+  which this decoder accepts.
+- A JSON string joins a high UTF-16 surrogate and the following low
+  surrogate into one Unicode scalar. capnp 1.4.0 keeps the two
+  UTF-16 surrogate code units as six CESU-8 bytes.
 
 ## [0.3.1] - 2026-08-15
 

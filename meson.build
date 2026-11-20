@@ -30,6 +30,9 @@ capnp_fsrc = files(
   'src/capnp_rpc.f90',
   'src/capnp_schema.f90',
   'src/capnp_dynamic.f90',
+  'src/capnp_codec.f90',
+  'src/capnp_text.f90',
+  'src/capnp_json.f90',
   'src/stream_capnp.f90',
 )
 
@@ -62,6 +65,13 @@ meson.override_dependency('capnp-fortran', capnp_fortran_dep)
 capnpc_fortran = executable(
   'capnpc-fortran',
   ['app/capnpc_emit.f90', 'app/main.f90'],
+  link_with: capnp_flib,
+  install: true,
+)
+
+capnpf = executable(
+  'capnpf',
+  ['app/os_errno.c', 'app/os_errno.f90', 'app/capnpf.f90'],
   link_with: capnp_flib,
   install: true,
 )
@@ -104,7 +114,7 @@ else
   message(
     'c-capnproto sources not found under ' + ccapnp_lib_dir + '; the golden '
     + 'master tests will be skipped. Fetch with `git clone '
-    + 'https://github.com/opensourcerouting/c-capnproto '
+    + 'https://github.com/HaoZeke/c-capnproto '
     + 'third_party/c-capnproto`.',
   )
 endif

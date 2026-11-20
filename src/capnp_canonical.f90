@@ -27,6 +27,7 @@ contains
       type(capnp_message_t), target :: canon
       type(capnp_ptr_t) :: root, croot
       integer(int64) :: need, n
+      integer :: stat
 
       root = capnp_root(msg, err)
       if (err /= CAPNP_OK) return
@@ -38,15 +39,27 @@ contains
       call capnp_message_init_builder(canon, err, first_words=need)
       if (err /= CAPNP_OK) return
       croot = canon_copy(canon, root, 0, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(canon)
+         return
+      end if
       call capnp_set_root(canon, croot, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(canon)
+         return
+      end if
       if (canon%nsegs /= 1) then
+         call capnp_message_free(canon)
          err = CAPNP_ERR_BOUNDS ! measurement bug; never canonical
          return
       end if
       n = canon%segs(1)%len
-      allocate (bytes(0:n - 1))
+      allocate (bytes(0:n - 1), stat=stat)
+      if (stat /= 0) then
+         call capnp_message_free(canon)
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       bytes = canon%segs(1)%bytes(0:n - 1)
       call capnp_message_free(canon)
    end subroutine capnp_canonicalize

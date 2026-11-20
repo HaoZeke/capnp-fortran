@@ -39,7 +39,7 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      type(capnp_ptr_t) :: bindings(0:3)
+      type(capnp_ptr_t), allocatable :: bindings(:)
       integer :: nbind = 0
    end type inst_t
    type(inst_t) :: g_insts(64)
@@ -134,9 +134,29 @@ contains
          else
             hex(i:i) = achar(iachar('a') + d - 10)
          end if
-         h = h / 16_int64
+         h = ishft(h, -4)
       end do
    end function ident_hash_hex
+
+   !> Lowercase hex of the 64-bit pattern. Division would be signed, and
+   !> a decimal rendering of a high-bit id puts a minus into the name.
+   pure function u64_hex(v) result(hex)
+      integer(int64), intent(in) :: v
+      character(len=16) :: hex
+      integer(int64) :: x
+      integer :: i, d
+      x = v
+      hex = '0000000000000000'
+      do i = 16, 1, -1
+         d = int(iand(x, 15_int64))
+         if (d < 10) then
+            hex(i:i) = achar(iachar('0') + d)
+         else
+            hex(i:i) = achar(iachar('a') + d - 10)
+         end if
+         x = ishft(x, -4)
+      end do
+   end function u64_hex
 
    !> Clamp an identifier to max_len (default F_IDENT_MAX). Over-long names
    !> become head_hash_tail so every occurrence of the logical name maps to
@@ -164,6 +184,20 @@ contains
       o = o//'_'//hex//'_'//s(len(s) - right + 1:len(s))
       if (len(o) > lim) o = o(1:lim)
    end function ident_fit
+
+   !> Parameter name, clamped so a suffix cannot push it past 63 characters.
+   pure function ident_const(s) result(o)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: o
+      o = ident_fit(s)
+   end function ident_const
+
+   !> One spelling for a default blob, shared by the parameter and its use.
+   pure function blob_name(an) result(o)
+      character(len=*), intent(in) :: an
+      character(len=:), allocatable :: o
+      o = ident_fit(upcase(an)//'_DEFAULT')
+   end function blob_name
 
    !> Field-path base (pfx_field): leave room for `_set_elem`.
    pure function accessor_base(pfx, field) result(o)
@@ -206,11 +240,7 @@ contains
       end do
       o = snake(o)
       if (len(o) > 32) then
-         write (hexid, '(z16.16)') node_id(np)
-         do i = 1, 16
-            if (hexid(i:i) >= 'A' .and. hexid(i:i) <= 'F') &
-               hexid(i:i) = achar(iachar(hexid(i:i)) + 32)
-         end do
+         hexid = u64_hex(node_id(np))
          o = o(1:15)
          if (o(15:15) == '_') o = o(1:14)
          o = o//'_'//hexid
@@ -320,8 +350,8 @@ contains
       g_blobs(g_nblobs)%bytes = bytes
    end subroutine note_blob
 
-   !> Typed constructor with bare default-kind values: -128 stays legal
-   !> (a bare -128_int8 literal is unary minus on out-of-range 128_int8).
+   !> Typed constructor. The int8 value -128 is spelled with huge()
+   !> because a kind-suffixed 128 does not fit in a signed 8-bit literal.
    subroutine emit_blob_params()
       integer :: i
       integer(int64) :: j, n
@@ -332,7 +362,11 @@ contains
                 itoa(n - 1)//') = [integer(int8) :: &')
          line = '      '
          do j = 1_int64, n
-            line = line//itoa(int(g_blobs(i)%bytes(j), int64))
+            if (g_blobs(i)%bytes(j) == -huge(0_int8) - 1_int8) then
+               line = line//'-huge(0_int8)-1_int8'
+            else
+               line = line//itoa(int(g_blobs(i)%bytes(j), int64))
+            end if
             if (j < n) line = line//', '
             if (mod(j, 16_int64) == 0_int64 .and. j < n) then
                call w(line//' &')
@@ -389,18 +423,29 @@ contains
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) return
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+         mine = node_id(g_nodes(i)%p) == file_id .or. &
+                (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
          if (.not. mine) cycle
+         call emit_node_annotations_decl(g_nodes(i)%p, err)
+         if (err /= CAPNP_OK) return
          select case (node_which(g_nodes(i)%p))
          case (NODE_STRUCT)
             if (.not. node_struct_is_group(g_nodes(i)%p)) then
+               call emit_struct_annotations_decl(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) return
                call emit_struct_procs(g_nodes(i)%p, err)
                if (err /= CAPNP_OK) return
             end if
+         case (NODE_ENUM)
+            call emit_enum_decl(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
          case (NODE_CONST)
             call emit_const_decl(g_nodes(i)%p, err)
             if (err /= CAPNP_OK) return
             call emit_const_proc(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) return
+         case (NODE_ANNOTATION)
+            call emit_annotation_node_decl(g_nodes(i)%p, err)
             if (err /= CAPNP_OK) return
          case (NODE_INTERFACE)
             g_has_iface = .true.
@@ -444,16 +489,23 @@ contains
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) exit
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+         mine = node_id(g_nodes(i)%p) == file_id .or. &
+                (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
          if (.not. mine) cycle
+         call emit_node_annotations_decl(g_nodes(i)%p, err)
+         if (err /= CAPNP_OK) exit
          select case (node_which(g_nodes(i)%p))
          case (NODE_ENUM)
             call emit_enum_decl(g_nodes(i)%p, err)
          case (NODE_CONST)
             call emit_const_decl(g_nodes(i)%p, err)
          case (NODE_STRUCT)
-            if (.not. node_struct_is_group(g_nodes(i)%p)) &
+            if (.not. node_struct_is_group(g_nodes(i)%p)) then
+               call emit_struct_annotations_decl(g_nodes(i)%p, err)
                call emit_struct_decl(g_nodes(i)%p, err)
+            end if
+         case (NODE_ANNOTATION)
+            call emit_annotation_node_decl(g_nodes(i)%p, err)
          end select
          if (err /= CAPNP_OK) exit
       end do
@@ -485,14 +537,20 @@ contains
          do i = 1, size(g_nodes)
             call node_display_name(g_nodes(i)%p, dn, err)
             if (err /= CAPNP_OK) exit
-            mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+            mine = node_id(g_nodes(i)%p) == file_id .or. &
+                   (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)
             if (.not. mine) cycle
+            call emit_node_annotations_proc(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) exit
             select case (node_which(g_nodes(i)%p))
             case (NODE_STRUCT)
                if (.not. node_struct_is_group(g_nodes(i)%p)) then
                   call emit_struct_procs(g_nodes(i)%p, err)
                   if (err /= CAPNP_OK) exit
                end if
+            case (NODE_ENUM)
+               call emit_enum_annotation_procs(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) exit
             case (NODE_CONST)
                call emit_const_proc(g_nodes(i)%p, err)
                if (err /= CAPNP_OK) exit
@@ -518,7 +576,7 @@ contains
    subroutine emit_enum_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: el, en
+      type(capnp_ptr_t) :: el, en, al
       character(len=:), allocatable :: tn, nm
       integer(int64) :: i
       call node_fname(np, tn, err)
@@ -534,9 +592,35 @@ contains
          ! enumerant `set`) would collide with prefix_kind_set (field accessor).
          call w('   integer, parameter :: '// &
                 ident_fit(upcase(tn)//'_'//upcase(snake(nm))//'_E')//' = '//itoa(i))
+         al = enumerant_annotations(en, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(snake(nm))), err)
+         if (err /= CAPNP_OK) return
       end do
       call w('')
    end subroutine emit_enum_decl
+
+   subroutine emit_enum_annotation_procs(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: el, en, al
+      character(len=:), allocatable :: tn, nm
+      integer(int64) :: i
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      el = node_enumerants(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(el) - 1_int64
+         en = capnp_list_get_struct(el, int(i), err)
+         if (err /= CAPNP_OK) return
+         call enumerant_name(en, nm, err)
+         if (err /= CAPNP_OK) return
+         al = enumerant_annotations(en, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_proc(al, ident_fit(upcase(tn)//'_'//upcase(snake(nm))), err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_enum_annotation_procs
 
    subroutine emit_const_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -641,7 +725,7 @@ contains
          call w('      logical, save :: loaded = .false.')
          call w('      err = CAPNP_OK')
          call w('      if (.not. loaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(cn)//'_DEFAULT, cmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(cn)//', cmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         loaded = .true.')
          call w('      end if')
@@ -667,6 +751,190 @@ contains
       case default; x = 0_int64
       end select
    end function const_int_value
+
+   ! --- annotations -----------------------------------------------------------
+
+   !> Generated annotation values are named after the annotated declaration
+   !> and the annotation declaration. This keeps independently applied
+   !> annotations distinct while exposing their schema identity and value.
+   subroutine annotation_symbol(a, target, o, err)
+      type(capnp_ptr_t), intent(in) :: a
+      character(len=*), intent(in) :: target
+      character(len=:), allocatable, intent(out) :: o
+      integer, intent(out) :: err
+      character(len=:), allocatable :: an
+      integer :: idx
+      idx = find_node(annotation_id(a))
+      if (idx == 0) then
+         o = ident_fit(upcase(target)//'_ANNOTATION_'//u64_hex(annotation_id(a)))
+         err = CAPNP_OK
+         return
+      end if
+      call node_fname(g_nodes(idx)%p, an, err)
+      if (err /= CAPNP_OK) return
+      o = ident_fit(upcase(target)//'_ANNOTATION_'//upcase(an))
+   end subroutine annotation_symbol
+
+   subroutine emit_annotation_node_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      character(len=:), allocatable :: an
+      call node_fname(np, an, err)
+      if (err /= CAPNP_OK) return
+      call w('   integer(int64), parameter :: '// &
+             ident_const(upcase(an)//'_ANNOTATION_ID')//' = '// &
+             itoa(node_id(np))//'_int64')
+      call w('')
+   end subroutine emit_annotation_node_decl
+
+   subroutine emit_annotation_value_decl(name, v, err)
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(in) :: v
+      integer, intent(out) :: err
+      character(len=:), allocatable :: s
+      integer(int8), allocatable :: db(:)
+      logical :: has
+      integer :: k
+      err = CAPNP_OK
+      k = value_which(v)
+      call w('   integer, parameter :: '//ident_const(name//'_KIND')//' = '// &
+             itoa(int(k, int64)))
+      select case (k)
+      case (TYPE_VOID)
+      case (TYPE_BOOL)
+         if (value_bool(v)) then
+            call w('   logical, parameter :: '//name//' = .true.')
+         else
+            call w('   logical, parameter :: '//name//' = .false.')
+         end if
+      case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, TYPE_ENUM, &
+            TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
+         call w('   integer(int64), parameter :: '//name//' = '// &
+                itoa(const_int_value(v))//'_int64')
+      case (TYPE_FLOAT32)
+         call w('   real(real32), parameter :: '//name//' = transfer('// &
+                itoa(int(cp_f32_bits(value_f32(v)), int64))//'_int32, 1.0_real32)')
+      case (TYPE_FLOAT64)
+         call w('   real(real64), parameter :: '//name//' = transfer('// &
+                itoa(cp_f64_bits(value_f64(v)))//'_int64, 1.0_real64)')
+      case (TYPE_TEXT)
+         call value_text(v, s, err)
+         if (err /= CAPNP_OK) return
+         call w('   character(len=*), parameter :: '//name//" = '"//fquote(s)//"'")
+      case (TYPE_DATA)
+         call value_data(v, db, err)
+         if (err /= CAPNP_OK) return
+         if (size(db) == 0) then
+            call w('   integer(int8), parameter :: '//name// &
+                   '(0:-1) = [integer(int8) ::]')
+         else if (g_suppress) then
+            call note_blob(name, db)
+         end if
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+         has = register_default_blob(name, v)
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      call w('')
+   end subroutine emit_annotation_value_decl
+
+   subroutine emit_annotation_value_proc(name, v, err)
+      character(len=*), intent(in) :: name
+      type(capnp_ptr_t), intent(in) :: v
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: p
+      err = CAPNP_OK
+      select case (value_which(v))
+      case (TYPE_STRUCT, TYPE_LIST, TYPE_ANY_POINTER)
+      case default
+         return
+      end select
+      p = value_pointer(v, err)
+      if (err /= CAPNP_OK) return
+      call w('   function '//name//'(err) result(o)')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: o')
+      if (p%kind == CAPNP_PK_NULL) then
+         call w('      err = CAPNP_OK')
+      else
+         call w('      type(capnp_message_t), save, target :: cmsg')
+         call w('      logical, save :: loaded = .false.')
+         call w('      err = CAPNP_OK')
+         call w('      if (.not. loaded) then')
+         call w('         call capnp_deserialize_bytes('//blob_name(name)//', cmsg, err)')
+         call w('         if (err /= CAPNP_OK) return')
+         call w('         loaded = .true.')
+         call w('      end if')
+         call w('      o = capnp_root(cmsg, err)')
+      end if
+      call w('   end function '//name)
+      call w('')
+   end subroutine emit_annotation_value_proc
+
+   subroutine emit_annotations_decl(al, target, err)
+      type(capnp_ptr_t), intent(in) :: al
+      character(len=*), intent(in) :: target
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: a, v
+      character(len=:), allocatable :: name
+      integer(int64) :: i
+      err = CAPNP_OK
+      do i = 0_int64, capnp_list_len(al) - 1_int64
+         a = capnp_list_get_struct(al, int(i), err)
+         if (err /= CAPNP_OK) return
+         call annotation_symbol(a, target, name, err)
+         if (err /= CAPNP_OK) return
+         v = annotation_value(a, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotation_value_decl(name, v, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_annotations_decl
+
+   subroutine emit_annotations_proc(al, target, err)
+      type(capnp_ptr_t), intent(in) :: al
+      character(len=*), intent(in) :: target
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: a, v
+      character(len=:), allocatable :: name
+      integer(int64) :: i
+      err = CAPNP_OK
+      do i = 0_int64, capnp_list_len(al) - 1_int64
+         a = capnp_list_get_struct(al, int(i), err)
+         if (err /= CAPNP_OK) return
+         call annotation_symbol(a, target, name, err)
+         if (err /= CAPNP_OK) return
+         v = annotation_value(a, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotation_value_proc(name, v, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_annotations_proc
+
+   subroutine emit_node_annotations_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      al = node_annotations(np, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_decl(al, upcase(tn), err)
+   end subroutine emit_node_annotations_decl
+
+   subroutine emit_node_annotations_proc(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      al = node_annotations(np, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_proc(al, upcase(tn), err)
+   end subroutine emit_node_annotations_proc
 
    ! --- structs ------------------------------------------------------------------
 
@@ -722,6 +990,56 @@ contains
          end if
       end do
    end subroutine emit_union_tag_decls
+
+   recursive subroutine emit_fields_annotation_decls(np, pfx, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=*), intent(in) :: pfx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f, al
+      character(len=:), allocatable :: fn, an
+      integer :: gidx
+      integer(int64) :: i
+      fl = node_struct_fields(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         call field_name(f, fn, err)
+         if (err /= CAPNP_OK) return
+         an = accessor_base(pfx, fn)
+         al = field_annotations(f, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, upcase(an), err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) /= FIELD_GROUP) cycle
+         gidx = find_node(field_group_type_id(f))
+         if (gidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call emit_fields_annotation_decls(g_nodes(gidx)%p, an, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine emit_fields_annotation_decls
+
+   subroutine emit_struct_annotations_decl(np, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      character(len=:), allocatable :: tn
+      call node_fname(np, tn, err)
+      if (err /= CAPNP_OK) return
+      call emit_fields_annotation_decls(np, tn, err)
+   end subroutine emit_struct_annotations_decl
+
+   subroutine emit_field_annotation_procs(f, an, err)
+      type(capnp_ptr_t), intent(in) :: f
+      character(len=*), intent(in) :: an
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: al
+      al = field_annotations(f, err)
+      if (err /= CAPNP_OK) return
+      call emit_annotations_proc(al, upcase(an), err)
+   end subroutine emit_field_annotation_procs
 
    subroutine emit_struct_procs(np, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -798,6 +1116,8 @@ contains
       call field_name(f, fn, err)
       if (err /= CAPNP_OK) return
       an = accessor_base(pfx, fn)
+      call emit_field_annotation_procs(f, an, err)
+      if (err /= CAPNP_OK) return
       disc = field_discriminant(f)
       gset = ''
       if (disc /= NO_DISCRIMINANT) then
@@ -916,7 +1236,7 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_serialize_bytes(tmp, bytes, err)
       if (err /= CAPNP_OK) return
-      call note_blob(upcase(an)//'_DEFAULT', bytes)
+      call note_blob(blob_name(an), bytes)
       call capnp_message_free(tmp)
    end function register_default_blob
 
@@ -1172,7 +1492,7 @@ contains
       if (value_which(dv) == TYPE_DATA) then
          call value_data(dv, db, err)
          if (err /= CAPNP_OK) return
-         if (size(db) > 0 .and. g_suppress) call note_blob(upcase(an)//'_DEFAULT', db)
+         if (size(db) > 0 .and. g_suppress) call note_blob(blob_name(an), db)
       else
          allocate (db(0))
       end if
@@ -1184,7 +1504,7 @@ contains
          call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
-         call w('         b = '//upcase(an)//'_DEFAULT')
+         call w('         b = '//blob_name(an))
          call w('         return')
          call w('      end if')
       end if
@@ -1238,7 +1558,7 @@ contains
          call w('      o%p = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. o%p%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(an)//'_DEFAULT, defmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(an)//', defmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         defloaded = .true.')
          call w('      end if')
@@ -1317,7 +1637,7 @@ contains
          call w('      l = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. l%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
-         call w('         call capnp_deserialize_bytes('//upcase(an)//'_DEFAULT, defmsg, err)')
+         call w('         call capnp_deserialize_bytes('//blob_name(an)//', defmsg, err)')
          call w('         if (err /= CAPNP_OK) return')
          call w('         defloaded = .true.')
          call w('      end if')
@@ -1397,6 +1717,27 @@ contains
 
    ! --- brand instantiations ---------------------------------------------------
 
+   !> Append one brand binding, growing the 0-based array as needed.
+   subroutine bind_store(arr, n, item, err)
+      type(capnp_ptr_t), allocatable, intent(inout) :: arr(:)
+      integer, intent(inout) :: n
+      type(capnp_ptr_t), intent(in) :: item
+      integer, intent(out) :: err
+      type(capnp_ptr_t), allocatable :: grown(:)
+      integer :: hi
+      err = CAPNP_OK
+      if (.not. allocated(arr)) then
+         allocate (arr(0:7))
+      else if (n > ubound(arr, 1)) then
+         hi = ubound(arr, 1)
+         allocate (grown(0:hi + hi + 1))
+         grown(0:hi) = arr
+         call move_alloc(grown, arr)
+      end if
+      arr(n) = item
+      n = n + 1
+   end subroutine bind_store
+
    !> Instantiation handle name for a branded struct Type, registering
    !> the instantiation on first sight. '' when the use is unbranded.
    subroutine inst_name_for(t, gidx, o, err)
@@ -1404,11 +1745,11 @@ contains
       integer, intent(in) :: gidx
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: b, scopes, sc, binds, bd
-      type(capnp_ptr_t) :: btypes(0:3)
+      type(capnp_ptr_t) :: b, scopes, sc, binds, bd, bt
+      type(capnp_ptr_t), allocatable :: btypes(:)
       character(len=:), allocatable :: gname, part
       integer(int64) :: i, j
-      integer :: n, k, bidx
+      integer :: n, k
       err = CAPNP_OK
       o = ''
       b = type_brand(t, err)
@@ -1424,29 +1765,30 @@ contains
          if (scope_which(sc) /= SCOPE_BIND) cycle
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
-         do j = 0_int64, min(capnp_list_len(binds), 4_int64) - 1_int64
+         do j = 0_int64, capnp_list_len(binds) - 1_int64
             bd = capnp_list_get_struct(binds, int(j), err)
             if (err /= CAPNP_OK) return
             if (binding_which(bd) == BINDING_BOUND_TYPE) then
-               btypes(n) = binding_type(bd, err)
+               bt = binding_type(bd, err)
                if (err /= CAPNP_OK) return
                ! A binding that is itself a parameter of the generic being
                ! instantiated resolves through the current instantiation,
                ! so nested branded uses (Box(T) inside Nest(T)) settle.
                if (g_cur_inst > 0) then
-                  if (type_which(btypes(n)) == TYPE_ANY_POINTER) then
-                     if (type_anyptr_which(btypes(n)) == ANYPTR_PARAMETER) then
-                        if (type_param_scope_id(btypes(n)) == &
+                  if (type_which(bt) == TYPE_ANY_POINTER) then
+                     if (type_anyptr_which(bt) == ANYPTR_PARAMETER) then
+                        if (type_param_scope_id(bt) == &
                             g_nodes(g_insts(g_cur_inst)%gidx)%id .and. &
-                            type_param_index(btypes(n)) < g_insts(g_cur_inst)%nbind) &
-                           btypes(n) = g_insts(g_cur_inst)%bindings(type_param_index(btypes(n)))
+                            type_param_index(bt) < g_insts(g_cur_inst)%nbind) &
+                           bt = g_insts(g_cur_inst)%bindings(type_param_index(bt))
                      end if
                   end if
                end if
             else
-               btypes(n) = capnp_ptr_t() ! unbound: stays AnyPointer
+               bt = capnp_ptr_t() ! unbound: stays AnyPointer
             end if
-            n = n + 1
+            call bind_store(btypes, n, bt, err)
+            if (err /= CAPNP_OK) return
          end do
       end do
       if (n == 0) return
@@ -1458,15 +1800,9 @@ contains
          if (err /= CAPNP_OK) return
          o = o//'_'//part
       end do
-      ! Long names truncate deterministically (content checksum), so a
-      ! second sighting of the same instantiation dedups to one entry.
-      if (len(o) > 32) then
-         bidx = 0
-         do k = 1, len(o)
-            bidx = mod(bidx*31 + iachar(o(k:k)), 997)
-         end do
-         o = o(1:28)//'_'//itoa(int(bidx, int64))
-      end if
+      ! Over-long instantiation names clamp with the same hash as other
+      ! identifiers, so the handle stays a legal Fortran name.
+      o = ident_fit(o)
       do k = 1, g_ninsts
          if (g_insts(k)%name == o) return
       end do
@@ -1478,9 +1814,8 @@ contains
       g_insts(g_ninsts)%gidx = gidx
       g_insts(g_ninsts)%name = o
       g_insts(g_ninsts)%nbind = n
-      do k = 0, n - 1
-         g_insts(g_ninsts)%bindings(k) = btypes(k)
-      end do
+      allocate (g_insts(g_ninsts)%bindings(0:n - 1))
+      g_insts(g_ninsts)%bindings(0:n - 1) = btypes(0:n - 1)
    end subroutine inst_name_for
 
    !> Name fragment for one binding type. Lists recurse into their
@@ -1610,15 +1945,28 @@ contains
    subroutine emit_interface_decl(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: ml, mp
+      type(capnp_ptr_t) :: ml, mp, al
       character(len=:), allocatable :: tn, mn, pn, rn
       integer(int64) :: i
       call node_fname(np, tn, err)
       if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
       if (err /= CAPNP_OK) return
-      call w('   integer(int64), parameter :: '//upcase(tn)//'_INTERFACE_ID = '// &
+      call w('   integer(int64), parameter :: '// &
+             ident_const(upcase(tn)//'_INTERFACE_ID')//' = '// &
              itoa(node_id(np))//'_int64')
+      ! Annotation values are module data, not type-bound procedure bindings.
+      do i = 0_int64, capnp_list_len(ml) - 1_int64
+         mp = capnp_list_get_struct(ml, int(i), err)
+         if (err /= CAPNP_OK) return
+         call method_name(mp, mn, err)
+         if (err /= CAPNP_OK) return
+         mn = snake(mn)
+         al = method_annotations(mp, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
+         if (err /= CAPNP_OK) return
+      end do
       call w('   type :: '//tn//'_client_t')
       call w('      type(rpc_cap_t) :: cap')
       call w('   end type '//tn//'_client_t')
@@ -1665,7 +2013,7 @@ contains
    subroutine emit_interface_procs(np, err)
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: ml, mp
+      type(capnp_ptr_t) :: ml, mp, al
       character(len=:), allocatable :: tn, mn, pn, rn
       integer(int64) :: i
       call node_fname(np, tn, err)
@@ -1678,6 +2026,10 @@ contains
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
          mn = snake(mn)
+         al = method_annotations(mp, err)
+         if (err /= CAPNP_OK) return
+         call emit_annotations_proc(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
+         if (err /= CAPNP_OK) return
          call method_types(mp, pn, rn, err)
          if (err /= CAPNP_OK) return
          call w('   subroutine '//tn//'_'//mn//'_begin(conn, client, m, params, qid, err)')
@@ -1688,8 +2040,9 @@ contains
          call w('      integer(int64), intent(out) :: qid')
          call w('      integer, intent(out) :: err')
          call w('      type(payload_t) :: pl')
-         call w('      call rpc_call_begin(conn, client%cap, '//upcase(tn)// &
-                '_INTERFACE_ID, '//itoa(i)//', m, pl, qid, err)')
+         call w('      call rpc_call_begin(conn, client%cap, '// &
+                ident_const(upcase(tn)//'_INTERFACE_ID')//', '//itoa(i)// &
+                ', m, pl, qid, err)')
          call w('      if (err /= CAPNP_OK) return')
          call w('      params%p = capnp_new_struct(m, '//upcase(pn)//'_DWORDS, '// &
                 upcase(pn)//'_PWORDS, err)')
@@ -1712,7 +2065,8 @@ contains
       call w('      type(rpc_call_ctx_t), intent(inout) :: ctx')
       call w('      integer, intent(out) :: err')
       call w('      err = CAPNP_ERR_ARG')
-      call w('      if (ctx%interface_id /= '//upcase(tn)//'_INTERFACE_ID) return')
+      call w('      if (ctx%interface_id /= '// &
+             ident_const(upcase(tn)//'_INTERFACE_ID')//') return')
       call w('      select case (ctx%method_id)')
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)
@@ -1727,8 +2081,8 @@ contains
          call w('            type('//pn//'_t) :: params')
          call w('            type('//rn//'_t) :: results')
          call w('            params%p = ctx%params')
-         call w('            results%p = capnp_new_struct(ctx%rmsg, '//upcase(rn)// &
-                '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
+         call w('            results%p = capnp_new_struct(ctx%rmsg, &')
+         call w('               '//upcase(rn)//'_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
          call w('            call self%'//mn//'(params, results, err)')
          call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')

@@ -17,12 +17,15 @@ program capnpc_fortran
    type(capnp_ptr_t) :: root, files, rf
    integer(int8), allocatable :: bytes(:)
    character(len=:), allocatable :: fname
-   character(len=4096) :: arg
-   integer :: err, i, n
+   character(len=:), allocatable :: arg
+   integer :: err, i, n, alen
 
    if (command_argument_count() >= 1) then
-      call get_command_argument(1, arg)
-      call capnp_read_file(trim(arg), bytes, err)
+      call get_command_argument(1, length=alen)
+      if (alen < 0) alen = 0
+      allocate (character(len=alen) :: arg)
+      if (alen > 0) call get_command_argument(1, arg)
+      call capnp_read_file(arg, bytes, err)
    else
       call read_stdin(bytes, err)
    end if
@@ -51,11 +54,18 @@ program capnpc_fortran
    end do
 
    ! Main-program allocatables are not freed at exit; release them so leak
-   ! checkers see a clean run.
-   if (allocated(fname)) deallocate (fname)
-   if (allocated(bytes)) deallocate (bytes)
+   ! checkers see a clean run. die() releases the same set.
+   call release_cli()
 
 contains
+
+   subroutine release_cli()
+      if (allocated(arg)) deallocate (arg)
+      if (allocated(fname)) deallocate (fname)
+      if (allocated(bytes)) deallocate (bytes)
+      call capnp_message_free(msg)
+   end subroutine release_cli
+
 
    !> Drain stdin (a pipe: no queryable size) into a byte buffer.
    subroutine read_stdin(b, err)
@@ -97,8 +107,10 @@ contains
    subroutine die(what, code)
       character(len=*), intent(in) :: what
       integer, intent(in) :: code
+      call release_cli()
       write (*, '(a,a,a,i0)') 'capnpc-fortran: ', what, ', err=', code
-      error stop 1
+      ! stop runs atexit handlers, so a leak checker reports an error-path leak.
+      stop 1
    end subroutine die
 
 end program capnpc_fortran

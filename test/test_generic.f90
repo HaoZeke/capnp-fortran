@@ -15,7 +15,8 @@ contains
 
    subroutine collect_generic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      testsuite = [new_unittest("generic", run_generic)]
+      testsuite = [new_unittest("generic", run_generic), &
+                   new_unittest("generic-five-bindings", run_five_bindings)]
    end subroutine collect_generic
 
    subroutine check_(error, cond, name)
@@ -117,5 +118,32 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(rmsg)
    end subroutine run_generic
+
+   !> A brand with five bindings keeps the fifth parameter's type.
+   subroutine run_five_bindings(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(q_use_t) :: use_
+      type(q_text_text_text_text_data_t) :: q
+      integer(int8), allocatable :: got(:)
+      integer(int8) :: raw(3)
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      use_ = q_use_new_root(msg, err)
+      q = q_use_q_init(use_, err)
+      call check_(error, err == CAPNP_OK, 'brand5: init')
+      raw = [1_int8, 2_int8, 0_int8]
+      call q_text_text_text_text_data_e_set(q, raw, err)
+      call check_(error, err == CAPNP_OK, 'brand5: fifth binding is data')
+      call q_text_text_text_text_data_e_get(q, got, err)
+      call check_(error, err == CAPNP_OK .and. allocated(got) .and. size(got) == 3, &
+                  'brand5: data length')
+      if (.not. allocated(error) .and. allocated(got)) then
+         call check_(error, got(lbound(got, 1)) == 1_int8 .and. &
+                     got(ubound(got, 1)) == 0_int8, 'brand5: data bytes')
+      end if
+      call capnp_message_free(msg)
+   end subroutine run_five_bindings
 
 end module test_generic

@@ -24,8 +24,18 @@ convention. Word offsets and lengths are `integer(int64)`.
 | `CAPNP_ERR_IO` | file I/O failure |
 
 Guards default to `CAPNP_DEFAULT_TRAVERSAL_WORDS` (8 Mi words) and
-`CAPNP_DEFAULT_DEPTH_LIMIT` (64); both are per-message and settable through
-the deserialize entry points.
+`CAPNP_DEFAULT_DEPTH_LIMIT` (64). `capnp_reader_options_t` carries both
+(`traversal_words`, `nesting_limit`) into deserialize and stream readers.
+Stream readers apply the traversal budget to the segment table before
+allocating the body. Packed bytes are expanded only up to that budget
+plus the largest segment table, so a zero-run cannot allocate without
+bound. `capnp_builder_options_t` carries
+`first_segment_words` (default `CAPNP_SUGGESTED_FIRST_SEGMENT_WORDS`, 1024)
+and `allocation_strategy` (`CAPNP_ALLOC_GROW_HEURISTICALLY` doubles each
+later segment; `CAPNP_ALLOC_FIXED_SIZE` repeats the first-segment size
+unless one object is larger). A first segment above the segment word cap
+is rejected, and heuristic growth stops at that cap. Omitting the options
+keeps those defaults.
 
 Element-size codes for `capnp_new_list`: `CAPNP_SZ_VOID` (0), `_BIT`,
 `_BYTE`, `_TWO`, `_FOUR`, `_EIGHT`, `_PTR`, `_COMPOSITE` (7). Handle kinds:
@@ -38,7 +48,7 @@ the `target` attribute.
 
 | Procedure | Signature | Notes |
 |-----------|-----------|-------|
-| `capnp_message_init_builder` | `(msg, err [, first_words])` | fresh builder; reserves the zeroed root word |
+| `capnp_message_init_builder` | `(msg, err [, first_words, options])` | fresh builder; reserves the zeroed root word. `options` is `capnp_builder_options_t` |
 | `capnp_message_free` | `(msg)` | releases owned segments; safe on views |
 
 ## Objects and pointers (`capnp_message`)
@@ -111,14 +121,14 @@ as primitive via field `@0`).
 | Procedure | Signature | Notes |
 |-----------|-----------|-------|
 | `capnp_serialize_bytes` | `(msg, bytes, err)` | segment table + segments |
-| `capnp_deserialize_bytes` | `(bytes, msg, err [, traversal_words, depth_limit])` | copies segments; frees `msg` first |
+| `capnp_deserialize_bytes` | `(bytes, msg, err [, traversal_words, depth_limit, options])` | copies segments; frees `msg` first. `options` is `capnp_reader_options_t`; explicit limits override it |
 | `capnp_deserialize_view` | `(bytes, msg, err [, ...])` | zero-copy: segments alias the caller's `target` buffer |
 | `capnp_serialize_packed_bytes` / `capnp_deserialize_packed_bytes` | as above | packed framing |
 | `capnp_write_file` / `capnp_read_file` | `(path, bytes, err)` | raw byte I/O |
 | `capnp_write_message` / `capnp_read_message` | `(path, msg, err)` | framed message file I/O |
 | `capnp_write_message_packed` / `capnp_read_message_packed` | `(path, msg, err)` | |
-| `capnp_read_message_unit` | `(unit, msg, err)` | one framed message from an open stream unit; back-to-back messages read in sequence |
-| `capnp_read_message_packed_unit` | `(unit, msg, err)` | same for packed streams (C++ `PackedMessageReader`) |
+| `capnp_read_message_unit` | `(unit, msg, err [, options])` | one framed message from an open stream unit; the segment table is bounded by the reader traversal budget |
+| `capnp_read_message_packed_unit` | `(unit, msg, err [, options])` | same for packed streams (C++ `PackedMessageReader`) |
 
 ## Packed codec (`capnp_packed`)
 
@@ -127,6 +137,80 @@ as primitive via field `@0`).
 | `capnp_pack` / `capnp_unpack` | `(in, out, err)` | whole buffers |
 | `capnp_unpacker_t` + `capnp_unpack_push` | `(u, chunk, out, outn, err)` | incremental; chunks may split anywhere |
 | `capnp_packer_t` + `capnp_pack_push` / `capnp_pack_finish` | `(pk, chunk, out, outn, err)` | incremental; byte-identical to `capnp_pack` |
+
+## Text format (`capnp_text`)
+
+`use capnp_text`. This is the struct-literal format `capnp decode` prints and
+`capnp encode` reads. `capnp_text_encode(schema, idx, p, text, err [, pretty])`
+writes a struct. Pretty output (the default) follows the C++ text codec:
+primitives are always shown, null pointers are omitted, and only the active
+union member is shown. `pretty=.false.` is the one-line form of `capnp decode
+--short`. Floats use the same shortest round-trip spelling as KJ (`nan`,
+`inf`, `-inf`). Data is a C-escaped string; bytes outside ASCII become
+three-digit octal escapes.
+
+`capnp_text_decode(schema, idx, text, msg, err)` parses one struct literal
+into a new builder, applying schema defaults on the way in. Comments (`#`),
+trailing commas, `0x"..."` data, and adjacent string literals are accepted.
+`capnp_text_encode_value` renders a schema `Value` (a const or a field
+default). `capnp_text_span` finds the next top-level value in a stream.
+
+External constants and embedded files are not accepted.
+
+## JSON (`capnp_json`)
+
+`use capnp_json`. `capnp_json_encode` and `capnp_json_decode` follow the
+defaults and annotations in `capnp/compat/json.h`. Field, group, union, and
+enumerant names are the schema names unless `$Json.name` renames them.
+`$Json.flatten` inlines sub-structs, groups, and discriminated union
+variants with an optional `prefix`; `$Json.discriminator` tags unions with
+an explicit variant field and optional `valueName`. 64-bit integers are
+decimal strings. Data is a JSON array of byte values, or a base64 string
+under `$Json.base64`, or lowercase hex under `$Json.hex`. Enums are names
+and unknown ordinals are numbers. NaN and infinities are `"NaN"`,
+`"Infinity"`, and `"-Infinity"`. Null pointers are omitted outside unions.
+The active union arm is still written when its pointer is null: text and
+data use the schema default, or are empty when the arm has none.
+Primitives, groups, and that arm are written, with non-union fields
+emitted before the union arm. An unknown discriminator string does not
+select an arm. A known tag clears the arm it selects, so a member written
+earlier does not survive. Plain member keys in that object are still
+applied in document order, and a value that appears before the tag is
+applied after it. A repeated known tag is rejected. A void value accepts
+any payload. A flattened struct is reused for later keys in the same
+object, and a nested flattened union keeps the tag it already saw.
+A non-string discriminator is rejected. Unknown JSON fields
+are ignored on decode. Pretty output matches `capnp convert binary:json`; pass
+`pretty=.false.` for `--short`, and use `capnp_json_span` to step through
+multi-value JSON streams. A high UTF-16 surrogate followed by a low
+surrogate is one Unicode scalar. capnp 1.4.0 keeps the two UTF-16
+surrogate code units as six CESU-8 bytes. An unquoted integer past 2^53 keeps every digit.
+capnp 1.4.0 rounds that token through a double, so it rejects an integer
+the double cannot hold. `{"i64":9223372036854775807}` and
+`{"u64":18446744073709551615}` are two such inputs: this decoder accepts
+them and capnp 1.4.0 does not.
+
+## capnpf
+
+`capnpf` is the command-line counterpart of `capnp encode`, `decode`,
+`convert`, and `eval`. It compiles the schema with `capnp compile -o-`
+and loads that CodeGeneratorRequest.
+
+```
+capnpf encode [-I DIR] [--packed] [--flat] [--segment-size=N] SCHEMA TYPE
+capnpf decode [-I DIR] [--packed] [--flat] [--short] SCHEMA TYPE
+capnpf convert [-I DIR] [--short] [--segment-size=N] FROM:TO [SCHEMA TYPE]
+capnpf eval [-I DIR] [--short] [-b|-p|--flat|-o FORMAT] SCHEMA NAME
+```
+
+`FROM`, `TO`, and `FORMAT` are `binary`, `packed`, `flat`, `flat-packed`,
+`canonical`, `text`, or `json` (`SCHEMA TYPE` may be omitted on `convert`
+when neither side is `text` or `json`). The reader limits are the
+maximum, matching the capnp tool. `--segment-size` repeats that word
+count for every segment. Flat, flat-packed, and canonical output
+write every message on the input, one after another. `eval` traverses
+constants, struct field defaults, groups, and arbitrarily deep `.field` and
+`[index]` paths, and emits struct targets in any supported format.
 
 ## Canonical form (`capnp_canonical`)
 

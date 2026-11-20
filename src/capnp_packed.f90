@@ -120,14 +120,25 @@ contains
    end subroutine capnp_pack
 
    !> Unpack into a word-aligned buffer.
-   subroutine capnp_unpack(inb, outb, err)
+   subroutine capnp_unpack(inb, outb, err, max_words)
       integer(int8), intent(in) :: inb(0:)
       integer(int8), allocatable, intent(out) :: outb(:)
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: max_words
       integer(int8), allocatable :: buf(:)
-      integer(int64) :: ipos, opos, cap, n, j
+      integer(int64) :: ipos, opos, cap, n, j, limit
       integer :: tag, k, cnt
+      logical :: bounded
       err = CAPNP_OK
+      bounded = present(max_words)
+      limit = 0_int64
+      if (bounded) then
+         limit = max_words
+         if (limit < 0_int64) then
+            err = CAPNP_ERR_TRAVERSAL
+            return
+         end if
+      end if
       n = size(inb, kind=int64)
       cap = max(8_int64*n, 64_int64)
       allocate (buf(0:cap - 1))
@@ -137,6 +148,12 @@ contains
       do while (ipos < n)
          tag = cp_u8(inb(ipos))
          ipos = ipos + 1
+         if (bounded) then
+            if (opos/8_int64 >= limit) then
+               err = CAPNP_ERR_TRAVERSAL
+               return
+            end if
+         end if
          call ensure(buf, cap, opos + 8_int64)
          do k = 0, 7
             if (btest(tag, k)) then
@@ -158,6 +175,12 @@ contains
             end if
             cnt = cp_u8(inb(ipos))
             ipos = ipos + 1
+            if (bounded) then
+               if (int(cnt, int64) > limit - opos/8_int64) then
+                  err = CAPNP_ERR_TRAVERSAL
+                  return
+               end if
+            end if
             call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
             buf(opos:opos + int(cnt, int64)*8_int64 - 1) = 0_int8
             opos = opos + int(cnt, int64)*8_int64
@@ -171,6 +194,12 @@ contains
             if (ipos + int(cnt, int64)*8_int64 > n) then
                err = CAPNP_ERR_PACKED
                return
+            end if
+            if (bounded) then
+               if (int(cnt, int64) > limit - opos/8_int64) then
+                  err = CAPNP_ERR_TRAVERSAL
+                  return
+               end if
             end if
             call ensure(buf, cap, opos + int(cnt, int64)*8_int64)
             do j = 0_int64, int(cnt, int64)*8_int64 - 1_int64
