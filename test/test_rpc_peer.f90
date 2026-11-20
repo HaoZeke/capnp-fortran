@@ -14,8 +14,9 @@ module test_rpc_peer
 
    public :: collect_rpc_peer
 
-   !> Method 2 returns a new local export. Any other method returns the
-   !> caller's export 4 as receiverHosted, as a reflect call does.
+   !> Method 2 returns a new local export, and method 7 answers later.
+   !> Any other method returns the caller's export 4 as receiverHosted,
+   !> as a reflect call does.
    type, extends(rpc_server_t) :: mix_srv_t
       class(rpc_server_t), pointer :: inner => null()
    contains
@@ -30,7 +31,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(14))
+      allocate (testsuite(16))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -59,6 +60,10 @@ contains
       testsuite(13)%test => t_dis_plain_finish
       testsuite(14)%name = "disembargo-plain-fwd-promise-cap"
       testsuite(14)%test => t_dis_plain_promise
+      testsuite(15)%name = "fwd-ra-running-answer"
+      testsuite(15)%test => t_fwd_ra_running
+      testsuite(16)%name = "disembargo-running-answer-proxy"
+      testsuite(16)%test => t_dis_ra_running
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -68,6 +73,11 @@ contains
       type(capnp_ptr_t) :: s, ctab
       type(cap_descriptor_t) :: cd
       integer :: idx
+      if (ctx%method_id == 7) then
+         err = CAPNP_OK
+         call rpc_ctx_defer(ctx)
+         return
+      end if
       s = capnp_new_struct(ctx%rmsg, 0, 1, err)
       if (err /= CAPNP_OK) return
       if (ctx%method_id == 2) then
@@ -323,8 +333,8 @@ contains
    !> The next frame as text, '' after 200 ms with nothing:
    !> "CALL <q> I<id>|P<q> c|y [caps]", "RET <id> res [caps]|exc|can|else|
    !> take<q>", "FIN <q> T|F", "REL <id> <n>", "DIS I<id>|P<q> sl|rl
-   !> <id>", "ABORT", or "TAG <n>". A Call that hints
-   !> onlyPromisePipeline ends in " opp". A cap is sh<id>, sp<id>,
+   !> <id>", "RES <id> cap|exc", "ABORT", or "TAG <n>". A Call that
+   !> hints onlyPromisePipeline ends in " opp". A cap is sh<id>, sp<id>,
    !> rh<id>, ra<q> or no. `q` gets the question id of a Call.
    function wtext(fd, q) result(txt)
       integer, intent(in) :: fd
@@ -337,6 +347,7 @@ contains
       type(finish_t) :: f
       type(release_t) :: rel
       type(disembargo_t) :: d
+      type(resolve_t) :: rv
       type(message_target_t) :: tgt
       character(len=64) :: buf
       logical :: ready
@@ -406,6 +417,14 @@ contains
             buf = ' other'
          end select
          txt = txt // trim(buf)
+      case (MESSAGE_RESOLVE_TAG)
+         rv = message_resolve_get(msg, e)
+         write (buf, '(a,i0)') 'RES ', resolve_promise_id_get(rv)
+         if (resolve_which(rv) == RESOLVE_EXCEPTION_TAG) then
+            txt = trim(buf) // ' exc'
+         else
+            txt = trim(buf) // ' cap'
+         end if
       case (MESSAGE_ABORT_TAG)
          txt = 'ABORT'
       case default
@@ -861,6 +880,122 @@ contains
                  'disembargo plain promise: got '//a//' / '//b//' / '//c//' / '//d)
       call close_peer(conn, fd)
    end subroutine t_dis_plain_promise
+
+   !> A forwarded receiverAnswer param names an answer still running in
+   !> this vat. C++ takes the cap from its queued pipeline, writes it as
+   !> senderPromise, and resolves it when the call returns.
+   subroutine t_fwd_ra_running(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k
+      integer :: fd, e, idx
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'running answer: call 2 is not deferred')
+         call close_peer(conn, fd)
+         return
+      end if
+      idx = rpc_ctx_export_cap(ctx, made, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call check(error, index(b, ' I4 y [sp') > 0 .and. index(c, 'RET 2 res [sh') == 1 .and. &
+                 index(c, ' | RES ') > 0 .and. index(c, ' cap') > 0, &
+                 'running answer: got '//b//' / '//c)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_ra_running
+
+   !> A senderLoopback Disembargo names the proxy written for an answer
+   !> still running. C++ waits for the answer to return, and fails once no
+   !> message is left to read, since the answer is a cap of this vat.
+   subroutine t_dis_ra_running(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      character(len=:), allocatable :: a, b, c, w
+      integer(int64) :: k, pid
+      integer :: fd, e, idx, j
+      logical :: handled
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      pid = -1_int64
+      j = index(b, ' I4 y [sp')
+      if (j > 0) then
+         pid = 0_int64
+         j = j + 9
+         do while (j <= len(b))
+            if (b(j:j) < '0' .or. b(j:j) > '9') exit
+            pid = 10_int64*pid + int(ichar(b(j:j)) - ichar('0'), int64)
+            j = j + 1
+         end do
+      end if
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, pid, e)
+      call disembargo_context_sender_loopback_set(d, 9_int64, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      w = drain(fd)
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'disembargo running answer: call 2 is not deferred, got '//w)
+         call close_peer(conn, fd)
+         return
+      end if
+      idx = rpc_ctx_export_cap(ctx, made, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call rpc_pump_poll(conn, 0, handled, e)
+      a = drain(fd)
+      call check(error, pid >= 0_int64 .and. w == '' .and. index(c, 'RET 2 res [sh') == 1 .and. &
+                 index(c, ' | RES ') > 0 .and. a == 'ABORT' .and. allocated(conn%abort_reason), &
+                 'disembargo running answer: got '//b//' / '//w//' / '//c//' / '//a)
+      if (allocated(error)) then
+         call close_peer(conn, fd)
+         return
+      end if
+      call check(error, index(conn%abort_reason, 'does not point back') > 0, &
+                 'disembargo running answer: reason '//conn%abort_reason)
+      call close_peer(conn, fd)
+   end subroutine t_dis_ra_running
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

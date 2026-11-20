@@ -126,6 +126,8 @@ module capnp_rpc
    integer, parameter :: PIPE_EXPORT = 1
    integer, parameter :: PIPE_IMPORT = 2
    integer, parameter :: PIPE_QUESTION = 3
+   !> A pipeline of one of our answers still running.
+   integer, parameter :: PIPE_ANSWER = 4
 
    !> Policy shared by every wrapper belonging to one membrane. Reusing
    !> the same object gives all wrapped capabilities one revocation
@@ -259,6 +261,10 @@ module capnp_rpc
       integer(int64) :: import = -1_int64
       integer :: eid = -1
       character(len=:), allocatable :: reason
+      !> Our answer `aqid`, a call still running, when the proxy stands
+      !> for its pipeline `ops`. C++ exports that QueuedClient as a
+      !> promise and resolves it when the call returns.
+      integer(int64) :: aqid = -1_int64
    end type rpc_pipe_proxy_t
 
    !> Owners of a server that a handoff exported on two connections.
@@ -446,10 +452,20 @@ module capnp_rpc
       !> A Disembargo whose target is this promise import, waiting for
       !> its Resolve (rpc.c++ handleDisembargo whenResolved).
       integer(int64) :: import_wire = -1_int64
+      !> A Disembargo whose target is this proxy export of an answer still
+      !> running, waiting for its Return.
+      integer :: proxy_eid = -1
+      !> The proxy settled. C++ checks the target after evalLast, so the
+      !> check waits until no message is left to read.
+      logical :: idle = .false.
       type(capnp_message_t) :: msg
       !> Param holds taken when the call arrived, as C++ imports the
       !> param caps before the call waits (rpc.c++ handleCall).
       integer(int64), allocatable :: pids(:)
+      !> The pipeline ops of a call on an answer proxy, whose target is
+      !> the proxy export.
+      logical :: by_ops = .false.
+      integer, allocatable :: ops(:)
       type(rpc_incoming_wait_t), pointer :: next => null()
    end type rpc_incoming_wait_t
 
@@ -5070,6 +5086,8 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
+      call run_idle_loopbacks(conn, err)
+      if (err /= CAPNP_OK) return
       call rpc_recv_message(conn%transport, m, err, detail=detail)
       if (err /= CAPNP_OK) then
          ! No Return is coming for an abandoned Join, so the slot must
@@ -5146,6 +5164,8 @@ contains
          err = RPC_ERR_DEAD
          return
       end if
+      call run_idle_loopbacks(conn, err)
+      if (err /= CAPNP_OK) return
       call conn%transport%poll_in(timeout_ms, readable, err)
       if (err /= CAPNP_OK .or. .not. readable) return
       call rpc_pump_once(conn, err)
@@ -5360,7 +5380,11 @@ contains
       ! A pipelined call on an answer still running waits for its Return,
       ! as the C++ answer pipeline queues it (rpc.c++ QueuedPipeline).
       if (terr == CAPNP_OK .and. aqid >= 0_int64) then
-         call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
+         if (fkind == PIPE_ANSWER) then
+            call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err, fops)
+         else
+            call enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
+         end if
          return
       end if
       ! The refused vines go with the param caps, until the call is over.
@@ -5640,6 +5664,11 @@ contains
       if (found) found = associated(slot)
       if (found) found = slot%used
       if (.not. found) return
+      if (.not. slot%has_results .and. slot%plain_qid < 0_int64 .and. &
+          .not. slot%finished .and. .not. slot%no_pipeline) then
+         call write_answer_proxy(conn, ocd, promised_answer_question_id_get(rpa), fields, err)
+         return
+      end if
       ! A plain forward still running serves its pipeline from its
       ! question. C++ exports that pipeline cap as a hosted cap.
       if (.not. slot%has_results) then
@@ -5709,6 +5738,186 @@ contains
          end do
       end select
    end subroutine forward_answer_param
+
+   !> Write the pipeline `ops` of answer `aqid`, a call still running, as
+   !> a promise export. C++ QueuedPipeline keeps one cap per ops, so the
+   !> same ops write the same export again.
+   subroutine write_answer_proxy(conn, ocd, aqid, ops, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: ocd
+      integer(int64), intent(in) :: aqid
+      integer, intent(in) :: ops(:)
+      integer, intent(out) :: err
+      type(rpc_pipe_proxy_t), pointer :: px
+      class(*), pointer :: srv
+      integer :: i, peid
+      err = CAPNP_OK
+      do i = 0, nexports(conn) - 1
+         if (.not. conn%exports(i)%used .or. conn%exports(i)%refcount <= 0) cycle
+         select type (old => conn%exports(i)%srv)
+         type is (rpc_pipe_proxy_t)
+            if (old%aqid /= aqid) cycle
+            if (size(old%ops) /= size(ops)) cycle
+            if (any(old%ops /= ops)) cycle
+            conn%exports(i)%refcount = conn%exports(i)%refcount + 1
+            call cap_descriptor_sender_promise_set(ocd, int(i, int64), err)
+            return
+         end select
+      end do
+      allocate (px)
+      px%aqid = aqid
+      px%ops = ops
+      srv => px
+      peid = export_server(conn, srv, owned=.true.)
+      if (peid < 0) then
+         deallocate (px)
+         return
+      end if
+      call cap_descriptor_sender_promise_set(ocd, int(peid, int64), err)
+   end subroutine write_answer_proxy
+
+   !> Answer `qid` returned `rm`. Resolve each proxy export of its
+   !> pipeline to the cap the Return names (rpc.c++
+   !> resolveExportedPromise), and let calls on it reach that cap.
+   recursive subroutine settle_answer_proxies(conn, qid, rm, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(capnp_message_t), intent(inout) :: rm
+      integer, intent(inout) :: err
+      type(rpc_answer_slot_t), pointer :: slot
+      type(rpc_import_node_t), pointer :: node
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(resolve_t) :: rv
+      type(exception_t) :: ex
+      type(cap_descriptor_t) :: cd
+      type(promised_answer_t) :: opa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer, allocatable :: qops(:)
+      character(len=:), allocatable :: why
+      class(*), pointer :: srv
+      integer(int64) :: id
+      integer :: i, k, kind, e, peid
+      logical :: found, sfound, own
+      if (.not. allocated(conn%exports)) return
+      call answer_find(conn, qid, slot, sfound)
+      if (sfound) sfound = associated(slot)
+      do i = 0, size(conn%exports) - 1
+         if (conn%dead .or. .not. associated(conn%transport)) return
+         if (.not. conn%exports(i)%used) cycle
+         select type (px => conn%exports(i)%srv)
+         type is (rpc_pipe_proxy_t)
+            if (px%aqid /= qid) cycle
+            px%aqid = -1_int64
+            px%settled = .true.
+            e = CAPNP_OK
+            call proxy_cap_kind(kind, id, why, qops, e)
+            call capnp_message_init_builder(m, e)
+            if (e == CAPNP_OK) msg = message_new_root(m, e)
+            if (e == CAPNP_OK) rv = message_resolve_init(msg, e)
+            if (e == CAPNP_OK) call resolve_promise_id_set(rv, int(i, int64), e)
+            if (e == CAPNP_OK .and. kind == PIPE_BROKEN .and. why /= 'Called null capability.') then
+               px%reason = why
+               ex = resolve_exception_init(rv, e)
+               if (e == CAPNP_OK) call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+               if (e == CAPNP_OK) call exception_reason_set(ex, why, e)
+            else if (e == CAPNP_OK) then
+               cd = resolve_cap_init(rv, e)
+               select case (kind)
+               case (PIPE_BROKEN)
+                  px%reason = why
+                  block
+                     type(rpc_pipe_proxy_t), pointer :: nul
+                     allocate (nul)
+                     nul%settled = .true.
+                     nul%reason = why
+                     srv => nul
+                     peid = export_server(conn, srv, owned=.true.)
+                     if (peid < 0) then
+                        deallocate (nul)
+                        e = CAPNP_ERR_ALLOC
+                     else if (e == CAPNP_OK) then
+                        call cap_descriptor_sender_hosted_set(cd, int(peid, int64), e)
+                     end if
+                  end block
+               case (PIPE_EXPORT)
+                  if (sfound) id = int(pipeline_export(slot, int(id)), int64)
+                  peid = -1
+                  if (eslot_ok(conn, id)) then
+                     if (conn%exports(int(id))%used) then
+                        if (conn%exports(int(id))%refcount > 0) then
+                           conn%exports(int(id))%refcount = conn%exports(int(id))%refcount + 1
+                           peid = int(id)
+                        else
+                           srv => conn%exports(int(id))%srv
+                           own = conn%exports(int(id))%owned
+                           if (own) call share_export_owner(conn%exports(int(id)))
+                           peid = export_server(conn, srv, owned=own)
+                           if (own .and. peid >= 0) call share_export_owner(conn%exports(peid))
+                        end if
+                     end if
+                  end if
+                  if (peid >= 0) then
+                     call cap_descriptor_sender_hosted_set(cd, int(peid, int64), e)
+                     call pin_export(conn, peid)
+                     px%eid = peid
+                  else
+                     call cap_descriptor_none_set(cd, e)
+                  end if
+               case (PIPE_IMPORT)
+                  call cap_descriptor_receiver_hosted_set(cd, id, e)
+                  call import_find_live(conn, id, node, found)
+                  if (found) then
+                     node%holds = node%holds + 1
+                     px%import = node%id
+                  end if
+               case (PIPE_QUESTION)
+                  if (.not. allocated(qops)) allocate (qops(0))
+                  opa = cap_descriptor_receiver_answer_init(cd, e)
+                  if (e == CAPNP_OK) call promised_answer_question_id_set(opa, id, e)
+                  if (e == CAPNP_OK) &
+                     ops = promised_answer_transform_init(opa, int(size(qops), int64), e)
+                  do k = 1, size(qops)
+                     if (e /= CAPNP_OK) exit
+                     op%p = capnp_list_get_struct(ops, k - 1, e)
+                     if (e /= CAPNP_OK) exit
+                     if (qops(k) < 0) then
+                        call promised_answer_op_noop_set(op, e)
+                     else
+                        call promised_answer_op_get_pointer_field_set(op, qops(k), e)
+                     end if
+                  end do
+                  px%qid = id
+                  px%ops = qops
+                  px%settled = .false.
+               end select
+            end if
+            if (e == CAPNP_OK) call rpc_send_message(conn%transport, m, e)
+            call capnp_message_free(m)
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+            if (px%settled) call ready_proxy_loopbacks(conn, i)
+         end select
+      end do
+   contains
+      subroutine proxy_cap_kind(kind, id, why, qops, e)
+         integer, intent(out) :: kind
+         integer(int64), intent(out) :: id
+         character(len=:), allocatable, intent(out) :: why
+         integer, allocatable, intent(out) :: qops(:)
+         integer, intent(inout) :: e
+         select type (px => conn%exports(i)%srv)
+         type is (rpc_pipe_proxy_t)
+            call answer_pipeline_cap(conn, rm, px%ops, kind, id, why, e, deferred=.true., &
+                                     qops=qops)
+         end select
+         if (e /= CAPNP_OK) then
+            kind = PIPE_BROKEN
+            if (.not. allocated(why)) why = 'no such capability'
+            e = CAPNP_OK
+         end if
+      end subroutine proxy_cap_kind
+   end subroutine settle_answer_proxies
 
    !> Dispatch an incoming Call to export `eid` and answer it, or answer
    !> it with `reason` when the target did not resolve.
@@ -5946,12 +6155,14 @@ contains
 
    !> Keep a Call made on the pipeline of answer `aqid`, which is still
    !> running, until that answer's Return is built.
-   subroutine enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err)
+   subroutine enqueue_incoming_pipeline(conn, m, qid, aqid, spill, err, ops)
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: m
       integer(int64), intent(in) :: qid, aqid
       integer(int64), allocatable, intent(inout) :: spill(:)
       integer, intent(out) :: err
+      !> The pipeline ops, when the call targets an answer proxy.
+      integer, intent(in), optional :: ops(:)
       type(rpc_incoming_wait_t), pointer :: node, tail
       integer(int8), allocatable :: bytes(:)
       type(message_t) :: qmsg
@@ -5960,6 +6171,10 @@ contains
       allocate (node)
       node%answer_qid = aqid
       node%call_qid = qid
+      if (present(ops)) then
+         node%by_ops = .true.
+         node%ops = ops
+      end if
       call capnp_serialize_bytes(m, bytes, err)
       if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
       if (err /= CAPNP_OK) then
@@ -6035,21 +6250,25 @@ contains
          if (err == CAPNP_OK .and. .not. conn%dead) then
             msg = message_read_root(node%msg, e)
             if (e == CAPNP_OK) c = message_call_get(msg, e)
-            if (e == CAPNP_OK) tgt = call_target_get(c, e)
-            if (e == CAPNP_OK) pa = message_target_promised_answer_get(tgt, e)
-            if (e == CAPNP_OK) ops = promised_answer_transform_get(pa, e)
-            if (e == CAPNP_OK) then
-               if (allocated(fields)) deallocate (fields)
-               allocate (fields(int(capnp_list_len(ops))))
-               do i = 0, size(fields) - 1
-                  op%p = capnp_list_get_struct(ops, i, e)
-                  fields(i + 1) = -1
-                  if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
-                     fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
-               end do
-               call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, &
-                                        deferred=.true., qops=qops)
+            if (node%by_ops) then
+               fields = node%ops
+            else
+               if (e == CAPNP_OK) tgt = call_target_get(c, e)
+               if (e == CAPNP_OK) pa = message_target_promised_answer_get(tgt, e)
+               if (e == CAPNP_OK) ops = promised_answer_transform_get(pa, e)
+               if (e == CAPNP_OK) then
+                  if (allocated(fields)) deallocate (fields)
+                  allocate (fields(int(capnp_list_len(ops))))
+                  do i = 0, size(fields) - 1
+                     op%p = capnp_list_get_struct(ops, i, e)
+                     fields(i + 1) = -1
+                     if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+                        fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
+                  end do
+               end if
             end if
+            if (e == CAPNP_OK) call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, &
+                                                        deferred=.true., qops=qops)
             cfound = .false.
             if (e == CAPNP_OK .and. (kind == PIPE_IMPORT .or. kind == PIPE_QUESTION)) then
                call answer_find(conn, node%call_qid, cslot, cfound)
@@ -6238,6 +6457,108 @@ contains
       tail%next => node
    end subroutine append_loopback_wait
 
+   !> Keep a senderLoopback Disembargo on proxy export `eid` of an answer
+   !> still running until that answer returns (rpc.c++ handleDisembargo
+   !> whenResolved).
+   subroutine wait_proxy_loopback(conn, eid, tgt, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(in) :: eid
+      type(message_target_t), intent(in) :: tgt
+      integer, intent(out) :: err
+      type(rpc_incoming_wait_t), pointer :: node
+      integer(int8), allocatable :: bytes(:)
+      allocate (node)
+      node%proxy_eid = eid
+      call capnp_serialize_bytes(tgt%p%msg, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      if (err /= CAPNP_OK) then
+         deallocate (node)
+         return
+      end if
+      call append_loopback_wait(conn, node)
+   end subroutine wait_proxy_loopback
+
+   !> Proxy export `eid` settled, so the Disembargoes on it can run.
+   subroutine ready_proxy_loopbacks(conn, eid)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer, intent(in) :: eid
+      type(rpc_incoming_wait_t), pointer :: node
+      node => conn%loopback_wait
+      do while (associated(node))
+         if (node%proxy_eid == eid) node%idle = .true.
+         node => node%next
+      end do
+   end subroutine ready_proxy_loopbacks
+
+   !> Once no message is left to read, check each Disembargo whose proxy
+   !> settled, as C++ does after evalLast. An import is echoed, a broken
+   !> cap fails with its exception, and any other cap does not point back.
+   subroutine run_idle_loopbacks(conn, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer, intent(out) :: err
+      type(rpc_incoming_wait_t), pointer :: node, prev, nxt
+      type(rpc_import_node_t), pointer :: inode
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      character(len=:), allocatable :: why
+      logical :: readable, found
+      integer :: e
+      err = CAPNP_OK
+      node => conn%loopback_wait
+      do while (associated(node))
+         if (node%idle) exit
+         node => node%next
+      end do
+      if (.not. associated(node) .or. .not. associated(conn%transport)) return
+      call conn%transport%poll_in(0, readable, err)
+      if (err /= CAPNP_OK .or. readable) return
+      prev => null()
+      node => conn%loopback_wait
+      do while (associated(node))
+         nxt => node%next
+         if (.not. node%idle) then
+            prev => node
+            node => nxt
+            cycle
+         end if
+         if (associated(prev)) then
+            prev%next => nxt
+         else
+            conn%loopback_wait => nxt
+         end if
+         if (.not. conn%dead) then
+            why = "'Disembargo' of type 'senderLoopback' sent to an " // &
+                  "object that does not point back to the sender."
+            found = .false.
+            e = CAPNP_OK
+            msg = message_read_root(node%msg, e)
+            if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
+            if (e == CAPNP_OK .and. eslot_ok(conn, int(node%proxy_eid, int64))) then
+               select type (px => conn%exports(node%proxy_eid)%srv)
+               type is (rpc_pipe_proxy_t)
+                  if (px%import >= 0_int64) call import_find(conn, px%import, inode, found)
+                  if (.not. found .and. px%eid < 0 .and. allocated(px%reason)) then
+                     if (px%reason /= 'Called null capability.') why = px%reason
+                  end if
+               end select
+            end if
+            if (e == CAPNP_OK) then
+               if (found) then
+                  call send_receiver_loopback_import(conn, &
+                                                     disembargo_context_sender_loopback_get(d), &
+                                                     inode%wire_id, e)
+               else
+                  call abort_conn(conn, why, e)
+               end if
+            end if
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         end if
+         call capnp_message_free(node%msg)
+         deallocate (node)
+         node => nxt
+      end do
+   end subroutine run_idle_loopbacks
+
    !> Our import `wire` is a promise the peer has not resolved.
    logical function import_promise_pending(conn, wire) result(pending)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -6423,7 +6744,11 @@ contains
             select type (px => conn%exports(out_eid)%srv)
             type is (rpc_pipe_proxy_t)
                out_eid = -1
-               if (px%eid >= 0) then
+               if (px%aqid >= 0_int64) then
+                  if (present(pending_qid)) pending_qid = px%aqid
+                  if (present(fwd_kind)) fwd_kind = PIPE_ANSWER
+                  if (present(fwd_ops)) fwd_ops = px%ops
+               else if (px%eid >= 0) then
                   if (eslot_ok(conn, int(px%eid, int64))) then
                      if (conn%exports(px%eid)%used) out_eid = px%eid
                   end if
@@ -7627,6 +7952,7 @@ contains
          if (present(pids)) call drop_param_holds(conn, pids, perr)
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+         call settle_answer_proxies(conn, qid, rm, err)
          ! Calls queued on this answer took its pipeline before the
          ! Finish, so they still reach its caps (rpc.c++ QueuedPipeline).
          call drain_incoming_pipeline(conn, qid, rm, err)
@@ -7722,6 +8048,7 @@ contains
          call settle_answer_promises(conn, qid, rm, err)
          call answer_slot_clear(slot)
          if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+         if (err == CAPNP_OK) call settle_answer_proxies(conn, qid, rm, err)
          if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
          call capnp_message_free(rm)
          if (.not. replay_later_ .and. err == CAPNP_OK) call replay_answer_loopbacks(conn, qid, err)
@@ -7744,6 +8071,7 @@ contains
          ! the export id does not remove that reference.
          call pin_answer_exports(conn, slot)
          if (err == CAPNP_OK) call settle_answer_promises(conn, qid, rm, err)
+         if (err == CAPNP_OK) call settle_answer_proxies(conn, qid, rm, err)
          if (err == CAPNP_OK) call drain_incoming_pipeline(conn, qid, rm, err)
       end if
       call capnp_message_free(rm)
@@ -9055,6 +9383,35 @@ contains
                call abort_conn(conn, 'Message target is not a current export ID.', err)
                return
             end if
+            ! A proxy export reaches the cap it resolved to: an import is
+            ! echoed, and a broken cap fails the Disembargo task with its
+            ! exception (rpc.c++ handleDisembargo whenResolved). A null
+            ! cap is already resolved, so it fails the brand check. A
+            ! proxy of an answer still running waits for its Return.
+            select type (px => conn%exports(int(eid))%srv)
+            type is (rpc_pipe_proxy_t)
+               if (px%aqid >= 0_int64) then
+                  call wait_proxy_loopback(conn, int(eid), tgt, err)
+                  return
+               end if
+               if (px%aqid < 0_int64 .and. px%import >= 0_int64) then
+                  block
+                     type(rpc_import_node_t), pointer :: inode
+                     logical :: ifound
+                     call import_find(conn, px%import, inode, ifound)
+                     if (ifound) then
+                        call send_receiver_loopback_import(conn, embargo_id, inode%wire_id, err)
+                        return
+                     end if
+                  end block
+               else if (px%aqid < 0_int64 .and. px%settled .and. px%eid < 0 .and. &
+                        allocated(px%reason)) then
+                  if (px%reason /= 'Called null capability.') then
+                     call abort_conn(conn, px%reason, err)
+                     return
+                  end if
+               end if
+            end select
          end block
          call abort_conn(conn, &
                          "'Disembargo' of type 'senderLoopback' sent to an " // &
