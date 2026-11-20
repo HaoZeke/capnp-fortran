@@ -1747,13 +1747,14 @@ contains
             mn = snake(mn)
             call method_types(mp, pn, rn, err)
             if (err /= CAPNP_OK) return
-            call w('      subroutine '//tn//'_'//mn//'_ifc(self, params, results, err)')
+            call w('      subroutine '//tn//'_'//mn//'_ifc(self, ctx, params, results, err)')
             if (pn == rn) then
-               call w('         import :: '//tn//'_server_t, '//pn//'_t')
+               call w('         import :: '//tn//'_server_t, rpc_call_ctx_t, '//pn//'_t')
             else
-               call w('         import :: '//tn//'_server_t, '//pn//'_t, '//rn//'_t')
+               call w('         import :: '//tn//'_server_t, rpc_call_ctx_t, '//pn//'_t, '//rn//'_t')
             end if
             call w('         class('//tn//'_server_t), intent(inout) :: self')
+            call w('         type(rpc_call_ctx_t), intent(inout) :: ctx')
             call w('         type('//pn//'_t), intent(in) :: params')
             call w('         type('//rn//'_t), intent(in) :: results')
             call w('         integer, intent(out) :: err')
@@ -1842,7 +1843,7 @@ contains
          call w('            results%p = capnp_new_struct(ctx%rmsg, '//upcase(rn)// &
                 '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
-         call w('            call self%'//mn//'(params, results, err)')
+         call w('            call self%'//mn//'(ctx, params, results, err)')
          call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')
          call w('         end block')
       end do
