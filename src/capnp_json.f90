@@ -1004,7 +1004,7 @@ contains
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
                call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, &
-                                    depth + 1, clear_prev, err)
+                                    depth, clear_prev, err)
                if (err /= CAPNP_OK) return
             else
                raw_t = field_slot_type(f, err)
@@ -1343,7 +1343,7 @@ contains
             call read_disc_opts(al, gdisc, err)
             if (err /= CAPNP_OK) return
             call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, one, &
-                                 depth + 1, clear_prev, err, nested_deferred)
+                                 depth, clear_prev, err, nested_deferred)
             if (err == CAPNP_OK .and. nested_deferred) defer = .true.
             return
          end if

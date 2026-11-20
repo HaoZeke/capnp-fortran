@@ -18,7 +18,8 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       testsuite = [ &
          new_unittest("json-audit-depth", run_json_audit_depth), &
-         new_unittest("group-encode-depth", run_group_encode_depth) &
+         new_unittest("group-encode-depth", run_group_encode_depth), &
+         new_unittest("json-flat-depth", run_json_flat_depth) &
          ]
    end subroutine collect_limits
 
@@ -188,5 +189,51 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_group_encode_depth
+
+   !> Flattened groups do not consume JSON container depth.
+   subroutine run_json_flat_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t) :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: src, out, num
+      character(len=8) :: buf
+      integer :: err, idx, i, n
+      n = 70
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      src = '@0x9c8b7a6f5e4d3c2b;'//achar(10)// &
+            'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+            'struct DeepFlat {'//achar(10)
+      do i = 0, n - 1
+         write (buf, '(i0)') i
+         num = trim(buf)
+         src = src//'  g'//num//' :group $Json.flatten() {'//achar(10)
+      end do
+      src = src//'  v @0 :UInt32;'//achar(10)
+      do i = 1, n
+         src = src//'}'//achar(10)
+      end do
+      src = src//'}'//achar(10)
+      call load_src(error, schema, src, 'flat.capnp', 'flat')
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'DeepFlat', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'flat schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      call capnp_json_decode(schema, idx, '{"v":7}', msg, err)
+      call check_(error, err == CAPNP_OK, 'flat json decode')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         call capnp_json_encode(schema, idx, root, out, err, pretty=.false.)
+         call check_(error, err == CAPNP_OK .and. index(out, '"v":7') > 0, 'flat json value')
+      end if
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_json_flat_depth
 
 end module test_limits
