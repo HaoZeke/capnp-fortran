@@ -2,7 +2,8 @@
 !>
 !> Float text matches KJ's DoubleToBuffer / FloatToBuffer (snprintf %.*g,
 !> then one extra retry, then the redundant exponent '+' stripped). Integer
-!> text is plain decimal. Data and Text escapes match kj::encodeCEscape.
+!> text is plain decimal, hex, or (for Cap'n Proto text literals) octal.
+!> Data and Text escapes match kj::encodeCEscape / kj::decodeCEscape.
 module capnp_codec
    use, intrinsic :: iso_c_binding, only: c_char, c_double, c_float, &
       c_loc, c_null_char, c_ptr, c_associated
@@ -232,115 +233,122 @@ contains
    subroutine capnp_cescape_text(str, out)
       character(len=*), intent(in) :: str
       character(len=:), allocatable, intent(out) :: out
-      integer :: i
-      out = ''
+      character(len=:), allocatable :: buf
+      integer :: i, m
+      if (len(str) == 0) then
+         out = ''
+         return
+      end if
+      allocate (character(len=len(str)*4) :: buf)
+      m = 0
       do i = 1, len(str)
-         call escape_byte(iachar(str(i:i)), .false., out)
+         call escape_byte(iachar(str(i:i)), .false., buf, m)
       end do
+      out = buf(1:m)
    end subroutine capnp_cescape_text
 
    subroutine capnp_cescape_data(bytes, out)
       integer(int8), intent(in) :: bytes(:)
       character(len=:), allocatable, intent(out) :: out
-      integer :: i
-      out = ''
+      character(len=:), allocatable :: buf
+      integer :: i, m
+      if (size(bytes) == 0) then
+         out = ''
+         return
+      end if
+      allocate (character(len=size(bytes)*4) :: buf)
+      m = 0
       do i = 1, size(bytes)
-         call escape_byte(capnp_u_of_i8(bytes(i)), .true., out)
+         call escape_byte(capnp_u_of_i8(bytes(i)), .true., buf, m)
       end do
+      out = buf(1:m)
    end subroutine capnp_cescape_data
 
-   !> Decode C-style escapes (octal, hex, and \\u/\\U) into a byte string.
+   !> Decode C-style escapes (1-3 octal digits and \xHH) into a byte string.
    subroutine capnp_cunescape(src, out, err)
       character(len=*), intent(in) :: src
       character(len=:), allocatable, intent(out) :: out
       integer, intent(out) :: err
-      integer :: i, n, d, cp, nhex, v
+      character(len=:), allocatable :: buf
+      integer :: i, n, m, d, d2, noct, v
       err = CAPNP_OK
-      out = ''
       n = len(src)
+      if (n == 0) then
+         out = ''
+         return
+      end if
+      allocate (character(len=n) :: buf)
+      m = 0
       i = 1
       do while (i <= n)
          if (src(i:i) /= '\') then
-            out = out//src(i:i)
+            m = m + 1
+            buf(m:m) = src(i:i)
             i = i + 1
             cycle
          end if
          i = i + 1
          if (i > n) then
             err = CAPNP_ERR_ARG
+            out = ''
             return
          end if
          select case (src(i:i))
-         case ('a'); out = out//achar(7)
-         case ('b'); out = out//achar(8)
-         case ('f'); out = out//achar(12)
-         case ('n'); out = out//achar(10)
-         case ('r'); out = out//achar(13)
-         case ('t'); out = out//achar(9)
-         case ('v'); out = out//achar(11)
-         case ("'"); out = out//"'"
-         case ('"'); out = out//'"'
-         case ('\'); out = out//'\'
+         case ('a'); m = m + 1; buf(m:m) = achar(7)
+         case ('b'); m = m + 1; buf(m:m) = achar(8)
+         case ('f'); m = m + 1; buf(m:m) = achar(12)
+         case ('n'); m = m + 1; buf(m:m) = achar(10)
+         case ('r'); m = m + 1; buf(m:m) = achar(13)
+         case ('t'); m = m + 1; buf(m:m) = achar(9)
+         case ('v'); m = m + 1; buf(m:m) = achar(11)
+         case ("'"); m = m + 1; buf(m:m) = "'"
+         case ('"'); m = m + 1; buf(m:m) = '"'
+         case ('?'); m = m + 1; buf(m:m) = '?'
+         case ('\'); m = m + 1; buf(m:m) = '\'
          case ('0':'7')
             v = iachar(src(i:i)) - iachar('0')
             i = i + 1
-            nhex = 0
-            do while (nhex < 2 .and. i <= n)
+            noct = 0
+            do while (noct < 2 .and. i <= n)
                d = oct_digit(src(i:i))
                if (d < 0) exit
                v = v*8 + d
                i = i + 1
-               nhex = nhex + 1
+               noct = noct + 1
             end do
             if (v > 255) then
                err = CAPNP_ERR_ARG
+               out = ''
                return
             end if
-            out = out//achar(v)
+            m = m + 1
+            buf(m:m) = achar(v)
             cycle
          case ('x')
-            i = i + 1
-            v = 0
-            nhex = 0
-            do while (i <= n)
-               d = hex_digit(src(i:i))
-               if (d < 0) exit
-               v = v*16 + d
-               i = i + 1
-               nhex = nhex + 1
-            end do
-            if (nhex == 0 .or. v > 255) then
+            if (i + 2 > n) then
                err = CAPNP_ERR_ARG
+               out = ''
                return
             end if
-            out = out//achar(v)
-            cycle
-         case ('u', 'U')
-            nhex = 4
-            if (src(i:i) == 'U') nhex = 8
-            i = i + 1
-            cp = 0
-            if (i + nhex - 1 > n) then
+            d = hex_digit(src(i + 1:i + 1))
+            d2 = hex_digit(src(i + 2:i + 2))
+            if (d < 0 .or. d2 < 0) then
                err = CAPNP_ERR_ARG
+               out = ''
                return
             end if
-            do d = 1, nhex
-               v = hex_digit(src(i:i))
-               if (v < 0) then
-                  err = CAPNP_ERR_ARG
-                  return
-               end if
-               cp = cp*16 + v
-               i = i + 1
-            end do
-            call append_cp(out, cp, err)
-            if (err /= CAPNP_OK) return
+            m = m + 1
+            buf(m:m) = achar(d*16 + d2)
+            i = i + 3
             cycle
          case default
-            out = out//src(i:i)
+            err = CAPNP_ERR_ARG
+            out = ''
+            return
          end select
          i = i + 1
       end do
+      out = buf(1:m)
    end subroutine capnp_cunescape
 
    pure function capnp_as_i8(u) result(v)
@@ -460,7 +468,6 @@ contains
          end if
       end if
    end subroutine fmt_g
-
 
    pure function neg_bit64(x) result(y)
       real(real64), intent(in) :: x
@@ -598,61 +605,37 @@ contains
       end do
    end subroutine parse_u64_body
 
-   subroutine escape_byte(ub0, binary, out)
+   subroutine escape_byte(ub0, binary, buf, m)
       integer, intent(in) :: ub0
       logical, intent(in) :: binary
-      character(len=:), allocatable, intent(inout) :: out
+      character(len=*), intent(inout) :: buf
+      integer, intent(inout) :: m
       integer :: ub
-      character(len=1) :: d1, d2, d3
       ub = iand(ub0, 255)
       select case (ub)
-      case (7); out = out//'\a'
-      case (8); out = out//'\b'
-      case (12); out = out//'\f'
-      case (10); out = out//'\n'
-      case (13); out = out//'\r'
-      case (9); out = out//'\t'
-      case (11); out = out//'\v'
-      case (39); out = out//"\'"
-      case (34); out = out//'\"'
-      case (92); out = out//'\\'
+      case (7); buf(m + 1:m + 2) = '\a'; m = m + 2
+      case (8); buf(m + 1:m + 2) = '\b'; m = m + 2
+      case (12); buf(m + 1:m + 2) = '\f'; m = m + 2
+      case (10); buf(m + 1:m + 2) = '\n'; m = m + 2
+      case (13); buf(m + 1:m + 2) = '\r'; m = m + 2
+      case (9); buf(m + 1:m + 2) = '\t'; m = m + 2
+      case (11); buf(m + 1:m + 2) = '\v'; m = m + 2
+      case (39); buf(m + 1:m + 2) = "\'"; m = m + 2
+      case (34); buf(m + 1:m + 2) = '\"'; m = m + 2
+      case (92); buf(m + 1:m + 2) = '\\'; m = m + 2
       case default
          if (ub < 32 .or. ub == 127 .or. (binary .and. ub > 127)) then
-            d1 = achar(iachar('0') + ub/64)
-            d2 = achar(iachar('0') + mod(ub/8, 8))
-            d3 = achar(iachar('0') + mod(ub, 8))
-            out = out//'\'//d1//d2//d3
+            buf(m + 1:m + 1) = '\'
+            buf(m + 2:m + 2) = achar(iachar('0') + ub/64)
+            buf(m + 3:m + 3) = achar(iachar('0') + mod(ub/8, 8))
+            buf(m + 4:m + 4) = achar(iachar('0') + mod(ub, 8))
+            m = m + 4
          else
-            out = out//achar(ub)
+            m = m + 1
+            buf(m:m) = achar(ub)
          end if
       end select
    end subroutine escape_byte
-
-   subroutine append_cp(out, cp, err)
-      character(len=:), allocatable, intent(inout) :: out
-      integer, intent(in) :: cp
-      integer, intent(inout) :: err
-      integer :: c
-      if (err /= CAPNP_OK) return
-      c = cp
-      if (c < 0) then
-         err = CAPNP_ERR_ARG
-         return
-      else if (c <= 127) then
-         out = out//achar(c)
-      else if (c <= 2047) then
-         out = out//achar(ior(192, ishft(c, -6)))//achar(ior(128, iand(c, 63)))
-      else if (c <= 65535) then
-         out = out//achar(ior(224, ishft(c, -12)))// &
-               achar(ior(128, iand(ishft(c, -6), 63)))//achar(ior(128, iand(c, 63)))
-      else if (c <= 1114111) then
-         out = out//achar(ior(240, ishft(c, -18)))// &
-               achar(ior(128, iand(ishft(c, -12), 63)))// &
-               achar(ior(128, iand(ishft(c, -6), 63)))//achar(ior(128, iand(c, 63)))
-      else
-         err = CAPNP_ERR_ARG
-      end if
-   end subroutine append_cp
 
    pure function dec_digit(c) result(d)
       character(len=1), intent(in) :: c

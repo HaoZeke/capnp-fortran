@@ -8,6 +8,7 @@ program test_fixgate
    call case_fmt()
    call case_f32()
    call case_oct()
+   call case_esc()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -37,5 +38,15 @@ contains
       call capnp_parse_i64("010", v, err, allow_octal=.true.)
       if (err /= 0 .or. v /= 8_int64) call bad()
    end subroutine case_oct
+
+
+   subroutine case_esc()
+      character(len=:), allocatable :: out
+      integer :: err
+      call capnp_cunescape("\q", out, err)
+      if (err == 0) call bad()
+      call capnp_cunescape("\x41", out, err)
+      if (err /= 0 .or. out /= "A") call bad()
+   end subroutine case_esc
 
 end program
