@@ -5638,7 +5638,7 @@ contains
       integer(int64) :: qid
       integer :: i, k, eid, jerr
       type(rpc_answer_slot_t), pointer :: jslot
-      logical :: jfound
+      logical :: jfound, gone
       f = message_finish_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
@@ -5679,10 +5679,19 @@ contains
          jslot%finished = .true.
          return
       end if
+      gone = .false.
       if (finish_release_result_caps_get(f)) then
          do i = 0, jslot%nexp - 1
             eid = jslot%exports(i)
-            if (eid >= 0 .and. eid < MAXE) call drop_export(conn, eid, 1)
+            if (eid < 0 .or. eid >= MAXE) cycle
+            ! A peer Release that took the refcount to zero removed
+            ! the export from the C++ table; only the pipeline pin is
+            ! left here, and it is not a wire reference.
+            if (.not. conn%exports(eid)%used .or. conn%exports(eid)%refcount <= 0) then
+               gone = .true.
+               exit
+            end if
+            call drop_export(conn, eid, 1)
          end do
       end if
       ! Finish always drops the pipeline reference, including when
@@ -5691,6 +5700,7 @@ contains
       call capnp_message_free(jslot%retmsg)
       call answer_slot_clear(jslot)
       if (qid >= int(MAXQ, int64)) call answer_drop_hi(conn, qid)
+      if (gone) call abort_conn(conn, 'Tried to release invalid export ID.', err)
    end subroutine handle_finish
 
    subroutine handle_release(conn, msg, err)

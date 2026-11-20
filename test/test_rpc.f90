@@ -125,7 +125,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(107))
+      allocate (testsuite(108))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -328,18 +328,20 @@ contains
       testsuite(100)%test => w_resolve_receiver_answer_exception
       testsuite(101)%name = "rpc-resolve-receiver-answer-bad-cap-index"
       testsuite(101)%test => w_resolve_receiver_answer_bad_cap_index
-      testsuite(102)%name = "posix-recv-eintr-retried"
-      testsuite(102)%test => t_recv_all_retries_eintr
-      testsuite(103)%name = "rpc-framing-511-accepted"
-      testsuite(103)%test => t_framing_511_accepted
-      testsuite(104)%name = "rpc-framing-512-rejected"
-      testsuite(104)%test => t_framing_512_rejected
-      testsuite(105)%name = "rpc-framing-oversized-rejected"
-      testsuite(105)%test => t_framing_oversized_rejected
-      testsuite(106)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(106)%test => t_framing_negative_traversal_rejected
-      testsuite(107)%name = "rpc-framing-short-and-padded"
-      testsuite(107)%test => t_framing_short_and_padded
+      testsuite(102)%name = "rpc-finish-released-result-export"
+      testsuite(102)%test => w_finish_released_result_export
+      testsuite(103)%name = "posix-recv-eintr-retried"
+      testsuite(103)%test => t_recv_all_retries_eintr
+      testsuite(104)%name = "rpc-framing-511-accepted"
+      testsuite(104)%test => t_framing_511_accepted
+      testsuite(105)%name = "rpc-framing-512-rejected"
+      testsuite(105)%test => t_framing_512_rejected
+      testsuite(106)%name = "rpc-framing-oversized-rejected"
+      testsuite(106)%test => t_framing_oversized_rejected
+      testsuite(107)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(107)%test => t_framing_negative_traversal_rejected
+      testsuite(108)%name = "rpc-framing-short-and-padded"
+      testsuite(108)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -626,6 +628,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_receiver_answer_bad_cap_index(error)
    end subroutine w_resolve_receiver_answer_bad_cap_index
+
+   subroutine w_finish_released_result_export(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_finish_released_result_export(error)
+   end subroutine w_finish_released_result_export
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8292,5 +8299,63 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_bad_cap_index
+
+   !> Send a raw Finish for `qid` from the peer socket of `sconn`.
+   subroutine raw_finish(cconn, sconn, qid, release)
+      type(rpc_conn_t), intent(inout), target :: cconn, sconn
+      integer(int64), intent(in) :: qid
+      logical, intent(in) :: release
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      integer :: e
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      f = message_finish_init(msg, e)
+      call finish_question_id_set(f, qid, e)
+      call finish_release_result_caps_set(f, release, e)
+      call finish_require_early_cancellation_workaround_set(f, .false., e)
+      call rpc_send_message(sconn%fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(cconn, e)
+   end subroutine raw_finish
+
+   !> Finish with releaseResultCaps releases each result export once
+   !> (rpc.c++ releaseExports). An export the peer already released to
+   !> zero is gone from the C++ table even though the answer pipeline
+   !> still refers to it, so that release aborts.
+   subroutine t_finish_released_result_export(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: peer_boot
+      integer(int64) :: qboot, qadder, eid
+      integer :: e
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call raw_finish(cconn, sconn, qadder, .true.)
+      call check_(error, rpc_conn_alive(cconn) .and. .not. cconn%answers(int(qadder))%used, &
+                  'finish: releasing live result exports is accepted')
+      if (.not. allocated(error)) then
+         peer_boot = rpc_cap_t()
+         peer_boot%kind = RPC_CAP_IMPORT
+         peer_boot%id = eid
+         call rpc_release_send(sconn, peer_boot, e)
+         call rpc_pump_once(cconn, e)
+         call check_(error, rpc_conn_alive(cconn) .and. cconn%exports(int(eid))%used .and. &
+                     cconn%exports(int(eid))%refcount == 0, &
+                     'finish: the answer pins the released export')
+      end if
+      if (.not. allocated(error)) then
+         call raw_finish(cconn, sconn, qboot, .true.)
+         call check_(error, .not. rpc_conn_alive(cconn) .and. &
+                     rpc_conn_reason(cconn) == 'Tried to release invalid export ID.', &
+                     'finish: releasing a released result export aborts')
+      end if
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_released_result_export
 
 end module test_rpc
