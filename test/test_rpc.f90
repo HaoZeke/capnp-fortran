@@ -35,6 +35,15 @@ module test_rpc
       procedure :: dispatch => many_caps_dispatch
    end type many_caps_srv_t
 
+   !> Answers any call with one capability: receiverAnswer(qid, [op]),
+   !> a pipeline on one of this vat's own questions.
+   type, extends(rpc_server_t) :: own_pipeline_srv_t
+      integer(int64) :: qid = 0_int64
+      integer :: op = 0
+   contains
+      procedure :: dispatch => own_pipeline_dispatch
+   end type own_pipeline_srv_t
+
    !> Answers any call with one capability: receiverHosted(peer_id),
    !> written by hand since no API puts an import in results.
    type, extends(rpc_server_t) :: peer_cap_srv_t
@@ -149,7 +158,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(121))
+      allocate (testsuite(122))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -380,18 +389,20 @@ contains
       testsuite(114)%test => w_twenty_caps_in_one_result
       testsuite(115)%name = "rpc-pipelined-call-to-import-is-forwarded"
       testsuite(115)%test => w_pipelined_call_to_import_is_forwarded
-      testsuite(116)%name = "posix-recv-eintr-retried"
-      testsuite(116)%test => t_recv_all_retries_eintr
-      testsuite(117)%name = "rpc-framing-511-accepted"
-      testsuite(117)%test => t_framing_511_accepted
-      testsuite(118)%name = "rpc-framing-512-rejected"
-      testsuite(118)%test => t_framing_512_rejected
-      testsuite(119)%name = "rpc-framing-oversized-rejected"
-      testsuite(119)%test => t_framing_oversized_rejected
-      testsuite(120)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(120)%test => t_framing_negative_traversal_rejected
-      testsuite(121)%name = "rpc-framing-short-and-padded"
-      testsuite(121)%test => t_framing_short_and_padded
+      testsuite(116)%name = "rpc-resolve-to-own-receiver-answer"
+      testsuite(116)%test => w_resolve_to_own_receiver_answer
+      testsuite(117)%name = "posix-recv-eintr-retried"
+      testsuite(117)%test => t_recv_all_retries_eintr
+      testsuite(118)%name = "rpc-framing-511-accepted"
+      testsuite(118)%test => t_framing_511_accepted
+      testsuite(119)%name = "rpc-framing-512-rejected"
+      testsuite(119)%test => t_framing_512_rejected
+      testsuite(120)%name = "rpc-framing-oversized-rejected"
+      testsuite(120)%test => t_framing_oversized_rejected
+      testsuite(121)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(121)%test => t_framing_negative_traversal_rejected
+      testsuite(122)%name = "rpc-framing-short-and-padded"
+      testsuite(122)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -475,6 +486,26 @@ contains
       end do
       call payload_content_set(ctx%results, s, err)
    end subroutine many_caps_dispatch
+
+   subroutine own_pipeline_dispatch(self, ctx, err)
+      class(own_pipeline_srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: s, ctab, ops
+      type(cap_descriptor_t) :: cd
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+      if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+      if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+      if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+      if (err == CAPNP_OK) pa = cap_descriptor_receiver_answer_init(cd, err)
+      if (err == CAPNP_OK) call promised_answer_question_id_set(pa, self%qid, err)
+      if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, 1_int64, err)
+      if (err == CAPNP_OK) op%p = capnp_list_get_struct(ops, 0, err)
+      if (err == CAPNP_OK) call promised_answer_op_get_pointer_field_set(op, self%op, err)
+   end subroutine own_pipeline_dispatch
 
    subroutine peer_cap_dispatch(self, ctx, err)
       class(peer_cap_srv_t), intent(inout) :: self
@@ -818,6 +849,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_pipelined_call_to_import_is_forwarded(error)
    end subroutine w_pipelined_call_to_import_is_forwarded
+
+   subroutine w_resolve_to_own_receiver_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_to_own_receiver_answer(error)
+   end subroutine w_resolve_to_own_receiver_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -9489,6 +9525,70 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_pipelined_call_to_import_is_forwarded
+
+   !> A promise resolved through our answer to receiverAnswer(q, ops) in
+   !> our own Return becomes the pipeline of our question q. It is
+   !> reflected like a receiverHosted entry, and once the embargo lifts
+   !> calls go to the peer as promisedAnswer(q, ops).
+   subroutine t_resolve_to_own_receiver_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(own_pipeline_srv_t), target :: local_pipe
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer(int64) :: qboot, qadder, eid, qc
+      integer :: e, n
+      logical :: released, disembargo, ok, pipelined
+
+      local_pipe%qid = 0_int64
+      local_pipe%op = 1
+      srv => local_pipe
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_called_promise(cconn, sconn, 4_int64, promised)
+      call check_(error, cconn%questions(0)%used, 'own receiverAnswer: question 0 is live')
+      if (allocated(error)) return
+      call ra_resolve(cconn, sconn, 4_int64, qadder, [0])
+      call ra_drain(sconn, 4_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. released .and. disembargo, &
+                  'own receiverAnswer: the called promise is reflected')
+      if (allocated(error)) return
+      call ra_loopback(cconn, sconn, 4_int64, cconn%embargoes%id)
+      call pa_echo(cconn, promised, qc, e)
+      call check_(error, e == CAPNP_OK, 'own receiverAnswer: the promise takes calls')
+      if (allocated(error)) return
+      pipelined = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            if (call_question_id_get(c) == qc) then
+               tgt = call_target_get(c, e)
+               if (message_target_which(tgt) == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+                  pa = message_target_promised_answer_get(tgt, e)
+                  ops = promised_answer_transform_get(pa, e)
+                  if (promised_answer_question_id_get(pa) == 0_int64 .and. &
+                      capnp_list_len(ops) == 1_int64) then
+                     op%p = capnp_list_get_struct(ops, 0, e)
+                     pipelined = promised_answer_op_get_pointer_field_get(op) == 1
+                  end if
+               end if
+            end if
+         end if
+         call capnp_message_free(reply)
+         if (pipelined) exit
+      end do
+      call check_(error, pipelined, 'own receiverAnswer: calls pipeline on question 0')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_to_own_receiver_answer
 
    !> A promisedAnswer Call on an answer still running waits in the C++
    !> answer pipeline (QueuedPipeline) and then reads the Return: the

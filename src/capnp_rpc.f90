@@ -345,6 +345,9 @@ module capnp_rpc
       logical :: borrowed = .false.
       !> The embargo guards calls bound for that import, not a local cap.
       logical :: embargo_remote = .false.
+      !> With `borrowed`, forwards to the pipeline `answer_ops` of our
+      !> question `fwd_qid` instead of to an import.
+      integer(int64) :: fwd_qid = -1_int64
       character(len=:), allocatable :: reason
       type(rpc_import_node_t), pointer :: next => null()
    end type rpc_import_node_t
@@ -1411,7 +1414,11 @@ contains
                      call capnp_message_free(m)
                      return
                   else if (node%state == IMP_REMOTE .and. node%borrowed) then
-                     call retarget_call(conn, m, qid, node%resolved_id)
+                     if (node%fwd_qid >= 0_int64) then
+                        call retarget_call(conn, m, qid, node%id)
+                     else
+                        call retarget_call(conn, m, qid, node%resolved_id)
+                     end if
                   end if
                end if
             end if
@@ -3211,6 +3218,7 @@ contains
          if (.not. found) return
          select case (node%state)
          case (IMP_REMOTE)
+            if (node%fwd_qid >= 0_int64) return
             out_id = node%resolved_id
          case (IMP_BROKEN)
             broken = .true.
@@ -3723,6 +3731,10 @@ contains
             if (return_which(ar) == RETURN_EXCEPTION_TAG) then
                call return_exception_reason(ar, reason)
                active = .false.
+            else if (return_which(ar) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+               call resolve_answer_pipeline(conn, node, &
+                                            return_take_from_other_question_get(ar), fields, err)
+               return
             else
                active = return_which(ar) == RETURN_RESULTS_TAG
             end if
@@ -3778,6 +3790,15 @@ contains
                      call resolve_answer_import(conn, node, &
                                                 cap_descriptor_receiver_hosted_get(acd), err)
                      return
+                  case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+                     block
+                        integer(int64) :: rq
+                        integer, allocatable :: rops(:)
+                        call descriptor_pipeline(acd, rq, rops, err)
+                        if (err /= CAPNP_OK) return
+                        call resolve_answer_pipeline(conn, node, rq, rops, err)
+                     end block
+                     return
                   end select
                end if
             end if
@@ -3789,6 +3810,33 @@ contains
       node%state = IMP_BROKEN
       node%reason = reason
    end subroutine resolve_receiver_answer
+
+   !> The question and transform of a receiverAnswer descriptor.
+   subroutine descriptor_pipeline(cd, q, ops_out, err)
+      type(cap_descriptor_t), intent(in) :: cd
+      integer(int64), intent(out) :: q
+      integer, allocatable, intent(out) :: ops_out(:)
+      integer, intent(out) :: err
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer :: k
+      q = -1_int64
+      allocate (ops_out(0))
+      pa = cap_descriptor_receiver_answer_get(cd, err)
+      if (err == CAPNP_OK) ops = promised_answer_transform_get(pa, err)
+      if (err /= CAPNP_OK) return
+      q = promised_answer_question_id_get(pa)
+      deallocate (ops_out)
+      allocate (ops_out(int(capnp_list_len(ops))))
+      do k = 0, size(ops_out) - 1
+         op%p = capnp_list_get_struct(ops, k, err)
+         if (err /= CAPNP_OK) return
+         ops_out(k + 1) = -1
+         if (promised_answer_op_which(op) == PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG) &
+            ops_out(k + 1) = int(promised_answer_op_get_pointer_field_get(op))
+      end do
+   end subroutine descriptor_pipeline
 
    !> The reason of an exception Return. A pipelined capability on that
    !> answer breaks with it (rpc.c++ sendErrorReturn keeps the pipeline).
@@ -3832,7 +3880,21 @@ contains
       msg = message_read_root(rm, err)
       if (err == CAPNP_OK) ret = message_return_get(msg, err)
       if (err /= CAPNP_OK) return
-      broken_answer = return_which(ret) /= RETURN_RESULTS_TAG
+      broken_answer = return_which(ret) /= RETURN_RESULTS_TAG .and. &
+                      return_which(ret) /= RETURN_TAKE_FROM_OTHER_QUESTION_TAG
+      if (return_which(ret) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then
+         node => conn%imports
+         do while (associated(node))
+            if (node%state == IMP_ANSWER .and. node%answer_qid == qid) then
+               call settle_answer_pipeline(conn, node, return_take_from_other_question_get(ret), &
+                                           node%answer_ops)
+               call drain_answer_pipeline(conn, node%id, err)
+               if (err /= CAPNP_OK) return
+            end if
+            node => node%next
+         end do
+         return
+      end if
       if (broken_answer) then
          reason = "invalid 'receiverAnswer'"
          if (return_which(ret) == RETURN_EXCEPTION_TAG) call return_exception_reason(ret, reason)
@@ -3884,6 +3946,14 @@ contains
                      call settle_reflected(conn, node, cap_descriptor_sender_promise_get(cd))
                   case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
                      call settle_answer_import(conn, node, cap_descriptor_receiver_hosted_get(cd))
+                  case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
+                     block
+                        integer(int64) :: rq
+                        integer, allocatable :: rops(:)
+                        call descriptor_pipeline(cd, rq, rops, err)
+                        if (err /= CAPNP_OK) return
+                        call settle_answer_pipeline(conn, node, rq, rops)
+                     end block
                   case default
                      call break_answer_promise(node, "invalid 'receiverAnswer'")
                   end select
@@ -4012,6 +4082,93 @@ contains
       end do
    end subroutine settle_answer_import
 
+   !> A promise reached, through a returned local answer, a pipelined
+   !> capability of our question `q`. It is the peer's, behind the same
+   !> race blocker C++ puts on our own answer's caps (rpc.c++ 1614), so it
+   !> is reflected like a receiverHosted entry, and calls then go to the
+   !> peer as promisedAnswer(q, ops).
+   subroutine resolve_answer_pipeline(conn, node, q, ops, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      integer(int64), intent(in) :: q
+      integer, intent(in) :: ops(:)
+      integer, intent(out) :: err
+      type(rpc_embargo_node_t), pointer :: emb
+      logical :: held
+      err = CAPNP_OK
+      if (.not. live_question(conn, q)) then
+         call release_all_import(conn, node, err)
+         if (err /= CAPNP_OK) return
+         call break_answer_promise(node, "invalid 'receiverAnswer'")
+         return
+      end if
+      held = node%refs > 0 .and. .not. node%released
+      node%local_refs = merge(node%refs, 0, held)
+      call point_at_pipeline(node, q, ops)
+      if (held .and. node%received_call) then
+         allocate (emb)
+         emb%id = conn%next_embargo
+         conn%next_embargo = emb%id + 1_int64
+         emb%promise_id = node%id
+         emb%open = .true.
+         emb%next => conn%embargoes
+         conn%embargoes => emb
+         node%state = IMP_EMBARGO
+         node%embargo_remote = .true.
+         node%embargo_id = emb%id
+         call send_sender_loopback(conn, node%wire_id, emb%id, err)
+         if (err /= CAPNP_OK) return
+      end if
+      call release_all_import(conn, node, err)
+   end subroutine resolve_answer_pipeline
+
+   !> The pending-answer form of resolve_answer_pipeline.
+   subroutine settle_answer_pipeline(conn, node, q, ops)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_import_node_t), intent(inout), target :: node
+      integer(int64), intent(in) :: q
+      integer, intent(in) :: ops(:)
+      type(rpc_embargo_node_t), pointer :: emb
+      if (.not. live_question(conn, q)) then
+         call break_answer_promise(node, "invalid 'receiverAnswer'")
+         return
+      end if
+      call point_at_pipeline(node, q, ops)
+      if (node%embargo_id < 0_int64) return
+      emb => conn%embargoes
+      do while (associated(emb))
+         if (emb%id == node%embargo_id) then
+            if (emb%open) then
+               node%state = IMP_EMBARGO
+               node%embargo_remote = .true.
+            end if
+            return
+         end if
+         emb => emb%next
+      end do
+   end subroutine settle_answer_pipeline
+
+   subroutine point_at_pipeline(node, q, ops)
+      type(rpc_import_node_t), intent(inout) :: node
+      integer(int64), intent(in) :: q
+      integer, intent(in) :: ops(:)
+      if (allocated(node%answer_ops)) deallocate (node%answer_ops)
+      allocate (node%answer_ops(size(ops)))
+      node%answer_ops = ops
+      node%fwd_qid = q
+      node%resolved_id = -1_int64
+      node%borrowed = .true.
+      node%state = IMP_REMOTE
+   end subroutine point_at_pipeline
+
+   logical function live_question(conn, q)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: q
+      live_question = .false.
+      if (.not. qslot_ok(conn, q)) return
+      live_question = conn%questions(int(q))%used .and. .not. conn%questions(int(q))%canceled
+   end function live_question
+
    !> Point a call begun on a promise at the import the promise now
    !> forwards to, so it can go on the wire.
    subroutine retarget_call(conn, m, qid, handle)
@@ -4025,17 +4182,49 @@ contains
       logical :: broken
       character(len=:), allocatable :: breason
       integer :: e
+      type(rpc_import_node_t), pointer :: fnode
+      logical :: ffound
       call import_follow(conn, handle, final_id, broken, breason)
       call import_wire_id(conn, final_id, wire)
       msg = message_read_root(m, e)
       if (e == CAPNP_OK) c = message_call_get(msg, e)
       if (e == CAPNP_OK) tgt = call_target_get(c, e)
-      if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
+      call import_find(conn, final_id, fnode, ffound)
+      if (ffound) ffound = fnode%state == IMP_REMOTE .and. fnode%fwd_qid >= 0_int64
+      if (ffound) then
+         if (e == CAPNP_OK) call write_pipeline_target(tgt, fnode%fwd_qid, fnode%answer_ops, e)
+      else
+         if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
+      end if
       if (qslot_ok(conn, qid)) then
          conn%questions(int(qid))%import_handle = final_id
          conn%questions(int(qid))%local_call = .false.
       end if
    end subroutine retarget_call
+
+   subroutine write_pipeline_target(tgt, qid, ops_in, err)
+      type(message_target_t), intent(in) :: tgt
+      integer(int64), intent(in) :: qid
+      integer, intent(in) :: ops_in(:)
+      integer, intent(out) :: err
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      integer :: i
+      pa = message_target_promised_answer_init(tgt, err)
+      if (err == CAPNP_OK) call promised_answer_question_id_set(pa, qid, err)
+      if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(size(ops_in), int64), err)
+      do i = 1, size(ops_in)
+         if (err /= CAPNP_OK) return
+         op%p = capnp_list_get_struct(ops, i - 1, err)
+         if (err /= CAPNP_OK) return
+         if (ops_in(i) < 0) then
+            call promised_answer_op_noop_set(op, err)
+         else
+            call promised_answer_op_get_pointer_field_set(op, ops_in(i), err)
+         end if
+      end do
+   end subroutine write_pipeline_target
 
    pure function hi_bucket(qid) result(b)
       integer(int64), intent(in) :: qid
