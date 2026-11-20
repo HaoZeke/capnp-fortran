@@ -36,7 +36,7 @@ fi
 compile_root() {
   local name=$1
   shift
-  capnp compile -o- "$@" >"$OUT/${name}.cgr.bin"
+  capnp compile -I"$CAPNP_INC" -o- "$@" >"$OUT/${name}.cgr.bin"
 }
 
 cd "$ROOT"
@@ -47,7 +47,7 @@ compile_root kitchen "$SCHEMA/kitchen.capnp" "$SCHEMA/common.capnp"
 compile_root rpc "$SCHEMA/rpc.capnp" "$SCHEMA/rpc-twoparty.capnp"
 compile_root rpc-threeparty "$SCHEMA/rpc-threeparty.capnp"
 ( cd "$SCHEMA" && capnp compile -o- box.capnp >"$OUT/box.cgr.bin" )
-( cd "$CAPNP_INC/capnp" && capnp compile -o- schema.capnp >"$OUT/schema.cgr.bin" )
+( cd "$CAPNP_INC/capnp" && capnp compile -I"$CAPNP_INC" -o- schema.capnp >"$OUT/schema.cgr.bin" )
 
 if [[ $CHECK -eq 1 ]]; then
   rc=0
