@@ -132,7 +132,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(114))
+      allocate (testsuite(115))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -349,18 +349,20 @@ contains
       testsuite(107)%test => w_call_pending_promised_answer
       testsuite(108)%name = "rpc-finish-before-return-answers"
       testsuite(108)%test => w_finish_before_return_answers
-      testsuite(109)%name = "posix-recv-eintr-retried"
-      testsuite(109)%test => t_recv_all_retries_eintr
-      testsuite(110)%name = "rpc-framing-511-accepted"
-      testsuite(110)%test => t_framing_511_accepted
-      testsuite(111)%name = "rpc-framing-512-rejected"
-      testsuite(111)%test => t_framing_512_rejected
-      testsuite(112)%name = "rpc-framing-oversized-rejected"
-      testsuite(112)%test => t_framing_oversized_rejected
-      testsuite(113)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(113)%test => t_framing_negative_traversal_rejected
-      testsuite(114)%name = "rpc-framing-short-and-padded"
-      testsuite(114)%test => t_framing_short_and_padded
+      testsuite(109)%name = "rpc-resolve-unknown-promise-reads-answer"
+      testsuite(109)%test => w_resolve_unknown_promise_reads_answer
+      testsuite(110)%name = "posix-recv-eintr-retried"
+      testsuite(110)%test => t_recv_all_retries_eintr
+      testsuite(111)%name = "rpc-framing-511-accepted"
+      testsuite(111)%test => t_framing_511_accepted
+      testsuite(112)%name = "rpc-framing-512-rejected"
+      testsuite(112)%test => t_framing_512_rejected
+      testsuite(113)%name = "rpc-framing-oversized-rejected"
+      testsuite(113)%test => t_framing_oversized_rejected
+      testsuite(114)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(114)%test => t_framing_negative_traversal_rejected
+      testsuite(115)%name = "rpc-framing-short-and-padded"
+      testsuite(115)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -712,6 +714,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_finish_before_return_answers(error)
    end subroutine w_finish_before_return_answers
+
+   subroutine w_resolve_unknown_promise_reads_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_unknown_promise_reads_answer(error)
+   end subroutine w_resolve_unknown_promise_reads_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8759,6 +8766,33 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_unknown_receiver_answer
+
+   !> C++ 1.4.0 reads a Resolve's descriptor before it looks up the
+   !> promise, so a receiverAnswer into a returned answer that fails to
+   !> read aborts even when the promise id is unknown.
+   subroutine t_resolve_unknown_promise_reads_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      integer(int64) :: qboot, qadder, eid
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call ra_resolve(cconn, sconn, 900_int64, qadder, [1])
+      call check_(error, rpc_conn_alive(cconn), &
+                  'unknown promise: receiverAnswer to a null field is dropped')
+      call ra_resolve(cconn, sconn, 901_int64, 700_int64, [0, 0])
+      call check_(error, rpc_conn_alive(cconn), &
+                  'unknown promise: receiverAnswer to an unknown answer is dropped')
+      call ra_resolve(cconn, sconn, 902_int64, qadder, [0, 0])
+      call check_(error, .not. rpc_conn_alive(cconn) .and. rpc_conn_reason(cconn) == &
+                  'Schema mismatch: Message contains non-struct pointer where ' // &
+                  'struct pointer was expected.', &
+                  'unknown promise: receiverAnswer read error aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_unknown_promise_reads_answer
 
    !> Raw Call from the peer socket of `sconn` on promisedAnswer `qid`
    !> walking `fields` (negative is noop). Returns the Return's outcome.

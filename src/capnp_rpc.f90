@@ -3432,7 +3432,12 @@ contains
          return
       end if
       call import_find_wire(conn, pid, node, found)
+      ! C++ reads the descriptor before it looks the promise up, so a
+      ! receiverAnswer that fails to read aborts even when the promise
+      ! is gone (rpc.c++ handleResolve, receiveCap 1606-1626).
       if (.not. found) then
+         call probe_receiver_answer(conn, cd, err)
+         if (err /= CAPNP_OK .or. conn%dead) return
          call release_resolve_cap(conn, cd, err)
          return
       end if
@@ -3440,6 +3445,8 @@ contains
       ! superseded. C++ has already erased that import and ignores it.
       ! A hosted import that was never a promise is still an error.
       if (node%state /= IMP_PROMISE) then
+         call probe_receiver_answer(conn, cd, err)
+         if (err /= CAPNP_OK .or. conn%dead) return
          if (node%state == IMP_HOSTED .and. .not. node%released) then
             call abort_conn(conn, "Got 'Resolve' for a non-promise import.", err)
          else
@@ -3469,6 +3476,52 @@ contains
          call abort_conn(conn, "Unknown 'Resolve' type.", err)
       end select
    end subroutine handle_resolve
+
+   !> Read a receiverAnswer descriptor whose capability is then dropped.
+   !> Only an active answer with a pipeline is read (rpc.c++ 1606-1626):
+   !> an unknown op or a schema error in a returned answer aborts, as the
+   !> read throws; a pending, capless, exception or Bootstrap answer
+   !> reads nothing yet.
+   subroutine probe_receiver_answer(conn, cd, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(cap_descriptor_t), intent(in) :: cd
+      integer, intent(out) :: err
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      type(rpc_answer_slot_t), pointer :: slot
+      integer, allocatable :: fields(:)
+      character(len=:), allocatable :: reason
+      integer(int64) :: id
+      integer :: i, kind
+      logical :: active
+      err = CAPNP_OK
+      if (cap_descriptor_which(cd) /= CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG) return
+      pa = cap_descriptor_receiver_answer_get(cd, err)
+      if (err /= CAPNP_OK) return
+      call answer_find(conn, promised_answer_question_id_get(pa), slot, active)
+      if (active) active = associated(slot)
+      if (active) active = slot%used .and. .not. slot%finished
+      if (.not. active) return
+      ops = promised_answer_transform_get(pa, err)
+      if (err /= CAPNP_OK) return
+      allocate (fields(int(capnp_list_len(ops))))
+      do i = 0, size(fields) - 1
+         op%p = capnp_list_get_struct(ops, i, err)
+         if (err /= CAPNP_OK) return
+         select case (promised_answer_op_which(op))
+         case (PROMISED_ANSWER_OP_NOOP_TAG)
+            fields(i + 1) = -1
+         case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+            fields(i + 1) = int(promised_answer_op_get_pointer_field_get(op))
+         case default
+            call abort_conn(conn, 'Unsupported pipeline op.', err)
+            return
+         end select
+      end do
+      if (.not. slot%has_results .or. slot%bootstrap) return
+      call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, err)
+   end subroutine probe_receiver_answer
 
    !> Resolve a promise to a capability inside one of our answers, the
    !> way receiveCap reads `answer.pipeline` (rpc.c++ 1604-1624). Only an
