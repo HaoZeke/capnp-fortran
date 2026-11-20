@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(141))
+      allocate (testsuite(142))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -435,18 +435,20 @@ contains
       testsuite(134)%test => w_elsewhere_keeps_param_caps
       testsuite(135)%name = "rpc-no-pipelining-answer-refuses-pipeline"
       testsuite(135)%test => w_no_pipelining_answer_refuses_pipeline
-      testsuite(136)%name = "posix-recv-eintr-retried"
-      testsuite(136)%test => t_recv_all_retries_eintr
-      testsuite(137)%name = "rpc-framing-511-accepted"
-      testsuite(137)%test => t_framing_511_accepted
-      testsuite(138)%name = "rpc-framing-512-rejected"
-      testsuite(138)%test => t_framing_512_rejected
-      testsuite(139)%name = "rpc-framing-oversized-rejected"
-      testsuite(139)%test => t_framing_oversized_rejected
-      testsuite(140)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(140)%test => t_framing_negative_traversal_rejected
-      testsuite(141)%name = "rpc-framing-short-and-padded"
-      testsuite(141)%test => t_framing_short_and_padded
+      testsuite(136)%name = "rpc-finish-queued-yourself-call"
+      testsuite(136)%test => w_finish_queued_yourself_call
+      testsuite(137)%name = "posix-recv-eintr-retried"
+      testsuite(137)%test => t_recv_all_retries_eintr
+      testsuite(138)%name = "rpc-framing-511-accepted"
+      testsuite(138)%test => t_framing_511_accepted
+      testsuite(139)%name = "rpc-framing-512-rejected"
+      testsuite(139)%test => t_framing_512_rejected
+      testsuite(140)%name = "rpc-framing-oversized-rejected"
+      testsuite(140)%test => t_framing_oversized_rejected
+      testsuite(141)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(141)%test => t_framing_negative_traversal_rejected
+      testsuite(142)%name = "rpc-framing-short-and-padded"
+      testsuite(142)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1025,6 +1027,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_no_pipelining_answer_refuses_pipeline(error)
    end subroutine w_no_pipelining_answer_refuses_pipeline
+
+   subroutine w_finish_queued_yourself_call(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_finish_queued_yourself_call(error)
+   end subroutine w_finish_queued_yourself_call
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10167,10 +10174,12 @@ contains
    end subroutine t_take_answer_keeps_promise_transform
 
    !> pa_send with params whose content is cap 0, senderHosted(`hosted`).
-   subroutine pa_send_cap(sconn, cq, qid, fields, hosted)
+   !> `yourself` asks for the results to stay with the callee.
+   subroutine pa_send_cap(sconn, cq, qid, fields, hosted, yourself)
       type(rpc_conn_t), intent(inout), target :: sconn
       integer(int64), intent(in) :: cq, qid, hosted
       integer, intent(in) :: fields(:)
+      logical, intent(in), optional :: yourself
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -10187,6 +10196,9 @@ contains
       call call_question_id_set(c, cq, e)
       call call_interface_id_set(c, ECHO_IFACE, e)
       call call_method_id_set(c, 0_int32, e)
+      if (present(yourself)) then
+         if (yourself) call call_send_results_to_yourself_set(c, e)
+      end if
       tgt = call_target_init(c, e)
       pa = message_target_promised_answer_init(tgt, e)
       call promised_answer_question_id_set(pa, qid, e)
@@ -11213,5 +11225,47 @@ contains
       call px_close(fb)
       call free_minted_adders()
    end subroutine t_no_pipelining_answer_refuses_pipeline
+
+   !> A Finish for a queued yourself call ends it with resultsSentElsewhere,
+   !> as the C++ call context does for a redirected call.
+   subroutine t_finish_queued_yourself_call(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(order_srv_t), target :: inner
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(return_t) :: r
+      integer(int64) :: qp
+      integer :: e, n, which30
+      logical :: ok
+
+      pumper = pump_srv_t()
+      pumper%mode = 1
+      pumper%npump = 2
+      srv => inner
+      pumper%inner => srv
+      call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+      call pa_send_cap(sconn, 30_int64, qp, [0], 55_int64, yourself=.true.)
+      call raw_finish_only(sconn, 30_int64, .false.)
+      call rpc_pump_once(cconn, e)
+      which30 = -1
+      do n = 1, 30
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_RETURN_TAG) then
+            r = message_return_get(msg, e)
+            if (return_answer_id_get(r) == 30_int64) which30 = return_which(r)
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, which30 == RETURN_RESULTS_SENT_ELSEWHERE_TAG .and. inner%n == 0, &
+                  'finish queued yourself: resultsSentElsewhere and no run')
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_finish_queued_yourself_call
 
 end module test_rpc

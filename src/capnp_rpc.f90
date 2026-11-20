@@ -7322,8 +7322,9 @@ contains
    end function resolve_param_hold
 
    !> A Finish for a call still queued on a pending answer drops it, as
-   !> C++ drops the call's task (rpc.c++ handleFinish). The caller gets a
-   !> canceled Return at once and the call never runs.
+   !> C++ drops the call's task (rpc.c++ handleFinish). The call never
+   !> runs. The caller gets a canceled Return at once, resultsSentElsewhere
+   !> for a yourself call, and nothing for onlyPromisePipeline.
    logical function cancel_queued_call(conn, qid, err) result(found)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
@@ -7351,8 +7352,12 @@ contains
       msg = message_read_root(node%msg, e)
       if (e == CAPNP_OK) c = message_call_get(msg, e)
       if (.not. conn%dead .and. associated(conn%transport) .and. e == CAPNP_OK) then
-         if (.not. call_only_promise_pipeline_get(c) .or. &
-             call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) then
+         ! A redirected call ends with resultsSentElsewhere instead
+         ! (rpc.c++ ~RpcCallContext).
+         if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG) then
+            call send_results_elsewhere(conn, qid, e)
+            if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
+         else if (.not. call_only_promise_pipeline_get(c)) then
             call send_canceled_return(conn, qid, e)
             if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
          end if
