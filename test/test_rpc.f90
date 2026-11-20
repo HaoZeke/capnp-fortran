@@ -117,7 +117,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(103))
+      allocate (testsuite(104))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -312,18 +312,20 @@ contains
       testsuite(96)%test => w_resolve_invalid_receiver_hosted
       testsuite(97)%name = "rpc-resolve-receiver-answer-walk"
       testsuite(97)%test => w_resolve_receiver_answer_walk
-      testsuite(98)%name = "posix-recv-eintr-retried"
-      testsuite(98)%test => t_recv_all_retries_eintr
-      testsuite(99)%name = "rpc-framing-511-accepted"
-      testsuite(99)%test => t_framing_511_accepted
-      testsuite(100)%name = "rpc-framing-512-rejected"
-      testsuite(100)%test => t_framing_512_rejected
-      testsuite(101)%name = "rpc-framing-oversized-rejected"
-      testsuite(101)%test => t_framing_oversized_rejected
-      testsuite(102)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(102)%test => t_framing_negative_traversal_rejected
-      testsuite(103)%name = "rpc-framing-short-and-padded"
-      testsuite(103)%test => t_framing_short_and_padded
+      testsuite(98)%name = "rpc-resolve-pending-receiver-answer"
+      testsuite(98)%test => w_resolve_pending_receiver_answer
+      testsuite(99)%name = "posix-recv-eintr-retried"
+      testsuite(99)%test => t_recv_all_retries_eintr
+      testsuite(100)%name = "rpc-framing-511-accepted"
+      testsuite(100)%test => t_framing_511_accepted
+      testsuite(101)%name = "rpc-framing-512-rejected"
+      testsuite(101)%test => t_framing_512_rejected
+      testsuite(102)%name = "rpc-framing-oversized-rejected"
+      testsuite(102)%test => t_framing_oversized_rejected
+      testsuite(103)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(103)%test => t_framing_negative_traversal_rejected
+      testsuite(104)%name = "rpc-framing-short-and-padded"
+      testsuite(104)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -581,6 +583,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_receiver_answer_walk(error)
    end subroutine w_resolve_receiver_answer_walk
+
+   subroutine w_resolve_pending_receiver_answer(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_resolve_pending_receiver_answer(error)
+   end subroutine w_resolve_pending_receiver_answer
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -8009,5 +8016,26 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_resolve_receiver_answer_walk
+
+   subroutine t_resolve_pending_receiver_answer(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      integer(int64) :: qboot, qadder, eid
+      logical :: released, disembargo
+
+      srv => local_echo
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      cconn%answers(int(qboot))%has_results = .false.
+      call ra_called_promise(cconn, sconn, 8_int64, promised)
+      call ra_resolve(cconn, sconn, 8_int64, qboot, [integer ::])
+      call ra_drain(sconn, 8_int64, released, disembargo)
+      call check_(error, rpc_conn_alive(cconn) .and. .not. released .and. &
+                  .not. disembargo, 'receiverAnswer: pending answer remains pipelined')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_resolve_pending_receiver_answer
 
 end module test_rpc
