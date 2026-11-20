@@ -190,7 +190,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(148))
+      allocate (testsuite(149))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -475,18 +475,20 @@ contains
       testsuite(141)%test => w_forward_drops_unreferenced_caps
       testsuite(142)%name = "rpc-released-result-export-id-reused"
       testsuite(142)%test => w_released_result_export_id_reused
-      testsuite(143)%name = "posix-recv-eintr-retried"
-      testsuite(143)%test => t_recv_all_retries_eintr
-      testsuite(144)%name = "rpc-framing-511-accepted"
-      testsuite(144)%test => t_framing_511_accepted
-      testsuite(145)%name = "rpc-framing-512-rejected"
-      testsuite(145)%test => t_framing_512_rejected
-      testsuite(146)%name = "rpc-framing-oversized-rejected"
-      testsuite(146)%test => t_framing_oversized_rejected
-      testsuite(147)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(147)%test => t_framing_negative_traversal_rejected
-      testsuite(148)%name = "rpc-framing-short-and-padded"
-      testsuite(148)%test => t_framing_short_and_padded
+      testsuite(143)%name = "rpc-npp-call-forwards-plain"
+      testsuite(143)%test => w_npp_call_forwards_plain
+      testsuite(144)%name = "posix-recv-eintr-retried"
+      testsuite(144)%test => t_recv_all_retries_eintr
+      testsuite(145)%name = "rpc-framing-511-accepted"
+      testsuite(145)%test => t_framing_511_accepted
+      testsuite(146)%name = "rpc-framing-512-rejected"
+      testsuite(146)%test => t_framing_512_rejected
+      testsuite(147)%name = "rpc-framing-oversized-rejected"
+      testsuite(147)%test => t_framing_oversized_rejected
+      testsuite(148)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(148)%test => t_framing_negative_traversal_rejected
+      testsuite(149)%name = "rpc-framing-short-and-padded"
+      testsuite(149)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1163,6 +1165,11 @@ contains
       call t_released_result_export_id_reused(error)
       if (.not. allocated(error)) call t_pinned_export_reexported(error)
    end subroutine w_released_result_export_id_reused
+
+   subroutine w_npp_call_forwards_plain(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_npp_call_forwards_plain(error)
+   end subroutine w_npp_call_forwards_plain
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10306,11 +10313,13 @@ contains
 
    !> pa_send with params whose content is cap 0, senderHosted(`hosted`).
    !> `yourself` asks for the results to stay with the callee.
-   subroutine pa_send_cap(sconn, cq, qid, fields, hosted, yourself, spare)
+   subroutine pa_send_cap(sconn, cq, qid, fields, hosted, yourself, spare, npp)
       type(rpc_conn_t), intent(inout), target :: sconn
       integer(int64), intent(in) :: cq, qid, hosted
       integer, intent(in) :: fields(:)
       logical, intent(in), optional :: yourself
+      !> Set noPromisePipelining on the call.
+      logical, intent(in), optional :: npp
       !> A senderHosted entry ahead of `hosted` that the content does not
       !> point to.
       integer(int64), intent(in), optional :: spare
@@ -10333,6 +10342,7 @@ contains
       if (present(yourself)) then
          if (yourself) call call_send_results_to_yourself_set(c, e)
       end if
+      if (present(npp)) call call_no_promise_pipelining_set(c, npp, e)
       tgt = call_target_init(c, e)
       pa = message_target_promised_answer_init(tgt, e)
       call promised_answer_question_id_set(pa, qid, e)
@@ -11922,5 +11932,75 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_released_result_export_id_reused
+
+   !> A call that may not tail-call goes on as a plain call, as C++
+   !> directTailCall sends it and copies the response. Under
+   !> noPromisePipelining the question is finished before our Return.
+   subroutine t_npp_call_forwards_plain(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(peer_cap_srv_t), target :: local_peer_cap
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(return_t) :: r
+      type(finish_t) :: f
+      integer(int64) :: qboot, qadder, eid, fq, finq, retq
+      integer :: e, n, which, rwhich
+      logical :: ok, npp, fin_first
+
+      local_peer_cap%peer_id = 77_int64
+      srv => local_peer_cap
+      call ra_pair(cconn, sconn, srv, qboot, qadder, eid)
+      call pa_send_cap(sconn, 30_int64, qadder, [0], 55_int64, npp=.true.)
+      call rpc_pump_once(cconn, e)
+      fq = -1_int64
+      which = -1
+      npp = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            fq = call_question_id_get(c)
+            which = call_send_results_to_which(c)
+            npp = call_no_promise_pipelining_get(c)
+            call capnp_message_free(reply)
+            exit
+         end if
+         call capnp_message_free(reply)
+      end do
+      call check_(error, fq >= 0_int64 .and. which == CALL_SEND_RESULTS_TO_CALLER_TAG .and. npp, &
+                  'npp forward: a plain call with the hint goes on')
+      if (allocated(error)) return
+      call send_raw_return(sconn%fd, fq, 'results', e)
+      call rpc_pump_once(cconn, e)
+      finq = -1_int64
+      retq = -1_int64
+      rwhich = -1
+      fin_first = .false.
+      do n = 1, 4
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) exit
+         select case (message_which(msg))
+         case (MESSAGE_FINISH_TAG)
+            f = message_finish_get(msg, e)
+            finq = finish_question_id_get(f)
+            fin_first = retq < 0_int64
+         case (MESSAGE_RETURN_TAG)
+            r = message_return_get(msg, e)
+            retq = return_answer_id_get(r)
+            rwhich = return_which(r)
+         end select
+         call capnp_message_free(reply)
+         if (retq >= 0_int64) exit
+      end do
+      call check_(error, finq == fq .and. fin_first .and. retq == 30_int64 .and. &
+                  rwhich == RETURN_RESULTS_TAG, &
+                  'npp forward: Finish, then the copied results')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_npp_call_forwards_plain
 
 end module test_rpc

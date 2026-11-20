@@ -30,7 +30,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(4))
+      allocate (testsuite(6))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -39,6 +39,10 @@ contains
       testsuite(3)%test => t_fwd_ra_released
       testsuite(4)%name = "released-export-reuse-in-dispatch"
       testsuite(4)%test => t_reuse_in_dispatch
+      testsuite(5)%name = "yourself-drops-opp"
+      testsuite(5)%test => t_yourself_opp
+      testsuite(6)%name = "npp-fwd-keeps-promise-import"
+      testsuite(6)%test => t_npp_keeps_promise
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -97,12 +101,12 @@ contains
    !> Call `method` on export 0, or on pa(aq, [0]) when aq >= 0. The
    !> params point at cap 0 of the entries `ck` ('sh', 'sp', or 'ra' for
    !> receiverAnswer(id, [0])) with ids `cid`.
-   subroutine wcall(fd, q, method, aq, ck, cid, yourself, npp)
+   subroutine wcall(fd, q, method, aq, ck, cid, yourself, npp, opp)
       integer, intent(in) :: fd, method
       integer(int64), intent(in) :: q, aq
       character(len=2), intent(in) :: ck(:)
       integer(int64), intent(in) :: cid(:)
-      logical, intent(in), optional :: yourself, npp
+      logical, intent(in), optional :: yourself, npp, opp
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -122,6 +126,7 @@ contains
          if (yourself) call call_send_results_to_yourself_set(c, e)
       end if
       if (present(npp)) call call_no_promise_pipelining_set(c, npp, e)
+      if (present(opp)) call call_only_promise_pipeline_set(c, opp, e)
       tgt = call_target_init(c, e)
       if (aq < 0_int64) then
          call message_target_imported_cap_set(tgt, 0_int64, e)
@@ -166,12 +171,13 @@ contains
    end subroutine set_answer
 
    !> Return for question `q`: results, with cap 0 senderHosted `cap`
-   !> when given, or resultsSentElsewhere.
-   subroutine wret(fd, q, elsewhere, cap)
+   !> (senderPromise when `promise`) when given, or resultsSentElsewhere.
+   subroutine wret(fd, q, elsewhere, cap, promise)
       integer, intent(in) :: fd
       integer(int64), intent(in) :: q
       logical, intent(in) :: elsewhere
       integer(int64), intent(in), optional :: cap
+      logical, intent(in), optional :: promise
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(return_t) :: r
@@ -194,7 +200,15 @@ contains
             call payload_content_set(pl, s, e)
             ctab = payload_cap_table_init(pl, 1_int64, e)
             cd%p = capnp_list_get_struct(ctab, 0, e)
-            call cap_descriptor_sender_hosted_set(cd, cap, e)
+            if (present(promise)) then
+               if (promise) then
+                  call cap_descriptor_sender_promise_set(cd, cap, e)
+               else
+                  call cap_descriptor_sender_hosted_set(cd, cap, e)
+               end if
+            else
+               call cap_descriptor_sender_hosted_set(cd, cap, e)
+            end if
          else
             call payload_content_set(pl, capnp_new_struct(m, 1, 0, e), e)
          end if
@@ -236,8 +250,9 @@ contains
       call capnp_message_free(m)
    end subroutine wrel
 
-   !> Resolve promise `pid` to senderHosted or senderPromise `id`
-   !> ('sh', 'sp'), or to receiverAnswer(id, [0]) ('ra').
+   !> Resolve promise `pid` to senderHosted, senderPromise or
+   !> receiverHosted `id` ('sh', 'sp', 'rh'), or to receiverAnswer(id,
+   !> [0]) ('ra').
    subroutine wres(fd, pid, kind, id)
       integer, intent(in) :: fd
       integer(int64), intent(in) :: pid, id
@@ -258,6 +273,8 @@ contains
          call cap_descriptor_sender_hosted_set(cd, id, e)
       case ('sp')
          call cap_descriptor_sender_promise_set(cd, id, e)
+      case ('rh')
+         call cap_descriptor_receiver_hosted_set(cd, id, e)
       case ('ra')
          pa = cap_descriptor_receiver_answer_init(cd, e)
          call set_answer(pa, id)
@@ -290,8 +307,9 @@ contains
    !> The next frame as text, '' after 200 ms with nothing:
    !> "CALL <q> I<id>|P<q> c|y [caps]", "RET <id> res [caps]|exc|can|else|
    !> take<q>", "FIN <q> T|F", "REL <id> <n>", "DIS I<id>|P<q> sl|rl
-   !> <id>", "ABORT", or "TAG <n>". A cap is sh<id>, sp<id>, rh<id>,
-   !> ra<q> or no. `q` gets the question id of a Call.
+   !> <id>", "ABORT", or "TAG <n>". A Call that hints
+   !> onlyPromisePipeline ends in " opp". A cap is sh<id>, sp<id>,
+   !> rh<id>, ra<q> or no. `q` gets the question id of a Call.
    function wtext(fd, q) result(txt)
       integer, intent(in) :: fd
       integer(int64), intent(out), optional :: q
@@ -331,6 +349,7 @@ contains
             txt = txt // ' c '
          end if
          txt = txt // caps_text(call_params_get(c, e))
+         if (call_only_promise_pipeline_get(c)) txt = txt // ' opp'
       case (MESSAGE_RETURN_TAG)
          r = message_return_get(msg, e)
          write (buf, '(a,i0)') 'RET ', return_answer_id_get(r)
@@ -557,5 +576,67 @@ contains
                  'reuse in dispatch: got '//b//' / '//c)
       call close_peer(conn, fd)
    end subroutine t_reuse_in_dispatch
+
+   !> C++ ignores onlyPromisePipeline on a yourself call, so the call it
+   !> sends on does not hint it.
+   subroutine t_yourself_opp(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b
+      integer(int64) :: k
+      integer :: fd, e
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, yourself=.true., opp=.true.)
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      call check(error, index(b, ' I4 c []') > 0 .and. index(b, 'opp') == 0, &
+                 'yourself opp: got '//b)
+      call close_peer(conn, fd)
+   end subroutine t_yourself_opp
+
+   !> A noPromisePipelining call goes on as a plain call, and its Return
+   !> names a promise that then resolves to our own export. C++ keeps the
+   !> promise import the Return named (resolutionsAtReturnTime) until our
+   !> answer's Finish, so no Release goes at the Resolve.
+   subroutine t_npp_keeps_promise(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 2, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 3_int64, 0, 1_int64, NOCAPS, NOIDS, npp=.true.)
+      call rpc_pump_once(conn, e)
+      a = wtext(fd, k)
+      call wret(fd, k, .false., 9_int64, promise=.true.)
+      b = step(conn, fd, 1)
+      call wres(fd, 9_int64, 'rh', 1_int64)
+      c = step(conn, fd, 1)
+      call wfin(fd, 3_int64, .true.)
+      d = step(conn, fd, 1)
+      call check(error, k >= 0_int64 .and. b == 'FIN '//itoa(k)//' F | RET 3 res [rh9]' .and. &
+                 index(c, 'REL') == 0 .and. d == 'REL 9 1', 'npp keeps promise: got '//b//' / '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_npp_keeps_promise
+
+   function itoa(i) result(s)
+      integer(int64), intent(in) :: i
+      character(len=:), allocatable :: s
+      character(len=24) :: buf
+      write (buf, '(i0)') i
+      s = trim(buf)
+   end function itoa
 
 end module test_rpc_peer
