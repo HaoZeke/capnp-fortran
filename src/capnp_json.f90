@@ -1281,19 +1281,23 @@ contains
       integer(int8), allocatable :: raw(:)
       err = CAPNP_OK
       if (mode == 1) then
-         if (jv%k == JK_NULL) return
-         if (jv%k /= JK_STR) then
+         if (jv%k == JK_NULL) then
+            allocate (raw(0))
+         else if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
+         else
+            call b64_decode(jv%str, raw, err)
          end if
-         call b64_decode(jv%str, raw, err)
       else if (mode == 2) then
-         if (jv%k == JK_NULL) return
-         if (jv%k /= JK_STR) then
+         if (jv%k == JK_NULL) then
+            allocate (raw(0))
+         else if (jv%k /= JK_STR) then
             err = CAPNP_ERR_ARG
             return
+         else
+            call hex_decode(jv%str, raw, err)
          end if
-         call hex_decode(jv%str, raw, err)
       else
          call bytes_from_array(jv, raw, err)
       end if
