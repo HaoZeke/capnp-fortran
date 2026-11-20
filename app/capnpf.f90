@@ -1004,7 +1004,19 @@ contains
          end if
       end if
 
-      if (node_which(sch%nodes(idx)) /= NODE_STRUCT .or. len(rest) < 2 .or. rest(1:1) /= '.') then
+      if (idx < 1 .or. idx > size(sch%nodes)) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (node_which(sch%nodes(idx)) /= NODE_STRUCT) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (len(rest) < 2) then
+         call fail('eval requires a constant or struct field', rc)
+         return
+      end if
+      if (rest(1:1) /= '.') then
          call fail('eval requires a constant or struct field', rc)
          return
       end if
@@ -1303,7 +1315,11 @@ contains
       err = CAPNP_OK
       fname = ''
       n = len(rest)
-      if (pos > n .or. rest(pos:pos) /= '.') then
+      if (pos > n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (rest(pos:pos) /= '.') then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1343,7 +1359,11 @@ contains
       err = CAPNP_OK
       ix = -1_int64
       n = len(rest)
-      if (pos > n .or. rest(pos:pos) /= '[') then
+      if (pos > n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (rest(pos:pos) /= '[') then
          err = CAPNP_ERR_ARG
          return
       end if
