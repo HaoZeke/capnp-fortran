@@ -1415,9 +1415,15 @@ contains
                      return
                   else if (node%state == IMP_REMOTE .and. node%borrowed) then
                      if (node%fwd_qid >= 0_int64) then
-                        call retarget_call(conn, m, qid, node%id)
+                        call retarget_call(conn, m, qid, node%id, err)
                      else
-                        call retarget_call(conn, m, qid, node%resolved_id)
+                        call retarget_call(conn, m, qid, node%resolved_id, err)
+                     end if
+                     if (err /= CAPNP_OK) then
+                        call release_unsent_call_caps(conn, m)
+                        if (qid >= 0_int64) call release_question(conn, qid)
+                        call capnp_message_free(m)
+                        return
                      end if
                   end if
                end if
@@ -1448,6 +1454,21 @@ contains
       end if
    end subroutine deliver_local_promise
 
+   !> A writable copy of the Call in `m`. A queued call is retargeted
+   !> in place before it goes on the wire.
+   subroutine copy_call_message(m, dst, err)
+      type(capnp_message_t), intent(inout), target :: m
+      type(capnp_message_t), intent(inout), target :: dst
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: root, copied
+      root = capnp_root(m, err)
+      if (err /= CAPNP_OK) return
+      call capnp_message_init_builder(dst, err)
+      if (err == CAPNP_OK) copied = capnp_copy(dst, root, err)
+      if (err == CAPNP_OK) call capnp_set_root(dst, copied, err)
+      if (err /= CAPNP_OK) call capnp_message_free(dst)
+   end subroutine copy_call_message
+
    subroutine enqueue_embargo_call(conn, node, m, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(rpc_import_node_t), intent(in) :: node
@@ -1456,7 +1477,6 @@ contains
       integer, intent(out) :: err
       type(rpc_embargo_node_t), pointer :: emb
       type(rpc_queued_call_t), pointer :: q, tail
-      integer(int8), allocatable :: bytes(:)
       emb => conn%embargoes
       do while (associated(emb))
          if (emb%open .and. emb%promise_id == node%id) exit
@@ -1469,8 +1489,7 @@ contains
       allocate (q)
       q%qid = qid
       q%next => null()
-      call capnp_serialize_bytes(m, bytes, err)
-      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, q%msg, err)
+      call copy_call_message(m, q%msg, err)
       if (err /= CAPNP_OK) then
          deallocate (q)
          return
@@ -1741,13 +1760,11 @@ contains
       integer(int64), intent(in) :: call_qid, target_qid
       integer, intent(out) :: err
       type(rpc_pipe_wait_t), pointer :: node, tail
-      integer(int8), allocatable :: bytes(:)
       allocate (node)
       node%call_qid = call_qid
       node%target_qid = target_qid
       node%next => null()
-      call capnp_serialize_bytes(m, bytes, err)
-      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      call copy_call_message(m, node%msg, err)
       if (err /= CAPNP_OK) then
          deallocate (node)
          return
@@ -1772,14 +1789,12 @@ contains
       integer(int64), intent(in) :: call_qid, promise_id
       integer, intent(out) :: err
       type(rpc_answer_wait_t), pointer :: node, tail
-      integer(int8), allocatable :: bytes(:)
 
       allocate (node)
       node%call_qid = call_qid
       node%promise_id = promise_id
       node%next => null()
-      call capnp_serialize_bytes(m, bytes, err)
-      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      call copy_call_message(m, node%msg, err)
       if (err /= CAPNP_OK) then
          deallocate (node)
          return
@@ -4171,17 +4186,17 @@ contains
 
    !> Point a call begun on a promise at the import the promise now
    !> forwards to, so it can go on the wire.
-   subroutine retarget_call(conn, m, qid, handle)
+   subroutine retarget_call(conn, m, qid, handle, e)
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout), target :: m
       integer(int64), intent(in) :: qid, handle
+      integer, intent(out) :: e
       type(message_t) :: msg
       type(call_t) :: c
       type(message_target_t) :: tgt
       integer(int64) :: final_id, wire
       logical :: broken
       character(len=:), allocatable :: breason
-      integer :: e
       type(rpc_import_node_t), pointer :: fnode
       logical :: ffound
       call import_follow(conn, handle, final_id, broken, breason)
@@ -4196,6 +4211,7 @@ contains
       else
          if (e == CAPNP_OK) call message_target_imported_cap_set(tgt, wire, e)
       end if
+      if (e /= CAPNP_OK) return
       if (qslot_ok(conn, qid)) then
          conn%questions(int(qid))%import_handle = final_id
          conn%questions(int(qid))%local_call = .false.

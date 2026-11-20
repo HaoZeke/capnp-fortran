@@ -76,11 +76,16 @@ module test_rpc
    !> Pumps `conn` once while answering, so a message sent after the
    !> call arrives while the answer is pending. It then calls `probe`
    !> once if set, and fails the call (mode 0), returns a cap to `inner`
-   !> in pointer 0 (mode 1), returns a struct with no caps (mode 2), or
-   !> returns a cap pointer to index 5 of an empty cap table (mode 3).
+   !> in pointer 0 (mode 1), returns a struct with no caps (mode 2),
+   !> returns a cap pointer to index 5 of an empty cap table (mode 3), or
+   !> returns receiverAnswer(own_q, [1]) in pointer 0 (mode 4), a pipeline
+   !> on a question of this vat.
    type, extends(rpc_server_t) :: pump_srv_t
       type(rpc_conn_t), pointer :: conn => null()
       integer :: mode = 0
+      !> Messages pumped before answering.
+      integer :: npump = 1
+      integer(int64) :: own_q = 0_int64
       class(rpc_server_t), pointer :: inner => null()
       type(rpc_cap_t) :: probe
       integer(int64) :: probe_q = -1_int64
@@ -158,7 +163,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(122))
+      allocate (testsuite(123))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -391,18 +396,20 @@ contains
       testsuite(115)%test => w_pipelined_call_to_import_is_forwarded
       testsuite(116)%name = "rpc-resolve-to-own-receiver-answer"
       testsuite(116)%test => w_resolve_to_own_receiver_answer
-      testsuite(117)%name = "posix-recv-eintr-retried"
-      testsuite(117)%test => t_recv_all_retries_eintr
-      testsuite(118)%name = "rpc-framing-511-accepted"
-      testsuite(118)%test => t_framing_511_accepted
-      testsuite(119)%name = "rpc-framing-512-rejected"
-      testsuite(119)%test => t_framing_512_rejected
-      testsuite(120)%name = "rpc-framing-oversized-rejected"
-      testsuite(120)%test => t_framing_oversized_rejected
-      testsuite(121)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(121)%test => t_framing_negative_traversal_rejected
-      testsuite(122)%name = "rpc-framing-short-and-padded"
-      testsuite(122)%test => t_framing_short_and_padded
+      testsuite(117)%name = "rpc-queued-call-is-retargeted"
+      testsuite(117)%test => w_queued_call_is_retargeted
+      testsuite(118)%name = "posix-recv-eintr-retried"
+      testsuite(118)%test => t_recv_all_retries_eintr
+      testsuite(119)%name = "rpc-framing-511-accepted"
+      testsuite(119)%test => t_framing_511_accepted
+      testsuite(120)%name = "rpc-framing-512-rejected"
+      testsuite(120)%test => t_framing_512_rejected
+      testsuite(121)%name = "rpc-framing-oversized-rejected"
+      testsuite(121)%test => t_framing_oversized_rejected
+      testsuite(122)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(122)%test => t_framing_negative_traversal_rejected
+      testsuite(123)%name = "rpc-framing-short-and-padded"
+      testsuite(123)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -656,8 +663,16 @@ contains
       type(capnp_message_t), target :: m
       type(payload_t) :: params
       type(capnp_ptr_t) :: s
-      integer :: e, idx
-      if (associated(self%conn) .and. ctx%method_id >= 0) call rpc_pump_once(self%conn, e)
+      type(cap_descriptor_t) :: cd
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ctab, ops
+      integer :: e, idx, k
+      if (associated(self%conn) .and. ctx%method_id >= 0) then
+         do k = 1, self%npump
+            call rpc_pump_once(self%conn, e)
+         end do
+      end if
       if (associated(self%conn) .and. self%probe%kind == RPC_CAP_IMPORT) then
          call rpc_call_begin(self%conn, self%probe, ECHO_IFACE, 0, m, params, self%probe_q, e)
          self%probe = rpc_cap_t()
@@ -684,6 +699,17 @@ contains
          s = capnp_new_struct(ctx%rmsg, 0, 1, err)
          if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 5), err)
          if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+      case (4)
+         s = capnp_new_struct(ctx%rmsg, 0, 1, err)
+         if (err == CAPNP_OK) call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), err)
+         if (err == CAPNP_OK) call payload_content_set(ctx%results, s, err)
+         if (err == CAPNP_OK) ctab = payload_cap_table_init(ctx%results, 1_int64, err)
+         if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+         if (err == CAPNP_OK) pa = cap_descriptor_receiver_answer_init(cd, err)
+         if (err == CAPNP_OK) call promised_answer_question_id_set(pa, self%own_q, err)
+         if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, 1_int64, err)
+         if (err == CAPNP_OK) op%p = capnp_list_get_struct(ops, 0, err)
+         if (err == CAPNP_OK) call promised_answer_op_get_pointer_field_set(op, 1, err)
       case default
          err = CAPNP_ERR_ARG
       end select
@@ -854,6 +880,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_resolve_to_own_receiver_answer(error)
    end subroutine w_resolve_to_own_receiver_answer
+
+   subroutine w_queued_call_is_retargeted(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_queued_call_is_retargeted(error)
+   end subroutine w_queued_call_is_retargeted
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -9676,5 +9707,97 @@ contains
          if (allocated(error)) return
       end do
    end subroutine t_finish_before_return_answers
+
+   !> Frames `cconn` sent to the raw peer, scanned for the Call of
+   !> question `q`. `which` is its target tag, or -1 when no such Call
+   !> came. `id` is the import id, or the question of a promisedAnswer
+   !> target whose pointer fields are `ops`.
+   subroutine raw_call_target(sconn, q, which, id, ops)
+      type(rpc_conn_t), intent(inout), target :: sconn
+      integer(int64), intent(in) :: q
+      integer, intent(out) :: which
+      integer(int64), intent(out) :: id
+      integer, allocatable, intent(out) :: ops(:)
+      type(capnp_message_t), target :: reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: lst
+      integer :: n, i, e
+      logical :: ok
+      which = -1
+      id = -1_int64
+      allocate (ops(0))
+      do n = 1, 30
+         call raw_next(sconn%fd, reply, msg, ok)
+         if (.not. ok) return
+         if (message_which(msg) == MESSAGE_CALL_TAG) then
+            c = message_call_get(msg, e)
+            if (call_question_id_get(c) == q) then
+               tgt = call_target_get(c, e)
+               which = message_target_which(tgt)
+               if (which == MESSAGE_TARGET_IMPORTED_CAP_TAG) then
+                  id = message_target_imported_cap_get(tgt)
+               else if (which == MESSAGE_TARGET_PROMISED_ANSWER_TAG) then
+                  pa = message_target_promised_answer_get(tgt, e)
+                  id = promised_answer_question_id_get(pa)
+                  lst = promised_answer_transform_get(pa, e)
+                  deallocate (ops)
+                  allocate (ops(capnp_list_len(lst)))
+                  do i = 1, size(ops)
+                     op%p = capnp_list_get_struct(lst, i - 1, e)
+                     ops(i) = promised_answer_op_get_pointer_field_get(op)
+                  end do
+               end if
+               call capnp_message_free(reply)
+               return
+            end if
+         end if
+         call capnp_message_free(reply)
+      end do
+   end subroutine raw_call_target
+
+   !> A call queued on a promise that waits on a pending answer goes out
+   !> when the answer returns a pipeline on one of our questions. The
+   !> queued copy is rewritten to that promisedAnswer target, which C++
+   !> 1.4.0 reaches through PromiseClient::resolve.
+   subroutine t_queued_call_is_retargeted(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      type(pump_srv_t), target :: pumper
+      class(rpc_server_t), pointer :: srv
+      type(rpc_cap_t) :: promised
+      integer(int64) :: qp, id
+      integer :: which
+      integer, allocatable :: ops(:)
+
+      pumper = pump_srv_t()
+      pumper%mode = 4
+      pumper%own_q = 0_int64
+      srv => local_echo
+      pumper%inner => srv
+      call pa_pending_pair(cconn, sconn, pumper, promised, qp)
+      pumper%probe = promised
+      call ra_resolve(cconn, sconn, 4_int64, qp, [0])
+      call check_(error, rpc_conn_alive(cconn) .and. pumper%probe_q >= 0_int64 .and. &
+                  cconn%questions(0)%used, &
+                  'queued retarget: a call is made while the answer is pending')
+      if (.not. allocated(error)) then
+         if (associated(cconn%embargoes)) &
+            call ra_loopback(cconn, sconn, 4_int64, cconn%embargoes%id)
+         call raw_call_target(sconn, pumper%probe_q, which, id, ops)
+         call check_(error, which == MESSAGE_TARGET_PROMISED_ANSWER_TAG .and. &
+                     id == 0_int64 .and. size(ops) == 1, &
+                     'queued retarget: the call pipelines on our question')
+         if (.not. allocated(error)) &
+            call check_(error, ops(1) == 1, 'queued retarget: the transform is kept')
+      end if
+      pumper%conn => null()
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_queued_call_is_retargeted
 
 end module test_rpc
