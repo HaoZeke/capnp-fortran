@@ -6232,6 +6232,7 @@ contains
       r = message_return_init(rmsg, err)
       if (err /= CAPNP_OK) return
       call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
       if (err /= CAPNP_OK) return
       ctx%results = return_results_init(r, err)
       if (err /= CAPNP_OK) return
@@ -6309,6 +6310,7 @@ contains
       r = message_return_init(rmsg, err)
       if (err /= CAPNP_OK) return
       call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
       if (err /= CAPNP_OK) return
       ctx%results = return_results_init(r, err)
       if (err /= CAPNP_OK) return
@@ -6333,6 +6335,7 @@ contains
       r = message_return_init(rmsg, err)
       if (err /= CAPNP_OK) return
       call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
       if (err /= CAPNP_OK) return
       call fill_exception(r, reason, err)
       if (err /= CAPNP_OK) return
@@ -6517,6 +6520,7 @@ contains
       r = message_return_init(rmsg, err)
       if (err /= CAPNP_OK) return
       call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
       if (err /= CAPNP_OK) return
       ctx%results = return_results_init(r, err)
       if (err /= CAPNP_OK) return
@@ -6649,6 +6653,7 @@ contains
       r = message_return_init(msg, err)
       if (err /= CAPNP_OK) return
       call return_answer_id_set(r, qid, err)
+      if (err == CAPNP_OK) call return_release_param_caps_set(r, .false., err)
       if (err /= CAPNP_OK) return
       call return_results_sent_elsewhere_set(r, err)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, m, err)

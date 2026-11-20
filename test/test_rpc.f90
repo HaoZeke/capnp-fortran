@@ -164,7 +164,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(139))
+      allocate (testsuite(140))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -431,18 +431,20 @@ contains
       testsuite(132)%test => w_only_pipeline_call_sends_no_return
       testsuite(133)%name = "rpc-return-after-finish-is-legal"
       testsuite(133)%test => w_return_after_finish_is_legal
-      testsuite(134)%name = "posix-recv-eintr-retried"
-      testsuite(134)%test => t_recv_all_retries_eintr
-      testsuite(135)%name = "rpc-framing-511-accepted"
-      testsuite(135)%test => t_framing_511_accepted
-      testsuite(136)%name = "rpc-framing-512-rejected"
-      testsuite(136)%test => t_framing_512_rejected
-      testsuite(137)%name = "rpc-framing-oversized-rejected"
-      testsuite(137)%test => t_framing_oversized_rejected
-      testsuite(138)%name = "rpc-framing-negative-traversal-rejected"
-      testsuite(138)%test => t_framing_negative_traversal_rejected
-      testsuite(139)%name = "rpc-framing-short-and-padded"
-      testsuite(139)%test => t_framing_short_and_padded
+      testsuite(134)%name = "rpc-elsewhere-keeps-param-caps"
+      testsuite(134)%test => w_elsewhere_keeps_param_caps
+      testsuite(135)%name = "posix-recv-eintr-retried"
+      testsuite(135)%test => t_recv_all_retries_eintr
+      testsuite(136)%name = "rpc-framing-511-accepted"
+      testsuite(136)%test => t_framing_511_accepted
+      testsuite(137)%name = "rpc-framing-512-rejected"
+      testsuite(137)%test => t_framing_512_rejected
+      testsuite(138)%name = "rpc-framing-oversized-rejected"
+      testsuite(138)%test => t_framing_oversized_rejected
+      testsuite(139)%name = "rpc-framing-negative-traversal-rejected"
+      testsuite(139)%test => t_framing_negative_traversal_rejected
+      testsuite(140)%name = "rpc-framing-short-and-padded"
+      testsuite(140)%test => t_framing_short_and_padded
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1011,6 +1013,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call t_return_after_finish_is_legal(error)
    end subroutine w_return_after_finish_is_legal
+
+   subroutine w_elsewhere_keeps_param_caps(error)
+      type(error_type), allocatable, intent(out) :: error
+      call t_elsewhere_keeps_param_caps(error)
+   end subroutine w_elsewhere_keeps_param_caps
 
    subroutine w_shutdown(error)
       type(error_type), allocatable, intent(out) :: error
@@ -10887,11 +10894,13 @@ contains
    end function raw_frame_text
 
    !> Call method `method` of export `eid` from a raw peer. The params
-   !> content is cap 0, senderHosted or senderPromise `id`.
-   subroutine raw_param_call(fd, q, eid, method, promise, id)
+   !> content is cap 0, senderHosted or senderPromise `id`. `yourself`
+   !> asks for the results to stay with the callee.
+   subroutine raw_param_call(fd, q, eid, method, promise, id, yourself)
       integer, intent(in) :: fd, method
       integer(int64), intent(in) :: q, eid, id
       logical, intent(in) :: promise
+      logical, intent(in), optional :: yourself
       type(capnp_message_t), target :: m
       type(message_t) :: msg
       type(call_t) :: c
@@ -10906,6 +10915,9 @@ contains
       call call_question_id_set(c, q, e)
       call call_interface_id_set(c, ECHO_IFACE, e)
       call call_method_id_set(c, int(method, int32), e)
+      if (present(yourself)) then
+         if (yourself) call call_send_results_to_yourself_set(c, e)
+      end if
       tgt = call_target_init(c, e)
       call message_target_imported_cap_set(tgt, eid, e)
       params = call_params_init(c, e)
@@ -11108,5 +11120,38 @@ contains
       call rpc_conn_close(conn)
       call px_close(fb)
    end subroutine t_return_after_finish_is_legal
+
+   !> Every Return for a call leaves the params to the callee, as in
+   !> C++. The resultsSentElsewhere that ends a yourself call says so
+   !> too, and the param cap is Released once, after that Return. The
+   !> Bootstrap Return keeps the default, as `handleBootstrap` does.
+   subroutine t_elsewhere_keeps_param_caps(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: conn
+      type(echo_srv_t), target :: echo
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer :: fa, fb, e
+
+      srv => echo
+      call px_socketpair(fa, fb, e)
+      call rpc_conn_init(conn, fa, srv)
+      call send_raw_bootstrap(fb, 0_int64, e)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      call check_(error, a == 'RET 0 T', 'elsewhere: the Bootstrap Return, got '//a)
+      call raw_param_call(fb, 1_int64, 0_int64, 1, .false., 5_int64, yourself=.true.)
+      call rpc_pump_once(conn, e)
+      call raw_finish_fd(fb, 1_int64)
+      call rpc_pump_once(conn, e)
+      a = raw_frame_text(fb)
+      b = raw_frame_text(fb)
+      c = raw_frame_text(fb)
+      call check_(error, a == 'RET 1 F' .and. b == 'REL 5 1' .and. c == '', &
+                  'elsewhere: got '//a//' | '//b//' | '//c)
+      call rpc_conn_close(conn)
+      call px_close(fb)
+      call free_minted_adders()
+   end subroutine t_elsewhere_keeps_param_caps
 
 end module test_rpc
