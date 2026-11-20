@@ -249,6 +249,9 @@ module capnp_rpc
       integer :: local_export = -1
       !> Application import handle used to form an outgoing Call.
       integer(int64) :: import_handle = -1_int64
+      !> Import handles bound to retmsg's cap table when Return arrived.
+      integer :: nresult_handles = 0
+      integer(int64) :: result_handles(0:MAXCAPS - 1) = -1_int64
       type(capnp_message_t) :: retmsg ! the Return message, kept until finish
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
@@ -381,6 +384,8 @@ module capnp_rpc
       logical :: used = .false.
       integer(int64) :: nonce = 0_int64
       integer(int64) :: vine_id = -1_int64
+      integer(int64) :: vine_handle = -1_int64
+      logical :: has_handle = .false.
       integer :: port = 0
       character(len=MAXHOST) :: host = ''
       integer :: host_len = 0
@@ -2201,8 +2206,13 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
-            call import_find_wire(conn, cap%id, inode, found)
-            if (found) cap%id = inode%id
+            if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
+                conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
+               cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+            else
+               call import_find_wire(conn, cap%id, inode, found)
+               if (found) cap%id = inode%id
+            end if
          end if
       case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
          ! A promise import: the spec permits continuing to address the
@@ -2214,8 +2224,13 @@ contains
             cap%kind = RPC_CAP_LOCAL
          else
             cap%kind = RPC_CAP_IMPORT
-            call import_find_wire(conn, cap%id, inode, found)
-            if (found) cap%id = inode%id
+            if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
+                conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
+               cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+            else
+               call import_find_wire(conn, cap%id, inode, found)
+               if (found) cap%id = inode%id
+            end if
          end if
       case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
          ! C++ receiveCap imports the vine and returns that client
@@ -2233,9 +2248,14 @@ contains
                   vine = third_party_cap_descriptor_vine_id_get(tp)
                   cap%kind = RPC_CAP_IMPORT
                   cap%id = vine
-                  call import_find_live(conn, vine, inode, found)
-                  if (.not. found) call import_find_wire(conn, vine, inode, found)
-                  if (found) cap%id = inode%id
+                  if (int(p%capidx) < conn%questions(int(qid))%nresult_handles .and. &
+                      conn%questions(int(qid))%result_handles(int(p%capidx)) /= -1_int64) then
+                     cap%id = conn%questions(int(qid))%result_handles(int(p%capidx))
+                  else
+                     call import_find_live(conn, vine, inode, found)
+                     if (.not. found) call import_find_wire(conn, vine, inode, found)
+                     if (found) cap%id = inode%id
+                  end if
                end if
             end block
          end if
@@ -2322,16 +2342,41 @@ contains
             id = cap_descriptor_sender_hosted_get(cd)
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
             id = cap_descriptor_sender_promise_get(cd)
+         case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
+            block
+               type(third_party_cap_descriptor_t) :: tp
+               integer :: verr
+               tp = cap_descriptor_third_party_hosted_get(cd, verr)
+               if (verr == CAPNP_OK .and. tp%p%kind == CAPNP_PK_STRUCT) &
+                  id = third_party_cap_descriptor_vine_id_get(tp)
+            end block
          end select
          if (id < 0_int64) cycle
          if (local) then
             if (id >= 0_int64 .and. id < int(MAXE, int64)) &
                call drop_export(conn, int(id), 1)
          else
-            call forget_import_ref(conn, id)
+            if (i < conn%questions(q)%nresult_handles .and. &
+                conn%questions(q)%result_handles(i) /= -1_int64) then
+               call forget_import_handle(conn, conn%questions(q)%result_handles(i))
+            else
+               call forget_import_ref(conn, id)
+            end if
          end if
       end do
    end subroutine drop_finished_caps
+
+   subroutine forget_import_handle(conn, handle)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: handle
+      type(rpc_import_node_t), pointer :: node
+      logical :: found
+      call import_find(conn, handle, node, found)
+      if (.not. found) return
+      if (node%refs <= 0 .or. node%released) return
+      node%refs = node%refs - 1
+      if (node%refs == 0) node%released = .true.
+   end subroutine forget_import_handle
 
    subroutine forget_import_ref(conn, id)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -2415,6 +2460,8 @@ contains
       slot%local_results = .false.
       slot%local_export = -1
       slot%import_handle = -1_int64
+      slot%nresult_handles = 0
+      slot%result_handles = -1_int64
       slot%membrane => null()
       slot%membrane_reverse = .false.
    end subroutine question_slot_clear
@@ -2632,30 +2679,38 @@ contains
    !> `record` is false for a call's params: those caps are the sender's
    !> exports, and counting them here would invent imports. An unknown
    !> descriptor aborts either way.
-   subroutine note_payload_imports(conn, pl, record, err)
+   subroutine note_payload_imports(conn, pl, record, err, handles, nhandles)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
       logical, intent(in) :: record
       integer, intent(out) :: err
+      integer(int64), intent(out), optional :: handles(0:)
+      integer, intent(out), optional :: nhandles
       type(capnp_ptr_t) :: ctab
       type(cap_descriptor_t) :: cd
       integer :: i, n, ierr
+      integer(int64) :: h
       err = CAPNP_OK
+      if (present(handles)) handles = -1_int64
+      if (present(nhandles)) nhandles = 0
       if (pl%p%kind /= CAPNP_PK_STRUCT) return
       ctab = payload_cap_table_get(pl, ierr)
       if (ierr /= CAPNP_OK) return
       n = int(capnp_list_len(ctab))
+      if (present(handles) .and. present(nhandles)) &
+         nhandles = min(n, size(handles))
       do i = 0, n - 1
          cd%p = capnp_list_get_struct(ctab, i, ierr)
          if (ierr /= CAPNP_OK) cycle
+         h = -1_int64
          select case (cap_descriptor_which(cd))
          case (CAP_DESCRIPTOR_NONE_TAG)
          case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
             if (record) call import_receive(conn, &
-                                            cap_descriptor_sender_hosted_get(cd), .false.)
+                                            cap_descriptor_sender_hosted_get(cd), .false., h)
          case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
             if (record) call import_receive(conn, &
-                                            cap_descriptor_sender_promise_get(cd), .true.)
+                                            cap_descriptor_sender_promise_get(cd), .true., h)
          case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
          case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
          case (CAP_DESCRIPTOR_THIRD_PARTY_HOSTED_TAG)
@@ -2671,7 +2726,7 @@ contains
                   tp = cap_descriptor_third_party_hosted_get(cd, verr)
                   if (verr == CAPNP_OK .and. tp%p%kind == CAPNP_PK_STRUCT) then
                      vine = third_party_cap_descriptor_vine_id_get(tp)
-                     if (vine >= 0_int64) call import_receive(conn, vine, .false.)
+                     if (vine >= 0_int64) call import_receive(conn, vine, .false., h)
                   end if
                end block
             end if
@@ -2679,6 +2734,9 @@ contains
             call abort_conn(conn, 'unknown CapDescriptor type', err)
             return
          end select
+         if (present(handles) .and. h /= -1_int64) then
+            if (i < size(handles)) handles(i) = h
+         end if
       end do
    end subroutine note_payload_imports
 
@@ -3921,10 +3979,12 @@ contains
    !> outlive the pickup. Dialling the third vat belongs to the network
    !> layer, so the arrangement is recorded and handed over rather than
    !> acted on here.
-   subroutine note_introductions(conn, pl, err)
+   subroutine note_introductions(conn, pl, err, handles, nhandles)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: pl
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: handles(0:)
+      integer, intent(in), optional :: nhandles
       type(capnp_ptr_t) :: ctab, idp
       type(cap_descriptor_t) :: cd
       type(third_party_cap_descriptor_t) :: tp
@@ -3963,6 +4023,16 @@ contains
             conn%introductions(j)%nonce = third_party_cap_id_nonce_get(id)
             conn%introductions(j)%vine_id = &
                third_party_cap_descriptor_vine_id_get(tp)
+            conn%introductions(j)%vine_handle = -1_int64
+            conn%introductions(j)%has_handle = .false.
+            if (present(handles) .and. present(nhandles)) then
+               if (i < nhandles) then
+                  if (handles(i) /= -1_int64) then
+                     conn%introductions(j)%vine_handle = handles(i)
+                     conn%introductions(j)%has_handle = .true.
+                  end if
+               end if
+            end if
             conn%introductions(j)%port = int(vat_id_port_get(vat))
             conn%introductions(j)%host = host
             conn%introductions(j)%host_len = len(host)
@@ -4036,9 +4106,13 @@ contains
       do i = 0, MAXINTRO - 1
          if (.not. conn%introductions(i)%used) cycle
          if (conn%introductions(i)%nonce /= nonce) cycle
-         vine%kind = RPC_CAP_IMPORT
-         vine%id = conn%introductions(i)%vine_id
-         call rpc_release_send(conn, vine, err)
+         if (conn%introductions(i)%has_handle) then
+            vine%kind = RPC_CAP_IMPORT
+            vine%id = conn%introductions(i)%vine_handle
+            call rpc_release_send(conn, vine, err)
+         else
+            call send_release(conn, conn%introductions(i)%vine_id, 1_int64, err)
+         end if
          conn%introductions(i) = rpc_introduction_t()
          return
       end do
@@ -4952,8 +5026,12 @@ contains
             type(payload_t) :: rpl
             integer :: ierr
             rpl = return_results_get(r, ierr)
-            if (ierr == CAPNP_OK) call note_introductions(conn, rpl, ierr)
-            if (ierr == CAPNP_OK) call note_payload_imports(conn, rpl, .true., ierr)
+            if (ierr == CAPNP_OK) call note_payload_imports( &
+               conn, rpl, .true., ierr, &
+               conn%questions(q)%result_handles, conn%questions(q)%nresult_handles)
+            if (ierr == CAPNP_OK) call note_introductions( &
+               conn, rpl, ierr, &
+               conn%questions(q)%result_handles, conn%questions(q)%nresult_handles)
             if (ierr /= CAPNP_OK) then
                call capnp_message_free(m)
                err = ierr
