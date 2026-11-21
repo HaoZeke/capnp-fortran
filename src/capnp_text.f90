@@ -444,6 +444,11 @@ contains
             end if
          else
             call capnp_get_text(p, int(off), s, err)
+            if (err == CAPNP_ERR_KIND) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               s = ''
+            end if
             if (err /= CAPNP_OK) return
          end if
          call capnp_cescape_text(s, esc, err)
@@ -466,6 +471,11 @@ contains
             end if
          else
             call capnp_get_data(p, int(off), raw, err)
+            if (err == CAPNP_ERR_KIND) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               raw = [integer(int8) ::]
+            end if
             if (err /= CAPNP_OK) return
             call capnp_cescape_data(raw, esc, err)
             if (err /= CAPNP_OK) return
@@ -475,6 +485,11 @@ contains
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
+            if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               q = capnp_ptr_t()
+            end if
             if (err /= CAPNP_OK) return
          end if
          if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
@@ -539,6 +554,11 @@ contains
          return
       end if
       et = capnp_brand_resolve(env, raw_et)
+      if (.not. list_readable(et, lst)) then
+         ptr_kind_bad = .true.
+         out = '[]'
+         return
+      end if
       nlen = capnp_list_len(lst)
       n = 0
       do i = 0_int64, nlen - 1_int64
@@ -2002,5 +2022,26 @@ contains
       logical :: y
       y = (c >= '0' .and. c <= '9') .or. c == '+' .or. c == '-' .or. c == '.'
    end function is_num_start
+
+   !> False when the wire list cannot be read as this element type.
+   function list_readable(et, lst) result(ok)
+      type(capnp_ptr_t), intent(in) :: et, lst
+      logical :: ok
+      integer :: tw, expect
+      tw = type_which(et)
+      select case (tw)
+      case (TYPE_STRUCT)
+         expect = CAPNP_SZ_COMPOSITE
+      case (TYPE_LIST, TYPE_TEXT, TYPE_DATA, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         expect = CAPNP_SZ_PTR
+      case default
+         expect = capnp_codec_elem_esize(tw)
+      end select
+      if (expect < 0) then
+         ok = .false.
+      else
+         ok = capnp_list_fits(lst, expect)
+      end if
+   end function list_readable
 
 end module capnp_text
