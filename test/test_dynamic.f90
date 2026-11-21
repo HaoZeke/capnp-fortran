@@ -260,6 +260,8 @@ contains
       call check_(error, err == CAPNP_OK .and. s == 'ping method', 'dyn: method annotation value')
       call capnp_message_init_builder(amsg, err)
       q = capnp_dyn_new_root(aschema, dynamic_idx, amsg, err)
+      call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 4294967296_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'dyn: capability index range check')
       call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 41_int64, err)
       call check_(error, err == CAPNP_OK .and. &
                   capnp_dyn_get_capability(aschema, dynamic_idx, q, 'capability', err) == 41_int64, &
@@ -268,6 +270,9 @@ contains
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyStruct', people, err)
       people = capnp_dyn_get_any_struct(aschema, dynamic_idx, q, 'anyStruct', err)
       call check_(error, err == CAPNP_OK .and. people%kind == CAPNP_PK_STRUCT, 'dyn: AnyStruct')
+      root = capnp_dyn_getp(aschema, dynamic_idx, q, 'choice', err)
+      call capnp_dyn_setp(aschema, choice_idx, root, 'items', people, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: setp rejects wrong list kind')
       people = capnp_new_list(amsg, CAPNP_SZ_FOUR, 1_int64, err)
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyList', people, err)
       people = capnp_dyn_get_any_list(aschema, dynamic_idx, q, 'anyList', err)
