@@ -24,7 +24,7 @@ contains
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
       integer(int64) :: header_bytes, total, pos, n
-      integer :: i
+      integer :: i, stat
       err = CAPNP_OK
       if (msg%nsegs < 1) then
          err = CAPNP_ERR_ARG
@@ -35,7 +35,11 @@ contains
       do i = 1, msg%nsegs
          total = total + msg%segs(i)%len
       end do
-      allocate (bytes(0:total - 1))
+      allocate (bytes(0:total - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       bytes = 0_int8
       call cp_put_i32(bytes, 0_int64, u32_wire(int(msg%nsegs - 1, int64)))
       do i = 1, msg%nsegs
@@ -61,7 +65,7 @@ contains
       integer, intent(in), optional :: depth_limit
       type(capnp_reader_options_t), intent(in), optional :: options
       integer(int64) :: pos, n, nwords
-      integer :: i, nsegs
+      integer :: i, nsegs, stat
       call capnp_message_free(msg)
       if (size(bytes, kind=int64) == 0_int64) then
          if (present(options)) then
@@ -86,7 +90,12 @@ contains
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
-      allocate (msg%segs(nsegs))
+      allocate (msg%segs(nsegs), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         msg%nsegs = 0
+         return
+      end if
       do i = 1, nsegs
          nwords = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))
          n = nwords*CAPNP_WORD_BYTES
@@ -94,7 +103,11 @@ contains
             err = CAPNP_ERR_FRAMING
             return
          end if
-         allocate (msg%segs(i)%bytes(0:max(n, 8_int64) - 1))
+         allocate (msg%segs(i)%bytes(0:max(n, 8_int64) - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          msg%segs(i)%owned = .true.
          msg%segs(i)%bytes = 0_int8
          if (n > 0_int64) msg%segs(i)%bytes(0:n - 1) = bytes(pos:pos + n - 1)
@@ -114,7 +127,7 @@ contains
       integer, intent(in), optional :: depth_limit
       type(capnp_reader_options_t), intent(in), optional :: options
       integer(int64) :: pos, n, nwords
-      integer :: i, nsegs
+      integer :: i, nsegs, stat
       call capnp_message_free(msg)
       if (size(bytes, kind=int64) == 0_int64) then
          if (present(options)) then
@@ -139,7 +152,12 @@ contains
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
-      allocate (msg%segs(nsegs))
+      allocate (msg%segs(nsegs), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         msg%nsegs = 0
+         return
+      end if
       do i = 1, nsegs
          nwords = wire_u32(cp_get_i32(bytes, int(i, int64)*4_int64))
          n = nwords*CAPNP_WORD_BYTES
@@ -208,6 +226,7 @@ contains
       integer, intent(out) :: err
       integer :: unit, ios
       integer(int64) :: sz
+      integer :: stat
       err = CAPNP_OK
       open (newunit=unit, file=path, access='stream', form='unformatted', &
             status='old', action='read', iostat=ios)
@@ -216,7 +235,12 @@ contains
          return
       end if
       inquire (unit=unit, size=sz)
-      allocate (bytes(0:sz - 1))
+      allocate (bytes(0:max(sz, 0_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         close (unit)
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (sz > 0_int64) read (unit, iostat=ios) bytes(0:sz - 1)
       close (unit)
       if (ios /= 0) err = CAPNP_ERR_IO

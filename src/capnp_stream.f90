@@ -207,7 +207,7 @@ contains
       integer(int8) :: head(0:3)
       integer(int8), allocatable :: table(:), body(:), whole(:)
       integer(int64) :: nsegs64, header_bytes, total, limit, i, n
-      integer :: ios
+      integer :: ios, stat
       err = CAPNP_OK
       limit = reader_word_limit(traversal_words, options)
       read (unit, iostat=ios) head
@@ -221,7 +221,11 @@ contains
          return
       end if
       header_bytes = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64*8_int64
-      allocate (table(0:header_bytes - 5))
+      allocate (table(0:header_bytes - 5), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       read (unit, iostat=ios) table
       if (ios /= 0) then
          err = CAPNP_ERR_FRAMING

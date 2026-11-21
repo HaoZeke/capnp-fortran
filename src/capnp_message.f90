@@ -1831,6 +1831,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       integer(int64) :: n, j
+      integer :: stat
       str = ''
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
@@ -1845,7 +1846,12 @@ contains
       n = q%nelem - 1_int64 ! trailing NUL
       if (n <= 0_int64) return
       deallocate (str)
-      allocate (character(len=n) :: str)
+      allocate (character(len=n) :: str, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         str = ''
+         return
+      end if
       do j = 0_int64, n - 1_int64
          str(j + 1:j + 1) = char(cp_u8(q%msg%segs(q%seg)%bytes(q%off + j)))
       end do
@@ -1877,7 +1883,12 @@ contains
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
-      allocate (bytes(0))
+      integer :: stat
+      allocate (bytes(0), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
       if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
@@ -1886,7 +1897,11 @@ contains
       end if
       if (q%nelem > 0_int64) then
          deallocate (bytes)
-         allocate (bytes(0:q%nelem - 1))
+         allocate (bytes(0:q%nelem - 1), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          bytes = q%msg%segs(q%seg)%bytes(q%off:q%off + q%nelem - 1)
       end if
    end subroutine capnp_get_data

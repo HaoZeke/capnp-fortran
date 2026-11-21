@@ -58,7 +58,7 @@ contains
       integer, intent(out) :: err
       integer(int8), allocatable :: buf(:)
       integer(int64) :: nwords, w, run, opos, j
-      integer :: tag, nz, k
+      integer :: tag, nz, k, stat
       err = CAPNP_OK
       if (mod(size(inb, kind=int64), 8_int64) /= 0_int64) then
          err = CAPNP_ERR_ARG
@@ -66,7 +66,11 @@ contains
       end if
       nwords = size(inb, kind=int64)/8_int64
       ! Worst case: tag + 8 bytes per word, plus one count byte per 0xff run.
-      allocate (buf(0:10_int64*max(nwords, 1_int64) - 1))
+      allocate (buf(0:10_int64*max(nwords, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       opos = 0_int64
       w = 0_int64
       do while (w < nwords)
@@ -111,11 +115,16 @@ contains
             w = w + run
          end if
       end do
-      allocate (outb(0:max(opos, 1_int64) - 1))
+      allocate (outb(0:max(opos, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (opos > 0_int64) outb(0:opos - 1) = buf(0:opos - 1)
       if (opos == 0_int64) then
          deallocate (outb)
-         allocate (outb(0))
+         allocate (outb(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
       end if
    end subroutine capnp_pack
 
