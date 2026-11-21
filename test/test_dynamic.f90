@@ -161,6 +161,12 @@ contains
       call check_(error, err == CAPNP_OK .and. &
                   capnp_dyn_get_int(kschema, sink_idx, q, 'count', err) == -7_int64, &
                   'dyn: scalar schema evolution default')
+      call capnp_dyn_get_text(kschema, sink_idx, q, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', 'dyn: text pointer default')
+      call capnp_dyn_get_data(kschema, sink_idx, q, 'payload', data, err)
+      call check_(error, err == CAPNP_OK .and. size(data) == 4 .and. &
+                  data(lbound(data, 1)) == -34_int8 .and. data(ubound(data, 1)) == -17_int8, &
+                  'dyn: data pointer default')
       q = capnp_dyn_getp(kschema, sink_idx, q, 'origin', err)
       call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT .and. &
                   abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'z', err) + 3.5_real64) < 1.0e-15_real64, &

@@ -511,7 +511,7 @@ contains
       character(len=*), intent(in) :: fname
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -520,7 +520,15 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
-      call capnp_get_text(p, int(field_slot_offset(f)), s, err)
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call capnp_get_text(p, int(field_slot_offset(f)), s, err)
+         return
+      end if
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call value_text(dv, s, err)
    end subroutine capnp_dyn_get_text
 
    subroutine capnp_dyn_get_data(schema, idx, p, fname, bytes, err)
@@ -530,7 +538,7 @@ contains
       character(len=*), intent(in) :: fname
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv, q
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -540,7 +548,15 @@ contains
          allocate (bytes(0:-1))
          return
       end if
-      call capnp_get_data(p, int(field_slot_offset(f)), bytes, err)
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call capnp_get_data(p, int(field_slot_offset(f)), bytes, err)
+         return
+      end if
+      dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call value_data(dv, bytes, err)
    end subroutine capnp_dyn_get_data
 
    !> Resolved pointer field (Text, Data, List, struct, anyPointer). For
