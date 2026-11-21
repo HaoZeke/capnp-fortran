@@ -58,6 +58,7 @@ contains
            new_unittest("traversal-single-far", test_traversal_single_far), &
            new_unittest("traversal-double-far", test_traversal_double_far), &
            new_unittest("void-list-words", test_void_list_words), &
+           new_unittest("void-list-get-all", test_void_list_get_all), &
            new_unittest("depth-limit", test_depth_limit), &
            new_unittest("depth-limit-nested", test_depth_limit_nested), &
            new_unittest("nest-limit-64", test_nest_limit_64), &
@@ -2108,6 +2109,38 @@ contains
       call void_list_case(error, 10000000_int64, CAPNP_DEFAULT_TRAVERSAL_WORDS, &
                           CAPNP_ERR_TRAVERSAL)
    end subroutine test_void_list_words
+
+   !> A void list that fits in the traversal budget is still the wrong
+   !> element kind for an integer bulk read. The kind check happens
+   !> before the host array is allocated.
+   subroutine test_void_list_get_all(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: bytes(:)
+      integer(int32), allocatable :: arr(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 64_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=1000_int64)
+      root = capnp_root(rmsg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 64_int64, &
+                 'void get-all: list is in budget')
+      if (allocated(error)) then
+         call capnp_message_free(rmsg)
+         return
+      end if
+      call capnp_list_get_all_i32(lst, arr, err)
+      call check(error, err == CAPNP_ERR_KIND .and. allocated(arr) .and. size(arr) == 0, &
+                 'void get-all: kind error before a sized allocate')
+      call capnp_message_free(rmsg)
+   end subroutine test_void_list_get_all
 
    subroutine void_list_case(error, count, budget, expect)
       type(error_type), allocatable, intent(inout) :: error

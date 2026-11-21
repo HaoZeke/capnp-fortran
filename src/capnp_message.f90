@@ -1017,6 +1017,21 @@ contains
       end if
    end function list_elem_base
 
+   !> True when a bulk primitive read can address every element. Checked
+   !> once, before the host array is allocated.
+   function bulk_elem_ok(p, want_bits) result(ok)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: want_bits
+      logical :: ok
+      ok = .false.
+      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg)) return
+      if (capnp_list_step_bits(p%esize) == want_bits .and. p%esize /= CAPNP_SZ_PTR) then
+         ok = .true.
+      else if (p%esize == CAPNP_SZ_COMPOSITE .and. p%dwords >= 1) then
+         ok = .true.
+      end if
+   end function bulk_elem_ok
+
    ! ------------------------------------------------------------------
    ! Primitive struct fields. Reads past the data section return the
    ! default (spec: short structs from older schema versions). Writes past
@@ -1087,15 +1102,32 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer(int8), allocatable, intent(out) :: arr(:)
       integer, intent(out) :: err
-      integer(int64) :: i
+      integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
-      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
-      if (capnp_list_len(p) == 0_int64) then
-         deallocate (arr)
-         allocate (arr(0))
+      n = capnp_list_len(p)
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         allocate (arr(0), stat=stat)
          return
       end if
-      do i = 0_int64, capnp_list_len(p) - 1_int64
+      if (n > 0_int64 .and. .not. bulk_elem_ok(p, 8)) then
+         err = CAPNP_ERR_KIND
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      allocate (arr(0:max(n, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (n == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, n - 1_int64
          arr(i) = capnp_list_get_i8 (p, i, err)
          if (err /= CAPNP_OK) return
       end do
@@ -1182,15 +1214,32 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer(int16), allocatable, intent(out) :: arr(:)
       integer, intent(out) :: err
-      integer(int64) :: i
+      integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
-      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
-      if (capnp_list_len(p) == 0_int64) then
-         deallocate (arr)
-         allocate (arr(0))
+      n = capnp_list_len(p)
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         allocate (arr(0), stat=stat)
          return
       end if
-      do i = 0_int64, capnp_list_len(p) - 1_int64
+      if (n > 0_int64 .and. .not. bulk_elem_ok(p, 16)) then
+         err = CAPNP_ERR_KIND
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      allocate (arr(0:max(n, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (n == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, n - 1_int64
          arr(i) = capnp_list_get_i16 (p, i, err)
          if (err /= CAPNP_OK) return
       end do
@@ -1277,15 +1326,32 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer(int32), allocatable, intent(out) :: arr(:)
       integer, intent(out) :: err
-      integer(int64) :: i
+      integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
-      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
-      if (capnp_list_len(p) == 0_int64) then
-         deallocate (arr)
-         allocate (arr(0))
+      n = capnp_list_len(p)
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         allocate (arr(0), stat=stat)
          return
       end if
-      do i = 0_int64, capnp_list_len(p) - 1_int64
+      if (n > 0_int64 .and. .not. bulk_elem_ok(p, 32)) then
+         err = CAPNP_ERR_KIND
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      allocate (arr(0:max(n, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (n == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, n - 1_int64
          arr(i) = capnp_list_get_i32 (p, i, err)
          if (err /= CAPNP_OK) return
       end do
@@ -1372,15 +1438,32 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer(int64), allocatable, intent(out) :: arr(:)
       integer, intent(out) :: err
-      integer(int64) :: i
+      integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
-      allocate (arr(0:max(capnp_list_len(p), 1_int64) - 1))
-      if (capnp_list_len(p) == 0_int64) then
-         deallocate (arr)
-         allocate (arr(0))
+      n = capnp_list_len(p)
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         allocate (arr(0), stat=stat)
          return
       end if
-      do i = 0_int64, capnp_list_len(p) - 1_int64
+      if (n > 0_int64 .and. .not. bulk_elem_ok(p, 64)) then
+         err = CAPNP_ERR_KIND
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      allocate (arr(0:max(n, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      if (n == 0_int64) then
+         deallocate (arr)
+         allocate (arr(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, n - 1_int64
          arr(i) = capnp_list_get_i64 (p, i, err)
          if (err /= CAPNP_OK) return
       end do
@@ -1907,12 +1990,28 @@ contains
       logical, allocatable, intent(out) :: arr(:)
       integer, intent(out) :: err
       integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
       n = capnp_list_len(p)
-      allocate (arr(0:max(n, 1_int64) - 1))
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ALLOC
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      if (n > 0_int64 .and. .not. bulk_elem_ok(p, 1)) then
+         err = CAPNP_ERR_KIND
+         allocate (arr(0), stat=stat)
+         return
+      end if
+      allocate (arr(0:max(n, 1_int64) - 1), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       if (n == 0_int64) then
          deallocate (arr)
-         allocate (arr(0))
+         allocate (arr(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       do i = 0_int64, n - 1_int64
