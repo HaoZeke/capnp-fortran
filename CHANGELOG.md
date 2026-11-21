@@ -48,6 +48,11 @@ Pre-1.0 minor releases may include breaking API changes.
   independent live capnp-C++ RPC interop target.
 - The golden-master C harness is clean under strict compiler warnings.
 
+### Changed
+
+- Release validation checks that the fpm, Meson, CMake, citation, and Sphinx
+  versions match the release tag before publication.
+
 ## [0.3.1] - 2026-08-15
 
 ### Fixed
