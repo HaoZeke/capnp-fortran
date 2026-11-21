@@ -1058,9 +1058,13 @@ contains
       logical :: ok
       ok = .false.
       if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg)) return
-      if (capnp_list_step_bits(p%esize) == want_bits .and. p%esize /= CAPNP_SZ_PTR) then
+      if (p%esize == CAPNP_SZ_PTR) return
+      if (p%esize == CAPNP_SZ_COMPOSITE .and. p%dwords >= 1) then
          ok = .true.
-      else if (p%esize == CAPNP_SZ_COMPOSITE .and. p%dwords >= 1) then
+      else if (capnp_list_step_bits(p%esize) >= want_bits .and. &
+               capnp_list_step_bits(p%esize) > 0) then
+         ! layout.c++ accepts a primitive element at least as wide as the
+         ! schema type and reads the low-order bytes.
          ok = .true.
       end if
    end function bulk_elem_ok

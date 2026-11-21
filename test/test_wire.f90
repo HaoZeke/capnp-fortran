@@ -13,7 +13,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(55))
+      allocate (testsuite(56))
       testsuite(1) = new_unittest("endian", test_endian)
       testsuite(2) = new_unittest("pointer-words", test_pointer_words)
       testsuite(3) = new_unittest("empty-struct-offset-minus-one", test_empty_struct_offset)
@@ -62,14 +62,15 @@ contains
       testsuite(45) = new_unittest("traversal-double-far", test_traversal_double_far)
       testsuite(46) = new_unittest("void-list-words", test_void_list_words)
       testsuite(47) = new_unittest("void-list-get-all", test_void_list_get_all)
-      testsuite(48) = new_unittest("depth-limit", test_depth_limit)
-      testsuite(49) = new_unittest("depth-limit-nested", test_depth_limit_nested)
-      testsuite(50) = new_unittest("nest-limit-64", test_nest_limit_64)
-      testsuite(51) = new_unittest("far-depth-one", test_far_depth_one)
-      testsuite(52) = new_unittest("reader-options", test_reader_options)
-      testsuite(53) = new_unittest("builder-options", test_builder_options)
-      testsuite(54) = new_unittest("alloc-in-bounds", test_alloc_in_bounds)
-      testsuite(55) = new_unittest("root-uninit", test_root_uninit)
+      testsuite(48) = new_unittest("wide-list-get-all", test_wide_list_get_all)
+      testsuite(49) = new_unittest("depth-limit", test_depth_limit)
+      testsuite(50) = new_unittest("depth-limit-nested", test_depth_limit_nested)
+      testsuite(51) = new_unittest("nest-limit-64", test_nest_limit_64)
+      testsuite(52) = new_unittest("far-depth-one", test_far_depth_one)
+      testsuite(53) = new_unittest("reader-options", test_reader_options)
+      testsuite(54) = new_unittest("builder-options", test_builder_options)
+      testsuite(55) = new_unittest("alloc-in-bounds", test_alloc_in_bounds)
+      testsuite(56) = new_unittest("root-uninit", test_root_uninit)
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2145,6 +2146,28 @@ contains
                  'void get-all: kind error before a sized allocate')
       call capnp_message_free(rmsg)
    end subroutine test_void_list_get_all
+
+   !> A bulk read accepts an element wider than the requested type.
+   !> The low-order byte of each 16-bit element is the uint8 value.
+   subroutine test_wide_list_get_all(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer(int8), allocatable :: arr(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_TWO, 2_int64, err)
+      call capnp_list_set_i16(lst, 0_int64, 513_int16, err)
+      call capnp_list_set_i16(lst, 1_int64, 772_int16, err)
+      call capnp_list_get_all_i8(lst, arr, err)
+      call check(error, err == CAPNP_OK .and. allocated(arr) .and. size(arr) == 2, &
+                 'wide get-all: two bytes')
+      if (.not. allocated(error) .and. allocated(arr)) then
+         call check(error, arr(0) == 1_int8 .and. arr(1) == 4_int8, &
+                    'wide get-all: low bytes')
+      end if
+      call capnp_message_free(msg)
+   end subroutine test_wide_list_get_all
 
    subroutine void_list_case(error, count, budget, expect)
       type(error_type), allocatable, intent(inout) :: error
