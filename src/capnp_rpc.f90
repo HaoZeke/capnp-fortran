@@ -51,6 +51,7 @@ module capnp_rpc
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
    public :: rpc_membrane_policy_t, rpc_membrane_server_t
    public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
+   public :: rpc_membrane_owned_live
    public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
    public :: rpc_bootstrap_send, rpc_wait, rpc_result_content, rpc_result_cap
    public :: rpc_call_begin, rpc_call_send, rpc_pipeline_cap
@@ -155,8 +156,11 @@ module capnp_rpc
       logical :: owned = .false.
       !> Live export slots and provisions holding this owned wrapper.
       integer :: refs = 0
+      !> Heap wrapper counted by rpc_membrane_owned_live.
+      logical :: tracked = .false.
    contains
       procedure :: dispatch => membrane_dispatch
+      final :: membrane_server_final
    end type rpc_membrane_server_t
 
    abstract interface
@@ -237,6 +241,9 @@ module capnp_rpc
       !> outlives the claim and carries the answer to send.
       logical :: embargoed = .false.
       integer(int64) :: accept_qid = -1_int64
+      !> Connection that received the Accept. eid and accept_qid name
+      !> objects on this connection, which may differ from `host`.
+      type(rpc_conn_t), pointer :: accept_conn => null()
    end type rpc_provision_slot_t
 
    !> An introduction we have been handed but not yet picked up.
@@ -316,12 +323,21 @@ module capnp_rpc
       type(rpc_vat_t) :: own_vat
       type(rpc_introduction_t) :: introductions(0:MAXINTRO - 1)
       type(rpc_join_slot_t) :: joins(0:MAXJOINS - 1)
+      !> Join ids canceled by Finish before the set completed, with the
+      !> part count they used. A later part of that same set is answered
+      !> at once. A different part count is a new set.
+      integer :: njoin_cancel = 0
+      integer(int64) :: join_cancel_id(0:MAXJOINS - 1) = -1_int64
+      integer :: join_cancel_n(0:MAXJOINS - 1) = 0
       integer(int64) :: next_qid = 0_int64
       !> Null allows every dial. Otherwise the hook is asked before connect.
       procedure(rpc_dial_allow_ifc), pointer, nopass :: dial_allow => null()
       !> Connect timeout for an introduction dial, in milliseconds.
       integer :: dial_timeout_ms = 10000
    end type rpc_conn_t
+
+   !> Owned membrane wrappers allocated on the heap and not yet freed.
+   integer :: owned_membrane_count = 0
 
 contains
 
@@ -343,6 +359,7 @@ contains
       conn%own_vat = rpc_vat_t()
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
+      conn%njoin_cancel = 0
       conn%next_qid = 0_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
@@ -370,6 +387,7 @@ contains
       conn%own_vat = rpc_vat_t()
       conn%introductions = rpc_introduction_t()
       conn%joins = rpc_join_slot_t()
+      conn%njoin_cancel = 0
       conn%next_qid = 0_int64
       conn%dial_allow => null()
       conn%dial_timeout_ms = 10000
@@ -514,16 +532,37 @@ contains
       logical, intent(in) :: reverse
       integer, intent(out) :: err
       type(rpc_membrane_server_t), pointer :: wrapper
-      class(rpc_server_t), pointer :: inner
+      class(rpc_server_t), pointer :: inner, peeled
+      logical :: unwrap, drop_owned
       err = CAPNP_OK
+      unwrap = .false.
+      drop_owned = .false.
+      peeled => null()
       select type (existing => srv)
       type is (rpc_membrane_server_t)
          if (associated(existing%policy, policy) .and. &
              existing%reverse .neqv. reverse) then
-            srv => existing%inner
-            return
+            peeled => existing%inner
+            unwrap = .true.
+            drop_owned = existing%owned .and. existing%refs <= 0
          end if
       end select
+      if (unwrap) then
+         ! The staged pointer is not a counted holder. An owned wrapper
+         ! with no export or provision is freed. A live holder keeps it.
+         if (drop_owned) then
+            select type (existing => srv)
+            type is (rpc_membrane_server_t)
+               if (existing%tracked) then
+                  owned_membrane_count = owned_membrane_count - 1
+                  existing%tracked = .false.
+               end if
+            end select
+            deallocate (srv)
+         end if
+         srv => peeled
+         return
+      end if
       select type (typed => srv)
       class is (rpc_server_t)
          inner => typed
@@ -535,8 +574,24 @@ contains
       call rpc_membrane_server_init(wrapper, inner, policy, reverse)
       wrapper%owned = .true.
       wrapper%refs = 0
+      wrapper%tracked = .true.
+      owned_membrane_count = owned_membrane_count + 1
       srv => wrapper
    end subroutine membrane_wrap_server_ref
+
+   subroutine membrane_server_final(self)
+      type(rpc_membrane_server_t), intent(inout) :: self
+      if (self%tracked) then
+         owned_membrane_count = owned_membrane_count - 1
+         self%tracked = .false.
+      end if
+   end subroutine membrane_server_final
+
+   !> Heap owned membranes still allocated.
+   function rpc_membrane_owned_live() result(n)
+      integer :: n
+      n = owned_membrane_count
+   end function rpc_membrane_owned_live
 
    !> One holder of an owned membrane. Unowned servers are the caller's.
    subroutine retain_server(srv)
@@ -612,15 +667,42 @@ contains
       slot%source_eid = -1
    end subroutine release_provision_pin
 
-   !> Provisions whose source export lives on this connection.
+   !> Provisions whose source export lives on this connection, and
+   !> embargoed Accepts whose recipient is closing.
    subroutine release_hosted_provisions(conn)
       type(rpc_conn_t), intent(inout), target :: conn
-      integer :: i
+      type(rpc_conn_t), pointer :: ac
+      integer :: i, ae, ierr
+      integer(int64) :: aq
       do i = 0, MAXPROV - 1
          if (.not. conn%vat%provisions(i)%used) cycle
-         if (.not. associated(conn%vat%provisions(i)%host, conn)) cycle
-         call release_provision_pin(conn%vat%provisions(i))
-         conn%vat%provisions(i) = rpc_provision_slot_t()
+         if (associated(conn%vat%provisions(i)%host, conn)) then
+            if (conn%vat%provisions(i)%embargoed) then
+               ae = conn%vat%provisions(i)%eid
+               aq = conn%vat%provisions(i)%accept_qid
+               ac => conn%vat%provisions(i)%accept_conn
+               call release_provision_pin(conn%vat%provisions(i))
+               conn%vat%provisions(i) = rpc_provision_slot_t()
+               ! Accept ids belong to the recipient. This transport is
+               ! already closed, so the answer goes out on the other one.
+               if (associated(ac)) then
+                  if (.not. associated(ac, conn)) then
+                     if (ae >= 0) call drop_export(ac, ae, 1)
+                     if (.not. ac%dead .and. associated(ac%transport)) &
+                        call send_answer_exception(ac, aq, 'provide finished', ierr)
+                  end if
+               end if
+            else
+               call release_provision_pin(conn%vat%provisions(i))
+               conn%vat%provisions(i) = rpc_provision_slot_t()
+            end if
+         else if (conn%vat%provisions(i)%embargoed .and. &
+                  associated(conn%vat%provisions(i)%accept_conn, conn)) then
+            ! Recipient closed first; clear the reference before its
+            ! storage can disappear (rpc.c++ disconnect skips closed sends).
+            conn%vat%provisions(i)%accept_conn => null()
+            conn%vat%provisions(i)%eid = -1
+         end if
       end do
    end subroutine release_hosted_provisions
 
@@ -1034,6 +1116,7 @@ contains
       do i = 0, MAXJOINS - 1
          conn%joins(i) = rpc_join_slot_t()
       end do
+      conn%njoin_cancel = 0
    end subroutine clear_joins
 
    !> Collect a complete Join result set. `joined` is the single
@@ -2119,6 +2202,7 @@ contains
                ! stays until that Return is sent.
                conn%vat%provisions(i)%embargoed = .true.
                conn%vat%provisions(i)%accept_qid = qid
+               conn%vat%provisions(i)%accept_conn => conn
             else
                call release_provision_pin(conn%vat%provisions(i))
                conn%vat%provisions(i) = rpc_provision_slot_t()
@@ -2177,7 +2261,8 @@ contains
       integer(int64), intent(in) :: provide_qid
       integer, intent(out) :: err
       integer(int64) :: qid
-      integer :: i, eid
+      integer :: i, eid, ierr
+      type(rpc_conn_t), pointer :: ac
       err = CAPNP_OK
       do i = 0, MAXPROV - 1
          if (.not. conn%vat%provisions(i)%used) cycle
@@ -2185,9 +2270,17 @@ contains
          if (conn%vat%provisions(i)%qid /= provide_qid) cycle
          qid = conn%vat%provisions(i)%accept_qid
          eid = conn%vat%provisions(i)%eid
+         ac => conn%vat%provisions(i)%accept_conn
          call release_provision_pin(conn%vat%provisions(i))
          conn%vat%provisions(i) = rpc_provision_slot_t()
-         call send_accepted_cap(conn, qid, eid, err)
+         if (associated(ac)) then
+            if (.not. ac%dead .and. associated(ac%transport)) then
+               call send_accepted_cap(ac, qid, eid, ierr)
+               if (associated(ac, conn)) err = ierr
+            else if (eid >= 0) then
+               call drop_export(ac, eid, 1)
+            end if
+         end if
          return
       end do
       ! A Disembargo naming nothing we hold is the sender's problem, not
@@ -2314,6 +2407,13 @@ contains
 
       if (pcount <= 0 .or. pcount > MAXJOINPARTS .or. &
           pnum < 0 .or. pnum >= pcount) then
+         call send_join_failure(conn, qid, jid, err)
+         return
+      end if
+
+      if (join_cancel_match(conn, jid, pcount)) then
+         ! This joinId and part count were canceled. Answer now so the
+         ! part does not occupy a slot that waits forever.
          call send_join_failure(conn, qid, jid, err)
          return
       end if
@@ -2572,8 +2672,9 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
-      integer :: i, ae
+      integer :: i, ae, ierr
       integer(int64) :: aq
+      type(rpc_conn_t), pointer :: ac
       err = CAPNP_OK
       if (.not. associated(conn%vat)) return
       do i = 0, MAXPROV - 1
@@ -2583,10 +2684,16 @@ contains
          if (conn%vat%provisions(i)%embargoed) then
             ae = conn%vat%provisions(i)%eid
             aq = conn%vat%provisions(i)%accept_qid
+            ac => conn%vat%provisions(i)%accept_conn
             call release_provision_pin(conn%vat%provisions(i))
             conn%vat%provisions(i) = rpc_provision_slot_t()
-            if (ae >= 0) call drop_export(conn, ae, 1)
-            call send_answer_exception(conn, aq, 'provide finished', err)
+            if (associated(ac)) then
+               if (ae >= 0) call drop_export(ac, ae, 1)
+               if (.not. ac%dead .and. associated(ac%transport)) then
+                  call send_answer_exception(ac, aq, 'provide finished', ierr)
+                  if (associated(ac, conn)) err = ierr
+               end if
+            end if
          else
             call release_provision_pin(conn%vat%provisions(i))
             conn%vat%provisions(i) = rpc_provision_slot_t()
@@ -2594,6 +2701,67 @@ contains
          return
       end do
    end subroutine release_finished_provide
+
+   pure function join_cancel_match(conn, jid, pcount) result(yes)
+      type(rpc_conn_t), intent(in) :: conn
+      integer(int64), intent(in) :: jid
+      integer, intent(in) :: pcount
+      logical :: yes
+      integer :: i, n
+      yes = .false.
+      n = min(conn%njoin_cancel, MAXJOINS)
+      do i = 0, n - 1
+         if (conn%join_cancel_id(i) == jid .and. &
+             conn%join_cancel_n(i) == pcount) yes = .true.
+      end do
+   end function join_cancel_match
+
+   subroutine note_join_cancel(conn, jid, pcount)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: jid
+      integer, intent(in) :: pcount
+      integer :: k
+      k = mod(conn%njoin_cancel, MAXJOINS)
+      conn%join_cancel_id(k) = jid
+      conn%join_cancel_n(k) = pcount
+      conn%njoin_cancel = conn%njoin_cancel + 1
+   end subroutine note_join_cancel
+
+   !> Finish of one Join part before the set completes cancels the set.
+   !> Parts that already arrived get a failed JoinResult, and the slot is
+   !> freed. A later part with the same joinId and part count is answered
+   !> on arrival. A different part count may start a new set.
+   !> rpc.capnp Join.questionId: Finish before the joiner connects frees
+   !> the resources allocated for that join.
+   function finish_cancels_join(conn, qid, err) result(hit)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      logical :: hit
+      integer :: i, p, k, pcount
+      integer(int64) :: jid
+      err = CAPNP_OK
+      hit = .false.
+      do i = 0, MAXJOINS - 1
+         if (.not. conn%joins(i)%used) cycle
+         do p = 0, conn%joins(i)%part_count - 1
+            if (.not. conn%joins(i)%seen(p)) cycle
+            if (conn%joins(i)%qids(p) /= qid) cycle
+            hit = .true.
+            jid = conn%joins(i)%join_id
+            pcount = conn%joins(i)%part_count
+            do k = 0, pcount - 1
+               if (.not. conn%joins(i)%seen(k)) cycle
+               if (conn%joins(i)%qids(k) == qid) cycle
+               call send_join_failure(conn, conn%joins(i)%qids(k), jid, err)
+               if (err /= CAPNP_OK) return
+            end do
+            call note_join_cancel(conn, jid, pcount)
+            conn%joins(i) = rpc_join_slot_t()
+            return
+         end do
+      end do
+   end function finish_cancels_join
 
    subroutine handle_finish(conn, msg, err)
       type(rpc_conn_t), intent(inout), target :: conn
@@ -2606,13 +2774,9 @@ contains
       if (err /= CAPNP_OK) return
       qid = finish_question_id_get(f)
       call release_finished_provide(conn, qid, err)
-      do i = 0, MAXJOINS - 1
-         if (.not. conn%joins(i)%used) cycle
-         if (any(conn%joins(i)%qids(0:conn%joins(i)%part_count - 1) == qid)) then
-            conn%joins(i) = rpc_join_slot_t()
-            return
-         end if
-      end do
+      if (err /= CAPNP_OK) return
+      if (finish_cancels_join(conn, qid, err)) return
+      if (err /= CAPNP_OK) return
       if (qid < 0_int64 .or. qid >= int(MAXQ, int64)) return
       q = int(qid)
       if (.not. conn%answers(q)%used) then

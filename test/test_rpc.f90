@@ -46,7 +46,16 @@ contains
    subroutine collect_rpc(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! One ordered suite: cases share a socketpair connection (setup once).
-      testsuite = [new_unittest("rpc", run_rpc)]
+      testsuite = [ &
+         new_unittest("rpc", run_rpc), &
+         new_unittest("embargo finish", t_embargo_finish_answers_recipient), &
+         new_unittest("embargo close", t_embargo_close_answers_recipient), &
+         new_unittest("embargo lift", t_embargo_lift_answers_recipient), &
+         new_unittest("embargo finish closed", t_embargo_finish_recipient_closed), &
+         new_unittest("embargo lift closed", t_embargo_lift_recipient_closed), &
+         new_unittest("join finish rest", t_join_finish_answers_rest), &
+         new_unittest("membrane unwrap", t_membrane_unwrap_frees) &
+         ]
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -2253,5 +2262,597 @@ contains
       call px_close(fb)
       call px_close(lfd)
    end subroutine t_dial_guard
+
+   subroutine send_provide_fd(fd, qid, eid, nonce, e)
+      integer, intent(in) :: fd, eid
+      integer(int64), intent(in) :: qid, nonce
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(provide_t) :: pv
+      type(message_target_t) :: tgt
+      type(recipient_id_t) :: rid
+      type(vat_id_t) :: vat
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      pv = message_provide_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call provide_question_id_set(pv, qid, e)
+      if (e /= CAPNP_OK) return
+      tgt = provide_target_init(pv, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, int(eid, int64), e)
+      if (e /= CAPNP_OK) return
+      rid = recipient_id_new(m, e)
+      if (e /= CAPNP_OK) return
+      call recipient_id_nonce_set(rid, nonce, e)
+      if (e /= CAPNP_OK) return
+      vat = recipient_id_vat_init(rid, e)
+      if (e /= CAPNP_OK) return
+      call vat_id_host_set(vat, '127.0.0.1', e)
+      if (e /= CAPNP_OK) return
+      call vat_id_port_set(vat, 4000, e)
+      if (e /= CAPNP_OK) return
+      call provide_recipient_set(pv, rid%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_provide_fd
+
+   subroutine send_accept_embargo_fd(fd, qid, nonce, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: qid, nonce
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(accept_t) :: ac
+      type(provision_id_t) :: pid
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      ac = message_accept_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call accept_question_id_set(ac, qid, e)
+      if (e /= CAPNP_OK) return
+      call accept_embargo_set(ac, .true., e)
+      if (e /= CAPNP_OK) return
+      pid = provision_id_new(m, e)
+      if (e /= CAPNP_OK) return
+      call provision_id_nonce_set(pid, nonce, e)
+      if (e /= CAPNP_OK) return
+      call accept_provision_set(ac, pid%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_accept_embargo_fd
+
+   subroutine send_disembargo_fd(fd, provide_qid, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: provide_qid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      d = message_disembargo_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call disembargo_context_provide_set(d, provide_qid, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_disembargo_fd
+
+   subroutine send_finish_fd(fd, qid, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(finish_t) :: f
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      f = message_finish_init(msg, e)
+      if (e == CAPNP_OK) call finish_question_id_set(f, qid, e)
+      if (e == CAPNP_OK) call finish_release_result_caps_set(f, .true., e)
+      if (e == CAPNP_OK) &
+         call finish_require_early_cancellation_workaround_set(f, .false., e)
+      if (e == CAPNP_OK) call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_finish_fd
+
+   subroutine send_join_fd(fd, qid, eid, jid, pcount, pnum, e)
+      integer, intent(in) :: fd, eid, pcount, pnum
+      integer(int64), intent(in) :: qid, jid
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(join_t) :: jn
+      type(message_target_t) :: tgt
+      type(join_key_part_t) :: kp
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      jn = message_join_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call join_question_id_set(jn, qid, e)
+      if (e /= CAPNP_OK) return
+      tgt = join_target_init(jn, e)
+      if (e /= CAPNP_OK) return
+      call message_target_imported_cap_set(tgt, int(eid, int64), e)
+      if (e /= CAPNP_OK) return
+      kp = join_key_part_new(m, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_join_id_set(kp, jid, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_part_count_set(kp, pcount, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_part_num_set(kp, pnum, e)
+      if (e /= CAPNP_OK) return
+      call join_key_part_set(jn, kp%p, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_join_fd
+
+   subroutine recv_return_fd(fd, ansid, is_exc, kind, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(out) :: ansid
+      logical, intent(out) :: is_exc
+      integer, intent(out) :: kind, e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: content
+      logical :: readable
+      ansid = -1_int64
+      is_exc = .false.
+      kind = CAPNP_PK_NULL
+      call px_poll_in(fd, 200, readable, e)
+      if (e /= CAPNP_OK) return
+      if (.not. readable) then
+         e = CAPNP_ERR_IO
+         return
+      end if
+      call rpc_recv_message(fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) then
+         e = CAPNP_ERR_KIND
+         call capnp_message_free(m)
+         return
+      end if
+      r = message_return_get(msg, e)
+      if (e /= CAPNP_OK) return
+      ansid = return_answer_id_get(r)
+      is_exc = return_which(r) /= RETURN_RESULTS_TAG
+      if (.not. is_exc) then
+         pl = return_results_get(r, e)
+         if (e /= CAPNP_OK) return
+         content = payload_content_get(pl, e)
+         if (e /= CAPNP_OK) return
+         kind = content%kind
+      end if
+      e = CAPNP_OK
+      call capnp_message_free(m)
+   end subroutine recv_return_fd
+
+   subroutine recv_join_fd(fd, ansid, succeeded, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(out) :: ansid
+      logical, intent(out) :: succeeded
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: content
+      type(join_result_t) :: jr
+      logical :: readable
+      ansid = -1_int64
+      succeeded = .false.
+      call px_poll_in(fd, 200, readable, e)
+      if (e /= CAPNP_OK) return
+      if (.not. readable) then
+         e = CAPNP_ERR_IO
+         return
+      end if
+      call rpc_recv_message(fd, m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_read_root(m, e)
+      if (e /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_RETURN_TAG) then
+         e = CAPNP_ERR_KIND
+         call capnp_message_free(m)
+         return
+      end if
+      r = message_return_get(msg, e)
+      if (e /= CAPNP_OK) return
+      ansid = return_answer_id_get(r)
+      pl = return_results_get(r, e)
+      if (e /= CAPNP_OK) return
+      content = payload_content_get(pl, e)
+      if (e /= CAPNP_OK) return
+      jr%p = content
+      succeeded = join_result_succeeded_get(jr)
+      e = CAPNP_OK
+      call capnp_message_free(m)
+   end subroutine recv_join_fd
+
+   !> Provide on one connection, embargoed Accept on another, same vat.
+   subroutine stage_split_embargo(shared, alice, carol, host_a, host_b, &
+                                  echo, provide_q, accept_q, nonce, e)
+      type(rpc_vat_t), intent(inout), target :: shared
+      type(rpc_conn_t), intent(inout), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), intent(inout), target :: echo
+      integer(int64), intent(in) :: provide_q, accept_q, nonce
+      integer, intent(out) :: e
+      type(rpc_vat_t), pointer :: vp
+      class(rpc_server_t), pointer :: boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, ans
+      integer :: afd, ahfd, cfd, chfd, kind
+      logical :: is_exc, readable
+      e = CAPNP_OK
+      call px_socketpair(afd, ahfd, e)
+      if (e /= CAPNP_OK) return
+      call px_socketpair(cfd, chfd, e)
+      if (e /= CAPNP_OK) return
+      boot => echo
+      call rpc_conn_init(host_a, ahfd, boot)
+      boot => null()
+      call rpc_conn_init(host_b, chfd, boot)
+      call rpc_conn_init(alice, afd, boot)
+      call rpc_conn_init(carol, cfd, boot)
+      vp => shared
+      call rpc_conn_set_vat(host_a, vp)
+      call rpc_conn_set_vat(host_b, vp)
+      call rpc_bootstrap_send(alice, cap, e)
+      if (e /= CAPNP_OK) return
+      qboot = cap%id
+      call rpc_pump_once(host_a, e)
+      if (e /= CAPNP_OK) return
+      call rpc_wait(alice, qboot, e)
+      if (e /= CAPNP_OK) return
+      call rpc_result_cap(alice, qboot, [integer ::], cap, e)
+      if (e /= CAPNP_OK) return
+      call rpc_finish_send(alice, qboot, .true., e)
+      if (e /= CAPNP_OK) return
+      call rpc_pump_once(host_a, e)
+      if (e /= CAPNP_OK) return
+      call send_provide_fd(alice%fd, provide_q, 0, nonce, e)
+      if (e /= CAPNP_OK) return
+      call rpc_pump_once(host_a, e)
+      if (e /= CAPNP_OK) return
+      call recv_return_fd(alice%fd, ans, is_exc, kind, e)
+      if (e /= CAPNP_OK) return
+      if (is_exc .or. ans /= provide_q) then
+         e = CAPNP_ERR_KIND
+         return
+      end if
+      call send_accept_embargo_fd(carol%fd, accept_q, nonce, e)
+      if (e /= CAPNP_OK) return
+      call rpc_pump_once(host_b, e)
+      if (e /= CAPNP_OK) return
+      call px_poll_in(carol%fd, 50, readable, e)
+      if (e /= CAPNP_OK) return
+      if (readable) e = CAPNP_ERR_KIND
+   end subroutine stage_split_embargo
+
+   subroutine close_split(alice, carol, host_a, host_b)
+      type(rpc_conn_t), intent(inout), target :: alice, carol, host_a, host_b
+      call rpc_conn_close(alice)
+      call rpc_conn_close(carol)
+      call rpc_conn_close(host_a)
+      call rpc_conn_close(host_b)
+   end subroutine close_split
+
+   !> Finish of Provide must answer the Accept on the recipient
+   !> connection and must leave the introducer's export in place.
+   !> rpc.capnp Accept.embargo: the Return goes to the Accept sender.
+   subroutine t_embargo_finish_answers_recipient(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: shared
+      type(rpc_conn_t), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), target :: echo
+      integer(int64) :: ans
+      integer :: e, kind
+      logical :: is_exc, readable
+      integer(int64), parameter :: provide_q = 10_int64
+      integer(int64), parameter :: accept_q = 3_int64
+      integer(int64), parameter :: nonce = 91001_int64
+      call stage_split_embargo(shared, alice, carol, host_a, host_b, echo, &
+                               provide_q, accept_q, nonce, e)
+      call check_(error, e == CAPNP_OK .and. host_a%exports(0)%refcount == 2, &
+                  'embargo finish: pin is held')
+      if (allocated(error)) then
+         call close_split(alice, carol, host_a, host_b)
+         return
+      end if
+      call send_finish_fd(alice%fd, provide_q, e)
+      call rpc_pump_once(host_a, e)
+      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. is_exc .and. ans == accept_q, &
+                  'embargo finish: recipient Accept is answered')
+      call px_poll_in(alice%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo finish: introducer gets no Accept return')
+      call check_(error, host_a%exports(0)%used .and. &
+                  host_a%exports(0)%refcount == 1, &
+                  'embargo finish: introducer export keeps its ref')
+      call check_(error, .not. host_b%exports(0)%used, &
+                  'embargo finish: recipient export is released')
+      call check_(error, .not. host_a%answers(int(accept_q))%used, &
+                  'embargo finish: Accept id is absent on the introducer')
+      call check_(error, rpc_embargoed_accepts(host_b) == 0, &
+                  'embargo finish: arrangement is gone')
+      call close_split(alice, carol, host_a, host_b)
+   end subroutine t_embargo_finish_answers_recipient
+
+   !> Closing the Provide connection answers an embargoed Accept on the
+   !> recipient connection. rpc.capnp Provide.questionId: Finish, and a
+   !> dropped connection, cancels the arrangement.
+   subroutine t_embargo_close_answers_recipient(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: shared
+      type(rpc_conn_t), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), target :: echo
+      integer(int64) :: ans
+      integer :: e, kind
+      logical :: is_exc
+      integer(int64), parameter :: provide_q = 10_int64
+      integer(int64), parameter :: accept_q = 3_int64
+      integer(int64), parameter :: nonce = 91002_int64
+      call stage_split_embargo(shared, alice, carol, host_a, host_b, echo, &
+                               provide_q, accept_q, nonce, e)
+      call check_(error, e == CAPNP_OK, 'embargo close: staged')
+      if (allocated(error)) then
+         call close_split(alice, carol, host_a, host_b)
+         return
+      end if
+      call rpc_conn_close(host_a)
+      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. is_exc .and. ans == accept_q, &
+                  'embargo close: recipient Accept is answered')
+      call check_(error, .not. host_b%exports(0)%used, &
+                  'embargo close: recipient export is released')
+      call rpc_conn_close(alice)
+      call rpc_conn_close(carol)
+      call rpc_conn_close(host_b)
+   end subroutine t_embargo_close_answers_recipient
+
+   !> Disembargo.provide arrives on the introducer connection. The Accept
+   !> Return is sent on the recipient connection. rpc.capnp
+   !> Accept.embargo, the Vat C step.
+   subroutine t_embargo_lift_answers_recipient(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: shared
+      type(rpc_conn_t), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), target :: echo
+      integer(int64) :: ans
+      integer :: e, kind
+      logical :: is_exc, readable
+      integer(int64), parameter :: provide_q = 10_int64
+      integer(int64), parameter :: accept_q = 3_int64
+      integer(int64), parameter :: nonce = 91003_int64
+      call stage_split_embargo(shared, alice, carol, host_a, host_b, echo, &
+                               provide_q, accept_q, nonce, e)
+      call check_(error, e == CAPNP_OK, 'embargo lift: staged')
+      if (allocated(error)) then
+         call close_split(alice, carol, host_a, host_b)
+         return
+      end if
+      call send_disembargo_fd(alice%fd, provide_q, e)
+      call rpc_pump_once(host_a, e)
+      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. .not. is_exc .and. &
+                  ans == accept_q .and. kind == CAPNP_PK_CAP, &
+                  'embargo lift: recipient receives the capability')
+      call px_poll_in(alice%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo lift: introducer gets no Accept return')
+      call check_(error, host_b%exports(0)%used, &
+                  'embargo lift: recipient export stays')
+      call close_split(alice, carol, host_a, host_b)
+   end subroutine t_embargo_lift_answers_recipient
+
+   !> Finish of one Join part before the set is complete answers the
+   !> parts that already arrived, and a later part of that joinId is
+   !> answered too. rpc.capnp Join.questionId.
+   subroutine t_join_finish_answers_rest(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: local_echo
+      class(rpc_server_t), pointer :: local_boot
+      type(rpc_cap_t) :: cap
+      integer(int64) :: qboot, ans
+      integer :: fa, fb, e, i
+      logical :: ok, held, readable
+      call px_socketpair(fa, fb, e)
+      call check_(error, e == CAPNP_OK, 'join finish rest: socketpair')
+      if (allocated(error)) return
+      local_boot => local_echo
+      call rpc_conn_init(sconn, fb, local_boot)
+      local_boot => null()
+      call rpc_conn_init(cconn, fa, local_boot)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_finish_send(cconn, qboot, .true., e)
+      call rpc_pump_once(sconn, e)
+      call check_(error, e == CAPNP_OK .and. sconn%exports(0)%used, &
+                  'join finish rest: bootstrap export')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         return
+      end if
+      call send_join_fd(cconn%fd, 10_int64, 0, 42_int64, 3, 0, e)
+      call send_join_fd(cconn%fd, 11_int64, 0, 42_int64, 3, 1, e)
+      call rpc_pump_once(sconn, e)
+      call rpc_pump_once(sconn, e)
+      call px_poll_in(cconn%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'join finish rest: incomplete set is quiet')
+      if (allocated(error)) then
+         call rpc_conn_close(cconn)
+         call rpc_conn_close(sconn)
+         return
+      end if
+      call send_finish_fd(cconn%fd, 10_int64, e)
+      call rpc_pump_once(sconn, e)
+      call recv_join_fd(cconn%fd, ans, ok, e)
+      call check_(error, e == CAPNP_OK .and. ans == 11_int64 .and. .not. ok, &
+                  'join finish rest: arrived part is answered')
+      call send_join_fd(cconn%fd, 12_int64, 0, 42_int64, 3, 2, e)
+      call rpc_pump_once(sconn, e)
+      call recv_join_fd(cconn%fd, ans, ok, e)
+      call check_(error, e == CAPNP_OK .and. ans == 12_int64 .and. .not. ok, &
+                  'join finish rest: later part is answered')
+      held = .false.
+      do i = 0, 7
+         if (sconn%joins(i)%used) held = .true.
+      end do
+      call check_(error, .not. held, 'join finish rest: slot released')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_join_finish_answers_rest
+
+   !> A result that crosses back through the same policy drops the owned
+   !> wrapper allocated on the way out.
+   subroutine t_membrane_unwrap_frees(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: mcli, msrv
+      type(echo_srv_t), target :: inner_server
+      type(rpc_membrane_server_t), target :: reverse_srv, forward_srv
+      type(counting_membrane_policy_t), target :: policy_store
+      class(rpc_server_t), pointer :: inner, mid, mboot
+      class(rpc_membrane_policy_t), pointer :: policy
+      type(rpc_cap_t) :: root, adder
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer(int64) :: qb, qm
+      integer :: ma, mb, e, live
+      call px_socketpair(ma, mb, e)
+      call check_(error, e == CAPNP_OK, 'unwrap: socketpair')
+      if (allocated(error)) return
+      inner => inner_server
+      policy => policy_store
+      call rpc_membrane_server_init(reverse_srv, inner, policy, reverse=.true.)
+      mid => reverse_srv
+      call rpc_membrane_server_init(forward_srv, mid, policy)
+      mboot => forward_srv
+      call rpc_conn_init(msrv, mb, mboot)
+      mboot => null()
+      call rpc_conn_init(mcli, ma, mboot)
+      call rpc_bootstrap_send(mcli, root, e)
+      qb = root%id
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qb, e)
+      call rpc_result_cap(mcli, qb, [integer ::], root, e)
+      call rpc_finish_send(mcli, qb, .true., e)
+      call rpc_pump_once(msrv, e)
+      live = rpc_membrane_owned_live()
+      call rpc_call_begin(mcli, root, ECHO_IFACE, 1, m, params, qm, e)
+      s = capnp_new_struct(m, 1, 0, e)
+      call capnp_set_i64(s, 0_int64, 7_int64, e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(mcli, m, e)
+      call rpc_pump_once(msrv, e)
+      call rpc_wait(mcli, qm, e)
+      call rpc_result_cap(mcli, qm, [0], adder, e)
+      call check_(error, e == CAPNP_OK .and. adder%kind == RPC_CAP_IMPORT, &
+                  'unwrap: result cap came back')
+      call check_(error, rpc_membrane_owned_live() == live, &
+                  'unwrap: opposite wrapper is freed')
+      call rpc_finish_send(mcli, qm, .false., e)
+      call rpc_pump_once(msrv, e)
+      call rpc_conn_close(mcli)
+      call rpc_conn_close(msrv)
+   end subroutine t_membrane_unwrap_frees
+
+   !> Finish of Provide after the recipient closed drops the pin without
+   !> touching the closed recipient connection or replying to introducer.
+   subroutine t_embargo_finish_recipient_closed(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: shared
+      type(rpc_conn_t), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), target :: echo
+      integer :: e
+      logical :: readable
+      integer(int64), parameter :: provide_q = 10_int64
+      integer(int64), parameter :: accept_q = 3_int64
+      integer(int64), parameter :: nonce = 91004_int64
+      call stage_split_embargo(shared, alice, carol, host_a, host_b, echo, &
+                               provide_q, accept_q, nonce, e)
+      call check_(error, e == CAPNP_OK, 'embargo finish closed: staged')
+      if (allocated(error)) then
+         call close_split(alice, carol, host_a, host_b)
+         return
+      end if
+      call rpc_conn_close(host_b)
+      call rpc_conn_close(carol)
+      call send_finish_fd(alice%fd, provide_q, e)
+      call rpc_pump_once(host_a, e)
+      call check_(error, e == CAPNP_OK, 'embargo finish closed: pump ok')
+      call px_poll_in(alice%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo finish closed: introducer quiet')
+      call check_(error, host_a%exports(0)%used .and. &
+                  host_a%exports(0)%refcount == 1, &
+                  'embargo finish closed: pin dropped')
+      call check_(error, rpc_embargoed_accepts(host_a) == 0, &
+                  'embargo finish closed: arrangement cleared')
+      call rpc_conn_close(alice)
+      call rpc_conn_close(host_a)
+   end subroutine t_embargo_finish_recipient_closed
+
+   !> Disembargo.provide after the recipient closed drops the pin cleanly.
+   subroutine t_embargo_lift_recipient_closed(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_vat_t), target :: shared
+      type(rpc_conn_t), target :: alice, carol, host_a, host_b
+      type(echo_srv_t), target :: echo
+      integer :: e
+      logical :: readable
+      integer(int64), parameter :: provide_q = 10_int64
+      integer(int64), parameter :: accept_q = 3_int64
+      integer(int64), parameter :: nonce = 91005_int64
+      call stage_split_embargo(shared, alice, carol, host_a, host_b, echo, &
+                               provide_q, accept_q, nonce, e)
+      call check_(error, e == CAPNP_OK, 'embargo lift closed: staged')
+      if (allocated(error)) then
+         call close_split(alice, carol, host_a, host_b)
+         return
+      end if
+      call rpc_conn_close(host_b)
+      call rpc_conn_close(carol)
+      call send_disembargo_fd(alice%fd, provide_q, e)
+      call rpc_pump_once(host_a, e)
+      call check_(error, e == CAPNP_OK, 'embargo lift closed: pump ok')
+      call px_poll_in(alice%fd, 50, readable, e)
+      call check_(error, e == CAPNP_OK .and. .not. readable, &
+                  'embargo lift closed: introducer quiet')
+      call check_(error, host_a%exports(0)%used .and. &
+                  host_a%exports(0)%refcount == 1, &
+                  'embargo lift closed: pin dropped')
+      call check_(error, rpc_embargoed_accepts(host_a) == 0, &
+                  'embargo lift closed: arrangement cleared')
+      call rpc_conn_close(alice)
+      call rpc_conn_close(host_a)
+   end subroutine t_embargo_lift_recipient_closed
 
 end module test_rpc
