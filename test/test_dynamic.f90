@@ -171,6 +171,8 @@ contains
       call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT .and. &
                   abs(capnp_dyn_get_f64(kschema, vec_idx, q, 'z', err) + 3.5_real64) < 1.0e-15_real64, &
                   'dyn: pointer schema evolution default')
+      q = capnp_dyn_getp(kschema, sink_idx, sink%p, 'count', err)
+      call check_(error, err == CAPNP_ERR_KIND, 'dyn: getp rejects scalar field')
       call capnp_dyn_set_bool(kschema, sink_idx, sink%p, 'flag', .false., err)
       call capnp_dyn_set_f64(kschema, sink_idx, sink%p, 'ratio', 3.5_real64, err)
       data = [-34_int8, -83_int8, -66_int8]

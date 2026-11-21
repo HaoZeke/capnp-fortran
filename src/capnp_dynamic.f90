@@ -576,16 +576,17 @@ contains
          q = p
          return
       end if
-      q = capnp_getp(p, int(field_slot_offset(f)), err)
-      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER, &
             TYPE_ANY_STRUCT, TYPE_ANY_LIST, TYPE_CAPABILITY)
       case default
+         err = CAPNP_ERR_KIND
          return
       end select
+      q = capnp_getp(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
