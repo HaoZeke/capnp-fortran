@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+# Regression for the schema-compiler gaps. Each case fails on the base
+# emitter and matches Cap'n Proto C++ 1.4.0 after the fix.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+
+BIN=$(find build -name capnpc-fortran -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+MOD=$(find build -name capnp.mod -printf '%T@ %h\n' | sort -n | tail -1 | cut -d' ' -f2-)
+LIB=$(find build -name libcapnp.a -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+if [[ -z "${BIN}" || -z "${MOD}" || -z "${LIB}" ]]; then
+  echo "codegen parity: build capnpc-fortran first" >&2
+  exit 1
+fi
+BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
+MOD=$(cd "$MOD" && pwd)
+LIB=$(cd "$(dirname "$LIB")" && pwd)/$(basename "$LIB")
+
+FC=${FC:-gfortran}
+CXX=${CXX:-g++}
+SAN=()
+if [[ "${SANITIZE:-0}" == 1 ]]; then
+  SAN=(-fsanitize=address,undefined -fno-omit-frame-pointer)
+fi
+export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+
+work() {
+  local d
+  d=$(mktemp -d /tmp/codegen-parity.XXXXXX)
+  echo "$d"
+}
+
+fc() {
+  "$FC" -std=f2018 "${SAN[@]}" "$@"
+}
+
+cmp_out() {
+  local got=$1 exp=$2
+  if [[ "$got" != "$exp" ]]; then
+    echo "mismatch:" >&2
+    echo " got: $got" >&2
+    echo " exp: $exp" >&2
+    exit 1
+  fi
+}
+
+g1() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > minmax.capnp << 'EOF'
+@0x8111111111111101;
+struct MinMax {
+  i8 @0 :Int8 = -128;
+  i16 @1 :Int16 = -32768;
+  i32 @2 :Int32 = -2147483648;
+  i64 @3 :Int64 = -9223372036854775808;
+  z @4 :Float64 = -0;
+}
+const minI64 :Int64 = -9223372036854775808;
+EOF
+  capnp compile -o"$BIN" minmax.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use minmax_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(min_max_t) :: h
+   integer :: err
+   real(real64) :: z
+   integer(int64) :: bits
+   call capnp_message_init_builder(m, err)
+   h = min_max_new_root(m, err)
+   z = min_max_z_get(h)
+   bits = transfer(z, bits)
+   print '(i0,1x,i0,1x,i0,1x,i0,1x,i0,1x,z16.16)', &
+      min_max_i8_get(h), min_max_i16_get(h), min_max_i32_get(h), &
+      min_max_i64_get(h), min_i64, bits
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc minmax_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  capnp compile -oc++ minmax.capnp
+  cat > cpp.cpp << 'EOF'
+#include "minmax.capnp.h"
+#include <capnp/message.h>
+#include <cstdio>
+#include <cstring>
+int main() {
+  capnp::MallocMessageBuilder b;
+  auto r = b.initRoot<MinMax>();
+  double z = r.getZ();
+  unsigned long long bits = 0;
+  std::memcpy(&bits, &z, sizeof(z));
+  std::printf("%d %d %d %lld %lld %016llx\n",
+    (int)r.getI8(), (int)r.getI16(), (int)r.getI32(),
+    (long long)r.getI64(), (long long)MIN_I64, bits);
+}
+EOF
+  "$CXX" -std=c++17 cpp.cpp minmax.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
+  local f c
+  f=$(./drv | tr 'A-F' 'a-f')
+  c=$(./cppdrv | tr 'A-F' 'a-f')
+  cmp_out "$f" "$c"
+  echo "g1 ok"
+}
+
+g2() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > textesc.capnp << 'EOF'
+@0x8222222222222201;
+struct Tesc { s @0 :Text = "a\nb"; }
+const multi :Text = "line1\nline2";
+EOF
+  capnp compile -o"$BIN" textesc.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use textesc_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(tesc_t) :: h
+   character(len=:), allocatable :: s
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = tesc_new_root(m, err)
+   call tesc_s_get(h, s, err)
+   if (err /= 0) error stop 1
+   if (index(s, achar(10)) /= 2) error stop 2
+   if (s /= 'a'//achar(10)//'b') error stop 3
+   if (index(multi, achar(10)) /= 6) error stop 4
+   if (multi /= 'line1'//achar(10)//'line2') error stop 5
+   deallocate (s)
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc textesc_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g2 ok"
+}
+
+g34() {
+  local d which=$1
+  d=$(work)
+  cd "$d"
+  cat > deflists.capnp << 'EOF'
+@0x8333333333333301;
+struct Elem { v @0 :Int32; }
+struct DefLists {
+  nums @0 :List(Int32) = [10, 20, 30];
+  tags @1 :List(Text) = ["alpha", "beta"];
+  elems @2 :List(Elem) = [(v = 7)];
+}
+EOF
+  capnp compile -o"$BIN" deflists.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use deflists_capnp
+   implicit none
+   type(capnp_message_t), target :: m1, m2
+   type(def_lists_t) :: h, h2
+   type(elem_t) :: e
+   character(len=:), allocatable :: s
+   integer :: err
+   call capnp_message_init_builder(m1, err)
+   h = def_lists_new_root(m1, err)
+   call def_lists_nums_set_elem(h, 0, 999, err)
+   call capnp_message_init_builder(m2, err)
+   h2 = def_lists_new_root(m2, err)
+   call def_lists_tags_get_elem(h2, 0, s, err)
+   e = def_lists_elems_get_elem(h2, 0, err)
+   print '(i0,1x,a,1x,i0)', def_lists_nums_get_elem(h2, 0, err), s, elem_v_get(e)
+   deallocate (s)
+   call capnp_message_free(m1)
+   call capnp_message_free(m2)
+end program drv
+EOF
+  fc deflists_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  capnp compile -oc++ deflists.capnp
+  cat > cpp.cpp << 'EOF'
+#include "deflists.capnp.h"
+#include <capnp/message.h>
+#include <cstdio>
+int main() {
+  capnp::MallocMessageBuilder m1;
+  auto d1 = m1.initRoot<DefLists>();
+  d1.getNums().set(0, 999);
+  capnp::MallocMessageBuilder m2;
+  auto d2 = m2.initRoot<DefLists>();
+  auto t = d2.getTags()[0];
+  std::printf("%d %s %d\n", d2.getNums()[0], t.cStr(), d2.getElems()[0].getV());
+}
+EOF
+  "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
+  local f c
+  f=$(./drv)
+  c=$(./cppdrv)
+  cmp_out "$f" "$c"
+  if [[ "$which" == g3 ]]; then
+    # The fresh builder still sees the schema default after the other
+    # builder wrote 999 into its own copy.
+    [[ "$f" == 10\ * ]]
+  fi
+  echo "$which ok"
+}
+
+g5() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > ifaces.capnp << 'EOF'
+@0x8555555555555501;
+interface Base { ping @0 () -> (x :Int32); }
+interface Sub extends(Base) { pong @0 () -> (y :Int32); }
+EOF
+  capnp compile -o"$BIN" ifaces.capnp
+  grep -q 'extends(base_server_t)' ifaces_capnp.f90
+  grep -q 'call base_dispatch' ifaces_capnp.f90
+  cat > impl.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use ifaces_capnp
+   implicit none
+   integer :: saw = 0
+   type, extends(sub_server_t) :: srv_t
+   contains
+      procedure :: ping => do_ping
+      procedure :: pong => do_pong
+   end type srv_t
+contains
+   subroutine do_ping(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(base_ping_params_t), intent(in) :: params
+      type(base_ping_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      saw = 1
+      err = CAPNP_OK
+      call base_ping_results_x_set(results, 7, err)
+   end subroutine do_ping
+   subroutine do_pong(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(sub_pong_params_t), intent(in) :: params
+      type(sub_pong_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      saw = 2
+      err = CAPNP_OK
+   end subroutine do_pong
+end module impl
+program drv
+   use capnp
+   use capnp_rpc
+   use ifaces_capnp
+   use impl
+   implicit none
+   type(srv_t) :: srv
+   type(rpc_call_ctx_t) :: ctx
+   type(capnp_message_t), target :: m
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   ctx%rmsg => m
+   ctx%interface_id = base_interface_id
+   ctx%method_id = 0
+   call srv%dispatch(ctx, err)
+   print '(i0)', saw
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc ifaces_capnp.f90 impl.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "1"
+  echo "g5 ok"
+}
+
+g6() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > generics.capnp << 'EOF'
+@0x8666666666666601;
+struct Item { v @0 :Int32; }
+struct Result(T, E) {
+  union { ok @0 :T; err @1 :E; }
+}
+struct Five(A, B, C, D, E) {
+  a @0 :A; b @1 :B; c @2 :C; d @3 :D; e @4 :E;
+}
+interface GenIface(T) {
+  ident @0 (x :T) -> (y :T);
+}
+interface GenMethod {
+  identity @0 [T] (x :T) -> (y :T);
+}
+struct Use {
+  r @0 :Result(Item, Text);
+  f @1 :Five(Text, Text, Text, Text, Item);
+  g @2 :GenIface(Text);
+}
+EOF
+  capnp compile -o"$BIN" generics.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use generics_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(five_text_text_text_text_item_t) :: f
+   type(item_t) :: e
+   type(gen_iface_ident_params_text_t) :: p
+   type(gen_method_identity_params_t) :: gp
+   type(capnp_ptr_t) :: q
+   character(len=:), allocatable :: s
+   integer :: err
+   if (result_item_text_ok_tag /= 0) error stop 1
+   if (result_item_text_err_tag /= 1) error stop 2
+   call capnp_message_init_builder(m, err)
+   f = five_text_text_text_text_item_new(m, err)
+   e = five_text_text_text_text_item_e_init(f, err)
+   call item_v_set(e, 5, err)
+   e = five_text_text_text_text_item_e_get(f, err)
+   if (item_v_get(e) /= 5) error stop 3
+   p = gen_iface_ident_params_text_new(m, err)
+   call gen_iface_ident_params_text_x_set(p, 'hi', err)
+   call gen_iface_ident_params_text_x_get(p, s, err)
+   if (s /= 'hi') error stop 4
+   deallocate (s)
+   gp = gen_method_identity_params_new(m, err)
+   q = gen_method_identity_params_x_get(gp, err)
+   if (err /= 0) error stop 5
+   if (q%kind /= CAPNP_PK_NULL) error stop 6
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc generics_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g6 ok"
+}
+
+g7() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir -p dir_a dir_b
+  cat > dir_a/dup.capnp << 'EOF'
+@0x8a7a7a7a7a7a7a01;
+struct FromA { n @0 :Int32; }
+EOF
+  cat > dir_b/dup.capnp << 'EOF'
+@0x8b7b7b7b7b7b7b01;
+struct FromB { n @0 :Int32; }
+EOF
+  capnp compile -o"$BIN" dir_a/dup.capnp dir_b/dup.capnp
+  test -f dir_a/dup_capnp.f90
+  test -f dir_b/dup_capnp.f90
+  grep -q 'type :: from_a_t' dir_a/dup_capnp.f90
+  grep -q 'type :: from_b_t' dir_b/dup_capnp.f90
+  if grep -q 'from_b_t' dir_a/dup_capnp.f90; then
+    echo "dir_a was overwritten" >&2
+    exit 1
+  fi
+  echo "g7 ok"
+}
+
+g8() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > caps.capnp << 'EOF'
+@0x8888888888888801;
+interface Adder { add @0 (a :Int64, b :Int64) -> (sum :Int64); }
+struct Box { svc @0 :Adder; }
+EOF
+  capnp compile -o"$BIN" caps.capnp
+  cat > drv.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use caps_capnp
+   implicit none
+   integer :: exported = -1
+   type, extends(adder_server_t) :: srv_t
+   contains
+      procedure :: add => do_add
+   end type srv_t
+contains
+   subroutine do_add(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(adder_add_params_t), intent(in) :: params
+      type(adder_add_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      type(srv_t), pointer :: p
+      allocate (p)
+      exported = rpc_ctx_export_cap(ctx, p, err)
+   end subroutine do_add
+end module impl
+program drv
+   use capnp
+   use capnp_rpc
+   use caps_capnp
+   use impl
+   implicit none
+   type(capnp_message_t), target :: m
+   type(box_t) :: h
+   type(adder_client_t) :: c, g
+   type(capnp_ptr_t) :: ctab, cd
+   type(srv_t) :: srv
+   type(rpc_call_ctx_t) :: ctx
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = box_new_root(m, err)
+   c%cap%kind = RPC_CAP_IMPORT
+   c%cap%id = 11
+   call box_svc_set(h, c, err)
+   g = box_svc_get(h, err)
+   print '(i0)', g%cap%id
+   ctab = capnp_new_composite_list(m, 1_int64, 1, 1, err)
+   cd = capnp_list_get_struct(ctab, 0, err)
+   call capnp_set_u16(cd, 0_int64, 1_int32, err)
+   call capnp_set_u32(cd, 4_int64, 7_int64, err)
+   c%cap%id = 0
+   call box_svc_set(h, c, err)
+   g = box_svc_get(h, err, ctab)
+   print '(i0,1x,i0)', err, g%cap%id
+   ctx%rmsg => m
+   ctx%interface_id = adder_interface_id
+   ctx%method_id = 0
+   call srv%dispatch(ctx, err)
+   print '(i0)', exported
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc caps_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" $'11\n0 7\n0'
+  echo "g8 ok"
+}
+
+g9() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > surf.capnp << 'EOF'
+@0x8999999999999901;
+using Stream = import "/capnp/stream.capnp";
+annotation myTag @0x8999999999999902 (struct) :Text;
+struct S $myTag("hello") {
+  n @0 :Int32;
+  inner @1 :S;
+  nums @2 :List(Int32);
+  flags @3 :List(Bool);
+  anyS @4 :AnyStruct;
+  anyL @5 :AnyList;
+  cap @6 :Capability;
+}
+interface Streamer {
+  push @0 (x :Int64) -> stream;
+}
+EOF
+  capnp compile -o"$BIN" surf.capnp
+  grep -q 'call rpc_stream_send' surf_capnp.f90
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use surf_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(s_t) :: h, inner, back
+   type(any_struct_t) :: a
+   type(any_list_t) :: al
+   type(capability_client_t) :: cap
+   type(capnp_ptr_t) :: lst
+   integer :: err
+   logical :: fl
+   call capnp_message_init_builder(m, err)
+   h = s_new_root(m, err)
+   if (s_inner_has(h)) error stop 1
+   if (s_my_tag /= 'hello') error stop 2
+   inner = s_inner_init(h, err)
+   call s_n_set(inner, 4, err)
+   call s_inner_set(h, inner, err)
+   back = s_inner_get(h, err)
+   if (s_n_get(back) /= 4) error stop 3
+   lst = s_nums_init(h, 2_int64, err)
+   call s_nums_set_elem(h, 1, 9, err)
+   if (s_nums_get_elem(h, 1, err) /= 9) error stop 4
+   lst = s_flags_init(h, 1_int64, err)
+   call s_flags_set_elem(h, 0, .true., err)
+   fl = s_flags_get_elem(h, 0, err)
+   if (.not. fl) error stop 5
+   a = s_any_s_get(h, err)
+   al = s_any_l_get(h, err)
+   cap = s_cap_get(h, err)
+   if (err /= 0) error stop 6
+   if (my_tag_id /= -8531619134090667774_int64) error stop 7
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOF
+  fc surf_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g9 ok"
+}
+
+case "${1:-all}" in
+  g1) g1 ;;
+  g2) g2 ;;
+  g3) g34 g3 ;;
+  g4) g34 g4 ;;
+  g5) g5 ;;
+  g6) g6 ;;
+  g7) g7 ;;
+  g8) g8 ;;
+  g9) g9 ;;
+  all)
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9
+    ;;
+  *)
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|all" >&2
+    exit 2
+    ;;
+esac

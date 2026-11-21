@@ -2,7 +2,13 @@
 module adder_capnp
    use capnp
    use capnp_rpc
-   use rpc_capnp, only: payload_t, payload_content_set
+   use rpc_capnp, only: payload_t, payload_content_set, &
+      cap_descriptor_t, cap_descriptor_which, &
+      cap_descriptor_sender_hosted_get, &
+      cap_descriptor_sender_promise_get, &
+      cap_descriptor_receiver_hosted_get, &
+      cap_descriptor_none_tag, cap_descriptor_sender_hosted_tag, &
+      cap_descriptor_sender_promise_tag, cap_descriptor_receiver_hosted_tag
    implicit none
    public
 
@@ -28,9 +34,10 @@ module adder_capnp
       procedure :: dispatch => adder_dispatch
    end type adder_server_t
    abstract interface
-      subroutine adder_add_ifc(self, params, results, err)
-         import :: adder_server_t, adder_add_params_t, adder_add_results_t
+      subroutine adder_add_ifc(self, ctx, params, results, err)
+         import :: adder_server_t, rpc_call_ctx_t, adder_add_params_t, adder_add_results_t
          class(adder_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(adder_add_params_t), intent(in) :: params
          type(adder_add_results_t), intent(in) :: results
          integer, intent(out) :: err
@@ -160,12 +167,44 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%add(params, results, err)
+            call self%add(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
          err = CAPNP_ERR_ARG
       end select
    end subroutine adder_dispatch
+
+   subroutine cap_resolve(ctab, idx, cap, err)
+      type(capnp_ptr_t), intent(in) :: ctab
+      integer(int64), intent(in) :: idx
+      type(rpc_cap_t), intent(out) :: cap
+      integer, intent(out) :: err
+      type(cap_descriptor_t) :: cd
+      cap%kind = RPC_CAP_NONE
+      cap%id = 0_int64
+      err = CAPNP_OK
+      if (idx < 0_int64 .or. idx >= capnp_list_len(ctab)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(idx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (cap_descriptor_none_tag)
+         cap%kind = RPC_CAP_NONE
+      case (cap_descriptor_sender_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_hosted_get(cd)
+      case (cap_descriptor_sender_promise_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_promise_get(cd)
+      case (cap_descriptor_receiver_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_receiver_hosted_get(cd)
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine cap_resolve
 
 end module adder_capnp

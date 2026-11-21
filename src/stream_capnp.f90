@@ -10,6 +10,7 @@ module stream_capnp
       type(capnp_ptr_t) :: p
    end type stream_result_t
 
+   character(len=*), parameter :: STREAM_CAPNP_NAMESPACE = 'capnp'
 contains
 
    function stream_result_new(msg, err) result(h)

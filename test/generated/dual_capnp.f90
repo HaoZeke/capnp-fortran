@@ -50,6 +50,15 @@ contains
       call capnp_set_u16(h%p, 0_int64, 0_int32, err)
    end subroutine dual_primary_void_a_set
 
+   function dual_primary_text_a_has(h) result(v)
+      type(dual_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function dual_primary_text_a_has
+
    subroutine dual_primary_text_a_get(h, s, err)
       type(dual_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s

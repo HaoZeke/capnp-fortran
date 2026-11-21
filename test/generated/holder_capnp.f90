@@ -2,7 +2,13 @@
 module holder_capnp
    use capnp
    use capnp_rpc
-   use rpc_capnp, only: payload_t, payload_content_set
+   use rpc_capnp, only: payload_t, payload_content_set, &
+      cap_descriptor_t, cap_descriptor_which, &
+      cap_descriptor_sender_hosted_get, &
+      cap_descriptor_sender_promise_get, &
+      cap_descriptor_receiver_hosted_get, &
+      cap_descriptor_none_tag, cap_descriptor_sender_hosted_tag, &
+      cap_descriptor_sender_promise_tag, cap_descriptor_receiver_hosted_tag
    implicit none
    public
 
@@ -34,9 +40,10 @@ module holder_capnp
       procedure :: dispatch => echo_dispatch
    end type echo_server_t
    abstract interface
-      subroutine echo_ping_ifc(self, params, results, err)
-         import :: echo_server_t, echo_ping_params_t, echo_ping_results_t
+      subroutine echo_ping_ifc(self, ctx, params, results, err)
+         import :: echo_server_t, rpc_call_ctx_t, echo_ping_params_t, echo_ping_results_t
          class(echo_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
          type(echo_ping_params_t), intent(in) :: params
          type(echo_ping_results_t), intent(in) :: results
          integer, intent(out) :: err
@@ -127,7 +134,7 @@ contains
             params%p = ctx%params
             results%p = capnp_new_struct(ctx%rmsg, ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
-            call self%ping(params, results, err)
+            call self%ping(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
@@ -157,16 +164,29 @@ contains
       h%p = capnp_root(msg, err)
    end function holder_read_root
 
-   function holder_svc_get(h, err) result(c)
+   function holder_svc_has(h) result(v)
+      type(holder_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function holder_svc_has
+
+   function holder_svc_get(h, err, ctab) result(c)
       type(holder_t), intent(in) :: h
       integer, intent(out) :: err
       type(echo_client_t) :: c
+      type(capnp_ptr_t), intent(in), optional :: ctab
       type(capnp_ptr_t) :: q
       c%cap%kind = RPC_CAP_NONE
       c%cap%id = 0_int64
       q = capnp_getp(h%p, 0, err)
       if (err /= CAPNP_OK) return
-      if (q%kind == CAPNP_PK_CAP) then
+      if (q%kind /= CAPNP_PK_CAP) return
+      if (present(ctab)) then
+         call cap_resolve(ctab, q%capidx, c%cap, err)
+      else
          c%cap%kind = RPC_CAP_IMPORT
          c%cap%id = q%capidx
       end if
@@ -184,6 +204,15 @@ contains
       call capnp_setp(h%p, 0, q, err)
    end subroutine holder_svc_set
 
+   function holder_note_has(h) result(v)
+      type(holder_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function holder_note_has
+
    subroutine holder_note_get(h, s, err)
       type(holder_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
@@ -197,5 +226,37 @@ contains
       integer, intent(out) :: err
       call capnp_set_text(h%p, 1, s, err)
    end subroutine holder_note_set
+
+   subroutine cap_resolve(ctab, idx, cap, err)
+      type(capnp_ptr_t), intent(in) :: ctab
+      integer(int64), intent(in) :: idx
+      type(rpc_cap_t), intent(out) :: cap
+      integer, intent(out) :: err
+      type(cap_descriptor_t) :: cd
+      cap%kind = RPC_CAP_NONE
+      cap%id = 0_int64
+      err = CAPNP_OK
+      if (idx < 0_int64 .or. idx >= capnp_list_len(ctab)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(idx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (cap_descriptor_none_tag)
+         cap%kind = RPC_CAP_NONE
+      case (cap_descriptor_sender_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_hosted_get(cd)
+      case (cap_descriptor_sender_promise_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_sender_promise_get(cd)
+      case (cap_descriptor_receiver_hosted_tag)
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = cap_descriptor_receiver_hosted_get(cd)
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine cap_resolve
 
 end module holder_capnp
