@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(43))
+      allocate (testsuite(44))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -106,6 +106,7 @@ contains
       testsuite(41) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
       testsuite(42) = new_unittest("text-inactive-arm", run_text_inactive_arm)
       testsuite(43) = new_unittest("codec-parity", run_codec_parity)
+      testsuite(44) = new_unittest("shorthand-first-field", run_shorthand_first)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3088,5 +3089,71 @@ contains
          call test_failed(error, 'codec parity')
       end if
    end subroutine run_codec_parity
+
+   !> Struct, list, enum, and data first fields are not single-value
+   !> shorthand. The recovered text matches capnp 1.4.0, including a
+   !> bool written into a group whose first field is a struct.
+   subroutine run_shorthand_first(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: src
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x80112233445566a0;'//achar(10)// &
+            'struct OneField { v @0 :Int32; }'//achar(10)// &
+            'struct OuterOne { inner @0 :OneField; }'//achar(10)// &
+            'struct HoldOuter { o @0 :OuterOne; }'//achar(10)// &
+            'struct WithList { items @0 :List(Int32); tag @1 :Int32; }'//achar(10)// &
+            'struct HoldWL { w @0 :WithList; }'//achar(10)// &
+            'enum Color { red @0; green @1; blue @2; }'//achar(10)// &
+            'struct WithEnum { c @0 :Color; x @1 :Int32; }'//achar(10)// &
+            'struct WithData { d @0 :Data; x @1 :Int32; }'//achar(10)// &
+            'struct WithBool { b @0 :Bool; x @1 :Int32; }'//achar(10)// &
+            'struct ST { t @0 :Text; }'//achar(10)// &
+            'struct Bag { st @0 :ST; one @1 :Int32; }'//achar(10)// &
+            'struct Hold {'//achar(10)// &
+            '  we @0 :WithEnum; wd @1 :WithData;'//achar(10)// &
+            '  ge :group { c @2 :Color; x @3 :Int32; }'//achar(10)// &
+            '  gd :group { d @4 :Data; x @5 :Int32; }'//achar(10)// &
+            '  gl :group { l @6 :List(Int32); x @7 :Int32; }'//achar(10)// &
+            '  gs :group { s @8 :WithBool; x @9 :Int32; }'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/first.capnp', src, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'first-field schema')
+         return
+      end if
+      if (.not. sh(cap_setup()//' && export CAP && bash -s <<''END'''//achar(10)// &
+         'set +e'//achar(10)// &
+         'SCH='//tmp//'/first.capnp'//achar(10)// &
+         'bad=0'//achar(10)// &
+         'cmp_in() {'//achar(10)// &
+         '  printf "%s" "$3" | capnp convert text:text --short "$SCH" "$2" > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '  printf "%s" "$3" | "$CAP" convert text:text --short "$SCH" "$2" > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         '  cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         '}'//achar(10)// &
+         'cmp_in text:text HoldOuter "(o = 5)"'//achar(10)// &
+         'cmp_in text:text HoldWL "(w = [1, 2])"'//achar(10)// &
+         'cmp_in text:text Hold "(we = green)"'//achar(10)// &
+         'cmp_in text:text Hold "(wd = \"abc\")"'//achar(10)// &
+         'cmp_in text:text Hold "(wd = 0x\"6162\")"'//achar(10)// &
+         'cmp_in text:text Hold "(ge = green)"'//achar(10)// &
+         'cmp_in text:text Hold "(gd = \"abc\")"'//achar(10)// &
+         'cmp_in text:text Hold "(gl = [1, 2])"'//achar(10)// &
+         'cmp_in text:text Hold "(gs = true)"'//achar(10)// &
+         'cmp_in text:text Bag "(st = \"ab\")"'//achar(10)// &
+         'test "$bad" = 0'//achar(10)// &
+         'END')) then
+         call test_failed(error, 'shorthand first field')
+      end if
+   end subroutine run_shorthand_first
 
 end module test_regress

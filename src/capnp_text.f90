@@ -766,7 +766,6 @@ contains
       ! scalar or text field accepts a bare value. A struct, list, data,
       ! or enum needs its own literal. A bare name is an external constant.
       if (field_which(f) == FIELD_GROUP) then
-         if (ident_start(sc)) text_hard = .true.
          err = CAPNP_ERR_ARG
          return
       end if
@@ -777,8 +776,12 @@ contains
       case (TYPE_VOID, TYPE_BOOL, TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64, TYPE_FLOAT32, &
             TYPE_FLOAT64, TYPE_TEXT)
-      case default
+      case (TYPE_ENUM)
+         ! A bare name is an external constant. Nothing is printed.
          if (ident_start(sc)) text_hard = .true.
+         err = CAPNP_ERR_ARG
+         return
+      case default
          err = CAPNP_ERR_ARG
          return
       end select
