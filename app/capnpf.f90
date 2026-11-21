@@ -495,6 +495,8 @@ contains
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
+         ! capnp 1.4.0 exits 1 here: kj/io.c++ reports Premature EOF
+         ! unless --quiet is set. capnpf has no quiet suppression.
          call fail('empty input', rc)
          return
       end if

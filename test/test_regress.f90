@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(42))
+      allocate (testsuite(43))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -105,6 +105,7 @@ contains
       testsuite(40) = new_unittest("json-ptr-kind", run_json_ptr_kind)
       testsuite(41) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
       testsuite(42) = new_unittest("text-inactive-arm", run_text_inactive_arm)
+      testsuite(43) = new_unittest("codec-parity", run_codec_parity)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -1911,7 +1912,6 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_json_union_nested
    !> A chain of 4100 struct types, each a field of the one before. The
-   !> A chain of 4100 struct types, each a field of the one before. The
    !> request is built here, so the audit runs even when capnp compile
    !> cannot finish the same chain on a small stack.
    subroutine run_json_schema_chain(error)
@@ -2006,6 +2006,7 @@ contains
       if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
    end subroutine build_type_chain
+
 
 
 
@@ -2455,7 +2456,7 @@ contains
    subroutine run_text_shorthand(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema, book, extra
-      integer :: sample, garm, people, place, onefield, deepi, holdi, wrapi
+      integer :: sample, garm, people, place, onefield, deepi, holdi, wrapi, bagi
       if (.not. have_capnp()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
@@ -2507,6 +2508,17 @@ contains
       call round_text(extra, wrapi, '(s = (5,))', 's = (v = 5)')
       call round_text(extra, wrapi, '(o = (5,))', 'o = (v = 5)')
       call round_text(extra, wrapi, '(g = 5)', 'v = 5')
+      call round_text(extra, wrapi, '(s = 5)', 's = (v = 5)')
+      call reject_text(extra, bagi, '(s1 = 5)')
+      call reject_text(extra, bagi, '(s1 = (5))')
+      call reject_text(extra, bagi, '(sl = [1, 2])')
+      call reject_text(extra, bagi, '(se = red)')
+      call reject_text(extra, bagi, '(sd = "ab")')
+      call reject_text(extra, bagi, '(ls1 = [5])')
+      call reject_text(extra, bagi, '(g = 5)')
+      call reject_text(extra, bagi, '(sll = [[1]])')
+      call round_text(extra, bagi, '(one = 5)', 'one = (v = 5)')
+      call round_text(extra, bagi, '(st = "ab")', 't = "ab"')
       call capnp_dyn_free(extra)
       call capnp_dyn_free(schema)
       call capnp_dyn_free(book)
@@ -2556,7 +2568,19 @@ contains
                'struct Deep { deep :group { inner :group { v @0 :Int32; } } }'//achar(10)// &
                'struct Named { u :union { a @0 :Int32; b @1 :Text; } }'//achar(10)// &
                'struct Hold { nu @0 :Named; }'//achar(10)// &
-               'struct Wrap { g :group { v @0 :Int32; } s @1 :OneField; o @2 :OneField; }'//achar(10)
+               'struct Wrap { g :group { v @0 :Int32; } s @1 :OneField; o @2 :OneField; }'//achar(10)// &
+               'struct Inner { v @0 :Int32; }'//achar(10)// &
+               'struct S1 { i @0 :Inner; }'//achar(10)// &
+               'struct SL { l @0 :List(Int32); }'//achar(10)// &
+               'enum Hue { red @0; blue @1; }'//achar(10)// &
+               'struct SE { e @0 :Hue; }'//achar(10)// &
+               'struct SD { d @0 :Data; }'//achar(10)// &
+               'struct ST { t @0 :Text; }'//achar(10)// &
+               'struct SLL { ll @0 :List(List(Int32)); }'//achar(10)// &
+               'struct GS { g :group { i @0 :Inner; } }'//achar(10)// &
+               'struct Bag { s1 @0 :S1; sl @1 :SL; se @2 :SE; sd @3 :SD;'// &
+               ' st @4 :ST; one @5 :OneField; ls1 @6 :List(S1);'// &
+               ' sll @7 :SLL; g @8 :GS; }'//achar(10)
          call spit(tmp//'/short.capnp', src, err)
          if (.not. sh('capnp compile -o- '//tmp//'/short.capnp > '//tmp//'/short.cgr')) then
             call test_failed(err_out, 'shorthand: compile extra')
@@ -2568,8 +2592,9 @@ contains
          deepi = capnp_dyn_find(extra, 'Deep', err)
          holdi = capnp_dyn_find(extra, 'Hold', err)
          wrapi = capnp_dyn_find(extra, 'Wrap', err)
-         call check_(err_out, onefield > 0 .and. deepi > 0 .and. holdi > 0 .and. wrapi > 0, &
-                     'shorthand: extra schema')
+         bagi = capnp_dyn_find(extra, 'Bag', err)
+         call check_(err_out, onefield > 0 .and. deepi > 0 .and. holdi > 0 .and. wrapi > 0 &
+                     .and. bagi > 0, 'shorthand: extra schema')
       end subroutine load_short_extra
    end subroutine run_text_shorthand
 
@@ -2915,5 +2940,153 @@ contains
          end if
       end subroutine cmp_bin
    end subroutine run_bin_ptr_kind
+
+   !> Conversions, lists, and constants compared with capnp 1.4.0.
+   subroutine run_codec_parity(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: src
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x8011223344556690;'//achar(10)// &
+            'struct Wire { l32 @0 :List(Int32); bl @1 :List(Bool);' &
+            //' tx @2 :List(Text); vd @3 :List(Void); }'//achar(10)// &
+            'struct Num { big @0 :Int64; ubig @1 :UInt64; i8 @2 :Int8;' &
+            //' u8 @3 :UInt8; u16 @4 :UInt16; scores @5 :List(Int64);' &
+            //' people @6 :List(Text); }'//achar(10)// &
+            'struct Inner { v @0 :Int32; }'//achar(10)// &
+            'struct S1 { i @0 :Inner; }'//achar(10)// &
+            'struct SL { l @0 :List(Int32); }'//achar(10)// &
+            'enum Hue { red @0; blue @1; }'//achar(10)// &
+            'struct SE { e @0 :Hue; }'//achar(10)// &
+            'struct SD { d @0 :Data; }'//achar(10)// &
+            'struct ST { t @0 :Text; }'//achar(10)// &
+            'struct One { v @0 :Int32; }'//achar(10)// &
+            'struct Bag { s1 @0 :S1; sl @1 :SL; se @2 :SE; sd @3 :SD;' &
+            //' st @4 :ST; one @5 :One; }'//achar(10)// &
+            'struct Hold { u :union { a @0 :Int32; b @1 :Text; } }'//achar(10)// &
+            'const on :Hold = (u = (a = 7));'//achar(10)// &
+            'const off :Hold = (u = (b = "z"));'//achar(10)// &
+            'const tiny :Float32 = 1.401298464324817e-45;'//achar(10)
+      call spit(tmp//'/parity.capnp', src, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'parity schema')
+         return
+      end if
+      call spit(tmp//'/l32.hex', '00000000040000000000000000000100' &
+                //'010000001500000001020304050607081112131415161718', err)
+      call spit(tmp//'/bl.hex', '00000000040000000000000000000200' &
+                //'000000000000000001000000220000000200000000000000', err)
+      call spit(tmp//'/tx.hex', '00000000060000000000000000000300' &
+                //'00000000000000000000000000000000010000000f000000' &
+                //'04000000010000000000000000000000', err)
+      call spit(tmp//'/vd.hex', '00000000060000000000000000000400' &
+                //'000000000000000000000000000000000000000000000000' &
+                //'01000000190000000700000000000000', err)
+      call spit(tmp//'/vn.hex', '00000000060000000000000000000400' &
+                //'000000000000000000000000000000000000000000000000' &
+                //'010000001a0000000102030000000000', err)
+      call spit(tmp//'/nr.hex', '00000000030000000000000000000100' &
+                //'01000000130000000201040300000000', err)
+      call spit(tmp//'/mkhex.py', 'from pathlib import Path'//achar(10)// &
+                'd = Path("'//tmp//'")'//achar(10)// &
+                'for name in ("l32", "bl", "tx", "vd", "vn", "nr"):'//achar(10)// &
+                '    h = d.joinpath(name + ".hex").read_text().strip()'//achar(10)// &
+                '    d.joinpath(name + ".bin").write_bytes(bytes.fromhex(h))'//achar(10), err)
+      if (.not. sh(cap_setup()//' && export CAP && bash -s <<''END'''//achar(10)// &
+         'set +e'//achar(10)// &
+         'SCH='//tmp//'/parity.capnp'//achar(10)// &
+         'bad=0'//achar(10)// &
+         'cmp_in() {'//achar(10)// &
+         '  printf "%s" "$3" | capnp convert "$1" --short "$SCH" "$2" > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '  printf "%s" "$3" | "$CAP" convert "$1" --short "$SCH" "$2" > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         '  cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         '}'//achar(10)// &
+         'empty_err() {'//achar(10)// &
+         '  printf "" | capnp convert "$1" --short "$SCH" "$2" > '//tmp//'/ref 2>'//tmp//'/ref.err'//achar(10)// &
+         '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '  printf "" | "$CAP" convert "$1" --short "$SCH" "$2" > '//tmp//'/ours 2>'//tmp//'/ours.err'//achar(10)// &
+         '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         '  test "$(cat '//tmp//'/ref.rc)" = 1 && test "$(cat '//tmp//'/ours.rc)" = 1 || bad=1'//achar(10)// &
+         '  test -s '//tmp//'/ours.err || bad=1'//achar(10)// &
+         '}'//achar(10)// &
+         'empty_err text:text Bag'//achar(10)// &
+         'empty_err json:text Bag'//achar(10)// &
+         'empty_err text:json Bag'//achar(10)// &
+         'empty_err binary:text Bag'//achar(10)// &
+         'empty_err binary:json Bag'//achar(10)// &
+         'empty_err packed:text Bag'//achar(10)// &
+         'empty_err flat:text Bag'//achar(10)// &
+         'empty_err canonical:text Bag'//achar(10)// &
+         'empty_err binary:binary Bag'//achar(10)// &
+         'empty_err json:binary Bag'//achar(10)// &
+         'printf "" | capnp encode "$SCH" Num > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         'printf "" | "$CAP" encode "$SCH" Num > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'printf "" | capnp decode "$SCH" Num > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         'printf "" | "$CAP" decode "$SCH" Num > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'cmp_in text:text Bag "   "'//achar(10)// &
+         'printf "(\0)" | capnp convert text:text --short "$SCH" Bag > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         'printf "(\0)" | "$CAP" convert text:text --short "$SCH" Bag > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'cmp_in text:text Bag "(s1 = 5)"'//achar(10)// &
+         'cmp_in text:text Bag "(sl = [1, 2])"'//achar(10)// &
+         'cmp_in text:text Bag "(se = red)"'//achar(10)// &
+         'cmp_in text:text Bag "(sd = \"ab\")"'//achar(10)// &
+         'cmp_in text:text Bag "(one = 5)"'//achar(10)// &
+         'cmp_in text:text Bag "(st = \"ab\")"'//achar(10)// &
+         'cmp_in text:text Num "(i8 = 128)"'//achar(10)// &
+         'cmp_in text:text Num "(i8 = -129)"'//achar(10)// &
+         'cmp_in text:text Num "(u8 = 256)"'//achar(10)// &
+         'cmp_in text:text Num "(big = 9223372036854775808)"'//achar(10)// &
+         'cmp_in json:text Num "{\"big\":1.5}"'//achar(10)// &
+         'cmp_in json:text Num "{\"big\":9.3e18}"'//achar(10)// &
+         'cmp_in json:text Num "{\"big\":1e400}"'//achar(10)// &
+         'cmp_in json:text Num "{\"ubig\":-1}"'//achar(10)// &
+         'cmp_in json:text Num "{\"ubig\":1e20}"'//achar(10)// &
+         'cmp_in json:text Num "{\"ubig\":18446744073709551616}"'//achar(10)// &
+         'cmp_in json:text Num "{\"i8\":128}"'//achar(10)// &
+         'cmp_in json:text Num "{\"u16\":65536}"'//achar(10)// &
+         'cmp_in json:text Num "{\"scores\":null}"'//achar(10)// &
+         'cmp_in json:text Num "{\"people\":{}}"'//achar(10)// &
+         'cmp_in json:text Num "{\"big\":{}}"'//achar(10)// &
+         'cmp_in json:text Num "{\"big\":\"bad\",\"big\":{}}"'//achar(10)// &
+         'python3 '//tmp//'/mkhex.py'//achar(10)// &
+         'for f in l32 bl tx vd vn nr; do'//achar(10)// &
+         '  capnp convert binary:text --short "$SCH" Wire < '//tmp//'/$f.bin > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '  "$CAP" convert binary:text --short "$SCH" Wire < '//tmp//'/$f.bin > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         '  cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'done'//achar(10)// &
+         'capnp eval "$SCH" tiny > '//tmp//'/ref 2>/dev/null; echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '"$CAP" eval "$SCH" tiny > '//tmp//'/ours 2>/dev/null; echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'capnp eval "$SCH" on.u.a > '//tmp//'/ref 2>/dev/null; echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '"$CAP" eval "$SCH" on.u.a > '//tmp//'/ours 2>/dev/null; echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'capnp eval "$SCH" off.u.a > '//tmp//'/ref 2>/dev/null; echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '"$CAP" eval "$SCH" off.u.a > '//tmp//'/ours 2>/dev/null; echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'test "$bad" = 0'//achar(10)// &
+         'END')) then
+         call test_failed(error, 'codec parity')
+      end if
+   end subroutine run_codec_parity
 
 end module test_regress
