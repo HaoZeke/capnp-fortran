@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(60))
+      allocate (testsuite(61))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -123,6 +123,7 @@ contains
       testsuite(58) = new_unittest("request-beside-exe", run_request_beside_exe)
       testsuite(59) = new_unittest("generic-root", run_generic_root)
       testsuite(60) = new_unittest("zero-size-list", run_zero_size_list)
+      testsuite(61) = new_unittest("cli-options", run_cli_options)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3798,5 +3799,67 @@ contains
          call test_failed(error, 'zero-size list conversion')
       end if
    end subroutine run_zero_size_list
+
+   !> Options, values and positionals parse the way kj::MainBuilder does.
+   subroutine run_cli_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/cli-options && '//cap_setup() &
+         //' && export CAP ' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    try:'//achar(10)// &
+         '        p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE,'//achar(10)// &
+         '                           stderr=subprocess.PIPE, timeout=10)'//achar(10)// &
+         '    except subprocess.TimeoutExpired:'//achar(10)// &
+         '        return None'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'sch, typ = "schema/common.capnp", "Vec3"'//achar(10)// &
+         'inc = os.path.abspath("schema")'//achar(10)// &
+         'txt = b"(x = 1, y = 2, z = 3)\n"'//achar(10)// &
+         'cases = ['//achar(10)// &
+         '    ["encode", "--segment-size=0", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=00", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=4294967296", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=4294967297", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size", "1", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size= 1", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=1 ", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=0x10", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=-1", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=536870911", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=536870912", sch, typ],'//achar(10)// &
+         '    ["convert", "--segment-size=536870912", "text:text", sch, typ],'//achar(10)// &
+         '    ["convert", "--segment-size=536870912", "text:packed", sch, typ],'//achar(10)// &
+         '    ["convert", "--segment-size", "1", "text:binary", sch, typ],'//achar(10)// &
+         '    ["convert", "--import-path", inc, "text:binary", sch, typ],'//achar(10)// &
+         '    ["--import-path", inc, "convert", "text:binary", sch, typ],'//achar(10)// &
+         '    ["-I", inc, "convert", "text:binary", sch, typ],'//achar(10)// &
+         '    ["convert", "-I", "/no/such/dir", "text:binary", sch, typ],'//achar(10)// &
+         '    ["encode", "--flat", "--segment-size=1", sch, typ],'//achar(10)// &
+         '    ["encode", "--segment-size=1", "--flat", sch, typ],'//achar(10)// &
+         '    ["encode", "--packed", "--flat", sch, typ],'//achar(10)// &
+         '    ["encode", "-p", sch, typ],'//achar(10)// &
+         '    ["convert", "text:binary", sch, typ, "extra"],'//achar(10)// &
+         '    ["convert", "text:binary", "--", sch, typ],'//achar(10)// &
+         '    ["encode", sch],'//achar(10)// &
+         '    ["encode", "--short", sch, typ],'//achar(10)// &
+         '    ["decode", "--segment-size=1", sch, typ],'//achar(10)// &
+         '    ["eval", "-o", "nope", sch, "Vec3"],'//achar(10)// &
+         '    ["convert", "--bogus", "text:binary", sch, typ],'//achar(10)// &
+         ']'//achar(10)// &
+         'for args in cases:'//achar(10)// &
+         '    if run("capnp", args, txt) != run(cap, args, txt):'//achar(10)// &
+         '        print("mismatch:", args)'//achar(10)// &
+         '        sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'cli options')
+      end if
+   end subroutine run_cli_options
 
 end module test_regress

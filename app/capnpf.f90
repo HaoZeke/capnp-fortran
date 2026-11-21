@@ -46,7 +46,26 @@ program capnpf
          integer(c_size_t), value :: n
          integer(c_long) :: nw
       end function c_write
+      function c_strtol(s, endp, base) bind(c, name="strtol") result(v)
+         import c_ptr, c_int, c_long
+         type(c_ptr), value :: s
+         type(c_ptr), intent(out) :: endp
+         integer(c_int), value :: base
+         integer(c_long) :: v
+      end function c_strtol
    end interface
+
+   type :: arg_t
+      character(len=:), allocatable :: s
+   end type arg_t
+
+   type :: cli_opts_t
+      character(len=:), allocatable :: inc_flags
+      character(len=:), allocatable :: ofmt
+      logical :: short = .false., quiet = .false., flat = .false., packed = .false.
+      logical :: binary = .false., no_std = .false.
+      integer(int64) :: seg_words = 0_int64
+   end type cli_opts_t
 
    integer :: exit_code
    exit_code = 0
@@ -64,12 +83,13 @@ contains
 
    subroutine main_run(rc)
       integer, intent(out) :: rc
-      character(len=:), allocatable :: arg, next_arg
       character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
       character(len=:), allocatable :: from_fmt, to_fmt
-      logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc, quiet
+      logical :: short, packed_flag, flat_flag, no_std_inc, quiet, done
       integer(int64) :: seg_words
       integer :: i, n, err, colon, type_idx
+      type(arg_t), allocatable :: args(:), pos(:)
+      type(cli_opts_t) :: opts
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_brand_env_t) :: root_env
 
@@ -83,10 +103,11 @@ contains
       short = .false.
       packed_flag = .false.
       flat_flag = .false.
-      ofmt_explicit = .false.
       no_std_inc = .false.
       quiet = .false.
       seg_words = 0_int64
+      opts%inc_flags = ''
+      opts%ofmt = 'text'
 
       n = command_argument_count()
       if (n < 1) then
@@ -94,102 +115,92 @@ contains
          rc = 1
          return
       end if
+      allocate (args(n))
+      do i = 1, n
+         call take_arg(i, args(i)%s)
+      end do
+
+      ! kj::MainBuilder: global options, then the command, then its own
+      ! options and arguments in any order until `--`.
       i = 1
       do while (i <= n)
-         call take_arg(i, arg)
-         if (trim(arg) == '--help' .or. trim(arg) == '-h') then
-            call print_usage(1, err)
+         if (args(i)%s == '--') then
+            call fail('missing command', rc)
             return
-         else if (trim(arg) == '--version') then
-            call write_fd_line(1, "Cap'n Proto (capnpf) version 0.3.1", err)
-            return
-         else if (trim(arg) == '--short') then
-            short = .true.
-         else if (trim(arg) == '--quiet') then
-            quiet = .true.
-         else if (trim(arg) == '--verbose') then
-            continue
-         else if (trim(arg) == '--no-standard-import') then
-            no_std_inc = .true.
-         else if (trim(arg) == '-I') then
-            if (i + 1 > n) then
-               call fail('-I requires a directory', rc)
-               return
-            end if
-            i = i + 1
-            call take_arg(i, next_arg)
-            inc_flags = inc_flags//' -I'//shell_quote(next_arg)
-         else if (starts_with(arg, '-I') .and. len(arg) > 2) then
-            inc_flags = inc_flags//' -I'//shell_quote(trim(arg(3:)))
-         else if (index(trim(arg), '--import-path=') == 1) then
-            inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
-         else if (index(trim(arg), '--segment-size=') == 1) then
-            call capnp_parse_i64(trim(arg(16:)), seg_words, err)
-            if (err /= CAPNP_OK .or. seg_words < 1_int64) then
-               call fail('bad --segment-size', rc)
-               return
-            end if
-         else if (trim(arg) == '--packed' .or. trim(arg) == '-p') then
-            packed_flag = .true.
-         else if (trim(arg) == '--flat') then
-            flat_flag = .true.
-         else if (trim(arg) == '-b' .or. trim(arg) == '--binary') then
-            ofmt = 'binary'
-            ofmt_explicit = .true.
-         else if (trim(arg) == '-o') then
-            if (i + 1 > n) then
-               call fail('-o requires a format', rc)
-               return
-            end if
-            i = i + 1
-            call take_arg(i, next_arg)
-            ofmt = next_arg
-            ofmt_explicit = .true.
-         else if (starts_with(arg, '-o') .and. len(arg) > 2) then
-            ofmt = trim(arg(3:))
-            ofmt_explicit = .true.
-         else if (index(trim(arg), '--output=') == 1) then
-            ofmt = trim(arg(10:))
-            ofmt_explicit = .true.
-         else if (starts_with(arg, '-')) then
-            call fail('unknown option '//trim(arg), rc)
-            return
-         else if (len(cmd) == 0) then
-            cmd = trim(arg)
-            if (cmd == 'help') then
-               call print_usage(1, err)
-               return
-            end if
-         else if (cmd == 'convert' .and. len(spec) == 0) then
-            spec = trim(arg)
-         else if (len(schema_path) == 0) then
-            schema_path = trim(arg)
-         else if (len(name) == 0) then
-            name = trim(arg)
+         else if (is_option(args(i)%s)) then
+            call take_option(opts, '', args, i, done, rc)
+            if (done) return
          else
-            call fail('too many arguments', rc)
-            return
+            cmd = args(i)%s
+            exit
          end if
          i = i + 1
       end do
-
-      if (.not. ofmt_explicit) then
-         if (flat_flag .and. packed_flag) then
-            ofmt = 'flat-packed'
-         else if (flat_flag) then
-            ofmt = 'flat'
-         else if (packed_flag) then
-            ofmt = 'packed'
+      if (len(cmd) == 0) then
+         call fail('missing command', rc)
+         return
+      end if
+      if (cmd == 'help') then
+         if (i + 1 <= n) then
+            if (.not. known_command(args(i + 1)%s)) then
+               call fail(args(i + 1)%s//': unknown command', rc)
+               return
+            end if
          end if
-      end if
-
-      if (cmd /= 'encode' .and. cmd /= 'decode' .and. cmd /= 'convert' .and. cmd /= 'eval') then
-         call fail('unknown command '//cmd, rc)
+         call print_usage(1, err)
          return
       end if
-      if (quiet .and. cmd /= 'convert' .and. cmd /= 'decode') then
-         call fail('--quiet: unrecognized option', rc)
+      if (.not. known_command(cmd)) then
+         call fail(cmd//': unknown command', rc)
          return
+      end if
+      allocate (pos(0))
+      i = i + 1
+      do while (i <= n)
+         if (args(i)%s == '--') then
+            pos = [pos, args(i + 1:n)]
+            exit
+         else if (is_option(args(i)%s)) then
+            call take_option(opts, cmd, args, i, done, rc)
+            if (done) return
+         else
+            pos = [pos, args(i)]
+         end if
+         i = i + 1
+      end do
+      if (size(pos) < 1 .or. (cmd /= 'convert' .and. size(pos) < 2)) then
+         call fail('missing argument', rc)
+         return
+      end if
+      if (size(pos) > 3 .or. (cmd /= 'convert' .and. size(pos) > 2)) then
+         call fail(pos(size(pos))%s//': too many arguments', rc)
+         return
+      end if
+      if (cmd == 'convert') then
+         spec = pos(1)%s
+         if (size(pos) >= 2) schema_path = pos(2)%s
+         if (size(pos) >= 3) name = pos(3)%s
+      else
+         schema_path = pos(1)%s
+         name = pos(2)%s
+      end if
+      short = opts%short
+      quiet = opts%quiet
+      packed_flag = opts%packed
+      flat_flag = opts%flat
+      no_std_inc = opts%no_std
+      inc_flags = opts%inc_flags
+      seg_words = opts%seg_words
+      ofmt = opts%ofmt
+      ! formatFromDeprecatedFlags: --flat, -p and -b win over -o.
+      if (flat_flag .and. packed_flag) then
+         ofmt = 'flat-packed'
+      else if (flat_flag) then
+         ofmt = 'flat'
+      else if (packed_flag) then
+         ofmt = 'packed'
+      else if (opts%binary) then
+         ofmt = 'binary'
       end if
 
       if (cmd == 'convert') then
@@ -208,37 +219,36 @@ contains
             call fail('unknown output format '//to_fmt, rc)
             return
          end if
-         if (needs_schema(from_fmt) .or. needs_schema(to_fmt)) then
-            if (len(schema_path) == 0 .or. len(name) == 0) then
-               call print_usage(2, err)
-               rc = 1
-               return
-            end if
+         ! capnp compiles a schema and resolves a type whenever they are
+         ! given, even for a binary-only conversion.
+         type_idx = 0
+         if (len(schema_path) > 0) then
             call load_schema(schema_path, inc_flags, no_std_inc, name, &
                from_fmt == 'json' .or. to_fmt == 'json', schema, err)
             if (err /= CAPNP_OK) then
                call fail('cannot load schema', rc)
                return
             end if
+         end if
+         if (len(name) > 0) then
             call bind_root(schema, name, type_idx, root_env, err)
             if (err /= CAPNP_OK .or. type_idx <= 0) then
                call capnp_dyn_free(schema)
                call fail('unknown type '//name, rc)
                return
             end if
-         else
-            type_idx = 0
+         end if
+         if ((needs_schema(from_fmt) .or. needs_schema(to_fmt)) .and. type_idx <= 0) then
+            call capnp_dyn_free(schema)
+            call print_usage(2, err)
+            rc = 1
+            return
          end if
          call cmd_convert(schema, type_idx, root_env, from_fmt, to_fmt, short, seg_words, quiet, rc)
          call capnp_dyn_free(schema)
          return
       end if
 
-      if (len(schema_path) == 0 .or. len(name) == 0) then
-         call print_usage(2, err)
-         rc = 1
-         return
-      end if
       call load_schema(schema_path, inc_flags, no_std_inc, name, .false., schema, err)
       if (err /= CAPNP_OK) then
          call fail('cannot load schema', rc)
@@ -280,12 +290,7 @@ contains
          end if
          call cmd_decode(schema, type_idx, root_env, from_fmt, short, quiet, rc)
       case ('eval')
-         if (.not. valid_fmt(ofmt)) then
-            call capnp_dyn_free(schema)
-            call fail('unknown output format '//ofmt, rc)
-            return
-         end if
-         call cmd_eval(schema, name, ofmt, short, seg_words, rc)
+         call cmd_eval(schema, name, ofmt, short, 0_int64, rc)
       end select
       call capnp_dyn_free(schema)
    end subroutine main_run
@@ -637,6 +642,258 @@ contains
       allocate (character(len=n) :: s)
       if (n > 0) call get_command_argument(i, s)
    end subroutine take_arg
+
+   pure function known_command(s) result(y)
+      character(len=*), intent(in) :: s
+      logical :: y
+      y = s == 'encode' .or. s == 'decode' .or. s == 'convert' .or. s == 'eval'
+   end function known_command
+
+   pure function is_option(s) result(y)
+      character(len=*), intent(in) :: s
+      logical :: y
+      y = .false.
+      if (len(s) > 1) y = s(1:1) == '-'
+   end function is_option
+
+   !> 0: unknown to this command, 1: a flag, 2: takes a value.
+   pure function option_kind(cmd, name) result(k)
+      character(len=*), intent(in) :: cmd, name
+      integer :: k
+      k = 0
+      select case (name)
+      case ('import-path')
+         k = 2
+      case ('no-standard-import', 'verbose', 'version')
+         k = 1
+      case ('short')
+         if (cmd == 'convert' .or. cmd == 'decode' .or. cmd == 'eval') k = 1
+      case ('quiet')
+         if (cmd == 'convert' .or. cmd == 'decode') k = 1
+      case ('segment-size')
+         if (cmd == 'convert' .or. cmd == 'encode') k = 2
+      case ('flat', 'packed')
+         if (cmd == 'decode' .or. cmd == 'encode' .or. cmd == 'eval') k = 1
+      case ('binary')
+         if (cmd == 'eval') k = 1
+      case ('output')
+         if (cmd == 'eval') k = 2
+      end select
+   end function option_kind
+
+   function short_option(cmd, c) result(name)
+      character(len=*), intent(in) :: cmd
+      character, intent(in) :: c
+      character(len=:), allocatable :: name
+      select case (c)
+      case ('I')
+         name = 'import-path'
+      case ('p')
+         name = 'packed'
+      case ('o')
+         name = 'output'
+      case ('b')
+         name = 'binary'
+      case default
+         name = ''
+      end select
+      if (len(name) > 0) then
+         if (option_kind(cmd, name) == 0) name = ''
+      end if
+   end function short_option
+
+   !> One option argument, parsed the way kj::MainBuilder parses it. A
+   !> value may be attached or be the next argument when that argument
+   !> is not itself an option.
+   subroutine take_option(o, cmd, args, i, done, rc)
+      type(cli_opts_t), intent(inout) :: o
+      character(len=*), intent(in) :: cmd
+      type(arg_t), intent(in) :: args(:)
+      integer, intent(inout) :: i
+      logical, intent(out) :: done
+      integer, intent(inout) :: rc
+      character(len=:), allocatable :: p, name, val, msg
+      integer :: eq, j
+      logical :: has_val
+      done = .false.
+      p = args(i)%s
+      if (starts_with(p, '--')) then
+         eq = index(p, '=')
+         has_val = eq > 0
+         if (has_val) then
+            name = p(3:eq - 1)
+            val = p(eq + 1:)
+         else
+            name = p(3:)
+            val = ''
+         end if
+         select case (option_kind(cmd, name))
+         case (0)
+            if (p == '--help') then
+               call print_usage(1, eq)
+               rc = 0
+            else
+               call fail('--'//name//': unrecognized option', rc)
+            end if
+            done = .true.
+         case (1)
+            if (has_val) then
+               call fail('--'//name//': option does not accept an argument', rc)
+               done = .true.
+               return
+            end if
+            call set_option(o, name, '', msg, done, rc)
+            if (len(msg) > 0) call fail(p//': '//msg, rc)
+            if (len(msg) > 0) done = .true.
+         case (2)
+            if (.not. has_val .and. i < size(args)) then
+               if (.not. is_option(args(i + 1)%s)) then
+                  i = i + 1
+                  val = args(i)%s
+                  has_val = .true.
+               end if
+            end if
+            if (.not. has_val) then
+               call fail('--'//name//': missing argument', rc)
+               done = .true.
+               return
+            end if
+            call set_option(o, name, val, msg, done, rc)
+            if (len(msg) > 0) call fail(p//': '//msg, rc)
+            if (len(msg) > 0) done = .true.
+         end select
+         return
+      end if
+      j = 2
+      do while (j <= len(p))
+         name = short_option(cmd, p(j:j))
+         if (len(name) == 0) then
+            call fail('-'//p(j:j)//': unrecognized option', rc)
+            done = .true.
+            return
+         end if
+         if (option_kind(cmd, name) == 2) then
+            if (j < len(p)) then
+               val = p(j + 1:)
+            else if (i < size(args)) then
+               if (is_option(args(i + 1)%s)) then
+                  call fail('-'//p(j:j)//': missing argument', rc)
+                  done = .true.
+                  return
+               end if
+               i = i + 1
+               val = args(i)%s
+            else
+               call fail('-'//p(j:j)//': missing argument', rc)
+               done = .true.
+               return
+            end if
+            call set_option(o, name, val, msg, done, rc)
+            if (len(msg) > 0) call fail('-'//p(j:j)//' '//val//': '//msg, rc)
+            if (len(msg) > 0) done = .true.
+            return
+         end if
+         call set_option(o, name, '', msg, done, rc)
+         if (len(msg) > 0) call fail('-'//p(j:j)//': '//msg, rc)
+         if (len(msg) > 0) done = .true.
+         if (done) return
+         j = j + 1
+      end do
+   end subroutine take_option
+
+   !> The validity callbacks of capnp.c++. A non-empty msg rejects the
+   !> option; done stops parsing after --version.
+   subroutine set_option(o, name, val, msg, done, rc)
+      type(cli_opts_t), intent(inout) :: o
+      character(len=*), intent(in) :: name, val
+      character(len=:), allocatable, intent(out) :: msg
+      logical, intent(inout) :: done
+      integer, intent(inout) :: rc
+      integer(int64) :: v
+      logical :: ok, ex
+      integer :: err
+      msg = ''
+      select case (name)
+      case ('import-path')
+         inquire (file=val//'/.', exist=ex)
+         if (.not. ex) then
+            msg = 'no such directory'
+            return
+         end if
+         o%inc_flags = o%inc_flags//' -I'//shell_quote(val)
+      case ('no-standard-import')
+         o%no_std = .true.
+      case ('verbose')
+         continue
+      case ('version')
+         call write_fd_line(1, "Cap'n Proto (capnpf) version 0.3.1", err)
+         rc = 0
+         done = .true.
+      case ('short')
+         o%short = .true.
+      case ('quiet')
+         o%quiet = .true.
+      case ('segment-size')
+         if (o%flat) then
+            msg = 'cannot be used with --flat'
+            return
+         end if
+         call c_long_value(val, v, ok)
+         if (.not. ok) then
+            msg = 'not an integer'
+            return
+         end if
+         ! capnp.c++ keeps the value in a uint.
+         o%seg_words = iand(v, 4294967295_int64)
+      case ('flat')
+         if (o%binary) then
+            msg = 'cannot be used with --binary'
+            return
+         end if
+         o%flat = .true.
+      case ('packed')
+         if (o%binary) then
+            msg = 'cannot be used with --binary'
+            return
+         end if
+         o%packed = .true.
+      case ('binary')
+         if (o%packed) then
+            msg = 'cannot be used with --packed'
+            return
+         end if
+         if (o%flat) then
+            msg = 'cannot be used with --flat'
+            return
+         end if
+         o%binary = .true.
+      case ('output')
+         if (.not. valid_fmt(val)) then
+            msg = 'unknown format: '//val
+            return
+         end if
+         o%ofmt = val
+      end select
+   end subroutine set_option
+
+   !> strtol(s, &end, 0) with the whole string consumed, as setSegmentSize
+   !> requires. Out-of-range values saturate like strtol.
+   subroutine c_long_value(s, v, ok)
+      character(len=*), intent(in) :: s
+      integer(int64), intent(out) :: v
+      logical, intent(out) :: ok
+      character(kind=c_char), allocatable, target :: buf(:)
+      type(c_ptr) :: endp
+      integer(c_intptr_t) :: a0, a1
+      v = 0_int64
+      ok = .false.
+      if (len(s) == 0) return
+      call to_cchars(s, buf)
+      v = int(c_strtol(c_loc(buf(1)), endp, 0_c_int), int64)
+      a0 = transfer(c_loc(buf(1)), a0)
+      a1 = transfer(endp, a1)
+      ok = a1 - a0 == int(len(s), c_intptr_t)
+   end subroutine c_long_value
 
    pure function starts_with(s, pfx) result(y)
       character(len=*), intent(in) :: s, pfx
@@ -1297,6 +1554,7 @@ contains
       type(capnp_ptr_t) :: root, croot
       type(capnp_builder_options_t) :: bopt
       integer(int8), allocatable :: flatb(:)
+      integer(int64) :: need
       err = CAPNP_OK
       if (to == 'canonical') then
          call capnp_canonicalize(msg, outb, err)
@@ -1307,9 +1565,18 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_pack(flatb, outb, err)
       else if (seg_words > 0_int64 .and. (to == 'binary' .or. to == 'packed')) then
+         ! MallocMessageBuilder rejects a first segment above
+         ! MAX_SEGMENT_WORDS. A segment that holds the whole message gives
+         ! the same output at any larger size, so no more is allocated.
+         if (seg_words > 536870911_int64) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) return
-         bopt%first_segment_words = seg_words
+         need = capnp_total_size(root, err)
+         if (err /= CAPNP_OK) return
+         bopt%first_segment_words = min(seg_words, 2_int64*need + 1024_int64)
          bopt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
          call capnp_message_init_builder(reseg, err, options=bopt)
          if (err /= CAPNP_OK) return
