@@ -212,7 +212,8 @@ contains
       case (TYPE_UINT64)
          call capnp_fmt_u64(capnp_def_i64(val), text)
       case (TYPE_FLOAT32)
-         call capnp_fmt_f32(capnp_def_f32(val), text)
+         ! A bare Float32 constant is promoted and printed as a double.
+         call capnp_fmt_f64(real(capnp_def_f32(val), real64), text)
       case (TYPE_FLOAT64)
          call capnp_fmt_f64(capnp_def_f64(val), text)
       case (TYPE_TEXT)
