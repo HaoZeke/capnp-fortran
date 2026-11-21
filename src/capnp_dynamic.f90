@@ -432,8 +432,6 @@ contains
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
@@ -698,6 +696,15 @@ contains
       if (err /= CAPNP_OK) return
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      select case (type_which(t))
+      case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
+            TYPE_INT64, TYPE_UINT64, TYPE_ENUM)
+      case default
+         err = CAPNP_ERR_KIND
+         return
+      end select
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
@@ -938,6 +945,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
       if (err == CAPNP_OK) call capnp_setp(p, int(field_slot_offset(f)), value, err)
@@ -962,6 +971,8 @@ contains
          return
       end if
       elem = type_list_element(t, err)
+      if (err /= CAPNP_OK) return
+      call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))

@@ -282,6 +282,16 @@ contains
       call capnp_dyn_get_text(aschema, choice_idx, people, 'label', s, err)
       call check_(error, err == CAPNP_OK .and. s == 'selected' .and. &
                   capnp_dyn_which(aschema, choice_idx, people, err) == 1, 'dyn: select and text union')
+      tag = capnp_dyn_get_int(aschema, choice_idx, people, 'number', err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(aschema, choice_idx, people, err) == 1, &
+                  'dyn: integer read does not select union')
+      q = capnp_dyn_init_list(aschema, choice_idx, people, 'items', 2_int64, err)
+      call check_(error, err == CAPNP_OK .and. capnp_list_len(q) == 2_int64 .and. &
+                  capnp_dyn_which(aschema, choice_idx, people, err) == 2, &
+                  'dyn: init list selects union')
+      call capnp_dyn_set_int(aschema, choice_idx, people, 'number', 74_int64, err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(aschema, choice_idx, people, err) == 0, &
+                  'dyn: integer write selects union')
 
       call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
       call check_(error, err == CAPNP_OK, 'dyn: box cgr reads')

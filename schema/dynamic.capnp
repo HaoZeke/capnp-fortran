@@ -9,6 +9,7 @@ struct Dynamic {
   choice :union {
     number @3 :Int32;
     label @4 :Text;
+    items @5 :List(Int32);
   }
 }
 
