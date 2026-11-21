@@ -1,0 +1,52 @@
+name: Release prepare
+
+on:
+  pull_request:
+    paths:
+      - "CHANGELOG.md"
+      - "CITATION.cff"
+      - "CMakeLists.txt"
+      - "README.md"
+      - "cog.toml"
+      - "docs/source/conf.py"
+      - "fpm.toml"
+      - "meson.build"
+      - "towncrier.toml"
+      - "scripts/bump_versions.py"
+      - "scripts/changelog_build.py"
+      - "scripts/check_version.py"
+      - "scripts/cog_bump.py"
+      - "scripts/release_notes.py"
+      - "scripts/version_util.py"
+      - "docs/newsfragments/**"
+      - "docs/orgmode/install.org"
+      - "prek.toml"
+      - ".github/workflows/release*.yml"
+      - ".github/workflows/towncrier.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install towncrier
+        run: python3 -m pip install --quiet "towncrier==26.9.0"
+      - name: Build changelog draft
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 -c 'import re, pathlib; text = pathlib.Path("meson.build").read_text(); print(re.search(r"^  version: .([0-9A-Za-z.+-]+).", text, re.M).group(1))')
+          python3 scripts/changelog_build.py --version "$VERSION" --draft
+      - name: Check metadata configuration
+        run: |
+          set -euo pipefail
+          python3 -c "import pathlib, tomllib; [tomllib.loads(pathlib.Path(name).read_text()) for name in ('cog.toml', 'fpm.toml', 'towncrier.toml')]"
+          VERSION=$(python3 -c 'import re, pathlib; text = pathlib.Path("meson.build").read_text(); print(re.search(r"^  version: .([0-9A-Za-z.+-]+).", text, re.M).group(1))')
+          python3 scripts/check_version.py "v${VERSION}"

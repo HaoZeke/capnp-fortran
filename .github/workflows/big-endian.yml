@@ -5,14 +5,19 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   s390x:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - name: full suite on emulated s390x (big-endian)
-        uses: uraimo/run-on-arch-action@v2
+        uses: uraimo/run-on-arch-action@ac33288c3728ca72563c97b8b88dda5a65a84448 # v2
         with:
           arch: s390x
           distro: bookworm

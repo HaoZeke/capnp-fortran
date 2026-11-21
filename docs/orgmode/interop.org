@@ -108,6 +108,10 @@ and ``capnpc-c++`` are all found; otherwise Meson prints a skip
 message and continues.
 #+end_export
 
+The default feature =rpc_interop= is =auto=, which is that skip.
+=-Drpc_interop=enabled= fails configure when the peer is missing, and CI
+passes that value.
+
 - =interop/rpc_peer_server.c++= -- a capnp-C++ =EzRpcServer=
   hosting the =Adder= interface (=schema/adder.capnp=), listening
   on a port given as its first argument.

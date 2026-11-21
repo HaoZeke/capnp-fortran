@@ -9,7 +9,7 @@ library underneath; only `iso_fortran_env` kinds and, for the optional C API,
 `iso_c_binding`.
 
 Documentation: **https://capnp-fortran.rgoswami.me** (Sphinx site; sources under `docs/`).
-Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURITY.md). Linkcheck: `pixi run -e docs linkcheck` (needs `lychee` on PATH). Hooks: `prek install` then `prek run -a` (config in `prek.toml`; version bumps via `cog bump`).
+Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security: [SECURITY.md](SECURITY.md). Linkcheck: `pixi run -e docs linkcheck` (needs `lychee` on PATH). Hooks: `prek install` then `prek run -a` (config in `prek.toml`; version bumps via `python3 scripts/cog_bump.py`).
 
 ## Features
 
@@ -157,7 +157,7 @@ To depend on it, name the git source and a tag in your own `fpm.toml`:
 
 ```toml
 [dependencies]
-capnp = { git = "https://github.com/HaoZeke/capnp-fortran", tag = "v0.3.1" }
+capnp = { git = "https://github.com/HaoZeke/capnp-fortran", tag = "v0.4.0" }
 ```
 
 then `use capnp` and build as usual. This is the supported route:
@@ -172,6 +172,26 @@ $ pixi run build
 $ pixi run test
 ```
 
+### Meson subproject
+
+Add `subprojects/capnp-fortran.wrap` to a Meson project:
+
+```ini
+[wrap-git]
+url = https://github.com/HaoZeke/capnp-fortran.git
+revision = v0.4.0
+```
+
+Then request the dependency and link it:
+
+```meson
+capnp_fortran_dep = dependency(
+  'capnp-fortran',
+  fallback: ['capnp-fortran', 'capnp_fortran_dep'],
+)
+executable('myapp', 'myapp.f90', dependencies: capnp_fortran_dep)
+```
+
 ### CMake / FetchContent
 
 Official Cap'n Proto C++ uses `find_package(CapnProto)` and `CapnProto::capnp`.
@@ -183,7 +203,7 @@ include(FetchContent)
 FetchContent_Declare(
   capnp_fortran
   GIT_REPOSITORY https://github.com/HaoZeke/capnp-fortran.git
-  GIT_TAG        v0.3.1
+  GIT_TAG        v0.4.0
 )
 FetchContent_MakeAvailable(capnp_fortran)
 target_link_libraries(myapp PRIVATE capnp_fortran::capnp_fortran)

@@ -23,49 +23,58 @@ endif
 
 # --- RPC interop: Fortran vat against a capnp-C++ peer ---------------------
 
-cpp_ok = add_languages('cpp', required: false, native: false)
-capnp_rpc_dep = dependency('capnp-rpc', required: false)
-capnp_tool = find_program('capnp', required: false)
-capnpc_cpp = find_program('capnpc-c++', required: false)
-bash = find_program('bash', required: false)
-
-if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
-  adder_gen = custom_target(
-    'adder-capnp-cpp',
-    input: '../schema/adder.capnp',
-    output: ['adder.capnp.c++', 'adder.capnp.h'],
-    command: [
-      capnp_tool, 'compile',
-      '--src-prefix=' + meson.project_source_root() / 'schema',
-      '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
-      '@INPUT@',
-    ],
-  )
-
-  rpc_peer_server = executable(
-    'rpc_peer_server',
-    ['rpc_peer_server.c++', adder_gen],
-    dependencies: capnp_rpc_dep,
-    override_options: ['cpp_std=c++17'],
-  )
-
-  rpc_client_f = executable(
-    'rpc_client_f',
-    'rpc_client.f90',
-    link_with: capnp_flib,
-  )
-
-  test(
-    'rpc_interop_cpp',
-    bash,
-    args: [
-      meson.current_source_dir() / 'run_rpc_interop.sh',
-      rpc_peer_server.full_path(),
-      rpc_client_f.full_path(),
-    ],
-    depends: [rpc_peer_server, rpc_client_f],
-    timeout: 60,
-  )
+# auto (the default) skips when the peer cannot be built, so a Fortran
+# main project still configures. enabled fails that configure. CI passes
+# -Drpc_interop=enabled.
+rpc_opt = get_option('rpc_interop')
+rpc_required = rpc_opt.enabled()
+if rpc_opt.disabled()
+  message('interop/rpc: skipped (rpc_interop disabled).')
 else
-  message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+  cpp_ok = add_languages('cpp', required: rpc_required, native: false)
+  capnp_rpc_dep = dependency('capnp-rpc', required: rpc_required)
+  capnp_tool = find_program('capnp', required: rpc_required)
+  capnpc_cpp = find_program('capnpc-c++', required: rpc_required)
+  bash = find_program('bash', required: rpc_required)
+
+  if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+    adder_gen = custom_target(
+      'adder-capnp-cpp',
+      input: '../schema/adder.capnp',
+      output: ['adder.capnp.c++', 'adder.capnp.h'],
+      command: [
+        capnp_tool, 'compile',
+        '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+        '@INPUT@',
+      ],
+    )
+
+    rpc_peer_server = executable(
+      'rpc_peer_server',
+      ['rpc_peer_server.c++', adder_gen],
+      dependencies: capnp_rpc_dep,
+      override_options: ['cpp_std=c++17'],
+    )
+
+    rpc_client_f = executable(
+      'rpc_client_f',
+      'rpc_client.f90',
+      link_with: capnp_flib,
+    )
+
+    test(
+      'rpc_interop_cpp',
+      bash,
+      args: [
+        meson.current_source_dir() / 'run_rpc_interop.sh',
+        rpc_peer_server.full_path(),
+        rpc_client_f.full_path(),
+      ],
+      depends: [rpc_peer_server, rpc_client_f],
+      timeout: 60,
+    )
+  else
+    message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+  endif
 endif

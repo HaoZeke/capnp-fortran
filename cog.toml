@@ -1,16 +1,28 @@
-from_latest_tag = false
+## Cocogitto config. Towncrier writes CHANGELOG.md.
+## 0.4.0 is already recorded. After the pull request checks are green:
+##   git tag -a v0.4.0 -m "v0.4.0"
+##   git push --follow-tags
+## Later: python3 scripts/cog_bump.py --auto -A "v{{version}}" (then push with --follow-tags; the tag triggers release.yml).
+## The wrapper refuses a recorded version before cog starts. Hooks then update the version files, build the changelog, and check the tag.
+## The post-bump hook annotates the tag when the bump command omits -A.
+from_latest_tag = true
 ignore_merge_commits = true
-# Hand-maintained Keep a Changelog; cog only orchestrates version bumps.
+# Towncrier owns CHANGELOG.md. Cog creates the bump commit and the tag.
 disable_changelog = true
 generate_mono_repository_global_tag = true
 tag_prefix = "v"
 skip_ci = "[skip ci]"
 branch_whitelist = ["main", "master"]
 
-# Keep fpm package version and Sphinx release in lockstep.
 pre_bump_hooks = [
-  "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' fpm.toml",
-  "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
+  "python3 scripts/bump_versions.py {{version}}",
+  "python3 scripts/changelog_build.py --version {{version}}",
+  "python3 scripts/check_version.py v{{version}}",
+  "python3 scripts/release_notes.py {{version}} > /dev/null",
+]
+
+post_bump_hooks = [
+  "python3 scripts/bump_versions.py --annotate-tag {{version}}",
 ]
 
 [commit_types]

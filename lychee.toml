@@ -24,6 +24,9 @@ exclude = [
   '^https://capnp-ts\.rgoswami\.me/',
   # Edit-this-page / blob links to main may 404 on PR branches
   '^https://github\.com/HaoZeke/capnp-fortran/blob/',
+  # Compare links name the tag being published. That tag is pushed only
+  # after the pull request checks are green, so the URL 404s until then.
+  '^https://github\.com/HaoZeke/capnp-fortran/compare/',
   # Theme / analytics vendor
   '^https?://antics-api\.turtletech\.us/',
   '^https?://analytics\.turtletech\.us/',

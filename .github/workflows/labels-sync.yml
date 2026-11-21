@@ -1,0 +1,37 @@
+name: Sync labels
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/labels.yml"
+      - "scripts/sync-labels.sh"
+      - ".github/workflows/labels-sync.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: labels-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet "PyYAML==6.0.2"
+      - name: Sync repository labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/sync-labels.sh

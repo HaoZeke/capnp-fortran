@@ -16,12 +16,13 @@ jobs:
   prek:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install prek and lychee
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2
         with:
           # prek >= 0.4 discovers prek.toml; 0.3 looked only for .pre-commit-config.yaml
           tool: prek@0.4.4,lychee@0.24.2

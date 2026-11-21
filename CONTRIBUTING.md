@@ -23,7 +23,8 @@ fpm test
 ```
 
 Docs: `pixi run -e docs docs`. Hooks: `prek install` then `prek run -a`
-(config in `prek.toml`). Version bumps use `cog bump` when cutting releases.
+(config in `prek.toml`). Release steps, fragments, and labels are in
+`CONVENTIONS.md`.
 
 ## Code style
 
