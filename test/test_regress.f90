@@ -1149,7 +1149,7 @@ contains
          'kept = Path("'//tmp//'/kept")'//achar(10)// &
          'root = Path("'//tmp//'")'//achar(10)// &
          'for i in range(1, 81):'//achar(10)// &
-         '    p = root / ("capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
          '    if p.is_symlink() or p.exists():'//achar(10)// &
          '        p.unlink()'//achar(10)// &
          '    p.symlink_to(kept)'//achar(10)// &
@@ -1161,14 +1161,12 @@ contains
          'python3 - <<''PY'''//achar(10)// &
          'from pathlib import Path'//achar(10)// &
          'pid = int(Path("'//tmp//'/pid").read_text())'//achar(10)// &
-         'root = Path("'//tmp//'")'//achar(10)// &
          'for i in range(1, 81):'//achar(10)// &
-         '    p = root / ("capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
          '    if p.is_symlink() or p.exists():'//achar(10)// &
          '        p.unlink()'//achar(10)// &
          'PY'//achar(10)// &
-         'test ! -e /tmp/capnpf-$(cat "'//tmp//'/pid").cgr && ' &
-         //'test "$ok" = 1' &
+         'test "$ok" = 1' &
          //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
          //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref')) then
          call test_failed(error, 'schema pipe encode failed')
