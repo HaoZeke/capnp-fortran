@@ -123,12 +123,13 @@ contains
       call enum_text(schema, tid, ord, text, err)
    end subroutine capnp_text_encode_enum
 
-   subroutine capnp_text_decode(schema, idx, text, msg, err)
+   subroutine capnp_text_decode(schema, idx, text, msg, err, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
+      type(capnp_brand_env_t), intent(in), optional :: brand_env
       type(capnp_ptr_t) :: root
       type(capnp_brand_env_t) :: env
       type(scan_t) :: sc
@@ -159,6 +160,7 @@ contains
       sc%s = text
       sc%n = len(text)
       sc%i = 1
+      if (present(brand_env)) env = brand_env
       call parse_struct(schema, idx, root, env, sc, 0, err, .false.)
       if (err /= CAPNP_OK) return
       call skip_ws(sc)

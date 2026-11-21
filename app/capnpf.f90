@@ -71,6 +71,7 @@ contains
       integer(int64) :: seg_words
       integer :: i, n, err, colon, type_idx
       type(capnp_dyn_schema_t), target :: schema
+      type(capnp_brand_env_t) :: root_env
 
       rc = 0
       cmd = ''
@@ -219,8 +220,8 @@ contains
                call fail('cannot load schema', rc)
                return
             end if
-            type_idx = capnp_dyn_find(schema, name, err)
-            if (type_idx <= 0) then
+            call bind_root(schema, name, type_idx, root_env, err)
+            if (err /= CAPNP_OK .or. type_idx <= 0) then
                call capnp_dyn_free(schema)
                call fail('unknown type '//name, rc)
                return
@@ -228,7 +229,7 @@ contains
          else
             type_idx = 0
          end if
-         call cmd_convert(schema, type_idx, from_fmt, to_fmt, short, seg_words, quiet, rc)
+         call cmd_convert(schema, type_idx, root_env, from_fmt, to_fmt, short, seg_words, quiet, rc)
          call capnp_dyn_free(schema)
          return
       end if
@@ -246,24 +247,24 @@ contains
 
       select case (cmd)
       case ('encode')
-         type_idx = capnp_dyn_find(schema, name, err)
-         if (type_idx <= 0) then
+         call bind_root(schema, name, type_idx, root_env, err)
+         if (err /= CAPNP_OK .or. type_idx <= 0) then
             call capnp_dyn_free(schema)
             call fail('unknown type '//name, rc)
             return
          end if
          if (flat_flag .and. packed_flag) then
-            call cmd_encode(schema, type_idx, 'flat-packed', seg_words, rc)
+            call cmd_encode(schema, type_idx, root_env, 'flat-packed', seg_words, rc)
          else if (flat_flag) then
-            call cmd_encode(schema, type_idx, 'flat', seg_words, rc)
+            call cmd_encode(schema, type_idx, root_env, 'flat', seg_words, rc)
          else if (packed_flag) then
-            call cmd_encode(schema, type_idx, 'packed', seg_words, rc)
+            call cmd_encode(schema, type_idx, root_env, 'packed', seg_words, rc)
          else
-            call cmd_encode(schema, type_idx, 'binary', seg_words, rc)
+            call cmd_encode(schema, type_idx, root_env, 'binary', seg_words, rc)
          end if
       case ('decode')
-         type_idx = capnp_dyn_find(schema, name, err)
-         if (type_idx <= 0) then
+         call bind_root(schema, name, type_idx, root_env, err)
+         if (err /= CAPNP_OK .or. type_idx <= 0) then
             call capnp_dyn_free(schema)
             call fail('unknown type '//name, rc)
             return
@@ -277,7 +278,7 @@ contains
          else
             from_fmt = 'binary'
          end if
-         call cmd_decode(schema, type_idx, from_fmt, short, quiet, rc)
+         call cmd_decode(schema, type_idx, root_env, from_fmt, short, quiet, rc)
       case ('eval')
          if (.not. valid_fmt(ofmt)) then
             call capnp_dyn_free(schema)
@@ -336,6 +337,58 @@ contains
       q = q//"'"
    end function shell_quote
 
+   !> A plain name is a schema node. A generic expression is the field
+   !> type of `CapnpfBrandHost`, which schema-request compiled for us.
+   subroutine bind_root(sch, name, idx, benv, err)
+      type(capnp_dyn_schema_t), intent(in) :: sch
+      character(len=*), intent(in) :: name
+      integer, intent(out) :: idx
+      type(capnp_brand_env_t), intent(out) :: benv
+      integer, intent(out) :: err
+      type(capnp_brand_env_t) :: empty
+      type(capnp_ptr_t) :: fields, fld, typ
+      integer :: host, i
+      integer(int64) :: tid
+      err = CAPNP_OK
+      idx = 0
+      if (index(name, '(') > 0) then
+         host = capnp_dyn_find(sch, 'CapnpfBrandHost', err)
+         if (err /= CAPNP_OK .or. host <= 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         fields = node_struct_fields(sch%nodes(host), err)
+         if (err /= CAPNP_OK) return
+         if (fields%kind /= CAPNP_PK_LIST .or. capnp_list_len(fields) < 1) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         fld = capnp_list_get_struct(fields, 0, err)
+         if (err /= CAPNP_OK) return
+         typ = field_slot_type(fld, err)
+         if (err /= CAPNP_OK) return
+         if (type_which(typ) /= TYPE_STRUCT) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         tid = type_type_id(typ)
+         do i = 1, size(sch%nodes)
+            if (node_id(sch%nodes(i)) == tid) then
+               idx = i
+               exit
+            end if
+         end do
+         if (idx <= 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call capnp_brand_enter(empty, typ, benv, err)
+         return
+      end if
+      idx = capnp_dyn_find(sch, name, err)
+      if (err /= CAPNP_OK .or. idx <= 0) err = CAPNP_ERR_ARG
+   end subroutine bind_root
+
    subroutine load_schema(path, extra_inc, no_std, type_name, annotations, sch, err)
       character(len=*), intent(in) :: path, extra_inc, type_name
       logical, intent(in) :: no_std, annotations
@@ -379,7 +432,23 @@ contains
               //extra_inc
       if (.not. no_std) shcmd = shcmd//' -I"$INC"'
       shcmd = shcmd//' '//shell_quote(trim(path))//' '//shell_quote(trim(type_name))//'; fi; '
-      if (no_std) then
+      if (index(type_name, '(') > 0) then
+         ! Without the helper, a wrapper file names the generic root as a
+         ! field type. Its names are looked up in the original file.
+         if (.not. no_std) shcmd = shcmd//'INC=$(dirname $(dirname $(command -v capnp)))/include; '
+         shcmd = shcmd//'ABS=$(readlink -f '//shell_quote(trim(path))//') || exit 1; ' &
+                 //'W=$(mktemp /tmp/capnpf-brand-XXXXXX.capnp) || exit 1; ' &
+                 //'printf ''%s\n'' ''@0x8e1e4a11b22c3d4f;'' "using CapnpfOrig = import \"$ABS\";" ' &
+                 //'''struct CapnpfBrandHost {'' ' &
+                 //shell_quote('  branded @0 :'//brand_expr(type_name)//';') &
+                 //' ''}'' > "$W"; capnp compile'
+         if (no_std) then
+            shcmd = shcmd//' --no-standard-import'//extra_inc
+         else
+            shcmd = shcmd//extra_inc//' -I"$INC"'
+         end if
+         shcmd = shcmd//' -I/ -o- "$W" "$ABS"; rc=$?; rm -f "$W"; exit $rc'
+      else if (no_std) then
          shcmd = shcmd//'capnp compile --no-standard-import'//extra_inc//' -o- ' &
                  //shell_quote(trim(path))
       else
@@ -426,6 +495,55 @@ contains
       at = p%off + int(p%dwords + k, int64)*8_int64
       p%msg%segs(p%seg)%bytes(at:at + 7_int64) = 0_int8
    end subroutine clear_slot
+
+   !> A type expression with each leading name moved into the scope of
+   !> `CapnpfOrig`, the original file. Built-in type names stay as they are.
+   function brand_expr(expr) result(out)
+      character(len=*), intent(in) :: expr
+      character(len=:), allocatable :: out
+      character(len=*), parameter :: builtins = ' Void Bool Int8 Int16 Int32 Int64 UInt8' &
+         //' UInt16 UInt32 UInt64 Float32 Float64 Text Data List Object AnyPointer' &
+         //' AnyStruct AnyList Capability '
+      integer :: i, j
+      logical :: head
+      character :: c
+      out = ''
+      head = .true.
+      i = 1
+      do while (i <= len(expr))
+         c = expr(i:i)
+         if (is_ident_char(c)) then
+            j = i
+            do while (j < len(expr))
+               if (.not. is_ident_char(expr(j + 1:j + 1))) exit
+               j = j + 1
+            end do
+            if (head .and. index(builtins, ' '//expr(i:j)//' ') == 0) then
+               out = out//'CapnpfOrig.'//expr(i:j)
+            else
+               out = out//expr(i:j)
+            end if
+            head = .false.
+            i = j + 1
+            cycle
+         end if
+         if (c == '.' .and. head) then
+            out = out//'CapnpfOrig.'
+            head = .false.
+         else
+            out = out//c
+            if (c == '(' .or. c == ',') head = .true.
+         end if
+         i = i + 1
+      end do
+   end function brand_expr
+
+   pure function is_ident_char(c) result(y)
+      character, intent(in) :: c
+      logical :: y
+      y = (c >= 'a' .and. c <= 'z') .or. (c >= 'A' .and. c <= 'Z') .or. &
+          (c >= '0' .and. c <= '9') .or. c == '_'
+   end function is_ident_char
 
    !> Read the stdout of a shell command. No temporary path is created.
    subroutine read_pipe(shcmd, bytes, err)
@@ -528,9 +646,10 @@ contains
       y = s(1:len(pfx)) == pfx
    end function starts_with
 
-   subroutine cmd_encode(sch, idx, to_fmt, seg_words, rc)
+   subroutine cmd_encode(sch, idx, benv, to_fmt, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: to_fmt
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
@@ -542,12 +661,13 @@ contains
          call fail('empty input', rc)
          return
       end if
-      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
+      call text_to_out(sch, idx, benv, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
    end subroutine cmd_encode
 
-   subroutine cmd_decode(sch, idx, from_fmt, short, quiet, rc)
+   subroutine cmd_decode(sch, idx, benv, from_fmt, short, quiet, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: from_fmt
       logical, intent(in) :: short, quiet
       integer, intent(out) :: rc
@@ -559,12 +679,13 @@ contains
          call empty_stream(quiet, rc)
          return
       end if
-      call bytes_to_out(sch, idx, raw, from_fmt, 'text', .not. short, 0_int64, rc)
+      call bytes_to_out(sch, idx, benv, raw, from_fmt, 'text', .not. short, 0_int64, rc)
    end subroutine cmd_decode
 
-   subroutine cmd_convert(sch, idx, from, to, short, seg_words, quiet, rc)
+   subroutine cmd_convert(sch, idx, benv, from, to, short, seg_words, quiet, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: from, to
       logical, intent(in) :: short
       integer(int64), intent(in) :: seg_words
@@ -587,11 +708,11 @@ contains
             call fail('input is not text', rc)
             return
          end if
-         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
+         call text_to_out(sch, idx, benv, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else if (from == 'json') then
-         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
+         call json_to_out(sch, idx, benv, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else
-         call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words, rc)
+         call bytes_to_out(sch, idx, benv, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
 
@@ -649,15 +770,15 @@ contains
       end if
    end subroutine empty_stream
 
-   subroutine text_to_out(sch, idx, text, to, pretty, seg_words, rc)
+   subroutine text_to_out(sch, idx, benv, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: text, to
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
-      type(capnp_brand_env_t) :: empty_env
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err, nbeg, nto, last
       rc = 0
@@ -679,14 +800,14 @@ contains
             call fail('text decode failed', rc)
             return
          end if
-         call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
+         call capnp_text_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv)
          if (err /= CAPNP_OK) then
             ! A reported error still prints the recovered message. An
             ! unresolved name throws before any output.
             if (.not. capnp_text_hard_failed()) then
                root = capnp_root(msg, err)
                if (err == CAPNP_OK .and. root_is_struct(root)) then
-                  call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+                  call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
                   call capnp_message_free(msg)
                   if (rc /= 0) return
                   call fail('text decode failed', rc)
@@ -703,7 +824,7 @@ contains
             call fail('bad root', rc)
             return
          end if
-         call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          if (rc /= 0) return
          count = count + 1
@@ -755,15 +876,15 @@ contains
       end do
    end function nul_lexes
 
-   subroutine json_to_out(sch, idx, text, to, pretty, seg_words, rc)
+   subroutine json_to_out(sch, idx, benv, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: text, to
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
-      type(capnp_brand_env_t) :: empty_env
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err
       logical :: soft
@@ -778,12 +899,12 @@ contains
             return
          end if
          if (beg == 0) exit
-         call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
+         call capnp_json_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv)
          if (err /= CAPNP_OK) then
             if (capnp_json_number_failed()) then
                root = capnp_root(msg, err)
                if (err == CAPNP_OK .and. root_is_struct(root)) then
-                  call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+                  call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
                   if (rc /= 0) then
                      call capnp_message_free(msg)
                      return
@@ -805,7 +926,7 @@ contains
             call fail('bad root', rc)
             return
          end if
-         call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          if (rc /= 0) return
          count = count + 1
@@ -818,16 +939,16 @@ contains
       if (count == 0) call fail('empty input', rc)
    end subroutine json_to_out
 
-   subroutine bytes_to_out(sch, idx, raw, from, to, pretty, seg_words, rc)
+   subroutine bytes_to_out(sch, idx, benv, raw, from, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       integer(int8), intent(in) :: raw(0:)
       character(len=*), intent(in) :: from, to
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
-      type(capnp_brand_env_t) :: empty_env
       integer(int8), allocatable :: one(:), wrapped(:), unpacked(:), chopped(:)
       integer(int64) :: off, n, total, words
       integer :: err, count
@@ -858,7 +979,7 @@ contains
             call fail('bad root', rc)
             return
          end if
-         call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          return
       end if
@@ -871,7 +992,7 @@ contains
             ! for flat input, then reports the read error. Canonical
             ! input stops with no output.
             if (from == 'flat') then
-               call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+               call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
             else
                call fail('bad flat input', rc)
             end if
@@ -903,7 +1024,7 @@ contains
                return
             end if
          end if
-         call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          return
       end if
@@ -931,7 +1052,7 @@ contains
                call fail('bad root', rc)
                return
             end if
-            call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+            call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
             call capnp_message_free(msg)
             ! A wrong pointer still yields the recovered message. capnp
             ! 1.4.0 prints it and reads the next message in the stream.
@@ -952,7 +1073,7 @@ contains
       ! Shorter than a segment table. capnp 1.4.0 writes the default
       ! value and then reports the short read.
       if (total > 0_int64 .and. total < 8_int64) then
-         call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+         call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
          return
       end if
       do while (off < total)
@@ -977,13 +1098,13 @@ contains
             ! the default value and then reports the error. A longer
             ! buffer that fails here has no output.
             if (total == 8_int64 .and. count == 0) then
-               call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+               call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
             else
                call fail('bad root', rc)
             end if
             return
          end if
-         call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          ! A wrong pointer still yields the recovered message. capnp
          ! 1.4.0 prints it and reads the next message in the stream.
@@ -1001,15 +1122,15 @@ contains
    !> Write the default value of a root that could not be read, then
    !> fail. capnp 1.4.0 does this when a binary or flat read throws
    !> after getRoot returns a null struct.
-   subroutine emit_recovered(sch, idx, to, pretty, seg_words, rc)
+   subroutine emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
+      type(capnp_brand_env_t), intent(in) :: benv
       character(len=*), intent(in) :: to
       logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
-      type(capnp_brand_env_t) :: empty_env
       type(capnp_ptr_t) :: root
       integer :: err
       call capnp_message_init_builder(msg, err)
@@ -1023,7 +1144,7 @@ contains
          call fail('bad root', rc)
          return
       end if
-      call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+      call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
       call capnp_message_free(msg)
       if (rc == 0) rc = 1
    end subroutine emit_recovered

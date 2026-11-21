@@ -165,18 +165,20 @@ contains
       end if
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
+      if (present(brand_env)) env = brand_env
       call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
       call emit_jval(root, 0, .false., do_pretty, text, multi, err)
       if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_json_encode
 
-   subroutine capnp_json_decode(schema, idx, text, msg, err)
+   subroutine capnp_json_decode(schema, idx, text, msg, err, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
+      type(capnp_brand_env_t), intent(in), optional :: brand_env
       type(capnp_brand_env_t) :: env
       type(disc_opts_t) :: no_disc
       type(jval) :: root
@@ -225,6 +227,7 @@ contains
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
       call union_seen_reset()
+      if (present(brand_env)) env = brand_env
       call fill_struct(schema, idx, obj, env, no_disc, root, 0, .false., err)
       if (err /= CAPNP_OK) then
          ! A later type error drops the recoverable number flag, so the

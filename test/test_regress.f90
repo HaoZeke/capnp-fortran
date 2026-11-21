@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(58))
+      allocate (testsuite(59))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -121,6 +121,7 @@ contains
       testsuite(56) = new_unittest("text-plausible", run_text_plausible)
       testsuite(57) = new_unittest("canonical-reject", run_canonical_reject)
       testsuite(58) = new_unittest("request-beside-exe", run_request_beside_exe)
+      testsuite(59) = new_unittest("generic-root", run_generic_root)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3722,5 +3723,67 @@ contains
          call test_failed(error, 'schema-request beside the executable')
       end if
    end subroutine run_request_beside_exe
+
+   !> A generic root expression matches capnp 1.4.0, with and without the helper.
+   subroutine run_generic_root(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/generic-root && '//cap_setup() &
+         //' && export CAP TMPD='//tmp//'/generic-root' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, shutil, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'tmp = os.environ["TMPD"]'//achar(10)// &
+         'def run(tool, args, data, cwd=None, env=None):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE,'//achar(10)// &
+         '                       stderr=subprocess.PIPE, cwd=cwd, env=env)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'sch = os.path.join(tmp, "g.capnp")'//achar(10)// &
+         'with open(sch, "w") as f:'//achar(10)// &
+         '    f.write("@0xa1b2c3d4e5f60718;\n"'//achar(10)// &
+         '            "struct G(A, B) { a @0 :A; b @1 :B; rev @2 :G(B, A);\n"'//achar(10)// &
+         '            "  struct Inner(C) { x @0 :A; y @1 :C; } }\n"'//achar(10)// &
+         '            "struct P { x @0 :Int32; }\n"'//achar(10)// &
+         '            "enum E { one @0; two @1; }\n"'//achar(10)// &
+         '            "struct R { g @0 :G(Text, Data); }\n")'//achar(10)// &
+         'box = os.path.abspath("schema/box.capnp")'//achar(10)// &
+         'cases = ['//achar(10)// &
+         '    (["convert", "text:text", sch, "R"], b''(g = (a = "x", rev = (a = 0x"0102", b = "t")))\n''),'//achar(10)// &
+         '    (["convert", "text:json", sch, "R"], b''(g = (rev = (rev = (a = "deep"))))\n''),'//achar(10)// &
+         '    (["convert", "text:text", sch, "G(P, Text)"], b''(a = (x = 5), rev = (b = (x = 1)))\n''),'//achar(10)// &
+         '    (["convert", "text:json", sch, "G(E, Text)"], b"(a = two)\n"),'//achar(10)// &
+         '    (["convert", "text:text", sch, "G(List(Int32), Text)"], b"(a = [1, 2])\n"),'//achar(10)// &
+         '    (["convert", "json:text", sch, "G(Text, Data)"], b''{"a": "x", "rev": {"b": "y"}}\n''),'//achar(10)// &
+         '    (["convert", "text:text", sch, ".G(.P, Text)"], b"(a = (x = 7))\n"),'//achar(10)// &
+         '    (["convert", "text:text", sch, "G(Text)"], b"(a = \"x\")\n"),'//achar(10)// &
+         '    (["convert", "text:text", sch, "Nope(Text)"], b"(a = \"x\")\n"),'//achar(10)// &
+         '    (["encode", sch, "G(Text, Data)"], b''(a = "x")\n''),'//achar(10)// &
+         '    (["convert", "text:text", box, "Box(Text)"], b''(value = "hi")\n''),'//achar(10)// &
+         '    (["convert", "json:text", box, "Box(Text)"], b''{"value":"hi"}\n''),'//achar(10)// &
+         ']'//achar(10)// &
+         'cases += ['//achar(10)// &
+         '    (["convert", "text:text", sch, "G(Text, Data).Inner(List(Int32))"], b''(x = "hi", y = [5])\n''),'//achar(10)// &
+         '    (["convert", "text:json", sch, "G(P, Text).Inner(List(Text))"], b''(x = (x = 3), y = ["a"])\n''),'//achar(10)// &
+         ']'//achar(10)// &
+         '# The fallback wrapper runs when no schema-request helper can be found.'//achar(10)// &
+         'bare = os.path.join(tmp, "bare")'//achar(10)// &
+         'os.makedirs(os.path.join(bare, "bin"), exist_ok=True)'//achar(10)// &
+         'shutil.copy(cap, os.path.join(bare, "bin", "capnpf"))'//achar(10)// &
+         'env = {k: v for k, v in os.environ.items() if k != "CAPNP_SCHEMA_REQUEST"}'//achar(10)// &
+         'for args, raw in cases:'//achar(10)// &
+         '    ref = run("capnp", args, raw)'//achar(10)// &
+         '    if ref != run(cap, args, raw):'//achar(10)// &
+         '        print("mismatch:", args)'//achar(10)// &
+         '        sys.exit(1)'//achar(10)// &
+         '    if ref != run(os.path.join(bare, "bin", "capnpf"), args, raw, cwd=bare, env=env):'//achar(10)// &
+         '        print("fallback mismatch:", args)'//achar(10)// &
+         '        sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'generic root')
+      end if
+   end subroutine run_generic_root
 
 end module test_regress

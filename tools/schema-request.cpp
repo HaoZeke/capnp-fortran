@@ -3,6 +3,8 @@
 // import in some other declaration does not reject the requested type.
 #include <capnp/compiler/compiler.h>
 #include <capnp/compiler/error-reporter.h>
+#include <capnp/compiler/lexer.h>
+#include <capnp/compiler/parser.h>
 #include <capnp/compiler/module-loader.h>
 #include <capnp/message.h>
 #include <capnp/schema.capnp.h>
@@ -15,6 +17,7 @@
 #include <kj/map.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <unistd.h>
 
 #include <vector>
@@ -58,6 +61,127 @@ kj::Maybe<const kj::ReadableDirectory&> openDir(
     return ref;
   }
   return nullptr;
+}
+
+// Errors from evaluating the type expression given on the command line.
+class ExprReporter final: public capnp::compiler::ErrorReporter {
+public:
+  void addError(uint32_t startByte, uint32_t endByte, TextView message) override {
+    had = true;
+    fprintf(stderr, "%u-%u: %s\n", startByte + 1, endByte, message.cStr());
+  }
+  bool hadErrors() override { return had; }
+  bool had = false;
+};
+
+const unsigned int kEager = capnp::compiler::Compiler::NODE |
+                            capnp::compiler::Compiler::PARENTS |
+                            capnp::compiler::Compiler::DEPENDENCIES |
+                            capnp::compiler::Compiler::DEPENDENCY_DEPENDENCIES |
+                            capnp::compiler::Compiler::DEPENDENCY_PARENTS;
+
+void compileType(const capnp::compiler::Compiler& compiler, capnp::Type type);
+
+void compileBrand(const capnp::compiler::Compiler& compiler, capnp::Schema schema) {
+  compiler.eagerlyCompile(schema.getProto().getId(), kEager);
+  for (auto scope: schema.getGenericScopeIds()) {
+    auto args = schema.getBrandArgumentsAtScope(scope);
+    for (uint i = 0; i < args.size(); i++) compileType(compiler, args[i]);
+  }
+}
+
+void compileType(const capnp::compiler::Compiler& compiler, capnp::Type type) {
+  switch (type.which()) {
+    case capnp::schema::Type::LIST:
+      compileType(compiler, type.asList().getElementType());
+      break;
+    case capnp::schema::Type::ENUM:
+      compileBrand(compiler, type.asEnum());
+      break;
+    case capnp::schema::Type::STRUCT:
+      compileBrand(compiler, type.asStruct());
+      break;
+    case capnp::schema::Type::INTERFACE:
+      compileBrand(compiler, type.asInterface());
+      break;
+    default:
+      break;
+  }
+}
+
+void setType(capnp::schema::Type::Builder out, capnp::Type type);
+
+void setBrand(capnp::schema::Brand::Builder out, capnp::Schema schema) {
+  auto ids = schema.getGenericScopeIds();
+  auto scopes = out.initScopes(ids.size());
+  for (uint i = 0; i < ids.size(); i++) {
+    scopes[i].setScopeId(ids[i]);
+    auto args = schema.getBrandArgumentsAtScope(ids[i]);
+    auto bind = scopes[i].initBind(args.size());
+    for (uint j = 0; j < args.size(); j++) setType(bind[j].initType(), args[j]);
+  }
+}
+
+// The schema.capnp form of a type the compiler evaluated.
+void setType(capnp::schema::Type::Builder out, capnp::Type type) {
+  switch (type.which()) {
+    case capnp::schema::Type::VOID: out.setVoid(); break;
+    case capnp::schema::Type::BOOL: out.setBool(); break;
+    case capnp::schema::Type::INT8: out.setInt8(); break;
+    case capnp::schema::Type::INT16: out.setInt16(); break;
+    case capnp::schema::Type::INT32: out.setInt32(); break;
+    case capnp::schema::Type::INT64: out.setInt64(); break;
+    case capnp::schema::Type::UINT8: out.setUint8(); break;
+    case capnp::schema::Type::UINT16: out.setUint16(); break;
+    case capnp::schema::Type::UINT32: out.setUint32(); break;
+    case capnp::schema::Type::UINT64: out.setUint64(); break;
+    case capnp::schema::Type::FLOAT32: out.setFloat32(); break;
+    case capnp::schema::Type::FLOAT64: out.setFloat64(); break;
+    case capnp::schema::Type::TEXT: out.setText(); break;
+    case capnp::schema::Type::DATA: out.setData(); break;
+    case capnp::schema::Type::LIST:
+      setType(out.initList().initElementType(), type.asList().getElementType());
+      break;
+    case capnp::schema::Type::ENUM: {
+      auto e = out.initEnum();
+      e.setTypeId(type.asEnum().getProto().getId());
+      setBrand(e.initBrand(), type.asEnum());
+      break;
+    }
+    case capnp::schema::Type::STRUCT: {
+      auto st = out.initStruct();
+      st.setTypeId(type.asStruct().getProto().getId());
+      setBrand(st.initBrand(), type.asStruct());
+      break;
+    }
+    case capnp::schema::Type::INTERFACE: {
+      auto in = out.initInterface();
+      in.setTypeId(type.asInterface().getProto().getId());
+      setBrand(in.initBrand(), type.asInterface());
+      break;
+    }
+    case capnp::schema::Type::ANY_POINTER: {
+      auto any = out.initAnyPointer();
+      KJ_IF_MAYBE(param, type.getBrandParameter()) {
+        auto p = any.initParameter();
+        p.setScopeId(param->scopeId);
+        p.setParameterIndex(param->index);
+      } else KJ_IF_MAYBE(implicit, type.getImplicitParameter()) {
+        any.initImplicitMethodParameter().setParameterIndex(implicit->index);
+      } else {
+        auto un = any.initUnconstrained();
+        switch (type.whichAnyPointerKind()) {
+          case capnp::schema::Type::AnyPointer::Unconstrained::ANY_KIND: un.setAnyKind(); break;
+          case capnp::schema::Type::AnyPointer::Unconstrained::STRUCT: un.setStruct(); break;
+          case capnp::schema::Type::AnyPointer::Unconstrained::LIST: un.setList(); break;
+          case capnp::schema::Type::AnyPointer::Unconstrained::CAPABILITY:
+            un.setCapability();
+            break;
+        }
+      }
+      break;
+    }
+  }
 }
 
 }  // namespace
@@ -108,7 +232,7 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  if (positional != 2) {
+  if (positional < 1) {
     usage();
     return 1;
   }
@@ -175,62 +299,112 @@ int main(int argc, char** argv) {
     compiler.eagerlyCompile(scope.getId(), capnp::compiler::Compiler::NODE);
     if (reporter.hadErrors()) return 1;
 
-    // `capnp eval` names a const or a field path, not only a type.
-    // Resolve the longest prefix of nested nodes and ignore subscripts.
-    // The rest of the path is a field walk done by the caller.
-    uint64_t id = scope.getId();
-    size_t begin = 0;
-    bool resolved = false;
-    TextView type = typeText;
-    while (begin <= type.size()) {
-      size_t dot = type.size();
-      for (size_t i = begin; i < type.size(); i++) {
-        if (type[i] == '.') {
-          dot = i;
+    // A schema given without a type is compiled as `capnp convert`
+    // compiles it. A generic root such as Box(Text) is evaluated in the
+    // file's scope like setRootType does, and the result becomes the
+    // field type of a synthetic CapnpfBrandHost node.
+    capnp::MallocMessageBuilder hostArena;
+    bool haveHost = false;
+    if (typeText.size() == 0) {
+    } else if (typeText.findFirst('(') != nullptr) {
+      ExprReporter exprReporter;
+      capnp::MallocMessageBuilder tokenArena;
+      auto lexed = tokenArena.initRoot<capnp::compiler::LexedTokens>();
+      capnp::compiler::lex(typeText, lexed, exprReporter);
+      capnp::compiler::CapnpParser parser(tokenArena.getOrphanage(), exprReporter);
+      auto tokens = lexed.asReader().getTokens();
+      capnp::compiler::CapnpParser::ParserInput input(tokens.begin(), tokens.end());
+      kj::Maybe<capnp::Type> evaluated;
+      KJ_IF_MAYBE(expr, parser.getParsers().expression(input)) {
+        if (input.getPosition() == tokens.end()) {
+          KJ_IF_MAYBE(compiled, scope.evalType(expr->getReader(), exprReporter)) {
+            evaluated = compiled->getSchema();
+          }
+        }
+      }
+      bool isStruct = false;
+      KJ_IF_MAYBE(t, evaluated) {
+        isStruct = t->isStruct();
+      }
+      if (exprReporter.hadErrors() || !isStruct) {
+        fprintf(stderr, "unknown type %s\n", typeText.cStr());
+        return 1;
+      }
+      capnp::Type rootType = KJ_ASSERT_NONNULL(evaluated);
+      compileType(compiler, rootType);
+      if (reporter.hadErrors()) return 1;
+      auto host = hostArena.initRoot<capnp::schema::Node>();
+      host.setId(0xb7e5d2a3c4f60a11ull);
+      host.setDisplayName("capnpf:CapnpfBrandHost");
+      host.setDisplayNamePrefixLength(7);
+      auto st = host.initStruct();
+      st.setPointerCount(1);
+      st.setPreferredListEncoding(capnp::schema::ElementSize::INLINE_COMPOSITE);
+      auto field = st.initFields(1)[0];
+      field.setName("branded");
+      field.setDiscriminantValue(0xffff);
+      field.initOrdinal().setExplicit(0);
+      auto slot = field.initSlot();
+      setType(slot.initType(), rootType);
+      slot.initDefaultValue().initStruct();
+      haveHost = true;
+    } else {
+      // `capnp eval` names a const or a field path, not only a type.
+      // Resolve the longest prefix of nested nodes and ignore subscripts.
+      // The rest of the path is a field walk done by the caller.
+      uint64_t id = scope.getId();
+      size_t begin = 0;
+      bool resolved = false;
+      TextView type = typeText;
+      while (begin <= type.size()) {
+        size_t dot = type.size();
+        for (size_t i = begin; i < type.size(); i++) {
+          if (type[i] == '.') {
+            dot = i;
+            break;
+          }
+        }
+        auto raw = type.slice(begin, dot);
+        size_t nlen = raw.size();
+        KJ_IF_MAYBE(bracket, raw.findFirst('[')) {
+          nlen = *bracket;
+        }
+        if (nlen == 0) {
+          if (!resolved) {
+            fprintf(stderr, "unknown type %s\n", type.cStr());
+            return 1;
+          }
           break;
         }
-      }
-      auto raw = type.slice(begin, dot);
-      size_t nlen = raw.size();
-      KJ_IF_MAYBE(bracket, raw.findFirst('[')) {
-        nlen = *bracket;
-      }
-      if (nlen == 0) {
-        if (!resolved) {
+        // The text view requires a NUL after the last byte. The slice sits
+        // in the middle of the path, so copy it.
+        kj::String name = kj::str(raw.slice(0, nlen));
+        KJ_IF_MAYBE(child, compiler.lookup(id, name)) {
+          id = *child;
+          resolved = true;
+        } else if (!resolved) {
           fprintf(stderr, "unknown type %s\n", type.cStr());
           return 1;
+        } else {
+          break;
         }
-        break;
+        if (dot == type.size()) break;
+        begin = dot + 1;
       }
-      // The text view requires a NUL after the last byte. The slice sits
-      // in the middle of the path, so copy it.
-      kj::String name = kj::str(raw.slice(0, nlen));
-      KJ_IF_MAYBE(child, compiler.lookup(id, name)) {
-        id = *child;
-        resolved = true;
-      } else if (!resolved) {
-        fprintf(stderr, "unknown type %s\n", type.cStr());
-        return 1;
-      } else {
-        break;
-      }
-      if (dot == type.size()) break;
-      begin = dot + 1;
-    }
 
-    unsigned int eagerness = capnp::compiler::Compiler::NODE | capnp::compiler::Compiler::PARENTS |
-                     capnp::compiler::Compiler::DEPENDENCIES |
-                     capnp::compiler::Compiler::DEPENDENCY_DEPENDENCIES |
-                     capnp::compiler::Compiler::DEPENDENCY_PARENTS;
-    compiler.eagerlyCompile(id, eagerness);
-    if (reporter.hadErrors()) return 1;
+      compiler.eagerlyCompile(id, kEager);
+      if (reporter.hadErrors()) return 1;
+    }
 
     capnp::MallocMessageBuilder message;
     auto request = message.initRoot<capnp::schema::CodeGeneratorRequest>();
     auto schemas = compiler.getLoader().getAllLoaded();
-    auto nodes = request.initNodes(schemas.size());
+    auto nodes = request.initNodes(schemas.size() + (haveHost ? 1 : 0));
     for (size_t i = 0; i < schemas.size(); i++) {
       nodes.setWithCaveats(i, schemas[i].getProto());
+    }
+    if (haveHost) {
+      nodes.setWithCaveats(schemas.size(), hostArena.getRoot<capnp::schema::Node>().asReader());
     }
     kj::FdOutputStream out(STDOUT_FILENO);
     capnp::writeMessage(out, message);
