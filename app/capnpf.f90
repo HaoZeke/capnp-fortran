@@ -1458,9 +1458,9 @@ contains
             return
          end if
          root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) then
+         if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
             call capnp_message_free(msg)
-            call fail('bad root', rc)
+            call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
             return
          end if
          call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
@@ -1495,18 +1495,18 @@ contains
             call fail('bad flat input', rc)
             return
          end if
-         root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) then
-            call capnp_message_free(msg)
-            call fail('bad root', rc)
-            return
-         end if
          if (from == 'canonical') then
             if (.not. capnp_is_canonical(msg, err)) then
                call capnp_message_free(msg)
                call fail('not canonical', rc)
                return
             end if
+         end if
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
+            call capnp_message_free(msg)
+            call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
+            return
          end if
          call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
@@ -1532,16 +1532,18 @@ contains
             end if
             root = capnp_root(msg, err)
             if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
+               ! getRoot recovers a struct pointer error with an empty
+               ! struct, and the stream goes on.
                call capnp_message_free(msg)
-               call fail('bad root', rc)
-               return
+               call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
+            else
+               writes = stdout_writes
+               call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
+               call capnp_message_free(msg)
+               ! A failure with no output is a thrown exception in capnp 1.4.0,
+               ! which ends the run.
+               if (rc /= 0 .and. stdout_writes == writes) return
             end if
-            writes = stdout_writes
-            call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
-            call capnp_message_free(msg)
-            ! A failure with no output is a thrown exception in capnp 1.4.0,
-            ! which ends the run.
-            if (rc /= 0 .and. stdout_writes == writes) return
             ! A wrong pointer still yields the recovered message. capnp
             ! 1.4.0 prints it and reads the next message in the stream.
             if (rc /= 0) recover = .true.
@@ -1565,6 +1567,17 @@ contains
          return
       end if
       do while (off < total)
+         ! Too many segments: the reader goes on with one empty segment
+         ! after the first word, so the root is the default value.
+         if (off + 8_int64 <= total) then
+            if (iand(int(cp_get_i32(raw, off), int64), 4294967295_int64) >= 511_int64) then
+               call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
+               recover = .true.
+               count = count + 1
+               off = off + 8_int64
+               cycle
+            end if
+         end if
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) then
             call fail('bad framing', rc)
@@ -1581,23 +1594,18 @@ contains
          end if
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
+            ! getRoot recovers a struct pointer error with an empty
+            ! struct, and the stream goes on.
             call capnp_message_free(msg)
-            ! Eight zero bytes are one empty segment. capnp 1.4.0 writes
-            ! the default value and then reports the error. A longer
-            ! buffer that fails here has no output.
-            if (total == 8_int64 .and. count == 0) then
-               call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
-            else
-               call fail('bad root', rc)
-            end if
-            return
+            call emit_recovered(sch, idx, benv, to, pretty, seg_words, rc)
+         else
+            writes = stdout_writes
+            call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
+            call capnp_message_free(msg)
+            ! A failure with no output is a thrown exception in capnp 1.4.0,
+            ! which ends the run.
+            if (rc /= 0 .and. stdout_writes == writes) return
          end if
-         writes = stdout_writes
-         call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
-         call capnp_message_free(msg)
-         ! A failure with no output is a thrown exception in capnp 1.4.0,
-         ! which ends the run.
-         if (rc /= 0 .and. stdout_writes == writes) return
          ! A wrong pointer still yields the recovered message. capnp
          ! 1.4.0 prints it and reads the next message in the stream.
          if (rc /= 0) recover = .true.

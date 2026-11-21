@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(63))
+      allocate (testsuite(64))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -126,6 +126,7 @@ contains
       testsuite(61) = new_unittest("cli-options", run_cli_options)
       testsuite(62) = new_unittest("cap-pointers", run_cap_pointers)
       testsuite(63) = new_unittest("plausible-sniff", run_plausible_sniff)
+      testsuite(64) = new_unittest("nonstruct-root", run_nonstruct_root)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3942,6 +3943,8 @@ contains
          '    bytes.fromhex("0000000003000000000000000300000000000000000000000000000000000000"),'//achar(10)// &
          '    bytes.fromhex("ffffffff0000000000000000"),'//achar(10)// &
          '    bytes.fromhex("0000010001000000"),'//achar(10)// &
+         '    bytes.fromhex("0100000001000000020000000000000000000000"),'//achar(10)// &
+         '    bytes.fromhex("0300000000000000"),'//achar(10)// &
          '    bytes.fromhex("1100000000"),'//achar(10)// &
          '    bytes.fromhex("ff0000000000000000"),'//achar(10)// &
          '    b"[1, 2]\n",'//achar(10)// &
@@ -3972,5 +3975,53 @@ contains
          call test_failed(error, 'plausibility sniff')
       end if
    end subroutine run_plausible_sniff
+
+   !> A root that is not a struct pointer reads as the default struct.
+   subroutine run_nonstruct_root(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/nonstruct-root && '//cap_setup() &
+         //' && export CAP ' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, struct, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    try:'//achar(10)// &
+         '        p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE,'//achar(10)// &
+         '                           stderr=subprocess.PIPE, timeout=10)'//achar(10)// &
+         '    except subprocess.TimeoutExpired:'//achar(10)// &
+         '        return None'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'sch, typ = "schema/common.capnp", "Vec3"'//achar(10)// &
+         'def msg(words):'//achar(10)// &
+         '    return struct.pack("<II", 0, len(words)) + b"".join(words)'//achar(10)// &
+         'listp = bytes.fromhex("0100000000000000")'//achar(10)// &
+         'capp = bytes.fromhex("0300000000000000")'//achar(10)// &
+         'oob = bytes.fromhex("1400000001000000")'//achar(10)// &
+         'farp = bytes.fromhex("0200000000000000")'//achar(10)// &
+         'z = bytes(8)'//achar(10)// &
+         'vec = msg([bytes.fromhex("0000000003000000"), struct.pack("<ddd", 1, 2, 3)])'//achar(10)// &
+         'inputs = ['//achar(10)// &
+         '    ("flat", listp + z), ("flat", capp), ("flat", listp), ("flat", oob),'//achar(10)// &
+         '    ("flat-packed", bytes.fromhex("0101")), ("flat-packed", bytes.fromhex("0103")),'//achar(10)// &
+         '    ("canonical", listp), ("canonical", capp),'//achar(10)// &
+         '    ("binary", msg([listp, z])), ("binary", msg([capp])), ("binary", msg([oob])),'//achar(10)// &
+         '    ("binary", msg([farp])), ("binary", msg([listp, z]) + vec), ("binary", msg([capp]) + vec),'//achar(10)// &
+         '    ("packed", bytes.fromhex("10010001") + bytes.fromhex("1101010100")),'//achar(10)// &
+         ']'//achar(10)// &
+         'for fmt, raw in inputs:'//achar(10)// &
+         '    for to in ("binary", "flat", "canonical", "text", "json"):'//achar(10)// &
+         '        args = ["convert", "--quiet", fmt + ":" + to, sch, typ]'//achar(10)// &
+         '        ref = run("capnp", args, raw)'//achar(10)// &
+         '        if ref is not None and ref != run(cap, args, raw):'//achar(10)// &
+         '            print("mismatch:", args, raw.hex())'//achar(10)// &
+         '            sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'non-struct root')
+      end if
+   end subroutine run_nonstruct_root
 
 end module test_regress
