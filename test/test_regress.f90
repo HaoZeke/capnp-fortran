@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(53))
+      allocate (testsuite(54))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -116,6 +116,7 @@ contains
       testsuite(51) = new_unittest("schema-lenient", run_schema_lenient)
       testsuite(52) = new_unittest("flat-tail", run_flat_tail)
       testsuite(53) = new_unittest("null-root-wire", run_null_root_wire)
+      testsuite(54) = new_unittest("json-value-object", run_json_value_object)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3574,5 +3575,33 @@ contains
          call test_failed(error, 'null root wire')
       end if
    end subroutine run_null_root_wire
+
+   !> A Json.Value object whose field holds an array must round-trip.
+   !> A shallow copy of the child frees that array twice.
+   subroutine run_json_value_object(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'inc = os.environ["INC"]; cap = os.environ["CAP"]'//achar(10)// &
+         'j = inc + "/capnp/compat/json.capnp"'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'cases = [b''{"a":[1,"x",null,true]}\n'', b''{"a":null,"b":[1]}\n'','//achar(10)// &
+         '         b''(object = [(name = "a", value = (array = [(number = 1)]))])\n'']'//achar(10)// &
+         'specs = [("json:json", cases[0]), ("json:json", cases[1]), ("text:json", cases[2])]'//achar(10)// &
+         'for spec, raw in specs:'//achar(10)// &
+         '    args = ["convert", "--quiet", "-I", inc, spec, j, "Value"]'//achar(10)// &
+         '    if run("capnp", args, raw) != run(cap, args, raw): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'json value object')
+      end if
+   end subroutine run_json_value_object
 
 end module test_regress

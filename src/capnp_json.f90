@@ -165,7 +165,6 @@ contains
       end if
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
-      if (present(brand_env)) env = brand_env
       call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
       call emit_jval(root, 0, .false., do_pretty, text, multi, err)
@@ -3961,7 +3960,6 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: arm, slot_t, et, body, el, child
       type(disc_opts_t) :: no_disc
-      type(jval) :: one
       character(len=:), allocatable :: nm, key
       integer :: which, vidx, bidx, n, i, stat
       integer(int64) :: slot
@@ -4034,19 +4032,15 @@ contains
             if (err /= CAPNP_OK) return
             child = named_ptr(schema, bidx, el, 'value', err)
             if (err /= CAPNP_OK) return
-            if (child%kind == CAPNP_PK_NULL .or. child%kind == CAPNP_PK_STRUCT) then
-               if (child%kind == CAPNP_PK_NULL) then
-                  one%k = JK_NULL
-               else
-                  call build_struct(schema, vidx, child, env, no_disc, depth + 1, gdepth, one, err)
-                  if (err /= CAPNP_OK) return
-               end if
-            else
+            if (child%kind == CAPNP_PK_STRUCT) then
+               call build_struct(schema, vidx, child, env, no_disc, depth + 1, gdepth, &
+                                 jv%kids(i), err)
+               if (err /= CAPNP_OK) return
+            else if (child%kind /= CAPNP_PK_NULL) then
                err = CAPNP_ERR_KIND
                return
             end if
-            one%key = key
-            jv%kids(i) = one
+            jv%kids(i)%key = key
          end do
       case ('call')
          jv%k = JK_CALL
@@ -4199,8 +4193,19 @@ contains
          block
             type(jval) :: arr
             type(capnp_ptr_t) :: pf, pet
+            integer :: stat, ii
             arr%k = JK_ARR
-            if (n > 0) arr%kids = jv%kids
+            if (n > 0) then
+               allocate (arr%kids(n), stat=stat)
+               if (stat /= 0) then
+                  err = CAPNP_ERR_ALLOC
+                  return
+               end if
+               do ii = 1, n
+                  call clone_jval(arr%kids(ii), jv%kids(ii), err)
+                  if (err /= CAPNP_OK) return
+               end do
+            end if
             call capnp_codec_find_field(schema, bidx, 'params', pf, err)
             if (err /= CAPNP_OK) return
             pet = field_slot_type(pf, err)
