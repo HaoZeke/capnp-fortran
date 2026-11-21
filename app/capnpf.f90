@@ -887,6 +887,13 @@ contains
             call fail('bad root', rc)
             return
          end if
+         if (from == 'canonical') then
+            if (.not. capnp_is_canonical(msg, err)) then
+               call capnp_message_free(msg)
+               call fail('not canonical', rc)
+               return
+            end if
+         end if
          call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
          return

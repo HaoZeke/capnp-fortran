@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(56))
+      allocate (testsuite(57))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -119,6 +119,7 @@ contains
       testsuite(54) = new_unittest("json-value-object", run_json_value_object)
       testsuite(55) = new_unittest("json-value-depth", run_json_value_depth)
       testsuite(56) = new_unittest("text-plausible", run_text_plausible)
+      testsuite(57) = new_unittest("canonical-reject", run_canonical_reject)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3669,5 +3670,30 @@ contains
          call test_failed(error, 'text plausible')
       end if
    end subroutine run_text_plausible
+
+   !> canonical input that is not canonical exits 1 with an empty stdout.
+   subroutine run_canonical_reject(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'def run(tool, data):'//achar(10)// &
+         '    p = subprocess.run([tool, "convert", "--quiet", "canonical:text",'//achar(10)// &
+         '                        "schema/common.capnp", "Vec3"],'//achar(10)// &
+         '                       input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'raw = bytes(16)'//achar(10)// &
+         'if run("capnp", raw) != run(cap, raw): sys.exit(1)'//achar(10)// &
+         'if run("capnp", raw)[0] != 1 or run("capnp", raw)[1] != b"": sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'canonical reject')
+      end if
+   end subroutine run_canonical_reject
 
 end module test_regress
