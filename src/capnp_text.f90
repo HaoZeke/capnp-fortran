@@ -11,12 +11,14 @@ module capnp_text
 
    public :: capnp_text_encode, capnp_text_decode
    public :: capnp_text_encode_value, capnp_text_encode_list, capnp_text_encode_enum
-   public :: capnp_text_span
+   public :: capnp_text_span, capnp_text_hard_failed
 
    integer, parameter :: MODE_BARE = 1
    integer, parameter :: MODE_PREF = 2
    integer, parameter :: MAX_DEPTH = 64
    logical, save :: ptr_kind_bad = .false.
+   !> An unresolved name throws in capnp before a message is printed.
+   logical, save :: text_hard = .false.
 
    type :: piece_t
       character(len=:), allocatable :: s
@@ -132,6 +134,7 @@ contains
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
+      text_hard = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -747,9 +750,9 @@ contains
       type(capnp_brand_env_t), intent(in) :: env
       type(scan_t), intent(inout) :: sc
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: fl, f
+      type(capnp_ptr_t) :: fl, f, slot
       character(len=:), allocatable :: name
-      integer :: fd
+      integer :: fd, tw
       err = CAPNP_OK
       fl = node_struct_fields(schema%nodes(idx), err)
       if (err /= CAPNP_OK) return
@@ -759,11 +762,26 @@ contains
       end if
       f = capnp_list_get_struct(fl, 0, err)
       if (err /= CAPNP_OK) return
-      ! One level only. A group or a named union needs its own literal.
+      ! One level only. The value must match the first field, and only a
+      ! scalar or text field accepts a bare value. A struct, list, data,
+      ! or enum needs its own literal. A bare name is an external constant.
       if (field_which(f) == FIELD_GROUP) then
+         if (ident_start(sc)) text_hard = .true.
          err = CAPNP_ERR_ARG
          return
       end if
+      slot = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      tw = type_which(slot)
+      select case (tw)
+      case (TYPE_VOID, TYPE_BOOL, TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, &
+            TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64, TYPE_FLOAT32, &
+            TYPE_FLOAT64, TYPE_TEXT)
+      case default
+         if (ident_start(sc)) text_hard = .true.
+         err = CAPNP_ERR_ARG
+         return
+      end select
       fd = field_discriminant(f)
       if (fd /= NO_DISCRIMINANT) then
          call field_name(f, name, err)
@@ -925,14 +943,15 @@ contains
          pw = node_struct_pointer_count(schema%nodes(idx))
          q = capnp_codec_new_struct(p, dw, pw, err)
          if (err /= CAPNP_OK) return
-         call capnp_setp(p, int(off), q, err)
-         if (err /= CAPNP_OK) return
          call skip_ws(sc)
          if (peek(sc) == '(') then
             call parse_struct(schema, idx, q, cenv, sc, depth, err, .true.)
          else
             call parse_first_field(schema, idx, q, cenv, sc, depth + 1, err)
          end if
+         if (err /= CAPNP_OK) return
+         ! A shorthand that does not match leaves the field at its default.
+         call capnp_setp(p, int(off), q, err)
       case default
          dv = field_slot_default(f, err)
          if (err /= CAPNP_OK) return
@@ -2034,6 +2053,30 @@ contains
       logical :: y
       y = (c >= '0' .and. c <= '9') .or. c == '+' .or. c == '-' .or. c == '.'
    end function is_num_start
+
+   !> True when the next token is a name. Cap'n Proto treats that as an
+   !> external constant and throws before printing the message.
+   function ident_start(sc) result(y)
+      type(scan_t), intent(in) :: sc
+      logical :: y
+      character(len=1) :: c
+      integer :: i
+      y = .false.
+      i = sc%i
+      do while (i <= sc%n)
+         c = sc%s(i:i)
+         if (c /= ' ' .and. c /= achar(9) .and. c /= achar(10) .and. c /= achar(13)) exit
+         i = i + 1
+      end do
+      if (i > sc%n) return
+      c = sc%s(i:i)
+      y = (c >= 'A' .and. c <= 'Z') .or. (c >= 'a' .and. c <= 'z') .or. c == '_'
+   end function ident_start
+
+   function capnp_text_hard_failed() result(y)
+      logical :: y
+      y = text_hard
+   end function capnp_text_hard_failed
 
    !> False when the wire list cannot be read as this element type.
    function list_readable(et, lst) result(ok)

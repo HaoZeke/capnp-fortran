@@ -33,6 +33,7 @@ program test_gate2
    call case_30()
    call case_31()
    call case_wide()
+   call case_33()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -949,4 +950,20 @@ contains
       if (err /= 0 .or. b /= 1_int8) error stop 1
       call capnp_message_free(msg)
    end subroutine case_wide
+
+   subroutine case_33()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '(bogus)\n' // &
+         achar(39) // &
+         ' > /tmp/g2-sh.in; "$CAP" convert text:text schema/codec.capn' // &
+         'p Sample < /tmp/g2-sh.in > /tmp/g2-sh.o; test $? -ne 0')
+   end subroutine case_33
 end program test_gate2
