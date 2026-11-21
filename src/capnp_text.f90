@@ -1097,7 +1097,19 @@ contains
          call read_numeric(sc, tok, err)
          if (err /= CAPNP_OK) return
          call capnp_parse_i64(tok, iv, err, allow_octal=.true.)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            ! A magnitude past Int64 saturates. Anything else stays zero.
+            call capnp_parse_u64(tok, iv, err, allow_octal=.true.)
+            if (err /= CAPNP_OK) return
+            if (tok(1:1) == '-') then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            iv = 9223372036854775807_int64
+            call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
+            if (err == CAPNP_OK) err = CAPNP_ERR_ARG
+            return
+         end if
          call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
       case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call read_numeric(sc, tok, err)
