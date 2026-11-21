@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(44))
+      allocate (testsuite(45))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -107,6 +107,7 @@ contains
       testsuite(42) = new_unittest("text-inactive-arm", run_text_inactive_arm)
       testsuite(43) = new_unittest("codec-parity", run_codec_parity)
       testsuite(44) = new_unittest("shorthand-first-field", run_shorthand_first)
+      testsuite(45) = new_unittest("stream-pointer-kind", run_stream_kind)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3155,5 +3156,100 @@ contains
          call test_failed(error, 'shorthand first field')
       end if
    end subroutine run_shorthand_first
+
+   !> Empty lists with the wrong element size, a second message after a
+   !> bad pointer, and text or data holding the wrong pointer kind.
+   subroutine run_stream_kind(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: src
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x80112233445566b1;'//achar(10)// &
+            'struct Child { n @0 :Int32; }'//achar(10)// &
+            'struct AllPtrs { s @0 :Child; }'//achar(10)// &
+            'struct TD { t @0 :Text; d @1 :Data; }'//achar(10)// &
+            'struct LI { li @0 :List(Int32); }'//achar(10)// &
+            'struct FL { scores @0 :List(Float64); }'//achar(10)// &
+            'struct TL { tx @0 :List(Text); }'//achar(10)
+      call spit(tmp//'/kind.capnp', src, err)
+      call spit(tmp//'/scores.hex', '000000000f000000000000000500070007000000000000000900000000000000' &
+                //'000040c000000100000000000000f83fff010000000000000000000000000000000000000000000000' &
+                //'000000000000000000000000000000090000001a000000090000002200000001000000000000006f6b' &
+                //'0000000000004e59430000000000', err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'stream kind schema')
+         return
+      end if
+      if (.not. sh(cap_setup()//' && export CAP && bash -s <<''END'''//achar(10)// &
+         'set +e'//achar(10)// &
+         'python3 - <<''PY'''//achar(10)// &
+         'import struct'//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'd = Path("'//tmp//'")'//achar(10)// &
+         'def frame(words):'//achar(10)// &
+         '    body = b"".join(struct.pack("<Q", w) for w in words)'//achar(10)// &
+         '    return struct.pack("<II", 0, len(words)) + body'//achar(10)// &
+         'root = 1 << 48'//achar(10)// &
+         'd.joinpath("two.bin").write_bytes(frame([root, 3]) + frame([root, 0]))'//achar(10)// &
+         'd.joinpath("text.bin").write_bytes(frame([root, 1 << 32, 0]))'//achar(10)// &
+         'd.joinpath("data.bin").write_bytes(frame([1 << 49, 0, 1 << 32, 0]))'//achar(10)// &
+         'd.joinpath("li.bin").write_bytes(frame([root, 1 | (1 << 35)]))'//achar(10)// &
+         'd.joinpath("void0.bin").write_bytes(frame([root, 1]))'//achar(10)// &
+         'd.joinpath("bit0.bin").write_bytes(frame([root, 1 | (1 << 32)]))'//achar(10)// &
+         'd.joinpath("ptr0.bin").write_bytes(frame([root, 1 | (6 << 32)]))'//achar(10)// &
+         'd.joinpath("byte0.bin").write_bytes(frame([root, 1 | (2 << 32)]))'//achar(10)// &
+         'h = d.joinpath("scores.hex").read_text().strip()'//achar(10)// &
+         'd.joinpath("scores.bin").write_bytes(bytes.fromhex(h))'//achar(10)// &
+         'PY'//achar(10)// &
+         'SCH='//tmp//'/kind.capnp'//achar(10)// &
+         'INC=$(dirname $(dirname $(command -v capnp)))/include'//achar(10)// &
+         'bad=0'//achar(10)// &
+         'cmpb() {'//achar(10)// &
+         '  capnp convert "binary:$2" --short "$SCH" "$3" < "$1" > '//tmp//'/ref 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '  "$CAP" convert "binary:$2" --short "$SCH" "$3" < "$1" > '//tmp//'/ours 2>/dev/null'//achar(10)// &
+         '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         '  cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         '}'//achar(10)// &
+         'cmpb '//tmp//'/two.bin json AllPtrs'//achar(10)// &
+         'cmpb '//tmp//'/two.bin text AllPtrs'//achar(10)// &
+         'cmpb '//tmp//'/text.bin json TD'//achar(10)// &
+         'cmpb '//tmp//'/text.bin text TD'//achar(10)// &
+         'cmpb '//tmp//'/data.bin json TD'//achar(10)// &
+         'cmpb '//tmp//'/data.bin text TD'//achar(10)// &
+         'cmpb '//tmp//'/li.bin json LI'//achar(10)// &
+         'cmpb '//tmp//'/li.bin text LI'//achar(10)// &
+         'cmpb '//tmp//'/void0.bin json LI'//achar(10)// &
+         'cmpb '//tmp//'/void0.bin text LI'//achar(10)// &
+         'cmpb '//tmp//'/bit0.bin json LI'//achar(10)// &
+         'cmpb '//tmp//'/ptr0.bin json LI'//achar(10)// &
+         'cmpb '//tmp//'/byte0.bin json TL'//achar(10)// &
+         'cmpb '//tmp//'/void0.bin json FL'//achar(10)// &
+         'capnp convert -I"$INC" binary:text --short schema/codec.capnp Sample < '//tmp//'/scores.bin > ' &
+         //tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '"$CAP" convert -I"$INC" binary:text --short schema/codec.capnp Sample < '//tmp//'/scores.bin > ' &
+         //tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'capnp convert -I"$INC" binary:json --short schema/codec.capnp Sample < '//tmp//'/scores.bin > ' &
+         //tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         '"$CAP" convert -I"$INC" binary:json --short schema/codec.capnp Sample < '//tmp//'/scores.bin > ' &
+         //tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         'test "$bad" = 0'//achar(10)// &
+         'END')) then
+         call test_failed(error, 'stream pointer kind')
+      end if
+   end subroutine run_stream_kind
 
 end module test_regress

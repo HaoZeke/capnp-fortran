@@ -691,6 +691,7 @@ contains
       integer(int8), allocatable :: one(:), wrapped(:), unpacked(:)
       integer(int64) :: off, n, total
       integer :: err, count
+      logical :: recover
       type(capnp_ptr_t) :: root
       rc = 0
       if (from == 'flat-packed') then
@@ -747,6 +748,7 @@ contains
          off = 0_int64
          total = size(raw, kind=int64)
          count = 0
+         recover = .false.
          do while (off < total)
             call unpack_next_message(raw, off, one, err)
             if (err /= CAPNP_OK) then
@@ -768,15 +770,22 @@ contains
             end if
             call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
             call capnp_message_free(msg)
-            if (rc /= 0) return
+            ! A wrong pointer still yields the recovered message. capnp
+            ! 1.4.0 prints it and reads the next message in the stream.
+            if (rc /= 0) recover = .true.
             count = count + 1
          end do
-         if (count == 0) call fail('empty input', rc)
+         if (count == 0) then
+            call fail('empty input', rc)
+         else if (recover) then
+            rc = 1
+         end if
          return
       end if
       off = 0_int64
       total = size(raw, kind=int64)
       count = 0
+      recover = .false.
       do while (off < total)
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) then
@@ -800,11 +809,17 @@ contains
          end if
          call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
-         if (rc /= 0) return
+         ! A wrong pointer still yields the recovered message. capnp
+         ! 1.4.0 prints it and reads the next message in the stream.
+         if (rc /= 0) recover = .true.
          count = count + 1
          off = off + n
       end do
-      if (count == 0) call fail('empty input', rc)
+      if (count == 0) then
+         call fail('empty input', rc)
+      else if (recover) then
+         rc = 1
+      end if
    end subroutine bytes_to_out
 
    pure function root_is_struct(root) result(ok)

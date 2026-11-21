@@ -576,6 +576,11 @@ contains
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
+            if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               q = capnp_ptr_t()
+            end if
             if (err /= CAPNP_OK) return
          end if
          if (q%kind == CAPNP_PK_NULL) then
@@ -586,11 +591,21 @@ contains
             end if
          else
             call capnp_get_text(p, int(off), jv%str, err)
+            if (err == CAPNP_ERR_KIND) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               jv%str = ''
+            end if
          end if
       case (TYPE_DATA)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
+            if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               q = capnp_ptr_t()
+            end if
             if (err /= CAPNP_OK) return
          end if
          if (q%kind == CAPNP_PK_NULL) then
@@ -606,6 +621,18 @@ contains
             end if
          else
             call capnp_get_data(p, int(off), raw, err)
+            if (err == CAPNP_ERR_KIND) then
+               ! get_data already left an empty buffer allocated.
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               if (.not. allocated(raw)) then
+                  allocate (raw(0), stat=stat)
+                  if (stat /= 0) then
+                     err = CAPNP_ERR_ALLOC
+                     return
+                  end if
+               end if
+            end if
             if (err /= CAPNP_OK) return
          end if
          call build_data_jval(raw, mode, jv, err)
@@ -616,6 +643,11 @@ contains
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
+            if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
+               ptr_kind_bad = .true.
+               err = CAPNP_OK
+               q = capnp_ptr_t()
+            end if
             if (err /= CAPNP_OK) return
          end if
          if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
