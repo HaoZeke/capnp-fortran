@@ -20,6 +20,10 @@ module capnp_canonical
    integer, save :: walk_n = 0
    integer, allocatable, save :: walk_seg(:)
    integer(int64), allocatable, save :: walk_off(:)
+   !> Copy a capability as null and note it. A trailing capability still
+   !> counts when the pointer section is truncated, as in layout.c++.
+   logical, save :: caps_null = .false.
+   logical, save :: caps_seen = .false.
 
 contains
 
@@ -32,7 +36,23 @@ contains
    !> Canonical bytes of a message's root object: one raw segment starting
    !> with the root pointer, no segment table (`capnp convert
    !> binary:canonical` output format).
-   subroutine capnp_canonicalize(msg, bytes, err)
+   subroutine capnp_canonicalize(msg, bytes, err, null_caps, saw_cap)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      !> Write each capability as a null pointer, as capnp 1.4.0 does
+      !> after it reports one, and set saw_cap.
+      logical, intent(in), optional :: null_caps
+      logical, intent(out), optional :: saw_cap
+      caps_null = .false.
+      if (present(null_caps)) caps_null = null_caps
+      caps_seen = .false.
+      call canonicalize_root(msg, bytes, err)
+      if (present(saw_cap)) saw_cap = caps_seen
+      caps_null = .false.
+   end subroutine capnp_canonicalize
+
+   subroutine canonicalize_root(msg, bytes, err)
       type(capnp_message_t), intent(inout), target :: msg
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
@@ -109,7 +129,7 @@ contains
       bytes = canon%segs(1)%bytes(0:n - 1)
       call capnp_message_free(canon)
       msg%traversal_words = after
-   end subroutine capnp_canonicalize
+   end subroutine canonicalize_root
 
    !> Whether the message is already in canonical form. A lazy walk in
    !> the shape of C++ `MessageReader::isCanonical`: the first mismatch
@@ -499,7 +519,7 @@ contains
       case (CAPNP_PK_NULL)
          return
       case (CAPNP_PK_CAP)
-         err = CAPNP_ERR_KIND
+         if (.not. caps_null) err = CAPNP_ERR_KIND
          return
       end select
       if (depth >= p%msg%depth_limit) then
@@ -598,7 +618,11 @@ contains
          return
       case (CAPNP_PK_CAP)
          ! Capabilities have no canonical form in a data message.
-         err = CAPNP_ERR_KIND
+         if (caps_null) then
+            caps_seen = .true.
+         else
+            err = CAPNP_ERR_KIND
+         end if
          return
       end select
       if (depth >= p%msg%depth_limit) then

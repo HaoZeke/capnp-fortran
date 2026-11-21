@@ -11,7 +11,7 @@ module capnp_text
 
    public :: capnp_text_encode, capnp_text_decode
    public :: capnp_text_encode_value, capnp_text_encode_list, capnp_text_encode_enum
-   public :: capnp_text_span, capnp_text_hard_failed
+   public :: capnp_text_span, capnp_text_hard_failed, capnp_text_saw_capability
 
    integer, parameter :: MODE_BARE = 1
    integer, parameter :: MODE_PREF = 2
@@ -19,6 +19,8 @@ module capnp_text
    logical, save :: ptr_kind_bad = .false.
    !> An unresolved name throws in capnp before a message is printed.
    logical, save :: text_hard = .false.
+   !> The last encode printed `<external capability>`.
+   logical, save :: cap_seen = .false.
 
    type :: piece_t
       character(len=:), allocatable :: s
@@ -53,6 +55,7 @@ contains
       err = CAPNP_OK
       text = ''
       ptr_kind_bad = .false.
+      cap_seen = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -92,6 +95,7 @@ contains
       err = CAPNP_OK
       text = ''
       ptr_kind_bad = .false.
+      cap_seen = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -182,6 +186,7 @@ contains
       err = CAPNP_OK
       text = ''
       ptr_kind_bad = .false.
+      cap_seen = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -272,6 +277,7 @@ contains
          text = '<opaque pointer>'
       case (TYPE_INTERFACE)
          text = '<external capability>'
+         cap_seen = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -530,6 +536,7 @@ contains
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
          out = '<external capability>'
+         cap_seen = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -661,6 +668,7 @@ contains
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
          out = '<external capability>'
+         cap_seen = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -2077,6 +2085,13 @@ contains
       c = sc%s(i:i)
       y = (c >= 'A' .and. c <= 'Z') .or. (c >= 'a' .and. c <= 'z') .or. c == '_'
    end function ident_start
+
+   !> True when the last encode met an interface value. The capnp tool
+   !> cannot read one without a capability table.
+   function capnp_text_saw_capability() result(y)
+      logical :: y
+      y = cap_seen
+   end function capnp_text_saw_capability
 
    function capnp_text_hard_failed() result(y)
       logical :: y

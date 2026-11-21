@@ -68,6 +68,9 @@ program capnpf
    end type cli_opts_t
 
    integer :: exit_code
+   !> Writes to stdout so far. A failed message that wrote nothing
+   !> ends the stream, as a thrown exception does in capnp 1.4.0.
+   integer(int64) :: stdout_writes = 0_int64
    exit_code = 0
    call main_run(exit_code)
    if (exit_code /= 0) call c_exit(int(exit_code, c_int))
@@ -1209,6 +1212,7 @@ contains
       integer(int8), allocatable :: one(:), wrapped(:), unpacked(:), chopped(:)
       integer(int64) :: off, n, total, words
       integer :: err, count
+      integer(int64) :: writes
       logical :: recover
       type(capnp_ptr_t) :: root
       rc = 0
@@ -1309,8 +1313,12 @@ contains
                call fail('bad root', rc)
                return
             end if
+            writes = stdout_writes
             call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
             call capnp_message_free(msg)
+            ! A failure with no output is a thrown exception in capnp 1.4.0,
+            ! which ends the run.
+            if (rc /= 0 .and. stdout_writes == writes) return
             ! A wrong pointer still yields the recovered message. capnp
             ! 1.4.0 prints it and reads the next message in the stream.
             if (rc /= 0) recover = .true.
@@ -1361,8 +1369,12 @@ contains
             end if
             return
          end if
+         writes = stdout_writes
          call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
          call capnp_message_free(msg)
+         ! A failure with no output is a thrown exception in capnp 1.4.0,
+         ! which ends the run.
+         if (rc /= 0 .and. stdout_writes == writes) return
          ! A wrong pointer still yields the recovered message. capnp
          ! 1.4.0 prints it and reads the next message in the stream.
          if (rc /= 0) recover = .true.
@@ -1424,11 +1436,16 @@ contains
       integer, intent(out) :: rc
       character(len=:), allocatable :: text
       integer(int8), allocatable :: outb(:)
-      integer :: err
+      integer :: err, caps
       rc = 0
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
                                 traversal_words=huge(0_int64))
+         if (capnp_text_saw_capability()) then
+            ! capnp 1.4.0 throws on reading a capability and stops.
+            call fail('cannot read a capability without a capability table', rc)
+            return
+         end if
          if (err == CAPNP_ERR_KIND .and. len(text) > 0) then
             call write_fd_line(1, text, err)
             if (err /= CAPNP_OK) then
@@ -1469,13 +1486,21 @@ contains
             return
          end if
       else
-         call write_binary_message(msg, to, seg_words, outb, err)
+         call write_binary_message(msg, to, seg_words, outb, err, caps)
          if (err /= CAPNP_OK) then
             call fail('binary encode failed', rc)
             return
          end if
+         if (caps == 2) then
+            call fail('Cannot create a canonical message with a capability', rc)
+            return
+         end if
          call write_stdout(outb, err)
-         if (err /= CAPNP_OK) call fail('cannot write stdout', rc)
+         if (err /= CAPNP_OK) then
+            call fail('cannot write stdout', rc)
+         else if (caps == 1) then
+            call fail('Message contained invalid capability pointer', rc)
+         end if
       end if
    end subroutine emit_one
 
@@ -1499,6 +1524,7 @@ contains
       type(c_ptr) :: p
       err = CAPNP_OK
       if (size(buf) <= 0) return
+      if (fd == 1) stdout_writes = stdout_writes + 1_int64
       lb = lbound(buf, 1)
       addr = transfer(c_loc(buf(lb)), addr)
       left = int(size(buf), c_size_t)
@@ -1544,24 +1570,44 @@ contains
       call write_fd(fd, buf, err)
    end subroutine write_fd_line
 
-   subroutine write_binary_message(msg, to, seg_words, outb, err)
+   !> caps is 1 when a capability was written as null and 2 when the
+   !> canonical form could not be made, which stops capnp 1.4.0.
+   subroutine write_binary_message(msg, to, seg_words, outb, err, caps)
       type(capnp_message_t), intent(inout), target :: msg
       integer(int8), allocatable, intent(out) :: outb(:)
       character(len=*), intent(in) :: to
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: err
+      integer, intent(out) :: caps
+      type(capnp_message_t), target :: check
+      logical :: found
       type(capnp_message_t), target :: reseg
       type(capnp_ptr_t) :: root, croot
       type(capnp_builder_options_t) :: bopt
       integer(int8), allocatable :: flatb(:)
       integer(int64) :: need
       err = CAPNP_OK
+      caps = 0
+      found = .false.
       if (to == 'canonical') then
-         call capnp_canonicalize(msg, outb, err)
+         call capnp_canonicalize(msg, outb, err, null_caps=.true., saw_cap=found)
+         if (err == CAPNP_OK .and. found) then
+            ! A trailing capability leaves a null pointer that is not
+            ! truncated. capnp 1.4.0 then fails its isCanonical assert.
+            caps = 1
+            call capnp_deserialize_bytes(wrap_flat(outb), check, err, options=tool_limits())
+            if (err == CAPNP_OK) then
+               if (.not. capnp_is_canonical(check, err)) caps = 2
+            end if
+            call capnp_message_free(check)
+            if (err /= CAPNP_OK) caps = 2
+            err = CAPNP_OK
+         end if
+         return
       else if (to == 'flat') then
-         call to_flat_bytes(msg, outb, err)
+         call to_flat_bytes(msg, outb, err, found)
       else if (to == 'flat-packed') then
-         call to_flat_bytes(msg, flatb, err)
+         call to_flat_bytes(msg, flatb, err, found)
          if (err /= CAPNP_OK) return
          call capnp_pack(flatb, outb, err)
       else if (seg_words > 0_int64 .and. (to == 'binary' .or. to == 'packed')) then
@@ -1585,6 +1631,7 @@ contains
             call capnp_message_free(reseg)
             return
          end if
+         call null_caps(croot, found)
          call capnp_set_root(reseg, croot, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(reseg)
@@ -1608,6 +1655,7 @@ contains
             call capnp_message_free(reseg)
             return
          end if
+         call null_caps(croot, found)
          call capnp_set_root(reseg, croot, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(reseg)
@@ -1624,12 +1672,55 @@ contains
       else
          call capnp_serialize_bytes(msg, outb, err)
       end if
+      if (found) caps = 1
    end subroutine write_binary_message
 
-   subroutine to_flat_bytes(msg, flatb, err)
+   !> Write each capability under p as a null pointer. capnp 1.4.0 has no
+   !> capability table, so its copy reports the pointer and writes null.
+   recursive subroutine null_caps(p, found)
+      type(capnp_ptr_t), intent(in) :: p
+      logical, intent(inout) :: found
+      type(capnp_ptr_t) :: q
+      integer :: k, err
+      integer(int64) :: i
+      select case (p%kind)
+      case (CAPNP_PK_STRUCT)
+         do k = 0, p%pwords - 1
+            q = capnp_getp(p, k, err)
+            if (err /= CAPNP_OK) cycle
+            if (q%kind == CAPNP_PK_CAP) then
+               call clear_slot(p, k)
+               found = .true.
+            else
+               call null_caps(q, found)
+            end if
+         end do
+      case (CAPNP_PK_LIST)
+         if (p%esize == CAPNP_SZ_PTR) then
+            do i = 0_int64, p%nelem - 1_int64
+               q = capnp_getp(p, int(i), err)
+               if (err /= CAPNP_OK) cycle
+               if (q%kind == CAPNP_PK_CAP) then
+                  p%msg%segs(p%seg)%bytes(p%off + i*8_int64:p%off + i*8_int64 + 7_int64) = 0_int8
+                  found = .true.
+               else
+                  call null_caps(q, found)
+               end if
+            end do
+         else if (p%esize == CAPNP_SZ_COMPOSITE .and. p%pwords > 0) then
+            do i = 0_int64, p%nelem - 1_int64
+               q = capnp_list_get_struct(p, int(i), err)
+               if (err == CAPNP_OK) call null_caps(q, found)
+            end do
+         end if
+      end select
+   end subroutine null_caps
+
+   subroutine to_flat_bytes(msg, flatb, err, found)
       type(capnp_message_t), intent(inout), target :: msg
       integer(int8), allocatable, intent(out) :: flatb(:)
       integer, intent(out) :: err
+      logical, intent(inout) :: found
       type(capnp_message_t), target :: single
       type(capnp_ptr_t) :: root, croot
       integer(int64) :: n, need
@@ -1650,6 +1741,7 @@ contains
          call capnp_message_free(single)
          return
       end if
+      call null_caps(croot, found)
       call capnp_set_root(single, croot, err)
       if (err /= CAPNP_OK) then
          call capnp_message_free(single)

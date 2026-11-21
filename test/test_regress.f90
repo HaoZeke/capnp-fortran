@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(61))
+      allocate (testsuite(62))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -124,6 +124,7 @@ contains
       testsuite(59) = new_unittest("generic-root", run_generic_root)
       testsuite(60) = new_unittest("zero-size-list", run_zero_size_list)
       testsuite(61) = new_unittest("cli-options", run_cli_options)
+      testsuite(62) = new_unittest("cap-pointers", run_cap_pointers)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3861,5 +3862,55 @@ contains
          call test_failed(error, 'cli options')
       end if
    end subroutine run_cli_options
+
+   !> A capability pointer fails the way capnp 1.4.0 fails without a cap table.
+   subroutine run_cap_pointers(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/cap-pointers && '//cap_setup() &
+         //' && export CAP TMPD='//tmp//'/cap-pointers' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, struct, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'tmp = os.environ["TMPD"]'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    try:'//achar(10)// &
+         '        p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE,'//achar(10)// &
+         '                           stderr=subprocess.PIPE, timeout=10)'//achar(10)// &
+         '    except subprocess.TimeoutExpired:'//achar(10)// &
+         '        return None'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'sch = os.path.join(tmp, "caps.capnp")'//achar(10)// &
+         'with open(sch, "w") as f:'//achar(10)// &
+         '    f.write("@0x9b1c2d3e4f506172;\ninterface I {}\n"'//achar(10)// &
+         '            "struct H { i @0 :I; a @1 :AnyPointer; l @2 :List(I); n @3 :Int32; }\n")'//achar(10)// &
+         'def msg(words):'//achar(10)// &
+         '    return struct.pack("<II", 0, len(words)) + b"".join(words)'//achar(10)// &
+         'root = bytes.fromhex("0000000001000300")'//achar(10)// &
+         'data = struct.pack("<Q", 7)'//achar(10)// &
+         'capp = bytes.fromhex("0300000000000000")'//achar(10)// &
+         'z = bytes(8)'//achar(10)// &
+         'lst = bytes.fromhex("010000000e000000")'//achar(10)// &
+         'm_field = msg([root, data, capp, z, z])'//achar(10)// &
+         'm_any = msg([root, data, z, capp, z])'//achar(10)// &
+         'm_list = msg([root, data, z, z, lst, z])'//achar(10)// &
+         'm_plain = msg([root, data, z, z, z])'//achar(10)// &
+         'inputs = [("binary", m) for m in'//achar(10)// &
+         '          (m_field, m_any, m_list, m_field + m_plain, m_list + m_plain, m_any + m_plain)]'//achar(10)// &
+         'inputs += [("flat", m_field[8:]), ("flat", m_any[8:])]'//achar(10)// &
+         'for fmt, raw in inputs:'//achar(10)// &
+         '    for to in ("binary", "packed", "flat", "flat-packed", "canonical", "text", "json"):'//achar(10)// &
+         '        args = ["convert", fmt + ":" + to, sch, "H"]'//achar(10)// &
+         '        ref = run("capnp", args, raw)'//achar(10)// &
+         '        if ref is not None and ref != run(cap, args, raw):'//achar(10)// &
+         '            print("mismatch:", fmt, to, raw.hex())'//achar(10)// &
+         '            sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'capability pointers')
+      end if
+   end subroutine run_cap_pointers
 
 end module test_regress
