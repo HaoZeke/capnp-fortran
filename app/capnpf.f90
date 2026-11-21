@@ -1347,7 +1347,7 @@ contains
       character(len=:), allocatable :: fname, text
       type(capnp_ptr_t) :: f, raw_t, t, dv, q, et
       type(capnp_brand_env_t) :: cenv
-      integer :: err, gidx, sidx, tw
+      integer :: err, gidx, sidx, tw, fd, tag
       integer(int64) :: off
       rc = 0
       if (pos > len(rest)) then
@@ -1363,6 +1363,14 @@ contains
       if (err /= CAPNP_OK) then
          call fail('unknown field '//fname, rc)
          return
+      end if
+      fd = field_discriminant(f)
+      if (fd /= NO_DISCRIMINANT) then
+         tag = capnp_dyn_which(sch, idx, obj, err)
+         if (err /= CAPNP_OK .or. tag /= fd) then
+            call fail('eval failed', rc)
+            return
+         end if
       end if
       if (field_which(f) == FIELD_GROUP) then
          gidx = capnp_codec_find_id(sch, field_group_type_id(f))
