@@ -1,6 +1,11 @@
 # Sticky PR comment with a downloadable Sphinx HTML artifact (HaoZeke/doc-previewer).
 name: Comment on pull request
 
+permissions:
+  actions: read
+  issues: write
+  pull-requests: write
+
 on:
   workflow_run:
     workflows: ["Documentation"]
@@ -18,7 +23,7 @@ jobs:
       actions: read
 
     steps:
-      - uses: HaoZeke/doc-previewer@v0.0.1
+      - uses: HaoZeke/doc-previewer@0e1094735b4f7ee9a2c60a18a34d7a7e5bc6bb63 # v0.0.1
         with:
           workflow_run_id: ${{ github.event.workflow_run.id }}
           head_sha: ${{ github.event.workflow_run.head_sha }}
