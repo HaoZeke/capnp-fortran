@@ -40,6 +40,7 @@ program test_gate2
    call case_37()
    call case_38()
    call case_39()
+   call case_40()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -1121,4 +1122,20 @@ contains
          achar(10) // &
          'cmp -s /tmp/g2-jv.o /tmp/g2-jv.r')
    end subroutine case_39
+
+   subroutine case_40()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; "$CAP" convert --q' // &
+         'uiet text:text schema/common.capnp Vec3 < /dev/null > /tmp/g' // &
+         '2-q.o; echo $? > /tmp/g2-q.e1; capnp convert --quiet text:te' // &
+         'xt schema/common.capnp Vec3 < /dev/null > /tmp/g2-q.r; echo ' // &
+         '$? > /tmp/g2-q.e2; cmp -s /tmp/g2-q.o /tmp/g2-q.r && cmp -s ' // &
+         '/tmp/g2-q.e1 /tmp/g2-q.e2')
+   end subroutine case_40
 end program test_gate2

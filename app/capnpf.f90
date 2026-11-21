@@ -67,7 +67,7 @@ contains
       character(len=:), allocatable :: arg, next_arg
       character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
       character(len=:), allocatable :: from_fmt, to_fmt
-      logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc
+      logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc, quiet
       integer(int64) :: seg_words
       integer :: i, n, err, colon, type_idx
       type(capnp_dyn_schema_t), target :: schema
@@ -84,6 +84,7 @@ contains
       flat_flag = .false.
       ofmt_explicit = .false.
       no_std_inc = .false.
+      quiet = .false.
       seg_words = 0_int64
 
       n = command_argument_count()
@@ -103,7 +104,9 @@ contains
             return
          else if (trim(arg) == '--short') then
             short = .true.
-         else if (trim(arg) == '--quiet' .or. trim(arg) == '--verbose') then
+         else if (trim(arg) == '--quiet') then
+            quiet = .true.
+         else if (trim(arg) == '--verbose') then
             continue
          else if (trim(arg) == '--no-standard-import') then
             no_std_inc = .true.
@@ -183,6 +186,10 @@ contains
          call fail('unknown command '//cmd, rc)
          return
       end if
+      if (quiet .and. cmd /= 'convert' .and. cmd /= 'decode') then
+         call fail('--quiet: unrecognized option', rc)
+         return
+      end if
 
       if (cmd == 'convert') then
          colon = index(spec, ':')
@@ -221,7 +228,7 @@ contains
          else
             type_idx = 0
          end if
-         call cmd_convert(schema, type_idx, from_fmt, to_fmt, short, seg_words, rc)
+         call cmd_convert(schema, type_idx, from_fmt, to_fmt, short, seg_words, quiet, rc)
          call capnp_dyn_free(schema)
          return
       end if
@@ -270,7 +277,7 @@ contains
          else
             from_fmt = 'binary'
          end if
-         call cmd_decode(schema, type_idx, from_fmt, short, rc)
+         call cmd_decode(schema, type_idx, from_fmt, short, quiet, rc)
       case ('eval')
          if (.not. valid_fmt(ofmt)) then
             call capnp_dyn_free(schema)
@@ -529,38 +536,39 @@ contains
       call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
    end subroutine cmd_encode
 
-   subroutine cmd_decode(sch, idx, from_fmt, short, rc)
+   subroutine cmd_decode(sch, idx, from_fmt, short, quiet, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: from_fmt
-      logical, intent(in) :: short
+      logical, intent(in) :: short, quiet
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
       integer :: err
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
-         call fail('empty input', rc)
+         call empty_stream(quiet, rc)
          return
       end if
       call bytes_to_out(sch, idx, raw, from_fmt, 'text', .not. short, 0_int64, rc)
    end subroutine cmd_decode
 
-   subroutine cmd_convert(sch, idx, from, to, short, seg_words, rc)
+   subroutine cmd_convert(sch, idx, from, to, short, seg_words, quiet, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: from, to
       logical, intent(in) :: short
       integer(int64), intent(in) :: seg_words
+      logical, intent(in) :: quiet
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
       integer :: err
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
-         ! capnp 1.4.0 exits 1 here: kj/io.c++ reports Premature EOF
-         ! unless --quiet is set. capnpf has no quiet suppression.
-         call fail('empty input', rc)
+         ! capnp 1.4.0 reads the first buffer to judge plausibility.
+         ! --quiet skips that read, so an empty stream exits 0.
+         call empty_stream(quiet, rc)
          return
       end if
       if (from == 'text') then
@@ -571,6 +579,16 @@ contains
          call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
+
+   subroutine empty_stream(quiet, rc)
+      logical, intent(in) :: quiet
+      integer, intent(out) :: rc
+      if (quiet) then
+         rc = 0
+      else
+         call fail('empty input', rc)
+      end if
+   end subroutine empty_stream
 
    subroutine text_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
