@@ -1,7 +1,8 @@
 !> Regressions for the text and JSON codec review.
 module test_regress
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
-   use, intrinsic :: iso_fortran_env, only: int64
+   use, intrinsic :: iso_fortran_env, only: int64, real64
+   use, intrinsic :: iso_c_binding, only: c_int
    use capnp
    use capnp_dynamic
    use capnp_text
@@ -10,11 +11,34 @@ module test_regress
    use cli_path, only: capnpf_setup, capnpc_setup
    implicit none
    private
-   public :: collect_regress
+   public :: collect_regress, release_regress_tmp
 
-   character(len=*), parameter :: tmp = '/tmp/capnpf-regress'
+   character(len=:), allocatable :: tmp
+
+   interface
+      function c_getpid() bind(c, name="getpid") result(pid)
+         import :: c_int
+         integer(c_int) :: pid
+      end function c_getpid
+   end interface
 
 contains
+
+   subroutine init_tmp()
+      character(len=16) :: buf
+      integer(c_int) :: pid
+      if (allocated(tmp)) return
+      pid = c_getpid()
+      write (buf, '(i0)') pid
+      tmp = '/tmp/capnpf-regress-'//trim(buf)
+   end subroutine init_tmp
+
+   !> Remove this process's regress directory, including the plugin files
+   !> created under it.
+   subroutine release_regress_tmp()
+      if (.not. allocated(tmp)) return
+      if (.not. sh('rm -rf '//tmp)) return
+   end subroutine release_regress_tmp
 
    !> True only when both arrays have the same length. The element compare
    !> runs after that check, so a short reference fails the test instead of
@@ -35,6 +59,7 @@ contains
 
    subroutine collect_regress(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
+      call init_tmp()
       testsuite = [ &
          new_unittest("comment-eof", run_comment_eof), &
          new_unittest("segment-bomb", run_segment_bomb), &
@@ -56,7 +81,8 @@ contains
          new_unittest("cli-locate", run_cli_locate), &
          new_unittest("string-linear", run_string_linear), &
          new_unittest("write-error", run_write_error), &
-         new_unittest("f32-text", run_f32_text) &
+         new_unittest("f32-text", run_f32_text), &
+         new_unittest("regress-tmp", run_regress_tmp) &
          ]
    end subroutine collect_regress
 
@@ -916,7 +942,8 @@ contains
    !> every error path. A sanitized build exits nonzero if any remain.
    subroutine run_plugin_release(error)
       type(error_type), allocatable, intent(out) :: error
-      character(len=*), parameter :: ptmp = '/tmp/capnpf-regress/plugin'
+      character(len=:), allocatable :: ptmp
+      ptmp = tmp//'/plugin'
       if (.not. sh('mkdir -p '//ptmp &
          //' && '//capnpc_setup() &
          //' && cp test/fixtures/addressbook.cgr.bin '//ptmp//'/req.bin' &
@@ -1575,4 +1602,19 @@ contains
          call test_failed(error, 'canon: failed byte allocation is reported')
       end if
    end subroutine check_canon_alloc
+   !> The regress directory is removed when the suite finishes. This fails
+   !> if the release leaves the directory in place.
+   subroutine run_regress_tmp(error)
+      type(error_type), allocatable, intent(out) :: error
+      call init_tmp()
+      if (.not. sh('mkdir -p '//tmp//'/left && test -d '//tmp)) then
+         call test_failed(error, 'regress temp dir was not created')
+         return
+      end if
+      call release_regress_tmp()
+      if (.not. sh('test ! -d '//tmp)) then
+         call test_failed(error, 'regress temp dir remains')
+      end if
+   end subroutine run_regress_tmp
+
 end module test_regress

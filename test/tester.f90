@@ -6,7 +6,7 @@ program tester
    use test_wire, only: collect_wire
    use test_addressbook, only: collect_addressbook
    use test_canonical, only: collect_canonical
-   use test_codecs, only: collect_codecs
+   use test_codecs, only: collect_codecs, release_codecs_tmp
    use test_dynamic, only: collect_dynamic
    use test_annotated, only: collect_annotated
    use test_generated, only: collect_generated
@@ -21,7 +21,7 @@ program tester
    use test_stream, only: collect_stream
    use test_codegen_parity, only: collect_codegen_parity
    use test_idents, only: collect_idents
-   use test_regress, only: collect_regress
+   use test_regress, only: collect_regress, release_regress_tmp
    use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
@@ -62,7 +62,10 @@ program tester
          if (allocated(test_name)) then
             write (error_unit, fmt) "Suite:", testsuites(is)%name
             call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
-            if (stat < 0) error stop 1
+            if (stat < 0) then
+               call release_temps()
+               error stop 1
+            end if
          else
             write (error_unit, fmt) "Testing:", testsuites(is)%name
             call run_testsuite(testsuites(is)%collect, error_unit, stat)
@@ -72,6 +75,7 @@ program tester
          do is = 1, size(testsuites)
             write (error_unit, fmt) "-", testsuites(is)%name
          end do
+         call release_temps()
          error stop 1
       end if
    else
@@ -81,8 +85,16 @@ program tester
       end do
    end if
 
+   call release_temps()
    if (stat > 0) then
       write (error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
       error stop 1
    end if
+
+contains
+
+   subroutine release_temps()
+      call release_codecs_tmp()
+      call release_regress_tmp()
+   end subroutine release_temps
 end program tester

@@ -7,16 +7,41 @@ module test_codecs
    use capnp_text
    use capnp_json
    use cli_path, only: capnpf_setup
+   use, intrinsic :: iso_c_binding, only: c_int
    implicit none
    private
-   public :: collect_codecs
+   public :: collect_codecs, release_codecs_tmp
 
-   character(len=*), parameter :: tmp = '/tmp/capnpf-codec'
+   character(len=:), allocatable :: tmp
+
+   interface
+      function c_getpid() bind(c, name="getpid") result(pid)
+         import :: c_int
+         integer(c_int) :: pid
+      end function c_getpid
+   end interface
 
 contains
 
+   subroutine init_codec_tmp()
+      character(len=16) :: buf
+      integer(c_int) :: pid
+      if (allocated(tmp)) return
+      pid = c_getpid()
+      write (buf, '(i0)') pid
+      tmp = '/tmp/capnpf-codec-'//trim(buf)
+   end subroutine init_codec_tmp
+
+   !> Remove this process's codec directory. A shared /tmp name collides
+   !> when two suites run together.
+   subroutine release_codecs_tmp()
+      if (.not. allocated(tmp)) return
+      if (.not. sh('rm -rf '//tmp)) return
+   end subroutine release_codecs_tmp
+
    subroutine collect_codecs(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
+      call init_codec_tmp()
       testsuite = [ &
          new_unittest("text-addressbook", run_addressbook), &
          new_unittest("text-kitchen", run_kitchen), &
@@ -28,7 +53,8 @@ contains
          new_unittest("json-edge-cases", run_json_edges), &
          new_unittest("json-flatten-discriminator", run_json_flatten_disc), &
          new_unittest("cli", run_cli), &
-         new_unittest("cli-extended", run_cli_extended) &
+         new_unittest("cli-extended", run_cli_extended), &
+         new_unittest("codec-tmp", run_codec_tmp) &
          ]
    end subroutine collect_codecs
 
@@ -759,7 +785,8 @@ contains
       call capnp_read_file(tmp//'/evc.ours', b_got, err)
       call check_bytes(error, b_got, b_exp, 'cli-ext: eval -ocanonical')
 
-      ! 4. Flags, exit codes, stderr separation, and zero leaked /tmp/capnpf-*.cgr files.
+      ! 4. Flags, exit codes, stderr separation, and no capnpf cgr in this
+      ! process directory. A sibling file under /tmp must not count.
       call check_(error, sh(capnpf_setup() &
          //' && "$CAP" --help >/dev/null && "$CAP" --version >/dev/null'), 'cli-ext: --help/--version exit 0')
       call check_(error, sh(capnpf_setup() &
@@ -770,9 +797,31 @@ contains
          //' && ! "$CAP" eval schema/kitchen.capnp "primes[9]" 2>/dev/null' &
          //' && ! "$CAP" convert bogus:text schema/common.capnp Vec3 < /dev/null 2>/dev/null'), &
          'cli-ext: error exit codes')
-      call check_(error, sh('! ls /tmp/capnpf-*.cgr >/dev/null 2>&1'), &
-         'cli-ext: no leaked /tmp/capnpf-*.cgr files')
+      call check_(error, index(tmp, '/tmp/capnpf-codec-') == 1, &
+         'cli-ext: codec files live in a per-process directory')
+      call check_(error, sh(capnpf_setup() &
+         //' && export CAP' &
+         //' && printf "%s\n" "echo \$\$ > \"\$1\"" "exec \"\$CAP\" --version >/dev/null"' &
+         //' > '//tmp//'/id.sh' &
+         //' && sh '//tmp//'/id.sh '//tmp//'/clipid' &
+         //' && pid=$(cat '//tmp//'/clipid) && test ! -e /tmp/capnpf-$pid.cgr'), &
+         'cli-ext: no leaked capnpf cgr for the child pid')
    end subroutine run_cli_extended
+
+   !> The codec directory is removed when the suite finishes. This fails
+   !> if the release leaves the directory in place.
+   subroutine run_codec_tmp(error)
+      type(error_type), allocatable, intent(out) :: error
+      call init_codec_tmp()
+      if (.not. sh('mkdir -p '//tmp//'/left && test -d '//tmp)) then
+         call test_failed(error, 'codec temp dir was not created')
+         return
+      end if
+      call release_codecs_tmp()
+      if (.not. sh('test ! -d '//tmp)) then
+         call test_failed(error, 'codec temp dir remains')
+      end if
+   end subroutine run_codec_tmp
 
    subroutine compile_codec_schema(error, schema)
       type(error_type), allocatable, intent(inout) :: error
