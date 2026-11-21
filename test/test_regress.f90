@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(46))
+      allocate (testsuite(47))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -81,34 +81,35 @@ contains
       testsuite(16) = new_unittest("schema-pipe", run_schema_pipe)
       testsuite(17) = new_unittest("plugin-release", run_plugin_release)
       testsuite(18) = new_unittest("cli-locate", run_cli_locate)
-      testsuite(19) = new_unittest("string-linear", run_string_linear)
-      testsuite(20) = new_unittest("write-error", run_write_error)
-      testsuite(21) = new_unittest("f32-text", run_f32_text)
-      testsuite(22) = new_unittest("regress-tmp", run_regress_tmp)
-      testsuite(23) = new_unittest("cli-sources", run_cli_sources)
-      testsuite(24) = new_unittest("json-union-many", run_json_union_many)
-      testsuite(25) = new_unittest("json-union-nested", run_json_union_nested)
-      testsuite(26) = new_unittest("json-schema-chain", run_json_schema_chain)
-      testsuite(27) = new_unittest("group-clear-depth", run_group_clear_depth)
-      testsuite(28) = new_unittest("packed-zero-cap", run_packed_zero_cap)
-      testsuite(29) = new_unittest("json-trailing-spaces", run_json_trailing_spaces)
-      testsuite(30) = new_unittest("json-union-clear", run_json_union_clear)
-      testsuite(31) = new_unittest("json-nul-eof", run_json_nul_eof)
-      testsuite(32) = new_unittest("json-nest-limit", run_json_nest_limit)
-      testsuite(33) = new_unittest("cli-json-stream", run_cli_json_stream)
-      testsuite(34) = new_unittest("cli-text-nul", run_cli_text_nul)
-      testsuite(35) = new_unittest("text-shorthand", run_text_shorthand)
-      testsuite(36) = new_unittest("text-group-replace", run_text_group_replace)
-      testsuite(37) = new_unittest("text-ws-vt-ff", run_text_ws_vt_ff)
-      testsuite(38) = new_unittest("json-dup-bad", run_json_dup_bad)
-      testsuite(39) = new_unittest("canonical-null-root", run_canonical_null_root)
-      testsuite(40) = new_unittest("json-ptr-kind", run_json_ptr_kind)
-      testsuite(41) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
-      testsuite(42) = new_unittest("text-inactive-arm", run_text_inactive_arm)
-      testsuite(43) = new_unittest("codec-parity", run_codec_parity)
-      testsuite(44) = new_unittest("shorthand-first-field", run_shorthand_first)
-      testsuite(45) = new_unittest("stream-pointer-kind", run_stream_kind)
-      testsuite(46) = new_unittest("cycle-guard", run_cycle_guard)
+      testsuite(19) = new_unittest("eval-annotations", run_eval_annotations)
+      testsuite(20) = new_unittest("string-linear", run_string_linear)
+      testsuite(21) = new_unittest("write-error", run_write_error)
+      testsuite(22) = new_unittest("f32-text", run_f32_text)
+      testsuite(23) = new_unittest("regress-tmp", run_regress_tmp)
+      testsuite(24) = new_unittest("cli-sources", run_cli_sources)
+      testsuite(25) = new_unittest("json-union-many", run_json_union_many)
+      testsuite(26) = new_unittest("json-union-nested", run_json_union_nested)
+      testsuite(27) = new_unittest("json-schema-chain", run_json_schema_chain)
+      testsuite(28) = new_unittest("group-clear-depth", run_group_clear_depth)
+      testsuite(29) = new_unittest("packed-zero-cap", run_packed_zero_cap)
+      testsuite(30) = new_unittest("json-trailing-spaces", run_json_trailing_spaces)
+      testsuite(31) = new_unittest("json-union-clear", run_json_union_clear)
+      testsuite(32) = new_unittest("json-nul-eof", run_json_nul_eof)
+      testsuite(33) = new_unittest("json-nest-limit", run_json_nest_limit)
+      testsuite(34) = new_unittest("cli-json-stream", run_cli_json_stream)
+      testsuite(35) = new_unittest("cli-text-nul", run_cli_text_nul)
+      testsuite(36) = new_unittest("text-shorthand", run_text_shorthand)
+      testsuite(37) = new_unittest("text-group-replace", run_text_group_replace)
+      testsuite(38) = new_unittest("text-ws-vt-ff", run_text_ws_vt_ff)
+      testsuite(39) = new_unittest("json-dup-bad", run_json_dup_bad)
+      testsuite(40) = new_unittest("canonical-null-root", run_canonical_null_root)
+      testsuite(41) = new_unittest("json-ptr-kind", run_json_ptr_kind)
+      testsuite(42) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
+      testsuite(43) = new_unittest("text-inactive-arm", run_text_inactive_arm)
+      testsuite(44) = new_unittest("codec-parity", run_codec_parity)
+      testsuite(45) = new_unittest("shorthand-first-field", run_shorthand_first)
+      testsuite(46) = new_unittest("stream-pointer-kind", run_stream_kind)
+      testsuite(47) = new_unittest("cycle-guard", run_cycle_guard)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -1052,6 +1053,51 @@ contains
          call test_failed(error, 'cli locate failed')
       end if
    end subroutine run_cli_locate
+
+   !> eval drops annotations, with and without the helper.
+   subroutine run_eval_annotations(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/eval-annotations && '//cap_setup() &
+         //' && export CAP TMPD='//tmp//'/eval-annotations INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, shutil, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'tmp = os.environ["TMPD"]'//achar(10)// &
+         'inc = os.environ["INC"]'//achar(10)// &
+         'def run(tool, args, cwd, env=None):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE,'//achar(10)// &
+         '                       cwd=cwd, env=env)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'with open(os.path.join(tmp, "ann.capnp"), "w") as f:'//achar(10)// &
+         '    f.write(''@0x8123456789abcde0;\n'''//achar(10)// &
+         '            ''using Json = import "/capnp/compat/json.capnp";\n'''//achar(10)// &
+         '            ''struct S {\n'''//achar(10)// &
+         '            ''  foo @0 :Int32 $Json.name("renamedFoo");\n'''//achar(10)// &
+         '            ''  raw @1 :Data $Json.hex;\n'''//achar(10)// &
+         '            ''}\n'''//achar(10)// &
+         '            ''const s :S = (foo = 42, raw = 0x"deadbeef");\n'')'//achar(10)// &
+         'bare = os.path.join(tmp, "bare")'//achar(10)// &
+         'os.makedirs(os.path.join(bare, "bin"), exist_ok=True)'//achar(10)// &
+         'shutil.copy(cap, os.path.join(bare, "bin", "capnpf"))'//achar(10)// &
+         'env = {k: v for k, v in os.environ.items() if k != "CAPNP_SCHEMA_REQUEST"}'//achar(10)// &
+         'for args in (["eval", "-I", inc, "-o", "json", "ann.capnp", "s"],'//achar(10)// &
+         '             ["eval", "-I", inc, "-o", "text", "ann.capnp", "s"],'//achar(10)// &
+         '             ["eval", "-I", inc, "ann.capnp", "s"]):'//achar(10)// &
+         '    ref = run("capnp", args, tmp)'//achar(10)// &
+         '    if b"renamedFoo" in ref[1] or ref != run(cap, args, tmp):'//achar(10)// &
+         '        print("mismatch:", args)'//achar(10)// &
+         '        sys.exit(1)'//achar(10)// &
+         '    if ref != run(os.path.join(bare, "bin", "capnpf"), args, tmp, env):'//achar(10)// &
+         '        print("fallback mismatch:", args)'//achar(10)// &
+         '        sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'eval annotations')
+      end if
+   end subroutine run_eval_annotations
 
    !> The schema plugin must release the command argument, the request
    !> buffer, the file name, and the message on the success path and on

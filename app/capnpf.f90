@@ -206,7 +206,8 @@ contains
                rc = 1
                return
             end if
-            call load_schema(schema_path, inc_flags, no_std_inc, schema, err)
+            call load_schema(schema_path, inc_flags, no_std_inc, name, &
+               from_fmt == 'json' .or. to_fmt == 'json', schema, err)
             if (err /= CAPNP_OK) then
                call fail('cannot load schema', rc)
                return
@@ -230,7 +231,7 @@ contains
          rc = 1
          return
       end if
-      call load_schema(schema_path, inc_flags, no_std_inc, schema, err)
+      call load_schema(schema_path, inc_flags, no_std_inc, name, .false., schema, err)
       if (err /= CAPNP_OK) then
          call fail('cannot load schema', rc)
          return
@@ -328,25 +329,87 @@ contains
       q = q//"'"
    end function shell_quote
 
-   subroutine load_schema(path, extra_inc, no_std, sch, err)
-      character(len=*), intent(in) :: path, extra_inc
-      logical, intent(in) :: no_std
+   subroutine load_schema(path, extra_inc, no_std, type_name, annotations, sch, err)
+      character(len=*), intent(in) :: path, extra_inc, type_name
+      logical, intent(in) :: no_std, annotations
       type(capnp_dyn_schema_t), intent(inout), target :: sch
       integer, intent(out) :: err
-      character(len=:), allocatable :: shcmd
+      character(len=:), allocatable :: shcmd, ann, std
       integer(int8), allocatable :: bytes(:)
+      ! User -I directories come before the install include, matching
+      ! capnp 1.4.0. schema-request compiles only the requested type, so
+      ! an error in some other declaration is ignored. Without the
+      ! helper, `capnp compile` still sees user paths first.
+      if (annotations) then
+         ann = 'keep'
+      else
+         ann = 'drop'
+      end if
       if (no_std) then
-         shcmd = 'capnp compile --no-standard-import'//extra_inc//' -o- ' &
+         std = ' --no-standard-import'
+      else
+         std = ''
+      end if
+      shcmd = 'REQ=""; if test -x ./build/schema-request; then REQ=./build/schema-request;' &
+              //' elif command -v capnp-schema-request >/dev/null 2>&1;' &
+              //' then REQ=capnp-schema-request; fi;'
+      if (.not. no_std) then
+         ! The helper is not installed beside the capnp headers, so the
+         ! standard import path is the same one `capnp compile` uses.
+         ! User -I paths stay in front of it.
+         shcmd = shcmd//' INC=$(dirname $(dirname $(command -v capnp)))/include;'
+      end if
+      shcmd = shcmd//' if test -n "$REQ"; then exec "$REQ" --annotations '//ann//std &
+              //extra_inc
+      if (.not. no_std) shcmd = shcmd//' -I"$INC"'
+      shcmd = shcmd//' '//shell_quote(trim(path))//' '//shell_quote(trim(type_name))//'; fi; '
+      if (no_std) then
+         shcmd = shcmd//'capnp compile --no-standard-import'//extra_inc//' -o- ' &
                  //shell_quote(trim(path))
       else
-         shcmd = 'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
-                 //'capnp compile -I"$INC"'//extra_inc//' -o- ' &
+         shcmd = shcmd//'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
+                 //'capnp compile'//extra_inc//' -I"$INC" -o- ' &
                  //shell_quote(trim(path))
       end if
       call read_pipe(shcmd, bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(sch, bytes, err)
+      if (err == CAPNP_OK .and. .not. annotations) call drop_annotations(sch)
    end subroutine load_schema
+
+   !> Clear node, field and enumerant annotations, as the capnp tool's
+   !> DROP_ANNOTATIONS compile does. `capnp compile` keeps them.
+   subroutine drop_annotations(sch)
+      type(capnp_dyn_schema_t), intent(inout), target :: sch
+      type(capnp_ptr_t) :: lst, el
+      integer :: i, j, err
+      if (.not. allocated(sch%nodes)) return
+      do i = 1, size(sch%nodes)
+         call clear_slot(sch%nodes(i), 2)
+         select case (node_which(sch%nodes(i)))
+         case (NODE_STRUCT)
+            lst = node_struct_fields(sch%nodes(i), err)
+         case (NODE_ENUM)
+            lst = node_enumerants(sch%nodes(i), err)
+         case default
+            cycle
+         end select
+         if (err /= CAPNP_OK .or. lst%kind /= CAPNP_PK_LIST) cycle
+         do j = 0, int(capnp_list_len(lst)) - 1
+            el = capnp_list_get_struct(lst, j, err)
+            if (err == CAPNP_OK) call clear_slot(el, 1)
+         end do
+      end do
+   end subroutine drop_annotations
+
+   subroutine clear_slot(p, k)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: k
+      integer(int64) :: at
+      if (p%kind /= CAPNP_PK_STRUCT .or. k >= p%pwords) return
+      at = p%off + int(p%dwords + k, int64)*8_int64
+      p%msg%segs(p%seg)%bytes(at:at + 7_int64) = 0_int8
+   end subroutine clear_slot
 
    !> Read the stdout of a shell command. No temporary path is created.
    subroutine read_pipe(shcmd, bytes, err)
