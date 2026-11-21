@@ -539,6 +539,18 @@ contains
          end if
          call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
+            ! A reported error still prints the recovered message. An
+            ! unresolved name throws before any output.
+            if (.not. capnp_text_hard_failed()) then
+               root = capnp_root(msg, err)
+               if (err == CAPNP_OK .and. root_is_struct(root)) then
+                  call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+                  call capnp_message_free(msg)
+                  if (rc /= 0) return
+                  call fail('text decode failed', rc)
+                  return
+               end if
+            end if
             call capnp_message_free(msg)
             call fail('text decode failed', rc)
             return
