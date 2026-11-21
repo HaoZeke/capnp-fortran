@@ -3497,7 +3497,8 @@ contains
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
          //' && test -x ./build/schema-request' &
          //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
-         //' && SRC=$(cd "$(dirname "$(command -v capnp)")/../../src/capnproto-c++-1.4.0/src" && pwd)' &
+         //' && SRC="${CAPNP_SRC:-}"' &
+         //' && if [ -z "$SRC" ]; then SRC=$(cd "$(dirname "$(command -v capnp)")/../../src/capnproto-c++-1.4.0/src" && pwd); fi' &
          //' && test -f "$SRC/capnp/test.capnp"' &
          //' && printf ''(int32Field = 1)\n'' | capnp convert -I"$SRC" text:binary' &
          //' "$SRC/capnp/test.capnp" TestAllTypes > '//tmp//'/ref.bin' &
@@ -3509,7 +3510,7 @@ contains
          'const bad :Data = embed "nope.bin";'//achar(10)// &
          'struct Good { x @0 :Int32; }'//achar(10)// &
          'EOF'//achar(10)// &
-         'capnp compile -I"$INC" -o- '//tmp//'/bad.capnp >/dev/null 2>'//tmp//'/bad.err; test $? -eq 1' &
+         '{ capnp compile -I"$INC" -o- '//tmp//'/bad.capnp >/dev/null 2>'//tmp//'/bad.err; test $? -eq 1; }' &
          //' && printf ''(x = 1)\n'' | capnp convert text:binary '//tmp//'/bad.capnp Good > ' &
          //tmp//'/ref.bin' &
          //' && printf ''(x = 1)\n'' | "$CAP" convert text:binary '//tmp//'/bad.capnp Good > ' &
