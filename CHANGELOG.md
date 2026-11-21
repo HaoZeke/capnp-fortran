@@ -6,10 +6,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Pre-1.0 minor releases may include breaking API changes.
 
-## [Unreleased]
+<!-- towncrier release notes start -->
+
+## [0.4.0] - 2026-11-21
+
+### Added
+
+- `capnp_is_canonical` reports whether a message is already in canonical form.
+- `capnp_unpack_finish` rejects a packed stream that ended inside a tag, a word,
+  or a run.
+- `capnp_unpack` takes an optional `max_words` bound.
+- `capnp_read_message`, `capnp_read_message_packed`, `capnp_read_message_unit`,
+  and `capnp_read_message_packed_unit` take optional `traversal_words` and
+  `depth_limit` arguments.
+- `rpc_recv_message` takes an optional `traversal_words` argument.
 
 ### Fixed
 
+- Reader framing, traversal accounting, pointer resolution, canonical form,
+  packed boundaries, and list-depth checks now match Cap'n Proto C++ edge
+  cases more closely. This includes empty flat arrays, empty stream files,
+  large flat segment tables, 511-segment stream limits, far-pointer landing
+  pads, malformed capability pointers, and zero-size lists.
+- A list longer than `2^29-1` elements is rejected, and a composite list
+  count is read as unsigned.
+- Replacing or copying pointers now clears prior storage safely, including
+  cross-message copy failures and cyclic far-pointer chains.
+- RPC framing applies `AsyncMessageReader` segment and traversal limits before
+  allocation, rejects negative traversal limits, and leaves invalid frames
+  unread. POSIX reads retry after `EINTR`.
 - The emitter's identifier hash no longer relies on signed 64-bit overflow,
   which UBSan aborts on for long schema names. It computes the same
   two's-complement value from 32-bit halves, so generated names stay the same.
@@ -231,6 +256,7 @@ optional C ABI, and two-party RPC).
 - Optional C++ RPC peer and cmocka golden master require the `interop` pixi environment
   and system Cap'n Proto / C++ tooling as documented under `interop/`.
 
+[0.4.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/HaoZeke/capnp-fortran/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.4...v0.3.0
 [0.2.4]: https://github.com/HaoZeke/capnp-fortran/compare/v0.2.3...v0.2.4
