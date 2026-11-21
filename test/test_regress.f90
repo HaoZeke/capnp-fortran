@@ -3564,7 +3564,7 @@ contains
          'import os, subprocess, sys'//achar(10)// &
          'from pathlib import Path'//achar(10)// &
          'd = Path("'//tmp//'")'//achar(10)// &
-         'd.joinpath("null.bin").write_bytes(bytes(8) + bytes([1, 0, 0, 0]) + bytes(8))'//achar(10)// &
+         'd.joinpath("null.bin").write_bytes(bytes(4) + bytes([1, 0, 0, 0]) + bytes(8))'//achar(10)// &
          'd.joinpath("null.flat").write_bytes(bytes(8))'//achar(10)// &
          'inc = os.environ["INC"]; cap = os.environ["CAP"]'//achar(10)// &
          'def run(tool, spec, data):'//achar(10)// &
