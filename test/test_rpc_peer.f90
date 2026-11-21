@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(44))
+      allocate (testsuite(45))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -121,6 +121,8 @@ contains
       testsuite(43)%test => t_dis_unimpl_text
       testsuite(44)%name = "pipeline-preserves-exception-type"
       testsuite(44)%test => t_pipeline_exc_type
+      testsuite(45)%name = "proxy-pin-frees-released-export-id"
+      testsuite(45)%test => t_proxy_pin_frees_id
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -2126,6 +2128,54 @@ contains
       call capnp_message_free(rm)
       call close_peer(conn, fd)
    end subroutine t_pipeline_exc_type
+
+   !> A resolved proxy export pins its target server without locking its
+   !> export id once the peer releases all wire references, matching C++.
+   subroutine t_proxy_pin_frees_id(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      type(echo_srv_t), target :: extra
+      class(rpc_server_t), pointer :: srv, sp
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(capnp_ptr_t) :: s
+      character(len=:), allocatable :: a, b, c, d
+      integer(int64) :: k, eid
+      integer :: fd, e, i, idx
+      mix%inner => made
+      srv => mix
+      sp => extra
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'proxy-pin-free: call 2 is not deferred')
+         call close_peer(conn, fd)
+         return
+      end if
+      idx = rpc_ctx_export_cap(ctx, sp, e)
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, idx), e)
+      call payload_content_set(ctx%results, s, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      i = index(c, '[sh')
+      eid = -1_int64
+      if (i > 0) read (c(i + 3:index(c(i:), ']') + i - 2), *) eid
+      call wrel(fd, eid, 2_int64)
+      a = step(conn, fd, 1)
+      call wcall(fd, 7_int64, 2, -1_int64, NOCAPS, NOIDS)
+      d = step(conn, fd, 1)
+      call check(error, eid >= 0_int64 .and. index(d, '[sh'//itoa(eid)//']') > 0, &
+                 'proxy-pin-free: expected reuse of sh'//itoa(eid)//', got '//c//' / '//d)
+      call close_peer(conn, fd)
+   end subroutine t_proxy_pin_frees_id
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i

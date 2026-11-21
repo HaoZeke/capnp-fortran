@@ -246,6 +246,9 @@ module capnp_rpc
       !> Pins of deferred calls on this server. They keep the server,
       !> and C++ frees the id all the same.
       integer :: call_pins = 0
+      !> Pins of resolved proxy exports on this server. C++ keeps the
+      !> ClientHook and frees the export id once wire refs reach zero.
+      integer :: proxy_pins = 0
       class(*), pointer :: srv => null()
       !> True when dropping the last reference must deallocate srv.
       logical :: owned = .false.
@@ -4800,7 +4803,11 @@ contains
          end if
          if (srv%eid >= 0) then
             if (eslot_ok(conn, int(srv%eid, int64))) then
-               if (conn%exports(srv%eid)%used) conn%exports(srv%eid)%unindexed = .true.
+               if (conn%exports(srv%eid)%used) then
+                  conn%exports(srv%eid)%unindexed = .true.
+                  if (conn%exports(srv%eid)%proxy_pins > 0) &
+                     conn%exports(srv%eid)%proxy_pins = conn%exports(srv%eid)%proxy_pins - 1
+               end if
             end if
             call drop_export_pin(conn, srv%eid)
             srv%eid = -1
@@ -4889,6 +4896,7 @@ contains
                if (eslot_ok(conn, id)) then
                   if (conn%exports(int(id))%used) then
                      call pin_export(conn, int(id))
+                     conn%exports(int(id))%proxy_pins = conn%exports(int(id))%proxy_pins + 1
                      px%eid = int(id)
                   end if
                end if
@@ -5153,6 +5161,7 @@ contains
             conn%exports(i)%pins = 0
             conn%exports(i)%answer_pins = 0
             conn%exports(i)%call_pins = 0
+            conn%exports(i)%proxy_pins = 0
             call retain_server(srv)
             conn%exports(i)%srv => srv
             conn%exports(i)%owned = own
@@ -6325,6 +6334,7 @@ contains
                   if (peid >= 0) then
                      call cap_descriptor_sender_hosted_set(cd, int(peid, int64), e)
                      call pin_export(conn, peid)
+                     conn%exports(peid)%proxy_pins = conn%exports(peid)%proxy_pins + 1
                      px%eid = peid
                   else
                      call cap_descriptor_none_set(cd, e)
@@ -9758,7 +9768,8 @@ contains
       export_released = conn%exports(i)%used .and. conn%exports(i)%refcount <= 0 .and. &
                         conn%exports(i)%pins > 0 .and. &
                         conn%exports(i)%pins == conn%exports(i)%answer_pins + &
-                        conn%exports(i)%call_pins + conn%exports(i)%dispatching
+                        conn%exports(i)%call_pins + conn%exports(i)%proxy_pins + &
+                        conn%exports(i)%dispatching
    end function export_released
 
    !> Enter a dispatch of export `at`; the caller holds a pin on it.
@@ -9823,6 +9834,13 @@ contains
             d => d%next
          end do
       end block
+      do k = 0, size(conn%exports) - 1
+         if (.not. conn%exports(k)%used) cycle
+         select type (px => conn%exports(k)%srv)
+         type is (rpc_pipe_proxy_t)
+            if (px%eid == i) px%eid = j
+         end select
+      end do
       do k = 0, MAXQ - 1
          call retarget_pins(conn%answers(k), i, j)
       end do
@@ -9966,6 +9984,7 @@ contains
       conn%exports(eid)%pins = 0
       conn%exports(eid)%answer_pins = 0
       conn%exports(eid)%call_pins = 0
+      conn%exports(eid)%proxy_pins = 0
       conn%exports(eid)%dispatching = 0
       call release_server(held)
    end subroutine drop_export_pin
@@ -9999,6 +10018,7 @@ contains
          conn%exports(eid)%pins = 0
          conn%exports(eid)%answer_pins = 0
          conn%exports(eid)%call_pins = 0
+         conn%exports(eid)%proxy_pins = 0
          conn%exports(eid)%dispatching = 0
          call release_server(held)
       end if
