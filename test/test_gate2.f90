@@ -32,6 +32,7 @@ program test_gate2
    call case_29()
    call case_30()
    call case_31()
+   call case_wide()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -933,4 +934,19 @@ contains
          achar(39) // &
          ' /tmp/g2-big.e')
    end subroutine case_31
+
+
+   subroutine case_wide()
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer(int8) :: b
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      if (err /= 0) error stop 1
+      lst = capnp_new_list(msg, CAPNP_SZ_TWO, 1_int64, err)
+      call capnp_list_set_i16(lst, 0_int64, 513_int16, err)
+      b = capnp_list_get_i8(lst, 0_int64, err)
+      if (err /= 0 .or. b /= 1_int8) error stop 1
+      call capnp_message_free(msg)
+   end subroutine case_wide
 end program test_gate2

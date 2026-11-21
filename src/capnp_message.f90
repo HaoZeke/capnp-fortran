@@ -1016,14 +1016,31 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
-      if (capnp_list_step_bits(p%esize) == want_bits .and. p%esize /= CAPNP_SZ_PTR) then
-         base = p%off + i*int(want_bits/8, int64)
+      ! A primitive list may be stored wider than the schema type. The
+      ! value is the low-order bytes of each element (layout.c++ requires
+      ! dataSize >= expected). A narrower list, a pointer list, and a
+      ! pointer-only composite are kind errors.
+      if (wider_data_step(p%esize) >= want_bits .and. wider_data_step(p%esize) > 0) then
+         base = p%off + i*int(wider_data_step(p%esize)/8, int64)
       else if (p%esize == CAPNP_SZ_COMPOSITE .and. p%dwords >= 1) then
          base = p%off + i*int(p%dwords + p%pwords, int64)*8_int64
       else
          err = CAPNP_ERR_KIND
       end if
    end function list_elem_base
+
+   !> Byte stride, in bits, of a data element that can widen. Zero when
+   !> the size is void, bit, pointer, or composite.
+   pure function wider_data_step(esize) result(bits)
+      integer, intent(in) :: esize
+      integer :: bits
+      select case (esize)
+      case (CAPNP_SZ_BYTE, CAPNP_SZ_TWO, CAPNP_SZ_FOUR, CAPNP_SZ_EIGHT)
+         bits = capnp_list_step_bits(esize)
+      case default
+         bits = 0
+      end select
+   end function wider_data_step
 
    !> True when a bulk primitive read can address every element. Checked
    !> once, before the host array is allocated.
@@ -1775,8 +1792,13 @@ contains
       integer(int64) :: byte
       err = CAPNP_OK
       v = .false.
-      if (p%kind /= CAPNP_PK_LIST .or. p%esize /= CAPNP_SZ_BIT .or. &
-          .not. associated(p%msg)) then
+      if (p%kind /= CAPNP_PK_LIST .or. .not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      ! Bool lists ignore the element stride and read packed bits. A byte
+      ! or wider data list is accepted; a composite list is not.
+      if (p%esize /= CAPNP_SZ_BIT .and. wider_data_step(p%esize) == 0) then
          err = CAPNP_ERR_KIND
          return
       end if
