@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(47))
+      allocate (testsuite(53))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -110,6 +110,12 @@ contains
       testsuite(45) = new_unittest("shorthand-first-field", run_shorthand_first)
       testsuite(46) = new_unittest("stream-pointer-kind", run_stream_kind)
       testsuite(47) = new_unittest("cycle-guard", run_cycle_guard)
+      testsuite(48) = new_unittest("quiet-empty", run_quiet_empty)
+      testsuite(49) = new_unittest("json-value", run_json_value)
+      testsuite(50) = new_unittest("void-list-json", run_void_list_json)
+      testsuite(51) = new_unittest("schema-lenient", run_schema_lenient)
+      testsuite(52) = new_unittest("flat-tail", run_flat_tail)
+      testsuite(53) = new_unittest("null-root-wire", run_null_root_wire)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -1139,8 +1145,9 @@ contains
          'pid = os.getpid()'//achar(10)// &
          'Path("'//tmp//'/pid").write_text(str(pid))'//achar(10)// &
          'kept = Path("'//tmp//'/kept")'//achar(10)// &
+         'root = Path("'//tmp//'")'//achar(10)// &
          'for i in range(1, 81):'//achar(10)// &
-         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    p = root / ("capnpf-%d.cgr" % (pid + i))'//achar(10)// &
          '    if p.is_symlink() or p.exists():'//achar(10)// &
          '        p.unlink()'//achar(10)// &
          '    p.symlink_to(kept)'//achar(10)// &
@@ -1152,12 +1159,14 @@ contains
          'python3 - <<''PY'''//achar(10)// &
          'from pathlib import Path'//achar(10)// &
          'pid = int(Path("'//tmp//'/pid").read_text())'//achar(10)// &
+         'root = Path("'//tmp//'")'//achar(10)// &
          'for i in range(1, 81):'//achar(10)// &
-         '    p = Path("/tmp/capnpf-%d.cgr" % (pid + i))'//achar(10)// &
+         '    p = root / ("capnpf-%d.cgr" % (pid + i))'//achar(10)// &
          '    if p.is_symlink() or p.exists():'//achar(10)// &
          '        p.unlink()'//achar(10)// &
          'PY'//achar(10)// &
-         'test "$ok" = 1' &
+         'test ! -e /tmp/capnpf-$(cat "'//tmp//'/pid").cgr && ' &
+         //'test "$ok" = 1' &
          //' && printf "(x = 1, y = 2, z = 3)\n" | capnp encode' &
          //' schema/common.capnp Vec3 > '//tmp//'/pipe.ref')) then
          call test_failed(error, 'schema pipe encode failed')
@@ -3322,14 +3331,248 @@ contains
          'for i in range(100):'//achar(10)// &
          '    words.append(0 if i == 99 else sp(0,0,1))'//achar(10)// &
          'd.joinpath("deep.bin").write_bytes(msg(words))'//achar(10)// &
+         'def pack(data):'//achar(10)// &
+         '    out = bytearray(); i = 0; n = len(data)'//achar(10)// &
+         '    while i < n:'//achar(10)// &
+         '        word = data[i:i + 8]'//achar(10)// &
+         '        if len(word) < 8: word = word + bytes(8 - len(word))'//achar(10)// &
+         '        if word == bytes(8):'//achar(10)// &
+         '            z = 0; i += 8'//achar(10)// &
+         '            while i < n and data[i:i + 8] == bytes(8) and z < 255:'//achar(10)// &
+         '                z += 1; i += 8'//achar(10)// &
+         '            out.append(0); out.append(z); continue'//achar(10)// &
+         '        tag = 0; nz = bytearray()'//achar(10)// &
+         '        for b in range(8):'//achar(10)// &
+         '            if word[b]: tag |= 1 << b; nz.append(word[b])'//achar(10)// &
+         '        out.append(tag); out.extend(nz); i += 8'//achar(10)// &
+         '    return bytes(out)'//achar(10)// &
+         'd.joinpath("cycle.pk").write_bytes(pack(d.joinpath("cycle.bin").read_bytes()))'//achar(10)// &
+         'd.joinpath("deep.pk").write_bytes(pack(d.joinpath("deep.bin").read_bytes()))'//achar(10)// &
          'PY'//achar(10)// &
          'rc=0; "$CAP" convert binary:binary < '//tmp//'/cycle.bin > ' &
          //tmp//'/cycle.out 2>'//tmp//'/cycle.err || rc=$?' &
          //'; test "$rc" -eq 1 && test -s '//tmp//'/cycle.err' &
          //' && "$CAP" convert binary:binary < '//tmp//'/deep.bin > ' &
-         //tmp//'/deep.out && test -s '//tmp//'/deep.out')) then
+         //tmp//'/deep.out && test -s '//tmp//'/deep.out' &
+         //' && for spec in binary:canonical binary:flat binary:flat-packed; do' &
+         //' rc=0; "$CAP" convert "$spec" < '//tmp//'/cycle.bin > /dev/null 2>' &
+         //tmp//'/cycle.err || rc=$?; test "$rc" -eq 1 || exit 1;' &
+         //' "$CAP" convert "$spec" < '//tmp//'/deep.bin > '//tmp//'/deep.out || exit 1;' &
+         //' test -s '//tmp//'/deep.out || exit 1; done' &
+         //' && rc=0; "$CAP" convert packed:canonical < '//tmp//'/cycle.pk > /dev/null 2>' &
+         //tmp//'/cycle.err || rc=$?; test "$rc" -eq 1' &
+         //' && "$CAP" convert packed:canonical < '//tmp//'/deep.pk > '//tmp//'/deep.out' &
+         //' && test -s '//tmp//'/deep.out')) then
          call test_failed(error, 'cycle: binary copy exits 1')
       end if
    end subroutine run_cycle_guard
+
+   !> Empty convert and decode match capnp 1.4.0, including --quiet.
+   !> encode rejects --quiet. Whitespace is not an empty stream.
+   subroutine run_quiet_empty(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'inc = os.environ["INC"]'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'S, T = "schema/codec.capnp", "Sample"'//achar(10)// &
+         'specs = ("text:text text:binary text:json binary:text binary:binary "'//achar(10)// &
+         '         "binary:packed binary:flat binary:flat-packed binary:canonical "'//achar(10)// &
+         '         "packed:text packed:canonical flat:text flat-packed:text "'//achar(10)// &
+         '         "canonical:text json:text json:json").split()'//achar(10)// &
+         'def once(tool, args, data):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'for spec in specs:'//achar(10)// &
+         '    for quiet in (False, True):'//achar(10)// &
+         '        for data in (b"", b" ", b"\n"):'//achar(10)// &
+         '            args = ["convert", "-I", inc]'//achar(10)// &
+         '            if quiet: args.append("--quiet")'//achar(10)// &
+         '            args += [spec, S, T]'//achar(10)// &
+         '            if once("capnp", args, data) != once(cap, args, data): sys.exit(1)'//achar(10)// &
+         'pairs = ['//achar(10)// &
+         '    ["decode", "-I", inc, S, T],'//achar(10)// &
+         '    ["decode", "-I", inc, "--quiet", S, T],'//achar(10)// &
+         '    ["encode", "-I", inc, S, T],'//achar(10)// &
+         '    ["encode", "-I", inc, "--quiet", S, T],'//achar(10)// &
+         ']'//achar(10)// &
+         'for args in pairs:'//achar(10)// &
+         '    if once("capnp", args, b"") != once(cap, args, b""): sys.exit(1)'//achar(10)// &
+         'if once(cap, ["encode", "-I", inc, "--quiet", S, T], b"")[0] != 1: sys.exit(1)'//achar(10)// &
+         'z = bytes(8)'//achar(10)// &
+         'for spec in ("binary:text", "binary:binary", "binary:flat", "binary:packed"):'//achar(10)// &
+         '    args = ["convert", spec, S, T]'//achar(10)// &
+         '    if once("capnp", args, z) != once(cap, args, z): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'quiet empty stream')
+      end if
+   end subroutine run_quiet_empty
+
+   !> Json.Value is the JSON value, including arrays, strings, and null.
+   subroutine run_json_value(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && J=$INC/capnp/compat/json.capnp' &
+         //' && cat > '//tmp//'/wrap.capnp <<''EOF'''//achar(10)// &
+         '@0x91b3c4d5e6f70819;'//achar(10)// &
+         'using Json = import "/capnp/compat/json.capnp";'//achar(10)// &
+         'struct Wrap { innerJson @0 :Json.Value; }'//achar(10)// &
+         'EOF'//achar(10)// &
+         'export CAP INC J="$INC/capnp/compat/json.capnp" WRAP='//tmp//'/wrap.capnp'//achar(10)// &
+         'python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'inc = os.environ["INC"]'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'j = os.environ["J"]'//achar(10)// &
+         'wrap = os.environ["WRAP"]'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'raw = b''{"innerJson":[123,"hello",null,{"object":true}]}'''//achar(10)// &
+         'args = ["convert", "-I", inc, "json:binary", wrap, "Wrap"]'//achar(10)// &
+         'if run("capnp", args, raw) != run(cap, args, raw): sys.exit(1)'//achar(10)// &
+         'blob = run("capnp", args, raw)[1]'//achar(10)// &
+         'args = ["convert", "-I", inc, "binary:json", "--short", wrap, "Wrap"]'//achar(10)// &
+         'if run("capnp", args, blob) != run(cap, args, blob): sys.exit(1)'//achar(10)// &
+         'for raw in (b"null", b''"hello"'', b''[1,"x",null]''):'//achar(10)// &
+         '    args = ["convert", "-I", inc, "--quiet", "json:json", "--short", j, "Value"]'//achar(10)// &
+         '    if run("capnp", args, raw) != run(cap, args, raw): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'json value')
+      end if
+   end subroutine run_json_value
+
+   !> List(Void) is a JSON array of null, in short and pretty form.
+   subroutine run_void_list_json(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'raw = b"(vls = [" + b", ".join([b"void"] * 64) + b"])\n"'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'for extra in ([], ["--short"]):'//achar(10)// &
+         '    args = ["convert", *extra, "text:json", "schema/codec.capnp", "VoidPayload"]'//achar(10)// &
+         '    if run("capnp", args, raw) != run(cap, args, raw): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'void list json')
+      end if
+   end subroutine run_void_list_json
+
+   !> convert accepts a type whose file has an unused error, and a user
+   !> -I that overlaps the standard schemas.
+   subroutine run_schema_lenient(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('test -x ./build/schema-request')) then
+         call skip_test(error, 'build/schema-request is missing; scripts/fypp-gen.sh builds it')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && test -x ./build/schema-request' &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && SRC=$(cd "$(dirname "$(command -v capnp)")/../../src/capnproto-c++-1.4.0/src" && pwd)' &
+         //' && test -f "$SRC/capnp/test.capnp"' &
+         //' && printf ''(int32Field = 1)\n'' | capnp convert -I"$SRC" text:binary' &
+         //' "$SRC/capnp/test.capnp" TestAllTypes > '//tmp//'/ref.bin' &
+         //' && printf ''(int32Field = 1)\n'' | "$CAP" convert -I"$SRC" text:binary' &
+         //' "$SRC/capnp/test.capnp" TestAllTypes > '//tmp//'/ours.bin' &
+         //' && cmp -s '//tmp//'/ref.bin '//tmp//'/ours.bin' &
+         //' && cat > '//tmp//'/bad.capnp <<''EOF'''//achar(10)// &
+         '@0x8123456789abcdef;'//achar(10)// &
+         'const bad :Data = embed "nope.bin";'//achar(10)// &
+         'struct Good { x @0 :Int32; }'//achar(10)// &
+         'EOF'//achar(10)// &
+         'capnp compile -I"$INC" -o- '//tmp//'/bad.capnp >/dev/null 2>'//tmp//'/bad.err; test $? -eq 1' &
+         //' && printf ''(x = 1)\n'' | capnp convert text:binary '//tmp//'/bad.capnp Good > ' &
+         //tmp//'/ref.bin' &
+         //' && printf ''(x = 1)\n'' | "$CAP" convert text:binary '//tmp//'/bad.capnp Good > ' &
+         //tmp//'/ours.bin' &
+         //' && cmp -s '//tmp//'/ref.bin '//tmp//'/ours.bin' &
+         //' && printf ''(title = missing)\n'' | capnp convert -I"$INC" text:text' &
+         //' schema/codec.capnp Sample >/dev/null 2>'//tmp//'/ref.err; echo $? > '//tmp//'/ref.rc' &
+         //' && printf ''(title = missing)\n'' | "$CAP" convert -I"$INC" text:text' &
+         //' schema/codec.capnp Sample >/dev/null 2>'//tmp//'/ours.err; echo $? > '//tmp//'/ours.rc' &
+         //' && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc && test "$(cat '//tmp//'/ref.rc)" = 1')) then
+         call test_failed(error, 'schema lenient')
+      end if
+   end subroutine run_schema_lenient
+
+   !> A partial trailing word of flat input is ignored.
+   subroutine run_flat_tail(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && printf ''(big = 1)\n'' | capnp convert -I"$INC" text:flat' &
+         //' schema/codec.capnp Sample > '//tmp//'/msg.flat' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'p = Path("'//tmp//'/msg.flat")'//achar(10)// &
+         'p.write_bytes(p.read_bytes() + b"\x01\x02\x03")'//achar(10)// &
+         'PY'//achar(10)// &
+         'capnp convert -I"$INC" flat:text schema/codec.capnp Sample < '//tmp//'/msg.flat > ' &
+         //tmp//'/ref; echo $? > '//tmp//'/ref.rc' &
+         //' && "$CAP" convert -I"$INC" flat:text schema/codec.capnp Sample < '//tmp//'/msg.flat > ' &
+         //tmp//'/ours; echo $? > '//tmp//'/ours.rc' &
+         //' && cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc' &
+         //' && test "$(cat '//tmp//'/ref.rc)" = 0')) then
+         call test_failed(error, 'flat trailing word')
+      end if
+   end subroutine run_flat_tail
+
+   !> A null root is a zero-size struct pointer on binary, packed, and flat.
+   subroutine run_null_root_wire(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'from pathlib import Path'//achar(10)// &
+         'd = Path("'//tmp//'")'//achar(10)// &
+         'd.joinpath("null.bin").write_bytes(bytes(8) + bytes([1, 0, 0, 0]) + bytes(8))'//achar(10)// &
+         'd.joinpath("null.flat").write_bytes(bytes(8))'//achar(10)// &
+         'inc = os.environ["INC"]; cap = os.environ["CAP"]'//achar(10)// &
+         'def run(tool, spec, data):'//achar(10)// &
+         '    p = subprocess.run([tool, "convert", "-I", inc, spec, "schema/codec.capnp", "Sample"],'//achar(10)// &
+         '                       input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'framed = (d / "null.bin").read_bytes(); flat = (d / "null.flat").read_bytes()'//achar(10)// &
+         'for spec, data in (('//achar(10)// &
+         '    "binary:binary", framed), ("binary:packed", framed), ("binary:flat", framed),'//achar(10)// &
+         '    ("binary:text", framed), ("flat:binary", flat), ("flat:text", flat)):'//achar(10)// &
+         '    if run("capnp", spec, data) != run(cap, spec, data): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'null root wire')
+      end if
+   end subroutine run_null_root_wire
 
 end module test_regress

@@ -2,6 +2,7 @@
 module test_limits
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, &
         skip_test
+   use, intrinsic :: iso_c_binding, only: c_int
    use capnp
    use capnp_dynamic
    use capnp_text
@@ -9,14 +10,36 @@ module test_limits
    use cli_path, only: capnpf_setup
    implicit none
    private
-   public :: collect_limits
+   public :: collect_limits, release_limits_tmp
 
-   character(len=*), parameter :: tmp = '/tmp/capnpf-limits'
+   character(len=:), allocatable :: tmp
+
+   interface
+      function c_getpid() bind(c, name="getpid") result(pid)
+         import :: c_int
+         integer(c_int) :: pid
+      end function c_getpid
+   end interface
 
 contains
 
+   subroutine init_tmp()
+      character(len=16) :: buf
+      integer(c_int) :: pid
+      if (allocated(tmp)) return
+      pid = c_getpid()
+      write (buf, '(i0)') pid
+      tmp = '/tmp/capnpf-limits-'//trim(buf)
+   end subroutine init_tmp
+
+   subroutine release_limits_tmp()
+      if (.not. allocated(tmp)) return
+      if (.not. sh('rm -rf '//tmp)) return
+   end subroutine release_limits_tmp
+
    subroutine collect_limits(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
+      call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(7))

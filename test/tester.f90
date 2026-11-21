@@ -23,7 +23,7 @@ program tester
    use test_idents, only: collect_idents
    use test_regress, only: collect_regress, release_regress_tmp
    use test_edges, only: collect_edges, release_edges_tmp
-   use test_limits, only: collect_limits
+   use test_limits, only: collect_limits, release_limits_tmp
    use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
@@ -46,6 +46,7 @@ program tester
             call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
             if (stat < 0) then
                call release_temps()
+               call drop_suites(testsuites)
                error stop 1
             end if
          else
@@ -58,6 +59,7 @@ program tester
             write (error_unit, fmt) "-", testsuites(is)%name
          end do
          call release_temps()
+         call drop_suites(testsuites)
          error stop 1
       end if
    else
@@ -70,8 +72,10 @@ program tester
    call release_temps()
    if (stat > 0) then
       write (error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
+      call drop_suites(testsuites)
       error stop 1
    end if
+   call drop_suites(testsuites)
 
 contains
 
@@ -106,5 +110,11 @@ contains
       call release_codecs_tmp()
       call release_regress_tmp()
       call release_edges_tmp()
+      call release_limits_tmp()
    end subroutine release_temps
+
+   subroutine drop_suites(testsuites)
+      type(testsuite_type), allocatable, intent(inout) :: testsuites(:)
+      if (allocated(testsuites)) deallocate (testsuites)
+   end subroutine drop_suites
 end program tester

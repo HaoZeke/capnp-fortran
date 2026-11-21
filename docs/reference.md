@@ -158,7 +158,9 @@ It recognizes quoted strings while splitting, so parentheses and `#` inside
 a string do not end a message. The capnp 1.4.0 command-line splitter counts
 those characters and can reject the same valid stream.
 
-External constants and embedded files are not accepted.
+External constants and embedded files are not accepted. capnp 1.4.0
+rejects them as well (`External constants not allowed.`,
+`External embeds not allowed.`).
 
 ## JSON (`capnp_json`)
 
@@ -182,7 +184,9 @@ applied in document order, and a value that appears before the tag is
 applied after it. A repeated known tag is rejected. A void value accepts
 any payload. A flattened struct is reused for later keys in the same
 object, and a nested flattened union keeps the tag it already saw.
-A non-string discriminator is rejected. Unknown JSON fields
+A field whose type is `capnp/compat/json.capnp` `Value` is the JSON
+value itself: an array, a string, null, a number, a boolean, an object,
+or a raw text value. A non-string discriminator is rejected. Unknown JSON fields
 are ignored on decode. Every occurrence of a key is decoded. A string
 that is not a number becomes zero, later keys still apply, and the
 decode fails.
@@ -224,11 +228,16 @@ count for every segment. Flat, flat-packed, and canonical output
 write every message on the input, one after another. `eval` traverses
 constants, struct field defaults, groups, and arbitrarily deep `.field` and
 `[index]` paths, and emits struct targets in any supported format.
-An empty convert input exits 1 with `empty input` on stderr. capnp 1.4.0
-exits 1 for that stream and reports `Premature EOF`, unless `--quiet` is
-set, in which case capnp exits 0. `--quiet` on capnpf does not hide the
-empty-input error. capnpf also does not reject plausible input based on a
-command-line format sniff before the selected decoder runs.
+An empty `convert` or `decode` input exits 1 with `empty input` on
+stderr. `--quiet` skips that read, matching capnp 1.4.0, and the empty
+stream exits 0 with no output. `encode` has no `--quiet` option; the
+flag is an error on both tools. User `-I` directories are searched
+before the standard import path. `convert` compiles the requested type
+and leaves an error in some other declaration uncompiled, matching
+capnp 1.4.0. A partial trailing word of flat input is dropped. A null
+root is written as a zero-size struct pointer. capnpf does not reject
+plausible input based on a command-line format sniff before the
+selected decoder runs.
 
 ## Canonical form (`capnp_canonical`)
 
