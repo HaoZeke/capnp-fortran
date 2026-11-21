@@ -43,6 +43,8 @@ module capnp_json
    integer, save :: union_seen_n = 0
    logical, save :: ptr_kind_bad = .false.
    logical, save :: number_bad = .false.
+   !> A numeric value was truncated or saturated. The message is kept.
+   logical, save :: value_bad = .false.
    integer, allocatable, save :: union_seen_seg(:)
    integer(int64), allocatable, save :: union_seen_off(:)
    integer, allocatable, save :: union_seen_disc(:)
@@ -189,6 +191,7 @@ contains
          return
       end if
       number_bad = .false.
+      value_bad = .false.
       sc%s = text
       nul = index(text, achar(0))
       if (nul > 0) then
@@ -219,16 +222,17 @@ contains
          ! A later type error drops the recoverable number flag, so the
          ! caller prints nothing for this message.
          number_bad = .false.
+         value_bad = .false.
          return
       end if
-      if (number_bad) err = CAPNP_ERR_ARG
+      if (number_bad .or. value_bad) err = CAPNP_ERR_ARG
    end subroutine capnp_json_decode
 
    !> True when the last decode stored zero for a string that was not a
    !> number. The message is complete. capnp 1.4.0 reports that failure
    !> and still writes the message.
    logical function capnp_json_number_failed() result(y)
-      y = number_bad
+      y = number_bad .or. value_bad
    end function capnp_json_number_failed
 
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
@@ -1704,10 +1708,18 @@ contains
          call j_signed(jv, iv, err)
          if (err /= CAPNP_OK) return
          call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
+         if (err == CAPNP_ERR_ARG) then
+            value_bad = .true.
+            err = CAPNP_OK
+         end if
       case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call j_unsigned(jv, iv, err)
          if (err /= CAPNP_OK) return
          call capnp_put_unsigned(p, off, tw, iv, in_list, ix, dv, err)
+         if (err == CAPNP_ERR_ARG) then
+            value_bad = .true.
+            err = CAPNP_OK
+         end if
       case (TYPE_FLOAT32, TYPE_FLOAT64)
          call j_float(jv, fv, err)
          if (err /= CAPNP_OK) return
@@ -1803,13 +1815,15 @@ contains
          call recover_i64(iv, err)
       else if (jv%k == JK_NUM .and. allocated(jv%str)) then
          if (json_int_token(jv%str)) then
-            call kj_parse_i64(jv%str, iv, err)
-            if (err /= CAPNP_OK) call capnp_f64_to_i64(jv%num, iv, err)
+            call signed_int_token(jv%str, iv, err)
+            ! A token wider than Uint64 is the double capnp 1.4.0 reads.
+            ! -9223372036854775809 lands on Int64 min and is accepted.
+            if (err /= CAPNP_OK) call signed_from_f64(jv%num, iv, err)
          else
-            call capnp_f64_to_i64(jv%num, iv, err)
+            call signed_from_f64(jv%num, iv, err)
          end if
       else if (jv%k == JK_NUM) then
-         call capnp_f64_to_i64(jv%num, iv, err)
+         call signed_from_f64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
@@ -1829,16 +1843,80 @@ contains
             iv = 0_int64
          else if (json_int_token(jv%str)) then
             call kj_parse_u64(jv%str, iv, err)
-            if (err /= CAPNP_OK) call capnp_f64_to_u64(jv%num, iv, err)
+            if (err /= CAPNP_OK) then
+               ! An integer token outside Uint64 becomes zero.
+               iv = 0_int64
+               err = CAPNP_OK
+               value_bad = .true.
+            end if
          else
-            call capnp_f64_to_u64(jv%num, iv, err)
+            call unsigned_from_f64(jv%num, iv, err)
          end if
       else if (jv%k == JK_NUM) then
-         call capnp_f64_to_u64(jv%num, iv, err)
+         call unsigned_from_f64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
    end subroutine j_unsigned
+
+   !> An integer token wider than Int64. A magnitude that fits in Uint64
+   !> keeps its bits. A larger magnitude is left for the double path.
+   subroutine signed_int_token(tok, iv, err)
+      character(len=*), intent(in) :: tok
+      integer(int64), intent(out) :: iv
+      integer, intent(out) :: err
+      call kj_parse_i64(tok, iv, err)
+      if (err == CAPNP_OK) return
+      call kj_parse_u64(tok, iv, err)
+      if (err == CAPNP_OK) then
+         ! 2^63 is the sign bit. The stored value is the minimum Int64.
+         value_bad = .true.
+         return
+      end if
+      ! Wider than Uint64. The caller reads the token as a double.
+      err = CAPNP_ERR_ARG
+   end subroutine signed_int_token
+
+   subroutine signed_from_f64(x, iv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: iv
+      integer, intent(out) :: err
+      real(real64), parameter :: min_i64_f64 = -9223372036854775808.0_real64
+      real(real64), parameter :: max_i64_f64 = 9223372036854774784.0_real64
+      integer(int64), parameter :: min_i64 = int(z'8000000000000000', int64)
+      integer(int64), parameter :: max_i64 = 9223372036854775807_int64
+      call capnp_f64_to_i64(x, iv, err)
+      if (err == CAPNP_OK) return
+      value_bad = .true.
+      err = CAPNP_OK
+      if ((.not. ieee_finite(x) .and. x < 0.0_real64) .or. x < min_i64_f64) then
+         iv = min_i64
+      else if (.not. ieee_finite(x) .or. x > max_i64_f64) then
+         iv = max_i64
+      else
+         iv = int(aint(x), int64)
+      end if
+   end subroutine signed_from_f64
+
+   subroutine unsigned_from_f64(x, iv, err)
+      real(real64), intent(in) :: x
+      integer(int64), intent(out) :: iv
+      integer, intent(out) :: err
+      real(real64), parameter :: max_u64_f64 = 18446744073709549568.0_real64
+      integer(int64), parameter :: max_u64 = -1_int64
+      call capnp_f64_to_u64(x, iv, err)
+      if (err == CAPNP_OK) return
+      value_bad = .true.
+      err = CAPNP_OK
+      if (x < 0.0_real64 .or. (.not. ieee_finite(x) .and. x < 0.0_real64)) then
+         iv = 0_int64
+      else if (.not. ieee_finite(x) .or. x > max_u64_f64) then
+         iv = max_u64
+      else
+         call capnp_f64_to_u64(aint(x), iv, err)
+         err = CAPNP_OK
+      end if
+   end subroutine unsigned_from_f64
 
    function json_list_ok(et, lst) result(ok)
       type(capnp_ptr_t), intent(in) :: et, lst
