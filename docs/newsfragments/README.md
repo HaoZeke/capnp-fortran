@@ -16,4 +16,5 @@ section use a compare link, placed with the other links at the bottom of
 `CHANGELOG.md`.
 
 A docs-only or CI-only pull request can include a `dev` fragment or the
-`skip-changelog` label. The towncrier check passes when that label is set.
+`skip-changelog` label. The towncrier check skips pull requests with that
+label and pull requests from `dependabot[bot]`.
