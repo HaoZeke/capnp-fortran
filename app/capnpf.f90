@@ -27,6 +27,7 @@ program capnpf
    character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
    character(len=:), allocatable :: from_fmt, to_fmt
    logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc
+   integer(int64) :: seg_words
    integer :: i, n, err, colon
    type(capnp_dyn_schema_t), target :: schema
    integer :: type_idx
@@ -42,6 +43,8 @@ program capnpf
    flat_flag = .false.
    ofmt_explicit = .false.
    no_std_inc = .false.
+   seg_words = 0_int64
+
    n = command_argument_count()
    if (n < 1) call usage_err()
    i = 1
@@ -67,6 +70,9 @@ program capnpf
          inc_flags = inc_flags//' -I'//shell_quote(trim(arg(3:)))
       else if (index(trim(arg), '--import-path=') == 1) then
          inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
+      else if (index(trim(arg), '--segment-size=') == 1) then
+         call capnp_parse_i64(trim(arg(16:)), seg_words, err)
+         if (err /= CAPNP_OK .or. seg_words < 1_int64) call die('bad --segment-size')
       else if (trim(arg) == '--packed' .or. trim(arg) == '-p') then
          packed_flag = .true.
       else if (trim(arg) == '--flat') then
@@ -132,7 +138,7 @@ program capnpf
       else
          type_idx = 0
       end if
-      call cmd_convert(schema, type_idx, from_fmt, to_fmt, short)
+      call cmd_convert(schema, type_idx, from_fmt, to_fmt, short, seg_words)
       call capnp_dyn_free(schema)
       call c_exit(0_c_int)
    end if
@@ -146,13 +152,13 @@ program capnpf
       type_idx = capnp_dyn_find(schema, name, err)
       if (type_idx <= 0) call die('unknown type '//name)
       if (flat_flag .and. packed_flag) then
-         call cmd_encode(schema, type_idx, 'flat-packed')
+         call cmd_encode(schema, type_idx, 'flat-packed', seg_words)
       else if (flat_flag) then
-         call cmd_encode(schema, type_idx, 'flat')
+         call cmd_encode(schema, type_idx, 'flat', seg_words)
       else if (packed_flag) then
-         call cmd_encode(schema, type_idx, 'packed')
+         call cmd_encode(schema, type_idx, 'packed', seg_words)
       else
-         call cmd_encode(schema, type_idx, 'binary')
+         call cmd_encode(schema, type_idx, 'binary', seg_words)
       end if
    case ('decode')
       type_idx = capnp_dyn_find(schema, name, err)
@@ -169,7 +175,7 @@ program capnpf
       call cmd_decode(schema, type_idx, from_fmt, short)
    case ('eval')
       if (.not. valid_fmt(ofmt)) call die('unknown output format '//ofmt)
-      call cmd_eval(schema, name, ofmt, short)
+      call cmd_eval(schema, name, ofmt, short, seg_words)
    end select
    call capnp_dyn_free(schema)
 
@@ -263,16 +269,17 @@ contains
       call capnp_dyn_load(sch, bytes, err)
    end subroutine load_schema
 
-   subroutine cmd_encode(sch, idx, to_fmt)
+   subroutine cmd_encode(sch, idx, to_fmt, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: to_fmt
+      integer(int64), intent(in) :: seg_words
       integer(int8), allocatable :: raw(:)
       integer :: err
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) call die('empty input')
       call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., &
-                       to_fmt == 'flat' .or. to_fmt == 'flat-packed')
+                       to_fmt == 'flat' .or. to_fmt == 'flat-packed', seg_words)
    end subroutine cmd_encode
 
    subroutine cmd_decode(sch, idx, from_fmt, short)
@@ -284,14 +291,15 @@ contains
       integer :: err
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) call die('empty input')
-      call bytes_to_out(sch, idx, raw, from_fmt, 'text', .not. short)
+      call bytes_to_out(sch, idx, raw, from_fmt, 'text', .not. short, 0_int64)
    end subroutine cmd_decode
 
-   subroutine cmd_convert(sch, idx, from, to, short)
+   subroutine cmd_convert(sch, idx, from, to, short, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: from, to
       logical, intent(in) :: short
+      integer(int64), intent(in) :: seg_words
       integer(int8), allocatable :: raw(:)
       logical :: single_out
       integer :: err
@@ -299,19 +307,20 @@ contains
       if (err /= CAPNP_OK) call die('empty input')
       single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'text') then
-         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out)
+         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words)
       else if (from == 'json') then
-         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out)
+         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words)
       else
-         call bytes_to_out(sch, idx, raw, from, to, .not. short)
+         call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words)
       end if
    end subroutine cmd_convert
 
-   subroutine text_to_out(sch, idx, text, to, pretty, single_only)
+   subroutine text_to_out(sch, idx, text, to, pretty, single_only, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
       logical, intent(in) :: pretty, single_only
+      integer(int64), intent(in) :: seg_words
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err
@@ -326,7 +335,7 @@ contains
          if (err /= CAPNP_OK) call die('text decode failed')
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) call die('bad root')
-         call emit_one(sch, idx, msg, root, to, pretty)
+         call emit_one(sch, idx, msg, root, to, pretty, seg_words)
          call capnp_message_free(msg)
          count = count + 1
          from = topos + 1
@@ -334,11 +343,12 @@ contains
       if (count == 0) call die('empty input')
    end subroutine text_to_out
 
-   subroutine json_to_out(sch, idx, text, to, pretty, single_only)
+   subroutine json_to_out(sch, idx, text, to, pretty, single_only, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
       logical, intent(in) :: pretty, single_only
+      integer(int64), intent(in) :: seg_words
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err
@@ -353,7 +363,7 @@ contains
          if (err /= CAPNP_OK) call die('json decode failed')
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) call die('bad root')
-         call emit_one(sch, idx, msg, root, to, pretty)
+         call emit_one(sch, idx, msg, root, to, pretty, seg_words)
          call capnp_message_free(msg)
          count = count + 1
          from = topos + 1
@@ -361,12 +371,13 @@ contains
       if (count == 0) call die('empty input')
    end subroutine json_to_out
 
-   subroutine bytes_to_out(sch, idx, raw, from, to, pretty)
+   subroutine bytes_to_out(sch, idx, raw, from, to, pretty, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       integer(int8), intent(in) :: raw(0:)
       character(len=*), intent(in) :: from, to
       logical, intent(in) :: pretty
+      integer(int64), intent(in) :: seg_words
       type(capnp_message_t), target :: msg
       integer(int8), allocatable :: one(:), wrapped(:), unpacked(:)
       integer(int64) :: off, n, total
@@ -385,7 +396,7 @@ contains
          if (err /= CAPNP_OK) call die('bad flat-packed message')
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) call die('bad root')
-         call emit_one(sch, idx, msg, root, to, pretty)
+         call emit_one(sch, idx, msg, root, to, pretty, seg_words)
          call capnp_message_free(msg)
          return
       end if
@@ -397,7 +408,7 @@ contains
          if (err /= CAPNP_OK) call die('bad flat input')
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) call die('bad root')
-         call emit_one(sch, idx, msg, root, to, pretty)
+         call emit_one(sch, idx, msg, root, to, pretty, seg_words)
          call capnp_message_free(msg)
          return
       end if
@@ -414,7 +425,7 @@ contains
             if (err /= CAPNP_OK) call die('bad packed message')
             root = capnp_root(msg, err)
             if (err /= CAPNP_OK) call die('bad root')
-            call emit_one(sch, idx, msg, root, to, pretty)
+            call emit_one(sch, idx, msg, root, to, pretty, seg_words)
             call capnp_message_free(msg)
             count = count + 1
          end do
@@ -435,7 +446,7 @@ contains
          if (err /= CAPNP_OK) call die('bad message')
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) call die('bad root')
-         call emit_one(sch, idx, msg, root, to, pretty)
+         call emit_one(sch, idx, msg, root, to, pretty, seg_words)
          call capnp_message_free(msg)
          count = count + 1
          off = off + n
@@ -443,13 +454,14 @@ contains
       if (count == 0) call die('empty input')
    end subroutine bytes_to_out
 
-   subroutine emit_one(sch, idx, msg, root, to, pretty)
+   subroutine emit_one(sch, idx, msg, root, to, pretty, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: root
       character(len=*), intent(in) :: to
       logical, intent(in) :: pretty
+      integer(int64), intent(in) :: seg_words
       character(len=:), allocatable :: text
       integer :: err, unit
       if (to == 'text') then
@@ -464,17 +476,20 @@ contains
          open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
                action='write', status='old', iostat=err)
          if (err /= 0) call die('cannot write stdout')
-         call write_binary_message(unit, msg, to, err)
+         call write_binary_message(unit, msg, to, seg_words, err)
          close (unit)
          if (err /= CAPNP_OK) call die('binary encode failed')
       end if
    end subroutine emit_one
 
-   subroutine write_binary_message(unit, msg, to, err)
+   subroutine write_binary_message(unit, msg, to, seg_words, err)
       integer, intent(in) :: unit
       type(capnp_message_t), intent(inout), target :: msg
       character(len=*), intent(in) :: to
+      integer(int64), intent(in) :: seg_words
       integer, intent(out) :: err
+      type(capnp_message_t), target :: reseg
+      type(capnp_ptr_t) :: root, croot
       integer(int8), allocatable :: outb(:), flatb(:)
       err = CAPNP_OK
       if (to == 'canonical') then
@@ -485,6 +500,27 @@ contains
          call to_flat_bytes(msg, flatb, err)
          if (err /= CAPNP_OK) return
          call capnp_pack(flatb, outb, err)
+      else if (seg_words > 0_int64 .and. (to == 'binary' .or. to == 'packed')) then
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) return
+         call capnp_message_init_builder(reseg, err, first_words=seg_words)
+         if (err /= CAPNP_OK) return
+         croot = capnp_copy(reseg, root, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         call capnp_set_root(reseg, croot, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         if (to == 'packed') then
+            call capnp_serialize_packed_bytes(reseg, outb, err)
+         else
+            call capnp_serialize_bytes(reseg, outb, err)
+         end if
+         call capnp_message_free(reseg)
       else if (to == 'packed') then
          call capnp_serialize_packed_bytes(msg, outb, err)
       else
@@ -652,12 +688,14 @@ contains
       end if
    end subroutine pull_packed_word
 
-   subroutine cmd_eval(sch, spec, fmt, short)
+   subroutine cmd_eval(sch, spec, fmt, short, seg_words)
       type(capnp_dyn_schema_t), intent(in) :: sch
       character(len=*), intent(in) :: spec, fmt
       logical, intent(in) :: short
+      integer(int64), intent(in) :: seg_words
       integer :: idx, best, i, err, nlen
       character(len=:), allocatable :: trial, rest, text
+      if (seg_words < 0_int64) continue
       idx = 0
       best = 0
       nlen = len(spec)
