@@ -86,6 +86,10 @@ module capnp_json
       character(len=:), allocatable :: str
       character(len=:), allocatable :: key
       type(jval), allocatable :: kids(:)
+      !> When this array is `nrepeat` copies of null, `kids` is unused.
+      !> A void list is that shape, and storing one value per element
+      !> doubles the memory of a long list.
+      integer(int64) :: nrepeat = 0
    end type jval
 
    type :: scan_t
@@ -105,6 +109,7 @@ contains
       dst%k = src%k
       dst%b = src%b
       dst%num = src%num
+      dst%nrepeat = src%nrepeat
       if (allocated(src%str)) dst%str = src%str
       if (allocated(src%key)) dst%key = src%key
       if (.not. allocated(src%kids)) return
@@ -709,6 +714,12 @@ contains
          return
       end if
       nlen = capnp_list_len(lst)
+      ! Void elements are null. One repeat count stands in for the list
+      ! so a long list does not allocate a value per element.
+      if (type_which(et) == TYPE_VOID) then
+         if (nlen > 0_int64) jv%nrepeat = nlen
+         return
+      end if
       n = 0
       do i = 0_int64, nlen - 1_int64
          call build_element(schema, et, lst, i, env, depth + 1, one, err)
@@ -889,6 +900,54 @@ contains
       call capnp_fmt_i64(int(ord, int64), jv%str)
    end subroutine build_enum_jval
 
+   !> `[null,null,...]` for `n` void elements. Pretty output separates
+   !> with a comma and a space. Short output uses a bare comma.
+   subroutine emit_null_list(n, pretty, out, multi, err)
+      integer(int64), intent(in) :: n
+      logical, intent(in) :: pretty
+      character(len=:), allocatable, intent(out) :: out
+      logical, intent(out) :: multi
+      integer, intent(out) :: err
+      character(len=:), allocatable :: body, token
+      integer(int64) :: total, pos, i, dlen
+      integer :: stat
+      err = CAPNP_OK
+      multi = .false.
+      if (n <= 0_int64) then
+         out = '[]'
+         return
+      end if
+      if (pretty) then
+         token = ', '
+      else
+         token = ','
+      end if
+      dlen = int(len(token), int64)
+      if (n > (huge(0_int64)/5_int64)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      total = 4_int64*n + dlen*(n - 1_int64)
+      if (total > int(huge(0), int64)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (character(len=int(total)) :: body, stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      body(1:4) = 'null'
+      pos = 4_int64
+      do i = 2_int64, n
+         body(pos + 1_int64:pos + dlen) = token
+         pos = pos + dlen
+         body(pos + 1_int64:pos + 4_int64) = 'null'
+         pos = pos + 4_int64
+      end do
+      out = '['//body//']'
+   end subroutine emit_null_list
+
    recursive subroutine emit_jval(jv, indent, has_prefix, pretty, out, multi, err)
       type(jval), intent(in) :: jv
       integer, intent(in) :: indent
@@ -917,6 +976,10 @@ contains
          call json_quote(jv%str, out, err)
          if (err /= CAPNP_OK) return
       case (JK_ARR)
+         if (jv%nrepeat > 0_int64) then
+            call emit_null_list(jv%nrepeat, pretty, out, multi, err)
+            return
+         end if
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
          sub = indent
@@ -3307,6 +3370,8 @@ contains
       dst%k = src%k
       dst%b = src%b
       dst%num = src%num
+      dst%nrepeat = src%nrepeat
+      src%nrepeat = 0
       if (allocated(src%str)) call move_alloc(src%str, dst%str)
       if (allocated(src%key)) call move_alloc(src%key, dst%key)
       if (allocated(src%kids)) call move_alloc(src%kids, dst%kids)
