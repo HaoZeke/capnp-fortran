@@ -4877,6 +4877,7 @@ contains
                   end if
                end if
             end select
+            call ready_proxy_loopbacks(conn, i)
          end select
       end do
    end subroutine settle_proxies
@@ -6320,7 +6321,11 @@ contains
             if (e == CAPNP_OK) call rpc_send_message(conn%transport, m, e)
             call capnp_message_free(m)
             if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
-            if (px%settled) call ready_proxy_loopbacks(conn, i)
+            if (px%settled) then
+               call ready_proxy_loopbacks(conn, i)
+            else if (qslot_ok(conn, px%qid)) then
+               if (conn%questions(int(px%qid))%returned) call settle_proxies(conn, int(px%qid))
+            end if
          end select
       end do
    contains
@@ -6932,6 +6937,26 @@ contains
       end do
    end subroutine ready_proxy_loopbacks
 
+   !> Keep a senderLoopback Disembargo waiting on unresolved promise import
+   !> `wire` until its Resolve arrives.
+   subroutine wait_import_loopback(conn, wire, tgt, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: wire
+      type(message_target_t), intent(in) :: tgt
+      integer, intent(out) :: err
+      type(rpc_incoming_wait_t), pointer :: node
+      integer(int8), allocatable :: bytes(:)
+      allocate (node)
+      node%import_wire = wire
+      call capnp_serialize_bytes(tgt%p%msg, bytes, err)
+      if (err == CAPNP_OK) call capnp_deserialize_bytes(bytes, node%msg, err)
+      if (err /= CAPNP_OK) then
+         deallocate (node)
+         return
+      end if
+      call append_loopback_wait(conn, node)
+   end subroutine wait_import_loopback
+
    !> Once no message is left to read, check each Disembargo whose proxy
    !> settled, as C++ does after evalLast. An import is echoed, a broken
    !> cap fails with its exception, and any other cap does not point back.
@@ -6939,12 +6964,12 @@ contains
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(out) :: err
       type(rpc_incoming_wait_t), pointer :: node, prev, nxt
-      type(rpc_import_node_t), pointer :: inode
+      type(rpc_import_node_t), pointer :: inode, to
       type(message_t) :: msg
       type(disembargo_t) :: d
       character(len=:), allocatable :: why
       logical :: readable, found
-      integer :: e
+      integer :: e, step
       err = CAPNP_OK
       node => conn%loopback_wait
       do while (associated(node))
@@ -6972,13 +6997,25 @@ contains
             why = "'Disembargo' of type 'senderLoopback' sent to an " // &
                   "object that does not point back to the sender."
             found = .false.
+            inode => null()
             e = CAPNP_OK
             msg = message_read_root(node%msg, e)
             if (e == CAPNP_OK) d = message_disembargo_get(msg, e)
             if (e == CAPNP_OK .and. eslot_ok(conn, int(node%proxy_eid, int64))) then
                select type (px => conn%exports(node%proxy_eid)%srv)
                type is (rpc_pipe_proxy_t)
-                  if (px%import >= 0_int64) call import_find(conn, px%import, inode, found)
+                  if (px%import >= 0_int64) then
+                     call import_find(conn, px%import, inode, found)
+                     if (found) then
+                        do step = 1, 8
+                           if (inode%state /= IMP_REMOTE .or. inode%borrowed) exit
+                           call import_find(conn, inode%resolved_id, to, found)
+                           if (.not. found) exit
+                           inode => to
+                        end do
+                        found = associated(inode)
+                     end if
+                  end if
                   if (.not. found .and. px%eid < 0 .and. allocated(px%reason)) then
                      if (px%reason /= 'Called null capability.') why = px%reason
                   end if
@@ -6986,9 +7023,29 @@ contains
             end if
             if (e == CAPNP_OK) then
                if (found) then
-                  call send_receiver_loopback_import(conn, &
-                                                     disembargo_context_sender_loopback_get(d), &
-                                                     inode%wire_id, e)
+                  if (inode%state == IMP_PROMISE) then
+                     node%proxy_eid = -1
+                     node%import_wire = inode%wire_id
+                     node%idle = .false.
+                     if (associated(prev)) then
+                        prev%next => node
+                     else
+                        conn%loopback_wait => node
+                     end if
+                     node%next => nxt
+                     prev => node
+                     node => nxt
+                     cycle
+                  else if (inode%state == IMP_HOSTED .or. &
+                           (inode%state == IMP_REMOTE .and. inode%borrowed)) then
+                     call send_receiver_loopback_import(conn, &
+                                                        disembargo_context_sender_loopback_get(d), &
+                                                        inode%wire_id, e)
+                  else if (inode%state == IMP_BROKEN .and. allocated(inode%reason)) then
+                     call abort_conn(conn, inode%reason, e)
+                  else
+                     call abort_conn(conn, why, e)
+                  end if
                else
                   call abort_conn(conn, why, e)
                end if
@@ -8740,6 +8797,7 @@ contains
          conn%questions(q)%returned = .true.
       end if
       call capnp_message_free(m)
+      if (err == CAPNP_OK) call settle_proxies(conn, q)
       if (err == CAPNP_OK .and. conn%questions(q)%tail_answer >= 0_int64) then
          if (.not. conn%questions(q)%tail_opp) call release_forwarded_params(conn, q, err)
          if (err == CAPNP_OK) call settle_forwarded_question(conn, q, err)
@@ -9971,18 +10029,36 @@ contains
             ! proxy of an answer still running waits for its Return.
             select type (px => conn%exports(int(eid))%srv)
             type is (rpc_pipe_proxy_t)
-               if (px%aqid >= 0_int64) then
+               if (px%aqid >= 0_int64 .or. (.not. px%settled .and. live_question(conn, px%qid))) then
                   call wait_proxy_loopback(conn, int(eid), tgt, err)
                   return
                end if
                if (px%aqid < 0_int64 .and. px%import >= 0_int64) then
                   block
-                     type(rpc_import_node_t), pointer :: inode
+                     type(rpc_import_node_t), pointer :: inode, to
                      logical :: ifound
+                     integer :: step
                      call import_find(conn, px%import, inode, ifound)
                      if (ifound) then
-                        call send_receiver_loopback_import(conn, embargo_id, inode%wire_id, err)
-                        return
+                        do step = 1, 8
+                           if (inode%state /= IMP_REMOTE .or. inode%borrowed) exit
+                           call import_find(conn, inode%resolved_id, to, ifound)
+                           if (.not. ifound) exit
+                           inode => to
+                        end do
+                        if (inode%state == IMP_PROMISE) then
+                           call wait_import_loopback(conn, inode%wire_id, tgt, err)
+                           return
+                        else if (inode%state == IMP_HOSTED .or. &
+                                 (inode%state == IMP_REMOTE .and. inode%borrowed)) then
+                           call send_receiver_loopback_import(conn, embargo_id, inode%wire_id, err)
+                           return
+                        else if (inode%state == IMP_BROKEN) then
+                           if (allocated(inode%reason)) then
+                              call abort_conn(conn, inode%reason, err)
+                              return
+                           end if
+                        end if
                      end if
                   end block
                else if (px%aqid < 0_int64 .and. px%settled .and. px%eid < 0 .and. &

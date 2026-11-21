@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(38))
+      allocate (testsuite(39))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -109,6 +109,8 @@ contains
       testsuite(37)%test => t_proxy_unindexes
       testsuite(38)%name = "resolve-to-ra-returned-npp"
       testsuite(38)%test => t_ra_ret_npp
+      testsuite(39)%name = "disembargo-running-answer-proxy-question"
+      testsuite(39)%test => t_dis_ra_running_q
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1043,6 +1045,103 @@ contains
                  'disembargo running answer: reason '//conn%abort_reason)
       call close_peer(conn, fd)
    end subroutine t_dis_ra_running
+
+   !> A running-answer proxy resolves to our own question's pipeline
+   !> (bootstrap q0). A senderLoopback Disembargo on the proxy waits
+   !> until the peer answers q0, then echoes receiverLoopback on the
+   !> returned import.
+   subroutine t_dis_ra_running_q(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(rpc_call_ctx_t), pointer :: ctx
+      type(rpc_cap_t) :: bcap
+      type(capnp_ptr_t) :: s, ctab
+      type(cap_descriptor_t) :: cd
+      type(promised_answer_t) :: pa
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(return_t) :: r
+      type(payload_t) :: pl
+      character(len=:), allocatable :: a, b, c, w, d1, d2
+      integer(int64) :: k, pid
+      integer :: fd, e, j
+      logical :: handled
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call rpc_bootstrap_send(conn, bcap, e)
+      a = drain(fd)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      pid = -1_int64
+      j = index(b, ' I4 y [sp')
+      if (j > 0) then
+         pid = 0_int64
+         j = j + 9
+         do while (j <= len(b))
+            if (b(j:j) < '0' .or. b(j:j) > '9') exit
+            pid = 10_int64*pid + int(ichar(b(j:j)) - ichar('0'), int64)
+            j = j + 1
+         end do
+      end if
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, pid, e)
+      call disembargo_context_sender_loopback_set(d, 9_int64, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      w = drain(fd)
+      ctx => rpc_deferred_ctx(conn, 2_int64)
+      if (.not. associated(ctx)) then
+         call check(error, .false., 'disembargo running q: call 2 is not deferred, got '//w)
+         call close_peer(conn, fd)
+         return
+      end if
+      s = capnp_new_struct(ctx%rmsg, 0, 1, e)
+      call capnp_setp(s, 0, rpc_make_cap_ptr(ctx%rmsg, 0), e)
+      call payload_content_set(ctx%results, s, e)
+      ctab = payload_cap_table_init(ctx%results, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      pa = cap_descriptor_receiver_answer_init(cd, e)
+      call promised_answer_question_id_set(pa, 0_int64, e)
+      call rpc_deferred_return(conn, 2_int64, e)
+      c = drain(fd)
+      call rpc_pump_poll(conn, 0, handled, e)
+      d1 = drain(fd)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      r = message_return_init(msg, e)
+      call return_answer_id_set(r, 0_int64, e)
+      call return_release_param_caps_set(r, .true., e)
+      pl = return_results_init(r, e)
+      call payload_content_set(pl, rpc_make_cap_ptr(m, 0), e)
+      ctab = payload_cap_table_init(pl, 1_int64, e)
+      cd%p = capnp_list_get_struct(ctab, 0, e)
+      call cap_descriptor_sender_hosted_set(cd, 7_int64, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call rpc_pump_poll(conn, 0, handled, e)
+      d2 = drain(fd)
+      call check(error, pid >= 0_int64 .and. w == '' .and. &
+                 index(c, 'RET 2 res [ra0]') == 1 .and. index(c, ' | RES ') > 0 .and. &
+                 d1 == '' .and. d2 == 'DIS I7 rl 9', &
+                 'disembargo running q: got '//b//' / '//w//' / '//c//' / '//d1//' / '//d2// &
+                 " (expected 'DIS I7 rl 9')")
+      call close_peer(conn, fd)
+   end subroutine t_dis_ra_running_q
 
    !> A param promise resolves to a cap a plain forward's answer imports.
    !> The call keeps that import, and one Release counts both refs.
