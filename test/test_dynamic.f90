@@ -48,7 +48,9 @@ contains
       type(dual_t) :: dual
       integer(int8), allocatable :: bytes(:), data(:)
       character(len=:), allocatable :: s
-      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx, dual_idx, dynamic_idx, choice_idx, box_idx, tag, want
+      integer :: err, book_idx, person_idx, phone_idx, sink_idx, vec_idx
+      integer :: dual_idx, dynamic_idx, choice_idx, service_idx, box_idx
+      integer :: tag, want
       integer :: tag_pri, tag_sec
       logical :: flag
       real(real64) :: ratio
@@ -240,8 +242,14 @@ contains
       call capnp_dyn_load(aschema, bytes, err)
       dynamic_idx = capnp_dyn_find(aschema, 'Dynamic', err)
       choice_idx = capnp_dyn_find(aschema, 'Dynamic.choice', err)
-      call check_(error, err == CAPNP_OK .and. dynamic_idx > 0 .and. choice_idx > 0, &
-                  'dyn: Dynamic and Choice nodes found')
+      service_idx = capnp_dyn_find(aschema, 'AnnotatedService', err)
+      call check_(error, err == CAPNP_OK .and. dynamic_idx > 0 .and. choice_idx > 0 .and. service_idx > 0, &
+                  'dyn: Dynamic, Choice, and AnnotatedService nodes found')
+      call capnp_dyn_method_annotations(aschema, service_idx, 'ping', annotations, err)
+      call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
+                  value_which(annotations(1)%value) == TYPE_TEXT, 'dyn: method annotation metadata')
+      call value_text(annotations(1)%value, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'ping method', 'dyn: method annotation value')
       call capnp_message_init_builder(amsg, err)
       q = capnp_dyn_new_root(aschema, dynamic_idx, amsg, err)
       call capnp_dyn_set_capability(aschema, dynamic_idx, q, 'capability', 41_int64, err)
