@@ -24,8 +24,8 @@ program capnpf
    end interface
 
    character(len=4096) :: arg, next_arg
-   character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt
-   logical :: short, packed_in, flat_in
+   character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
+   logical :: short, packed_in, flat_in, no_std_inc
    integer :: i, n, err
    type(capnp_dyn_schema_t), target :: schema
    integer :: type_idx
@@ -35,9 +35,11 @@ program capnpf
    name = ''
    spec = ''
    ofmt = 'text'
+   inc_flags = ''
    short = .false.
    packed_in = .false.
    flat_in = .false.
+   no_std_inc = .false.
    n = command_argument_count()
    if (n < 1) call usage_err()
    i = 1
@@ -52,6 +54,17 @@ program capnpf
          short = .true.
       else if (trim(arg) == '--quiet' .or. trim(arg) == '--verbose') then
          continue
+      else if (trim(arg) == '--no-standard-import') then
+         no_std_inc = .true.
+      else if (trim(arg) == '-I') then
+         if (i + 1 > n) call die('-I requires a directory')
+         i = i + 1
+         call get_command_argument(i, next_arg)
+         inc_flags = inc_flags//' -I'//shell_quote(trim(next_arg))
+      else if (len_trim(arg) > 2 .and. arg(1:2) == '-I') then
+         inc_flags = inc_flags//' -I'//shell_quote(trim(arg(3:)))
+      else if (index(trim(arg), '--import-path=') == 1) then
+         inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
       else if (trim(arg) == '--packed' .or. trim(arg) == '-p') then
          packed_in = .true.
          ofmt = 'packed'
@@ -94,7 +107,7 @@ program capnpf
       if (len(spec) == 0 .or. len(name) == 0) call usage_err()
    end if
 
-   call load_schema(schema_path, schema, err)
+   call load_schema(schema_path, inc_flags, no_std_inc, schema, err)
    if (err /= CAPNP_OK) call die('cannot load schema')
 
    select case (cmd)
@@ -140,6 +153,21 @@ contains
       call c_exit(1_c_int)
    end subroutine die
 
+   function shell_quote(s) result(q)
+      character(len=*), intent(in) :: s
+      character(len=:), allocatable :: q
+      integer :: i
+      q = "'"
+      do i = 1, len(s)
+         if (s(i:i) == "'") then
+            q = q//"'\''"
+         else
+            q = q//s(i:i)
+         end if
+      end do
+      q = q//"'"
+   end function shell_quote
+
    subroutine remove_file(path)
       character(len=*), intent(in) :: path
       integer :: u, ios
@@ -147,17 +175,25 @@ contains
       if (ios == 0) close (u, status='delete', iostat=ios)
    end subroutine remove_file
 
-   subroutine load_schema(path, sch, err)
-      character(len=*), intent(in) :: path
+   subroutine load_schema(path, extra_inc, no_std, sch, err)
+      character(len=*), intent(in) :: path, extra_inc
+      logical, intent(in) :: no_std
       type(capnp_dyn_schema_t), intent(inout), target :: sch
       integer, intent(out) :: err
-      character(len=64) :: tmp
+      character(len=96) :: tmp
+      character(len=:), allocatable :: shcmd
       integer(int8), allocatable :: bytes(:)
       integer :: st, cs
       write (tmp, '(a,i0,a)') '/tmp/capnpf-', c_getpid(), '.cgr'
-      call execute_command_line('INC=$(dirname $(dirname $(command -v capnp)))/include && '&
-         //'capnp compile -I"$INC" -o- '//trim(path)//' > '//trim(tmp), &
-         exitstat=st, cmdstat=cs, wait=.true.)
+      if (no_std) then
+         shcmd = 'capnp compile --no-standard-import'//extra_inc//' -o- ' &
+                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+      else
+         shcmd = 'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
+                 //'capnp compile -I"$INC"'//extra_inc//' -o- ' &
+                 //shell_quote(trim(path))//' > '//shell_quote(trim(tmp))
+      end if
+      call execute_command_line(shcmd, exitstat=st, cmdstat=cs, wait=.true.)
       if (cs /= 0 .or. st /= 0) then
          call remove_file(trim(tmp))
          err = CAPNP_ERR_IO
