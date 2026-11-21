@@ -751,8 +751,8 @@ contains
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
       type(capnp_brand_env_t) :: empty_env
-      integer(int8), allocatable :: one(:), wrapped(:), unpacked(:)
-      integer(int64) :: off, n, total
+      integer(int8), allocatable :: one(:), wrapped(:), unpacked(:), chopped(:)
+      integer(int64) :: off, n, total, words
       integer :: err, count
       logical :: recover
       type(capnp_ptr_t) :: root
@@ -786,11 +786,27 @@ contains
          return
       end if
       if (from == 'flat' .or. from == 'canonical') then
-         if (size(raw, kind=int64) == 0_int64 .or. mod(size(raw, kind=int64), 8_int64) /= 0_int64) then
-            call fail('bad flat input', rc)
+         ! A partial trailing word is dropped. An empty remainder is
+         ! not a message.
+         words = size(raw, kind=int64)/8_int64
+         if (words == 0_int64) then
+            ! No whole word. capnp 1.4.0 still writes the default value
+            ! for flat input, then reports the read error. Canonical
+            ! input stops with no output.
+            if (from == 'flat') then
+               call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+            else
+               call fail('bad flat input', rc)
+            end if
             return
          end if
-         wrapped = wrap_flat(raw)
+         if (words*8_int64 /= size(raw, kind=int64)) then
+            allocate (chopped(0:int(words*8_int64) - 1))
+            chopped = raw(0:int(words*8_int64) - 1)
+            wrapped = wrap_flat(chopped)
+         else
+            wrapped = wrap_flat(raw)
+         end if
          call capnp_deserialize_bytes(wrapped, msg, err, options=tool_limits())
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
