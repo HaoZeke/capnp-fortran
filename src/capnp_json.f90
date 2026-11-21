@@ -667,6 +667,10 @@ contains
          return
       end if
       et = capnp_brand_resolve(env, raw_et)
+      if (.not. json_list_ok(et, lst)) then
+         ptr_kind_bad = .true.
+         return
+      end if
       nlen = capnp_list_len(lst)
       n = 0
       do i = 0_int64, nlen - 1_int64
@@ -1835,6 +1839,26 @@ contains
          err = CAPNP_ERR_ARG
       end if
    end subroutine j_unsigned
+
+   function json_list_ok(et, lst) result(ok)
+      type(capnp_ptr_t), intent(in) :: et, lst
+      logical :: ok
+      integer :: tw, expect
+      tw = type_which(et)
+      select case (tw)
+      case (TYPE_STRUCT)
+         expect = CAPNP_SZ_COMPOSITE
+      case (TYPE_LIST, TYPE_TEXT, TYPE_DATA, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         expect = CAPNP_SZ_PTR
+      case default
+         expect = capnp_codec_elem_esize(tw)
+      end select
+      if (expect < 0) then
+         ok = .false.
+      else
+         ok = capnp_list_fits(lst, expect)
+      end if
+   end function json_list_ok
 
    function json_int_token(tok) result(y)
       character(len=*), intent(in) :: tok
