@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Changelog section and main ancestry
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "release.yml: ${TAG} is absent from origin/main. Merge the pull request before tagging." >&2
+            exit 1
+          fi
+          python3 scripts/release_notes.py "${TAG#v}" -o "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+  test:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
+        with:
+          environments: default
+      - name: Verify release metadata
+        run: python3 scripts/check_version.py "$GITHUB_REF_NAME"
+      - name: fypp templates are in sync
+        run: |
+          pixi run gen
+          git diff --exit-code -- src/
+      - name: strict f2018 conformance
+        run: pixi run -- bash scripts/std-check.sh
+      - name: build
+        run: pixi run build
+      # The wire goldens are only evidence of upstream parity while they are
+      # still what the capnp CLI emits; the suite cannot tell them apart from
+      # our own earlier output.
+      - name: wire goldens still match the capnp CLI
+        run: pixi run -- bash scripts/gen-fixtures.sh --check
+      - name: level 3 frames still match the capnp CLI
+        run: pixi run -- bash scripts/gen-rpc-frames.sh --check
+      - name: test
+        run: pixi run test
+      - name: codegen output matches checked-in modules
+        run: |
+          BIN=$(find build -name capnpc-fortran -type f | head -1)
+          mkdir -p /tmp/gen && cd /tmp/gen
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/addressbook.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/kitchen.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/rpc.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/rpc-threeparty.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/adder.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/box.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/stream.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/streamer.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/dual.cgr.bin"
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/holder.cgr.bin"
+          diff stream_capnp.f90 "$GITHUB_WORKSPACE/src/stream_capnp.f90"
+          diff streamer_capnp.f90 "$GITHUB_WORKSPACE/test/generated/streamer_capnp.f90"
+          diff adder_capnp.f90 "$GITHUB_WORKSPACE/test/generated/adder_capnp.f90"
+          diff box_capnp.f90 "$GITHUB_WORKSPACE/test/generated/box_capnp.f90"
+          diff addressbook_capnp.f90 "$GITHUB_WORKSPACE/test/generated/addressbook_capnp.f90"
+          diff kitchen_capnp.f90 "$GITHUB_WORKSPACE/test/generated/kitchen_capnp.f90"
+          diff common_capnp.f90 "$GITHUB_WORKSPACE/test/generated/common_capnp.f90"
+          diff dual_capnp.f90 "$GITHUB_WORKSPACE/test/generated/dual_capnp.f90"
+          diff holder_capnp.f90 "$GITHUB_WORKSPACE/test/generated/holder_capnp.f90"
+          diff rpc_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_capnp.f90"
+          diff rpc_twoparty_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_twoparty_capnp.f90"
+          diff rpc_threeparty_capnp.f90 "$GITHUB_WORKSPACE/src/rpc_threeparty_capnp.f90"
+      - name: self-hosting smoke, the plugin digests schema.capnp itself
+        run: |
+          BIN=$(find build -name capnpc-fortran -type f | head -1)
+          MODDIR=$(dirname "$(find build -name capnp.mod | head -1)")
+          mkdir -p /tmp/selfhost && cd /tmp/selfhost
+          "$GITHUB_WORKSPACE/$BIN" "$GITHUB_WORKSPACE/test/fixtures/schema.cgr.bin"
+          test -s schema_capnp.f90
+          pixi run --manifest-path "$GITHUB_WORKSPACE/pixi.toml" \
+            gfortran -fsyntax-only -I "$GITHUB_WORKSPACE/$MODDIR" schema_capnp.f90
+
+  interop:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
+        with:
+          environments: interop
+      - name: fetch c-capnproto
+        run: |
+          set -euo pipefail
+          rev=$(tr -d '[:space:]' < .github/c-capnproto-rev)
+          git init -q third_party/c-capnproto
+          git -C third_party/c-capnproto fetch -q --depth 1 https://github.com/HaoZeke/c-capnproto "$rev"
+          git -C third_party/c-capnproto checkout -q FETCH_HEAD
+      - name: build
+        run: |
+          pixi run -e interop env \
+            CC=x86_64-conda-linux-gnu-gcc \
+            CXX=x86_64-conda-linux-gnu-c++ \
+            FC=x86_64-conda-linux-gnu-gfortran \
+            meson setup build-interop . -Drpc_interop=enabled
+          pixi run -e interop meson compile -C build-interop
+      - name: golden master vs c-capnproto
+        run: |
+          pixi run -e interop meson test -C build-interop rpc_interop_cpp -v
+          pixi run -e interop meson test -C build-interop golden_master -v
+
+  packaging:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
+        with:
+          environments: interop
+      # CMake registers no CTest tests. This job builds consumers the same
+      # way ci.yml does: CMake, find_package, pkg-config, and a Meson subproject.
+      - name: CMake, find_package, pkg-config and meson subproject
+        run: pixi run -e interop bash scripts/packaging-smoke.sh
+
+  notes:
+    needs: [test, interop, packaging]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Extract release notes
+        run: python3 scripts/release_notes.py "${GITHUB_REF_NAME#v}" -o "$RUNNER_TEMP/release-notes.md"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+          if-no-files-found: error
+
+  publish:
+    needs: notes
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-notes
+          path: release-notes
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          PRE=false
+          case "$TAG" in
+            v*-*) PRE=true ;;
+          esac
+          FLAGS=(--repo "$GITHUB_REPOSITORY" --notes-file release-notes/release-notes.md)
+          if [ "$PRE" = "true" ]; then
+            FLAGS+=(--prerelease)
+          else
+            FLAGS+=(--prerelease=false)
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" "${FLAGS[@]}"
+          else
+            gh release create "$TAG" --title "$TAG" "${FLAGS[@]}"
+          fi
+          VER="${TAG#v}"
+          git archive --format=tar.gz --prefix="capnp-fortran-${VER}/" \
+            -o "capnp-fortran-${VER}.tar.gz" HEAD
+          sha256sum "capnp-fortran-${VER}.tar.gz" > "capnp-fortran-${VER}.tar.gz.sha256"
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "capnp-fortran-${VER}.tar.gz" "capnp-fortran-${VER}.tar.gz.sha256"

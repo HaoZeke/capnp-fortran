@@ -75,13 +75,24 @@ jobs:
         with:
           environments: interop
       - name: fetch c-capnproto
-        run: git clone --depth 1 https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
+        run: |
+          set -euo pipefail
+          rev=$(tr -d '[:space:]' < .github/c-capnproto-rev)
+          git init -q third_party/c-capnproto
+          git -C third_party/c-capnproto fetch -q --depth 1 https://github.com/HaoZeke/c-capnproto "$rev"
+          git -C third_party/c-capnproto checkout -q FETCH_HEAD
       - name: build
         run: |
-          pixi run -e interop meson setup build-interop .
+          pixi run -e interop env \
+            CC=x86_64-conda-linux-gnu-gcc \
+            CXX=x86_64-conda-linux-gnu-c++ \
+            FC=x86_64-conda-linux-gnu-gfortran \
+            meson setup build-interop . -Drpc_interop=enabled
           pixi run -e interop meson compile -C build-interop
       - name: golden master vs c-capnproto
-        run: pixi run -e interop meson test -C build-interop -v
+        run: |
+          pixi run -e interop meson test -C build-interop rpc_interop_cpp -v
+          pixi run -e interop meson test -C build-interop golden_master -v
 
   packaging:
     runs-on: ubuntu-latest

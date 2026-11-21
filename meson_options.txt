@@ -1,0 +1,6 @@
+option(
+  'rpc_interop',
+  type: 'feature',
+  value: 'auto',
+  description: 'Fortran RPC client against a capnp-C++ peer',
+)
