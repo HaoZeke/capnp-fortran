@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(55))
+      allocate (testsuite(56))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -118,6 +118,7 @@ contains
       testsuite(53) = new_unittest("null-root-wire", run_null_root_wire)
       testsuite(54) = new_unittest("json-value-object", run_json_value_object)
       testsuite(55) = new_unittest("json-value-depth", run_json_value_depth)
+      testsuite(56) = new_unittest("text-plausible", run_text_plausible)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3639,5 +3640,34 @@ contains
          call test_failed(error, 'json value depth')
       end if
    end subroutine run_json_value_depth
+
+   !> Malformed text that cannot be text prints nothing, matching capnp 1.4.0.
+   !> --quiet parses it. A plausible fragment still prints the recovered value.
+   subroutine run_text_plausible(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && export CAP' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'sch, typ = "schema/box.capnp", "Box"'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE)'//achar(10)// &
+         '    return p.returncode, p.stdout'//achar(10)// &
+         'cases = [b"hello\n", bytes([1, 2, 255, 40]), b"(\x0c)\n", b"(!!!)\n", b"(\n"]'//achar(10)// &
+         'for raw in cases:'//achar(10)// &
+         '    for quiet in (False, True):'//achar(10)// &
+         '        args = ["convert"]'//achar(10)// &
+         '        if quiet: args.append("--quiet")'//achar(10)// &
+         '        args += ["text:text", sch, typ]'//achar(10)// &
+         '        if run("capnp", args, raw) != run(cap, args, raw): sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'text plausible')
+      end if
+   end subroutine run_text_plausible
 
 end module test_regress

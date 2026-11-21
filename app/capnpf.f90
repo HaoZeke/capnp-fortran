@@ -572,6 +572,12 @@ contains
          return
       end if
       if (from == 'text') then
+         ! Without --quiet, capnp 1.4.0 rejects a prefix that cannot be text
+         ! and writes nothing. --quiet skips that check and parses.
+         if (.not. quiet .and. .not. text_plausible(raw)) then
+            call fail('input is not text', rc)
+            return
+         end if
          call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else if (from == 'json') then
          call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
@@ -579,6 +585,50 @@ contains
          call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
+
+   !> True when the first bytes can be Cap'n Proto text. Mirrors
+   !> isPlausiblyText in capnp 1.4.0: preamble is whitespace, `#`, or `(`,
+   !> and an unprintable byte is rejected. A quote in the body stops the scan.
+   function text_plausible(raw) result(ok)
+      integer(int8), intent(in) :: raw(0:)
+      logical :: ok
+      integer :: state, i, c, n
+      integer, parameter :: st_pre = 0, st_com = 1, st_body = 2
+      ok = .true.
+      state = st_pre
+      n = size(raw)
+      if (n > 8192) n = 8192
+      do i = 0, n - 1
+         c = int(raw(i))
+         if (c < 0) c = c + 256
+         select case (state)
+         case (st_pre)
+            if (c == iachar('(')) then
+               state = st_body
+               cycle
+            else if (c == iachar('#')) then
+               state = st_com
+               cycle
+            else if (c /= iachar(' ') .and. c /= 10 .and. c /= 13 .and. &
+                     c /= 9 .and. c /= 11) then
+               ok = .false.
+               return
+            end if
+         case (st_com)
+            if (c == 10) then
+               state = st_pre
+               cycle
+            end if
+         case (st_body)
+            if (c == iachar('"') .or. c == iachar("'")) return
+         end select
+         if ((c < 32 .and. c /= 10 .and. c /= 13 .and. c /= 9 .and. c /= 11) .or. &
+             c == 127) then
+            ok = .false.
+            return
+         end if
+      end do
+   end function text_plausible
 
    subroutine empty_stream(quiet, rc)
       logical, intent(in) :: quiet
