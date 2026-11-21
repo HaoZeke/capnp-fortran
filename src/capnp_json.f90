@@ -52,7 +52,10 @@ module capnp_json
    integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
    integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
    integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
-   integer, parameter :: JK_ARR = 4, JK_OBJ = 5
+   integer, parameter :: JK_ARR = 4, JK_OBJ = 5, JK_RAW = 6, JK_CALL = 7
+   !> capnp/compat/json.capnp Value. The file id is 0x8ef99297a43a5e34;
+   !> this is the struct's own id. A field of this type is raw JSON.
+   integer(int64), parameter :: JSON_VALUE_ID = int(z'A3FA7845F919DD83', int64)
    character(len=*), parameter :: B64 = &
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
@@ -296,6 +299,10 @@ contains
       integer, intent(out) :: err
       integer :: n
       err = CAPNP_OK
+      if (node_id(schema%nodes(idx)) == JSON_VALUE_ID) then
+         call json_value_to_jval(schema, idx, p, env, depth, gdepth, jv, err)
+         return
+      end if
       jv%k = JK_OBJ
       n = 0
       call append_struct_fields(schema, idx, p, env, '', parent_disc, '', depth, gdepth, jv%kids, n, err)
@@ -1016,6 +1023,31 @@ contains
          call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
          if (err /= CAPNP_OK) return
          out = '{'//body//'}'
+      case (JK_RAW)
+         if (allocated(jv%str)) then
+            out = jv%str
+         else
+            out = ''
+         end if
+      case (JK_CALL)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         m = 0
+         do i = 1, n
+            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi, err)
+            if (err /= CAPNP_OK) return
+            call push(items, m, val, child_multi, err)
+            if (err /= CAPNP_OK) return
+         end do
+         call jjoin(items, m, indent, .true., pretty, multi, body, err)
+         if (err /= CAPNP_OK) return
+         if (allocated(jv%str)) then
+            out = jv%str//'('//body//')'
+         else
+            out = '('//body//')'
+         end if
       case default
          out = 'null'
       end select
@@ -1102,6 +1134,10 @@ contains
       integer, intent(out) :: err
       integer :: mark
       err = CAPNP_OK
+      if (node_id(schema%nodes(idx)) == JSON_VALUE_ID) then
+         call fill_json_value(schema, idx, p, env, jv, depth, err)
+         return
+      end if
       mark = union_seen_n
       if (jv%k /= JK_OBJ) then
          err = CAPNP_ERR_ARG
@@ -1690,12 +1726,13 @@ contains
          if (err /= CAPNP_OK) return
          call fill_list(schema, et, p, int(off), env, jv, depth, err)
       case (TYPE_STRUCT)
-         if (jv%k /= JK_OBJ) then
+         idx = capnp_codec_find_id(schema, type_type_id(t))
+         if (idx == 0) then
             err = CAPNP_ERR_ARG
             return
          end if
-         idx = capnp_codec_find_id(schema, type_type_id(t))
-         if (idx == 0) then
+         ! Json.Value accepts any JSON value. Every other struct is an object.
+         if (jv%k /= JK_OBJ .and. node_id(schema%nodes(idx)) /= JSON_VALUE_ID) then
             err = CAPNP_ERR_ARG
             return
          end if
@@ -3913,5 +3950,351 @@ contains
       names(n)%key = key
       names(n)%kind = kind
    end subroutine jname_add
+
+   !> Encode capnp/compat/json.capnp Value as the JSON value it holds.
+   recursive subroutine json_value_to_jval(schema, idx, p, env, depth, gdepth, jv, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth, gdepth
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      type(jval), intent(out) :: jv
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: arm, slot_t, et, body, el, child
+      type(disc_opts_t) :: no_disc
+      type(jval) :: one
+      character(len=:), allocatable :: nm, key
+      integer :: which, vidx, bidx, n, i, stat
+      integer(int64) :: slot
+      err = CAPNP_OK
+      jv%k = JK_NULL
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      if (p%kind /= CAPNP_PK_STRUCT) return
+      which = capnp_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))))
+      call value_arm(schema, idx, which, arm, nm, err)
+      if (err /= CAPNP_OK) return
+      slot = field_slot_offset(arm)
+      select case (nm)
+      case ('null')
+         jv%k = JK_NULL
+      case ('boolean')
+         jv%k = JK_BOOL
+         jv%b = capnp_get_bool(p, slot)
+      case ('number')
+         call put_float_jval(capnp_get_f64(p, slot*8_int64), jv)
+      case ('string')
+         jv%k = JK_STR
+         call capnp_get_text(p, int(slot), jv%str, err)
+      case ('raw')
+         jv%k = JK_RAW
+         call capnp_get_text(p, int(slot), jv%str, err)
+      case ('array')
+         jv%k = JK_ARR
+         body = capnp_getp(p, int(slot), err)
+         if (err /= CAPNP_OK) return
+         n = int(capnp_list_len(body))
+         if (n > 0) then
+            allocate (jv%kids(n), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+         end if
+         vidx = capnp_codec_find_id(schema, JSON_VALUE_ID)
+         do i = 1, n
+            el = capnp_list_get_struct(body, i - 1, err)
+            if (err /= CAPNP_OK) return
+            call build_struct(schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
+            if (err /= CAPNP_OK) return
+         end do
+      case ('object')
+         jv%k = JK_OBJ
+         body = capnp_getp(p, int(slot), err)
+         if (err /= CAPNP_OK) return
+         n = int(capnp_list_len(body))
+         slot_t = field_slot_type(arm, err)
+         if (err /= CAPNP_OK) return
+         et = type_list_element(slot_t, err)
+         if (err /= CAPNP_OK) return
+         bidx = capnp_codec_find_id(schema, type_type_id(et))
+         if (n > 0) then
+            allocate (jv%kids(n), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+         end if
+         vidx = capnp_codec_find_id(schema, JSON_VALUE_ID)
+         do i = 1, n
+            el = capnp_list_get_struct(body, i - 1, err)
+            if (err /= CAPNP_OK) return
+            call named_text(schema, bidx, el, 'name', key, err)
+            if (err /= CAPNP_OK) return
+            child = named_ptr(schema, bidx, el, 'value', err)
+            if (err /= CAPNP_OK) return
+            if (child%kind == CAPNP_PK_NULL .or. child%kind == CAPNP_PK_STRUCT) then
+               if (child%kind == CAPNP_PK_NULL) then
+                  one%k = JK_NULL
+               else
+                  call build_struct(schema, vidx, child, env, no_disc, depth + 1, gdepth, one, err)
+                  if (err /= CAPNP_OK) return
+               end if
+            else
+               err = CAPNP_ERR_KIND
+               return
+            end if
+            one%key = key
+            jv%kids(i) = one
+         end do
+      case ('call')
+         jv%k = JK_CALL
+         body = capnp_getp(p, int(slot), err)
+         if (err /= CAPNP_OK) return
+         slot_t = field_slot_type(arm, err)
+         if (err /= CAPNP_OK) return
+         bidx = capnp_codec_find_id(schema, type_type_id(slot_t))
+         call named_text(schema, bidx, body, 'function', jv%str, err)
+         if (err /= CAPNP_OK) return
+         child = named_ptr(schema, bidx, body, 'params', err)
+         if (err /= CAPNP_OK) return
+         n = int(capnp_list_len(child))
+         if (n > 0) then
+            allocate (jv%kids(n), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
+         end if
+         vidx = capnp_codec_find_id(schema, JSON_VALUE_ID)
+         do i = 1, n
+            el = capnp_list_get_struct(child, i - 1, err)
+            if (err /= CAPNP_OK) return
+            call build_struct(schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
+            if (err /= CAPNP_OK) return
+         end do
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end subroutine json_value_to_jval
+
+   !> Decode any JSON value into a capnp/compat/json.capnp Value.
+   recursive subroutine fill_json_value(schema, idx, p, env, jv, depth, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, depth
+      type(capnp_ptr_t), intent(in) :: p
+      type(capnp_brand_env_t), intent(in) :: env
+      type(jval), intent(in) :: jv
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: arm, slot_t, et, lst, el, body, child
+      type(disc_opts_t) :: no_disc
+      character(len=:), allocatable :: nm, key
+      integer :: bidx, vidx, n, i, dw, pw
+      integer(int64) :: slot
+      err = CAPNP_OK
+      if (depth > MAX_DEPTH) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      select case (jv%k)
+      case (JK_NULL)
+         nm = 'null'
+      case (JK_BOOL)
+         nm = 'boolean'
+      case (JK_NUM)
+         nm = 'number'
+      case (JK_STR)
+         nm = 'string'
+      case (JK_ARR)
+         nm = 'array'
+      case (JK_OBJ)
+         nm = 'object'
+      case (JK_RAW)
+         nm = 'raw'
+      case (JK_CALL)
+         nm = 'call'
+      case default
+         err = CAPNP_ERR_ARG
+         return
+      end select
+      call value_arm_name(schema, idx, nm, arm, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), &
+                           field_discriminant(arm), err)
+      if (err /= CAPNP_OK) return
+      slot = field_slot_offset(arm)
+      select case (jv%k)
+      case (JK_BOOL)
+         call capnp_set_bool(p, slot, jv%b, err)
+      case (JK_NUM)
+         call capnp_set_f64(p, slot*8_int64, jv%num, err)
+      case (JK_STR, JK_RAW)
+         if (allocated(jv%str)) then
+            call capnp_set_text(p, int(slot), jv%str, err)
+         else
+            call capnp_set_text(p, int(slot), '', err)
+         end if
+      case (JK_ARR)
+         slot_t = field_slot_type(arm, err)
+         if (err /= CAPNP_OK) return
+         et = type_list_element(slot_t, err)
+         if (err /= CAPNP_OK) return
+         call fill_list(schema, et, p, int(slot), env, jv, depth, err)
+      case (JK_OBJ)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         slot_t = field_slot_type(arm, err)
+         if (err /= CAPNP_OK) return
+         et = type_list_element(slot_t, err)
+         if (err /= CAPNP_OK) return
+         lst = capnp_codec_alloc_list(p, et, n, schema, err, env=env)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(p, int(slot), lst, err)
+         if (err /= CAPNP_OK) return
+         bidx = capnp_codec_find_id(schema, type_type_id(et))
+         vidx = capnp_codec_find_id(schema, JSON_VALUE_ID)
+         dw = node_struct_data_words(schema%nodes(vidx))
+         pw = node_struct_pointer_count(schema%nodes(vidx))
+         do i = 1, n
+            el = capnp_list_get_struct(lst, i - 1, err)
+            if (err /= CAPNP_OK) return
+            if (allocated(jv%kids(i)%key)) then
+               key = jv%kids(i)%key
+            else
+               key = ''
+            end if
+            call named_set_text(schema, bidx, el, 'name', key, err)
+            if (err /= CAPNP_OK) return
+            child = capnp_codec_new_struct(el, dw, pw, err)
+            if (err /= CAPNP_OK) return
+            call named_set_ptr(schema, bidx, el, 'value', child, err)
+            if (err /= CAPNP_OK) return
+            call fill_struct(schema, vidx, child, env, no_disc, jv%kids(i), depth + 1, .false., err)
+            if (err /= CAPNP_OK) return
+         end do
+      case (JK_CALL)
+         slot_t = field_slot_type(arm, err)
+         if (err /= CAPNP_OK) return
+         bidx = capnp_codec_find_id(schema, type_type_id(slot_t))
+         if (bidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         dw = node_struct_data_words(schema%nodes(bidx))
+         pw = node_struct_pointer_count(schema%nodes(bidx))
+         body = capnp_codec_new_struct(p, dw, pw, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(p, int(slot), body, err)
+         if (err /= CAPNP_OK) return
+         if (allocated(jv%str)) then
+            call named_set_text(schema, bidx, body, 'function', jv%str, err)
+         else
+            call named_set_text(schema, bidx, body, 'function', '', err)
+         end if
+         if (err /= CAPNP_OK) return
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         ! params is List(Value). Build a JSON array and reuse fill_list.
+         block
+            type(jval) :: arr
+            type(capnp_ptr_t) :: pf, pet
+            arr%k = JK_ARR
+            if (n > 0) arr%kids = jv%kids
+            call capnp_codec_find_field(schema, bidx, 'params', pf, err)
+            if (err /= CAPNP_OK) return
+            pet = field_slot_type(pf, err)
+            if (err /= CAPNP_OK) return
+            pet = type_list_element(pet, err)
+            if (err /= CAPNP_OK) return
+            call fill_list(schema, pet, body, int(field_slot_offset(pf)), env, arr, depth, err)
+         end block
+      end select
+   end subroutine fill_json_value
+
+   subroutine value_arm(schema, idx, which, arm, nm, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, which
+      type(capnp_ptr_t), intent(out) :: arm
+      character(len=:), allocatable, intent(out) :: nm
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f
+      integer :: i, n
+      err = CAPNP_OK
+      nm = ''
+      fl = node_struct_fields(schema%nodes(idx), err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(fl))
+      do i = 0, n - 1
+         f = capnp_list_get_struct(fl, i, err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) /= FIELD_SLOT) cycle
+         if (field_discriminant(f) == which) then
+            arm = f
+            call field_name(f, nm, err)
+            return
+         end if
+      end do
+      err = CAPNP_ERR_ARG
+   end subroutine value_arm
+
+   subroutine value_arm_name(schema, idx, want, arm, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: want
+      type(capnp_ptr_t), intent(out) :: arm
+      integer, intent(out) :: err
+      call capnp_codec_find_field(schema, idx, want, arm, err)
+   end subroutine value_arm_name
+
+   subroutine named_text(schema, idx, obj, name, text, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: obj
+      character(len=*), intent(in) :: name
+      character(len=:), allocatable, intent(out) :: text
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f
+      call capnp_codec_find_field(schema, idx, name, f, err)
+      if (err /= CAPNP_OK) return
+      call capnp_get_text(obj, int(field_slot_offset(f)), text, err)
+   end subroutine named_text
+
+   function named_ptr(schema, idx, obj, name, err) result(q)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: obj
+      character(len=*), intent(in) :: name
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q, f
+      q = capnp_ptr_t()
+      call capnp_codec_find_field(schema, idx, name, f, err)
+      if (err /= CAPNP_OK) return
+      q = capnp_getp(obj, int(field_slot_offset(f)), err)
+   end function named_ptr
+
+   subroutine named_set_text(schema, idx, obj, name, text, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: obj
+      character(len=*), intent(in) :: name, text
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f
+      call capnp_codec_find_field(schema, idx, name, f, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_text(obj, int(field_slot_offset(f)), text, err)
+   end subroutine named_set_text
+
+   subroutine named_set_ptr(schema, idx, obj, name, val, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: obj, val
+      character(len=*), intent(in) :: name
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: f
+      call capnp_codec_find_field(schema, idx, name, f, err)
+      if (err /= CAPNP_OK) return
+      call capnp_setp(obj, int(field_slot_offset(f)), val, err)
+   end subroutine named_set_ptr
 
 end module capnp_json

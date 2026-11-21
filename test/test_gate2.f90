@@ -39,6 +39,7 @@ program test_gate2
    call case_36()
    call case_37()
    call case_38()
+   call case_39()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -1090,4 +1091,34 @@ contains
          achar(10) // &
          'done')
    end subroutine case_38
+
+   subroutine case_39()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'J=$(dirname $(dirname $(command -v capnp)))/include/capnp/co' // &
+         'mpat/json.capnp' // &
+         achar(10) // &
+         'test -f "$J" || exit 77' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '{"a": 1}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-jv.in' // &
+         achar(10) // &
+         '"$CAP" convert json:json "$J" Value < /tmp/g2-jv.in > /tmp/g' // &
+         '2-jv.o; echo $? >> /tmp/g2-jv.o' // &
+         achar(10) // &
+         'capnp convert json:json "$J" Value < /tmp/g2-jv.in > /tmp/g2' // &
+         '-jv.r; echo $? >> /tmp/g2-jv.r' // &
+         achar(10) // &
+         'cmp -s /tmp/g2-jv.o /tmp/g2-jv.r')
+   end subroutine case_39
 end program test_gate2
