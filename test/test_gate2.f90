@@ -36,6 +36,7 @@ program test_gate2
    call case_33()
    call case_34()
    call case_35()
+   call case_36()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -1004,4 +1005,29 @@ contains
          'cmp -s /tmp/g2-rec.o /tmp/g2-rec.r && cmp -s /tmp/g2-rec.e1 ' // &
          '/tmp/g2-rec.e2')
    end subroutine case_35
+
+   subroutine case_36()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "open(' // &
+         achar(39) // &
+         '/tmp/g2-bad.capnp' // &
+         achar(39) // &
+         ',' // &
+         achar(39) // &
+         'w' // &
+         achar(39) // &
+         ').write(' // &
+         achar(39) // &
+         '@0x8123456789abcdef;\nconst bad :Data = embed \"nope.bin\";\' // &
+         'nstruct Good { x @0 :Int32; }\n' // &
+         achar(39) // &
+         ')"; ./build/schema-request /tmp/g2-bad.capnp Good > /tmp/g2-' // &
+         'req.bin; test $? -eq 0 && test -s /tmp/g2-req.bin')
+   end subroutine case_36
 end program test_gate2
