@@ -1,23 +1,24 @@
-from_latest_tag = false
+## Cocogitto config. Towncrier owns CHANGELOG.md; cog creates the bump commit and tag.
+## Run: cog bump --auto   (then push with --follow-tags; the tag triggers release.yml)
+from_latest_tag = true
 ignore_merge_commits = true
-# Hand-maintained Keep a Changelog; cog only orchestrates version bumps.
 disable_changelog = true
-generate_mono_repository_global_tag = true
-tag_prefix = "v"
 skip_ci = "[skip ci]"
 branch_whitelist = ["main", "master"]
+tag_prefix = "v"
 
-# Keep fpm package version and Sphinx release in lockstep.
 pre_bump_hooks = [
   "sed -i '0,/^version = /s/^version = \".*\"/version = \"{{version}}\"/' fpm.toml",
   "sed -i 's/^release = \".*\"/release = \"{{version}}\"/' docs/source/conf.py",
+  "sed -i 's/^version = \"[^\"]*\"/version = \"{{version}}\"/' towncrier.toml",
+  "towncrier build --version {{version}} --date $(date +%Y-%m-%d) --yes",
+  "python3 scripts/release_notes.py {{version}} > /dev/null",
 ]
 
 [commit_types]
 feat = { changelog_title = "Features" }
 fix = { changelog_title = "Bug Fixes" }
 docs = { changelog_title = "Documentation" }
-style = { changelog_title = "Styles" }
 refactor = { changelog_title = "Refactoring" }
 perf = { changelog_title = "Performance" }
 test = { changelog_title = "Tests" }
