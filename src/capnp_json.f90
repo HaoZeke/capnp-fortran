@@ -1583,7 +1583,11 @@ contains
       integer(int64), parameter :: min_i64 = int(z'8000000000000000', int64)
       err = CAPNP_OK
       v = 0_int64
-      if (len(tok) == 0 .or. tok(1:1) == '-') then
+      if (len(tok) == 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (tok(1:1) == '-') then
          err = CAPNP_ERR_ARG
          return
       end if
