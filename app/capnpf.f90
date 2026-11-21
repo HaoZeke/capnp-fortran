@@ -71,6 +71,8 @@ program capnpf
    !> Writes to stdout so far. A failed message that wrote nothing
    !> ends the stream, as a thrown exception does in capnp 1.4.0.
    integer(int64) :: stdout_writes = 0_int64
+   integer, parameter :: P_IMPOSSIBLE = 0, P_IMPLAUSIBLE = 1, P_WRONG_TYPE = 2, &
+                         P_PLAUSIBLE = 3
    exit_code = 0
    call main_run(exit_code)
    if (exit_code /= 0) call c_exit(int(exit_code, c_int))
@@ -915,10 +917,16 @@ contains
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
       integer :: err
+      logical :: ok
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
          call fail('empty input', rc)
+         return
+      end if
+      call check_plausible('text', raw, ok)
+      if (.not. ok) then
+         rc = 1
          return
       end if
       call text_to_out(sch, idx, benv, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
@@ -933,11 +941,19 @@ contains
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
       integer :: err
+      logical :: ok
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
          call empty_stream(quiet, rc)
          return
+      end if
+      if (.not. quiet) then
+         call check_plausible(from_fmt, raw, ok)
+         if (.not. ok) then
+            rc = 1
+            return
+         end if
       end if
       call bytes_to_out(sch, idx, benv, raw, from_fmt, 'text', .not. short, 0_int64, rc)
    end subroutine cmd_decode
@@ -953,6 +969,7 @@ contains
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
       integer :: err
+      logical :: ok
       rc = 0
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) then
@@ -961,13 +978,14 @@ contains
          call empty_stream(quiet, rc)
          return
       end if
-      if (from == 'text') then
-         ! Without --quiet, capnp 1.4.0 rejects a prefix that cannot be text
-         ! and writes nothing. --quiet skips that check and parses.
-         if (.not. quiet .and. .not. text_plausible(raw)) then
-            call fail('input is not text', rc)
+      if (.not. quiet) then
+         call check_plausible(from, raw, ok)
+         if (.not. ok) then
+            rc = 1
             return
          end if
+      end if
+      if (from == 'text') then
          call text_to_out(sch, idx, benv, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else if (from == 'json') then
          call json_to_out(sch, idx, benv, bytes_to_text(raw), to, .not. short, seg_words, rc)
@@ -975,6 +993,211 @@ contains
          call bytes_to_out(sch, idx, benv, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
+
+   !> checkPlausibility in capnp 1.4.0: an input prefix that cannot be in
+   !> the named format is rejected before any message is read. Only
+   !> IMPOSSIBLE is an error, so the schema size checks, which only tell
+   !> PLAUSIBLE from WRONG_TYPE, are left out.
+   subroutine check_plausible(fmt, raw, ok)
+      character(len=*), intent(in) :: fmt
+      integer(int8), intent(in) :: raw(0:)
+      logical, intent(out) :: ok
+      character(len=11), parameter :: guesses(6) = [character(len=11) :: &
+         'binary', 'text', 'packed', 'json', 'flat', 'flat-packed']
+      integer, allocatable :: b(:)
+      integer :: i, n, rc
+      n = min(size(raw), 8192)
+      allocate (b(0:n - 1))
+      do i = 0, n - 1
+         b(i) = iand(int(raw(i)), 255)
+      end do
+      ok = plausibility(fmt, raw, b) /= P_IMPOSSIBLE
+      if (ok) return
+      do i = 1, size(guesses)
+         if (plausibility(trim(guesses(i)), raw, b) >= P_WRONG_TYPE) then
+            call fail('The input is not in "'//fmt//'" format. It looks like it is in "' &
+                      //trim(guesses(i))//'" format. Try that instead.', rc)
+            return
+         end if
+      end do
+      call fail('The input is not in "'//fmt//'" format.', rc)
+   end subroutine check_plausible
+
+   function plausibility(fmt, raw, b) result(r)
+      character(len=*), intent(in) :: fmt
+      integer(int8), intent(in) :: raw(0:)
+      integer, intent(in) :: b(0:)
+      integer :: r
+      select case (fmt)
+      case ('binary')
+         r = plausible_binary(b)
+      case ('packed')
+         r = plausible_packed(b, .false.)
+      case ('flat', 'canonical')
+         r = plausible_flat(b, 1_int64)
+      case ('flat-packed')
+         r = plausible_packed(b, .true.)
+      case ('text')
+         r = P_PLAUSIBLE
+         if (.not. text_plausible(raw)) r = P_IMPOSSIBLE
+      case ('json')
+         r = plausible_json(b)
+      case default
+         r = P_PLAUSIBLE
+      end select
+   end function plausibility
+
+   pure function le32(b, at) result(v)
+      integer, intent(in) :: b(0:)
+      integer, intent(in) :: at
+      integer(int64) :: v
+      v = int(b(at), int64) + ishft(int(b(at + 1), int64), 8) + &
+          ishft(int(b(at + 2), int64), 16) + ishft(int(b(at + 3), int64), 24)
+   end function le32
+
+   pure function plausible_flat(b, nsegs) result(r)
+      integer, intent(in) :: b(0:)
+      integer(int64), intent(in) :: nsegs
+      integer :: r
+      integer(int64) :: seg
+      r = P_PLAUSIBLE
+      if (size(b) < 8) return
+      if (iand(b(0), 3) == 2) then
+         seg = le32(b, 4)
+         if (seg == 0_int64 .or. seg >= nsegs) r = P_IMPOSSIBLE
+         return
+      end if
+      if (iand(b(0), 3) /= 0) then
+         r = P_IMPOSSIBLE
+         return
+      end if
+      if (iand(b(3), 128) /= 0) then
+         if (.not. (all(b(0:3) == 255) .and. all(b(4:7) == 0))) then
+            r = P_IMPOSSIBLE
+            return
+         end if
+      end if
+      if (iand(b(3), 224) /= 0) then
+         r = P_IMPLAUSIBLE
+         return
+      end if
+      if (b(4) + 256*b(5) + b(6) + 256*b(7) > 2048) r = P_IMPLAUSIBLE
+   end function plausible_flat
+
+   pure function plausible_binary(b) result(r)
+      integer, intent(in) :: b(0:)
+      integer :: r
+      integer(int64) :: nsegs, off
+      r = P_PLAUSIBLE
+      if (size(b) < 8) return
+      ! The count is stored minus one in a uint32, so it can wrap to zero.
+      nsegs = mod(le32(b, 0) + 1_int64, 4294967296_int64)
+      if (nsegs > 65536_int64) then
+         r = P_IMPOSSIBLE
+         return
+      else if (nsegs > 256_int64) then
+         r = P_IMPLAUSIBLE
+         return
+      end if
+      if (le32(b, 4) > 134217728_int64) then
+         r = P_IMPLAUSIBLE
+         return
+      end if
+      off = 4_int64 + nsegs*4_int64
+      if (mod(off, 8_int64) /= 0_int64) off = off + 4_int64
+      if (size(b, kind=int64) < off + 8_int64) return
+      r = plausible_flat(b(off:), nsegs)
+   end function plausible_binary
+
+   !> Unpack at most 1 KiB of the prefix, then check it as binary or flat.
+   pure function plausible_packed(b, flat) result(r)
+      integer, intent(in) :: b(0:)
+      logical, intent(in) :: flat
+      integer :: r
+      integer, allocatable :: u(:)
+      integer :: pos, last, tag, i, cnt, nu, avail
+      allocate (u(0:min(size(b), 1024)*1100 + 16))
+      nu = 0
+      pos = 0
+      last = min(size(b), 1024)
+      do while (pos < last)
+         tag = b(pos)
+         pos = pos + 1
+         i = 0
+         do while (i < 8 .and. pos < last)
+            if (btest(tag, i)) then
+               if (b(pos) == 0) then
+                  r = P_IMPOSSIBLE
+                  return
+               end if
+               u(nu) = b(pos)
+               pos = pos + 1
+            else
+               u(nu) = 0
+            end if
+            nu = nu + 1
+            i = i + 1
+         end do
+         if (pos == last) exit
+         if (tag == 0) then
+            cnt = b(pos)*8
+            pos = pos + 1
+            u(nu:nu + cnt - 1) = 0
+            nu = nu + cnt
+         else if (tag == 255) then
+            cnt = b(pos)*8
+            pos = pos + 1
+            avail = min(cnt, last - pos)
+            u(nu:nu + avail - 1) = b(pos:pos + avail - 1)
+            nu = nu + avail
+            pos = pos + avail
+         end if
+      end do
+      if (flat) then
+         r = plausible_flat(u(0:nu - 1), 1_int64)
+      else
+         r = plausible_binary(u(0:nu - 1))
+      end if
+   end function plausible_packed
+
+   !> isPlausiblyJson reads signed chars, so NUL and bytes from 0x80 up
+   !> are not unprintable there.
+   pure function plausible_json(b) result(r)
+      integer, intent(in) :: b(0:)
+      integer :: r
+      integer :: i, c, state
+      integer, parameter :: st_pre = 0, st_com = 1, st_body = 2
+      r = P_PLAUSIBLE
+      state = st_pre
+      do i = 0, size(b) - 1
+         c = b(i)
+         select case (state)
+         case (st_pre)
+            if (c == iachar('{')) then
+               state = st_body
+               cycle
+            else if (c == iachar('#') .or. c == iachar('/')) then
+               state = st_com
+               cycle
+            else if (c /= 32 .and. c /= 10 .and. c /= 13 .and. c /= 9 .and. c /= 11) then
+               r = P_IMPOSSIBLE
+               return
+            end if
+         case (st_com)
+            if (c == 10) then
+               state = st_pre
+               cycle
+            end if
+         case (st_body)
+            if (c == iachar('"')) return
+         end select
+         if ((c > 0 .and. c < 32 .and. c /= 10 .and. c /= 13 .and. c /= 9 .and. c /= 11) &
+             .or. c == 127) then
+            r = P_IMPOSSIBLE
+            return
+         end if
+      end do
+   end function plausible_json
 
    !> True when the first bytes can be Cap'n Proto text. Mirrors
    !> isPlausiblyText in capnp 1.4.0: preamble is whitespace, `#`, or `(`,

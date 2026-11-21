@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(62))
+      allocate (testsuite(63))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -125,6 +125,7 @@ contains
       testsuite(60) = new_unittest("zero-size-list", run_zero_size_list)
       testsuite(61) = new_unittest("cli-options", run_cli_options)
       testsuite(62) = new_unittest("cap-pointers", run_cap_pointers)
+      testsuite(63) = new_unittest("plausible-sniff", run_plausible_sniff)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3912,5 +3913,64 @@ contains
          call test_failed(error, 'capability pointers')
       end if
    end subroutine run_cap_pointers
+
+   !> Without --quiet, input that cannot be in the named format is rejected.
+   subroutine run_plausible_sniff(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/plausible-sniff && '//cap_setup() &
+         //' && export CAP ' &
+         //' && python3 - <<''PY'''//achar(10)// &
+         'import os, struct, subprocess, sys'//achar(10)// &
+         'cap = os.environ["CAP"]'//achar(10)// &
+         'def run(tool, args, data):'//achar(10)// &
+         '    try:'//achar(10)// &
+         '        p = subprocess.run([tool, *args], input=data, stdout=subprocess.PIPE,'//achar(10)// &
+         '                           stderr=subprocess.PIPE, timeout=3)'//achar(10)// &
+         '    except subprocess.TimeoutExpired:'//achar(10)// &
+         '        return None'//achar(10)// &
+         '    sniff = b"The input is not in" in p.stderr'//achar(10)// &
+         '    return p.returncode, sniff, p.stdout if p.returncode == 0 else b""'//achar(10)// &
+         'sch, typ = "schema/common.capnp", "Vec3"'//achar(10)// &
+         'flat = bytes.fromhex("0000000001000000fcffffff000000000000000001000000fcffffff00000000")'//achar(10)// &
+         'inputs = ['//achar(10)// &
+         '    flat,'//achar(10)// &
+         '    bytes.fromhex("fcffffff00000000"),'//achar(10)// &
+         '    bytes.fromhex("0000000003000000000000000300000000000000000000000000000000000000"),'//achar(10)// &
+         '    bytes.fromhex("ffffffff0000000000000000"),'//achar(10)// &
+         '    bytes.fromhex("0000010001000000"),'//achar(10)// &
+         '    bytes.fromhex("1100000000"),'//achar(10)// &
+         '    bytes.fromhex("ff0000000000000000"),'//achar(10)// &
+         '    b"[1, 2]\n",'//achar(10)// &
+         '    b"{\"x\": 1}\n",'//achar(10)// &
+         '    b"// c\n{\"x\": 1}\n",'//achar(10)// &
+         '    b"(x = 1)\n",'//achar(10)// &
+         '    b"# c\n(x = 1)\n",'//achar(10)// &
+         '    b"x\n",'//achar(10)// &
+         '    b"(\x7f)",'//achar(10)// &
+         '    b"{\x01}",'//achar(10)// &
+         '    b"{\x00}",'//achar(10)// &
+         ']'//achar(10)// &
+         'for raw in inputs:'//achar(10)// &
+         '    for fmt in ("binary", "packed", "flat", "flat-packed", "canonical", "text", "json"):'//achar(10)// &
+         '        for quiet in ([], ["--quiet"]):'//achar(10)// &
+         '            args = ["convert", *quiet, fmt + ":binary", sch, typ]'//achar(10)// &
+         '            ref = run("capnp", args, raw)'//achar(10)// &
+         '            if ref is not None and ref != run(cap, args, raw):'//achar(10)// &
+         '                print("mismatch:", args, raw.hex())'//achar(10)// &
+         '                sys.exit(1)'//achar(10)// &
+         '    for args in (["encode", sch, typ], ["decode", sch, typ], ["decode", "--quiet", sch, typ],'//achar(10)// &
+         '                 ["decode", "--flat", sch, typ], ["decode", "--packed", sch, typ]):'//achar(10)// &
+         '        ref = run("capnp", args, raw)'//achar(10)// &
+         '        if ref is not None and ref != run(cap, args, raw):'//achar(10)// &
+         '            print("mismatch:", args, raw.hex())'//achar(10)// &
+         '            sys.exit(1)'//achar(10)// &
+         'PY')) then
+         call test_failed(error, 'plausibility sniff')
+      end if
+   end subroutine run_plausible_sniff
 
 end module test_regress
