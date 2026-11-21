@@ -70,3 +70,6 @@ coverage-report/
 *.gcda
 *.gcno
 *.gcov
+
+# Bytecode from the release hooks
+__pycache__/
