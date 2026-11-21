@@ -3965,7 +3965,9 @@ contains
       integer(int64) :: slot
       err = CAPNP_OK
       jv%k = JK_NULL
-      if (depth > MAX_DEPTH) then
+      ! Encoding a value already on the wire follows the message limit.
+      ! JSON text decode keeps the 64-level cap in the parser.
+      if (depth > depth_cap(p)) then
          err = CAPNP_ERR_DEPTH
          return
       end if
