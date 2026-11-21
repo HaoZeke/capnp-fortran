@@ -708,37 +708,50 @@ contains
       integer, intent(in) :: tw
       logical, intent(in) :: in_list
       integer, intent(out) :: err
+      integer(int64) :: stored
+      logical :: clamped
       err = CAPNP_OK
+      stored = iv
+      clamped = .false.
       select case (tw)
       case (TYPE_INT8)
-         if (iv < -128_int64 .or. iv > 127_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (iv > 127_int64) then
+            stored = 127_int64
+            clamped = .true.
+         else if (iv < -128_int64) then
+            stored = -128_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i8(p, ix, int(iv, int8), err)
+            call capnp_list_set_i8(p, ix, int(stored, int8), err)
          else
-            call capnp_set_i8(p, off, int(iv, int8), err, default=capnp_def_i8(dv))
+            call capnp_set_i8(p, off, int(stored, int8), err, default=capnp_def_i8(dv))
          end if
       case (TYPE_INT16)
-         if (iv < -32768_int64 .or. iv > 32767_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (iv > 32767_int64) then
+            stored = 32767_int64
+            clamped = .true.
+         else if (iv < -32768_int64) then
+            stored = -32768_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i16(p, ix, int(iv, int16), err)
+            call capnp_list_set_i16(p, ix, int(stored, int16), err)
          else
-            call capnp_set_i16(p, off*2_int64, int(iv, int16), err, default=capnp_def_i16(dv))
+            call capnp_set_i16(p, off*2_int64, int(stored, int16), err, default=capnp_def_i16(dv))
          end if
       case (TYPE_INT32)
-         if (iv < -2147483648_int64 .or. iv > 2147483647_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (iv > 2147483647_int64) then
+            stored = 2147483647_int64
+            clamped = .true.
+         else if (iv < -2147483648_int64) then
+            stored = -2147483648_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i32(p, ix, int(iv, int32), err)
+            call capnp_list_set_i32(p, ix, int(stored, int32), err)
          else
-            call capnp_set_i32(p, off*4_int64, int(iv, int32), err, default=capnp_def_i32(dv))
+            call capnp_set_i32(p, off*4_int64, int(stored, int32), err, default=capnp_def_i32(dv))
          end if
       case (TYPE_INT64)
          if (in_list) then
@@ -749,6 +762,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK .and. clamped) err = CAPNP_ERR_ARG
    end subroutine capnp_put_signed
 
    subroutine capnp_put_unsigned(p, off, tw, uv, in_list, ix, dv, err)
@@ -757,37 +771,50 @@ contains
       integer, intent(in) :: tw
       logical, intent(in) :: in_list
       integer, intent(out) :: err
+      integer(int64) :: stored
+      logical :: clamped
       err = CAPNP_OK
+      stored = uv
+      clamped = .false.
       select case (tw)
       case (TYPE_UINT8)
-         if (uv < 0_int64 .or. uv > 255_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (uv < 0_int64) then
+            stored = 0_int64
+            clamped = .true.
+         else if (uv > 255_int64) then
+            stored = 255_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i8(p, ix, capnp_as_i8(int(uv)), err)
+            call capnp_list_set_i8(p, ix, capnp_as_i8(int(stored)), err)
          else
-            call capnp_set_u8(p, off, int(uv, int16), err, default=capnp_def_u8(dv))
+            call capnp_set_u8(p, off, int(stored, int16), err, default=capnp_def_u8(dv))
          end if
       case (TYPE_UINT16)
-         if (uv < 0_int64 .or. uv > 65535_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (uv < 0_int64) then
+            stored = 0_int64
+            clamped = .true.
+         else if (uv > 65535_int64) then
+            stored = 65535_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i16(p, ix, capnp_as_i16(int(uv)), err)
+            call capnp_list_set_i16(p, ix, capnp_as_i16(int(stored)), err)
          else
-            call capnp_set_u16(p, off*2_int64, int(uv, int32), err, default=capnp_def_u16(dv))
+            call capnp_set_u16(p, off*2_int64, int(stored, int32), err, default=capnp_def_u16(dv))
          end if
       case (TYPE_UINT32)
-         if (uv < 0_int64 .or. uv > 4294967295_int64) then
-            err = CAPNP_ERR_ARG
-            return
+         if (uv < 0_int64) then
+            stored = 0_int64
+            clamped = .true.
+         else if (uv > 4294967295_int64) then
+            stored = 4294967295_int64
+            clamped = .true.
          end if
          if (in_list) then
-            call capnp_list_set_i32(p, ix, capnp_as_i32u(uv), err)
+            call capnp_list_set_i32(p, ix, capnp_as_i32u(stored), err)
          else
-            call capnp_set_u32(p, off*4_int64, uv, err, default=capnp_def_u32(dv))
+            call capnp_set_u32(p, off*4_int64, stored, err, default=capnp_def_u32(dv))
          end if
       case (TYPE_UINT64)
          if (in_list) then
@@ -798,6 +825,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK .and. clamped) err = CAPNP_ERR_ARG
    end subroutine capnp_put_unsigned
 
    pure function capnp_as_i8(u) result(v)
