@@ -1683,7 +1683,8 @@ contains
          //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
          //' && test -n "$mod" && test -n "$lib"' &
          //' && dir=$(dirname "$mod")' &
-         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
+         //' then san="-fsanitize=address,undefined"; fi' &
          //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_text.f90 -o ' &
          //tmp//'/text_check.o' &
          //' && cat > '//tmp//'/ubounds.f90 <<''EOF'' &&'//achar(10)// &
@@ -1714,7 +1715,8 @@ contains
          //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
          //' && test -n "$mod" && test -n "$lib"' &
          //' && dir=$(dirname "$mod")' &
-         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
+         //' then san="-fsanitize=address,undefined"; fi' &
          //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_json.f90 -o ' &
          //tmp//'/json_check.o' &
          //' && cat > '//tmp//'/jbounds.f90 <<''EOF'' &&'//achar(10)// &
@@ -1746,6 +1748,8 @@ contains
       if (allocated(error)) return
       ! ASan replaces malloc, so the preload hook cannot see the byte buffer.
       if (.not. sh('test -z "${ASAN_OPTIONS:-}"')) return
+      if (.not. sh('lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
+         //' && test -n "$lib" && ! nm -A "$lib" 2>/dev/null | grep -q " __asan"')) return
       if (.not. sh('mkdir -p '//tmp &
          //' && cat > '//tmp//'/faili.c <<''EOF'' &&'//achar(10)// &
          '#define _GNU_SOURCE'//achar(10)// &
@@ -1798,7 +1802,8 @@ contains
          'mod=$(find build -name capnp_canonical.mod | xargs ls -t | head -1)' &
          //' && lib=$(find build -name libcapnp.a | xargs ls -t | head -1)' &
          //' && dir=$(dirname "$mod")' &
-         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ]; then san="-fsanitize=address,undefined"; fi' &
+         //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
+         //' then san="-fsanitize=address,undefined"; fi' &
          //' && gfortran $san -I "$dir" '//tmp//'/once.f90 "$lib" -o '//tmp//'/once' &
          //' && FAIL_SIZE=200 FAIL_INDEX=2 LD_PRELOAD='//tmp//'/faili.so ' &
          //tmp//'/once')) then
