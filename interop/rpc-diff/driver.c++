@@ -52,6 +52,7 @@ int fd = -1;
 std::vector<uint8_t> inbuf;
 bool peerEof = false;
 bool peerAborted = false;
+bool driverAborted = false;
 std::mt19937_64 rng;
 
 uint64_t TARGET_ID = capnp::typeId<Target>();
@@ -140,6 +141,18 @@ void sendRaw(capnp::MessageBuilder& mb) {
       return;
     }
     off += n;
+  }
+}
+
+void sendBytes(const std::vector<uint8_t>& bytes) {
+  size_t off = 0;
+  while (off < bytes.size()) {
+    ssize_t n = ::send(fd, bytes.data() + off, bytes.size() - off, MSG_NOSIGNAL);
+    if (n <= 0) {
+      peerEof = true;
+      return;
+    }
+    off += size_t(n);
   }
 }
 
@@ -415,6 +428,19 @@ void sendReturnException(uint32_t wire, const char* reason) {
   emit("D> RET " + peerQName(wire, false) + " exc(" + reason + ")");
 }
 
+void sendReturnExceptionType(uint32_t wire, const char* reason, rpc::Exception::Type type,
+                             const char* label) {
+  capnp::MallocMessageBuilder mb;
+  auto r = mb.initRoot<rpc::Message>().initReturn();
+  r.setAnswerId(wire);
+  r.setReleaseParamCaps(false);
+  auto e = r.initException();
+  e.setType(type);
+  e.setReason(reason);
+  sendRaw(mb);
+  emit("D> RET " + peerQName(wire, false) + " exc(" + label + ": " + reason + ")");
+}
+
 void sendReturnElsewhere(uint32_t wire) {
   capnp::MallocMessageBuilder mb;
   auto r = mb.initRoot<rpc::Message>().initReturn();
@@ -544,6 +570,8 @@ void onFinish(rpc::Finish::Reader f) {
   std::string flag;
   if (it == peerQs.end() || !it->second.answered)
     flag = f.getReleaseResultCaps() ? " rrc=1" : " rrc=0";
+  else if (f.getReleaseResultCaps() && it->second.resultExports.empty())
+    flag = " rrc=1";
   emit("P> FIN " + peerQName(wire, false) + flag);
   if (it != peerQs.end()) {
     if (f.getReleaseResultCaps()) {
@@ -987,6 +1015,87 @@ void actBoot(std::string& label) {
   emit("D> BOOT q" + std::to_string(q));
 }
 
+void actUnknownMethod(std::string& label) {
+  label = "unknown_method";
+  auto imps = liveImports(true);
+  if (imps.empty()) return;
+  uint32_t w = imps[pick(imps.size())];
+  uint32_t q = newQuestion("unknown_method");
+  capnp::MallocMessageBuilder mb;
+  auto c = mb.initRoot<rpc::Message>().initCall();
+  c.setQuestionId(q);
+  c.initTarget().setImportedCap(w);
+  std::string what;
+  if (chance(50)) {
+    uint16_t mid = uint16_t(8 + pick(20));
+    c.setInterfaceId(TARGET_ID);
+    c.setMethodId(mid);
+    what = "Target." + std::to_string(mid);
+  } else {
+    uint64_t iid = chance(50) ? (0x123456789abcdef0ull + pick(5))
+                              : (0x9000000000000001ull + pick(5));
+    uint16_t mid = uint16_t(pick(5));
+    c.setInterfaceId(iid);
+    c.setMethodId(mid);
+    what = "iface(" + std::to_string(iid) + ")." + std::to_string(mid);
+  }
+  c.initParams().getContent().initAs<N>().setN(pick(100));
+  sendRaw(mb);
+  emit("D> CALL q" + std::to_string(q) + " " + importRef(w) + " " + what);
+}
+
+void actSelfPipeline(std::string& label) {
+  label = "self_pipeline";
+  uint32_t q = newQuestion("self_pipe");
+  auto ops = randomOps();
+  capnp::MallocMessageBuilder mb;
+  auto c = mb.initRoot<rpc::Message>().initCall();
+  c.setQuestionId(q);
+  c.setInterfaceId(TARGET_ID);
+  c.setMethodId(0);
+  auto pa = c.initTarget().initPromisedAnswer();
+  pa.setQuestionId(q);
+  setOps(pa, ops);
+  c.initParams().getContent().initAs<N>().setN(pick(100));
+  sendRaw(mb);
+  emit("D> CALL q" + std::to_string(q) + " pa(q" + std::to_string(q) + opsName(ops) + ") echo");
+}
+
+void actAbort(std::string& label) {
+  label = "abort";
+  static const rpc::Exception::Type types[] = {
+      rpc::Exception::Type::FAILED,
+      rpc::Exception::Type::OVERLOADED,
+      rpc::Exception::Type::DISCONNECTED,
+      rpc::Exception::Type::UNIMPLEMENTED,
+  };
+  static const char* reasons[] = {
+      "driver abort",
+      "remote exception: driver abort",
+  };
+  auto ty = types[pick(4)];
+  const char* reason = reasons[pick(2)];
+  capnp::MallocMessageBuilder mb;
+  auto ex = mb.initRoot<rpc::Message>().initAbort();
+  ex.setType(ty);
+  ex.setReason(reason);
+  sendRaw(mb);
+  emit("D> ABORT " + exceptionStr(ex.asReader()));
+  driverAborted = true;
+}
+
+void waitPeerClose() {
+  auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kSyncTimeoutMs);
+  InMsg m;
+  while (!peerEof && std::chrono::steady_clock::now() < deadline) {
+    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now())
+                    .count();
+    if (left <= 0) break;
+    if (recvOne(m, int(left))) handle(m);
+  }
+}
+
 // ---------------------------------------------------------------- scenarios
 //
 // Fixed shapes that random steps reach too rarely. Each part is its own
@@ -1057,6 +1166,15 @@ void part(const std::string& cls) {
   printf("== %s.%d %s\n", scenarioStep.c_str(), ++scenarioPart, cls.c_str());
   for (auto& s : acted) printf("%s\n", s.c_str());
   sync();
+  flushWindow();
+}
+
+void partAbort(const std::string& cls) {
+  std::vector<std::string> acted = window;
+  window.clear();
+  printf("== %s.%d %s\n", scenarioStep.c_str(), ++scenarioPart, cls.c_str());
+  for (auto& s : acted) printf("%s\n", s.c_str());
+  waitPeerClose();
   flushWindow();
 }
 
@@ -1248,6 +1366,17 @@ uint32_t probeCall(int64_t aq, std::vector<int> ops, int method, int64_t n, bool
         ct[i].setSenderPromise(k.id);
         questions[q].paramExports.push_back(k.id);
         cs += "sp:D" + std::to_string(k.id);
+      } else if (k.kind == 't' || k.kind == 'T') {
+        // thirdPartyHosted with a vine and an id the peer must refuse: a
+        // null id ('t') or a vat host longer than any it keeps ('T').
+        auto tp = ct[i].initThirdPartyHosted();
+        tp.setVineId(k.id);
+        if (k.kind == 'T') {
+          auto id = tp.getId().initAsAnyStruct(1, 1);
+          auto vat = id.getPointerSection()[0].initAsAnyStruct(1, 1);
+          vat.getPointerSection()[0].setAs<capnp::Text>(std::string(300, 'x').c_str());
+        }
+        cs += "tph:D" + std::to_string(k.id);
       } else {
         auto ra = ct[i].initReceiverAnswer();
         ra.setQuestionId(k.id);
@@ -1576,7 +1705,18 @@ const char* kProbes[] = {"PARAM_PROMISE_MERGE_HOSTED", "PARAM_PROMISE_MERGE_PROM
                          "PROXY_EARLY_FINISH", "DISEMBARGO_PLAIN_FWD_NPP",
                          "FWD_SP_RESOLVE_TO_RA_PENDING_NPP", "PARAM_PROMISE_WRITTEN_MERGE",
                          "FWD_RA_PENDING_NPP", "FWD_RA_RETURNED_NPP",
-                         "DISEMBARGO_PLAIN_FWD_PROMISE_CAP", "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT"};
+                         "DISEMBARGO_PLAIN_FWD_PROMISE_CAP", "PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT",
+                         "UNKNOWN_METHOD", "UNKNOWN_INTERFACE", "CALL_PA_SELF", "PEER_ABORT",
+                         "DIS_SEND_PA_RETURNED", "DIS_ACCEPT_UNIMPL",
+                         "DISEMBARGO_PENDING_DEFERRED", "DISEMBARGO_PENDING_FINISHED",
+                         "FINISH_QUEUED_CHAIN",
+                         "TPH_PARAM_REFUSED", "DIS_FAILED_ANSWER", "DIS_PA_NON_STRUCT",
+                         "FRAME_512_FULL_VALID", "FRAME_4097_FULL_VALID", "FRAME_512_HDR_ONLY",
+                         "FRAME_HUGE_A", "FRAME_HUGE_B", "FRAME_HUGE_C", "DIS_YOURSELF_MAKE",
+                         "OPP_SELF_REEXPORT", "DIS_YOURSELF_REFLECT", "DIS_YOURSELF_FAILED",
+                         "TPH_SLOW_PREMATURE", "TPH_YOURSELF_PREMATURE", "TPH_MAKE_PREMATURE", "TPH_OPP_PREMATURE",
+                         "FRAME_512_SEGS", "FRAME_U32_MAX_SEGS", "FRAME_OVERSIZED",
+                         "FRAME_SEG_OVERFLOW_32", "FRAME_SHORT", "SLOW_PING_EXC_TYPES"};
 
 // Answer the oldest pending call since `before`, as probeAnswer answers
 // the newest.
@@ -1597,7 +1737,7 @@ bool probe(const std::string& name) {
   scenarioPart = 0;
   window.clear();
   if (!haveBoot) return true;
-  const int kSelf = 4, kMake = 2, kReflect = 5, kEcho = 0;
+  const int kSelf = 4, kMake = 2, kReflect = 5, kEcho = 0, kFail = 1, kSlow = 3, kSlowMake = 7;
   if (name == "PARAM_PROMISE_MERGE_HOSTED") {
     // Two calls keep params alive; the promise of one resolves to the
     // hosted cap of the other. Both share one import until the last Finish.
@@ -1949,6 +2089,309 @@ bool probe(const std::string& name) {
     part(name);
     sendFinish(q2, true, true);
     part(name);
+  } else if (name == "UNKNOWN_METHOD") {
+    uint32_t q = newQuestion("unknown_method");
+    capnp::MallocMessageBuilder mb;
+    auto c = mb.initRoot<rpc::Message>().initCall();
+    c.setQuestionId(q);
+    c.setInterfaceId(TARGET_ID);
+    c.setMethodId(99);
+    c.initTarget().setImportedCap(bootImportWire);
+    c.initParams().getContent().initAs<N>().setN(1);
+    sendRaw(mb);
+    emit("D> CALL q" + std::to_string(q) + " " + importRef(bootImportWire) + " Target.99");
+    part(name);
+    sendFinish(q, true, true);
+    part(name);
+  } else if (name == "UNKNOWN_INTERFACE") {
+    uint64_t ids[2] = {0x123456789abcdef0ull, 0x9000000000000001ull};
+    for (int i = 0; i < 2; ++i) {
+      uint32_t q = newQuestion("unknown_iface");
+      capnp::MallocMessageBuilder mb;
+      auto c = mb.initRoot<rpc::Message>().initCall();
+      c.setQuestionId(q);
+      c.setInterfaceId(ids[i]);
+      c.setMethodId(0);
+      c.initTarget().setImportedCap(bootImportWire);
+      c.initParams().getContent().initAs<N>().setN(i);
+      sendRaw(mb);
+      emit("D> CALL q" + std::to_string(q) + " " + importRef(bootImportWire) + " iface(" +
+           std::to_string(ids[i]) + ").0");
+      part(name);
+      sendFinish(q, true, true);
+      part(name);
+    }
+  } else if (name == "CALL_PA_SELF") {
+    uint32_t q = newQuestion("self_pipe");
+    capnp::MallocMessageBuilder mb;
+    auto c = mb.initRoot<rpc::Message>().initCall();
+    c.setQuestionId(q);
+    c.setInterfaceId(TARGET_ID);
+    c.setMethodId(0);
+    auto pa = c.initTarget().initPromisedAnswer();
+    pa.setQuestionId(q);
+    setOps(pa, {0});
+    c.initParams().getContent().initAs<N>().setN(7);
+    sendRaw(mb);
+    emit("D> CALL q" + std::to_string(q) + " pa(q" + std::to_string(q) + ",0) echo");
+    part(name);
+    sendFinish(q, true, true);
+    part(name);
+  } else if (name == "PEER_ABORT") {
+    capnp::MallocMessageBuilder mb;
+    auto ex = mb.initRoot<rpc::Message>().initAbort();
+    ex.setType(rpc::Exception::Type::FAILED);
+    ex.setReason("bye");
+    sendRaw(mb);
+    emit("D> ABORT " + exceptionStr(ex.asReader()));
+    driverAborted = true;
+    partAbort(name);
+  } else if (name == "DIS_SEND_PA_RETURNED") {
+    uint32_t q1 = callOnBoot(kMake, 1);
+    part(name);
+    probeDisembargo(q1, {}, 9);
+    partAbort(name);
+  } else if (name == "DIS_ACCEPT_UNIMPL") {
+    capnp::MallocMessageBuilder mb;
+    auto d = mb.initRoot<rpc::Message>().initDisembargo();
+    d.initTarget().setImportedCap(bootImportWire);
+    d.getContext().setAccept();
+    sendRaw(mb);
+    emit("D> DIS " + importRef(bootImportWire) + " accept");
+    partAbort(name);
+  } else if (name == "DISEMBARGO_PENDING_DEFERRED") {
+    // Disembargo on an answer that still waits on the driver's Callback.
+    // C++ holds it until the answer returns and keeps serving the
+    // connection.
+    size_t before = pending.size();
+    uint32_t q1 = probeCall(-1, {}, kSlow, 1, false, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 5000);
+    part(name);
+    uint32_t q2 = probeCall(-1, {}, kEcho, 42, false, false, {});
+    part(name);
+    probeAnswer(before, false);
+    part(name);
+    sendFinish(q1, true, true);
+    sendFinish(q2, true, true);
+    part(name);
+  } else if (name == "DISEMBARGO_PENDING_FINISHED") {
+    // The Finish arrives while the Disembargo still waits.
+    size_t before = pending.size();
+    uint32_t q1 = probeCall(-1, {}, kSlow, 1, false, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 5001);
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+    probeAnswer(before, false);
+    partAbort(name);
+  } else if (name == "FINISH_QUEUED_CHAIN") {
+    // Finish for a queued call that has a call pipelined on it. The
+    // queued call is answered as canceled, and the call behind it runs.
+    size_t before = pending.size();
+    uint32_t q1 = probeCall(-1, {}, kSlowMake, 1, false, false, {});
+    part(name);
+    uint32_t q2 = probeCall(q1, {0}, kSelf, 2, false, false, {});
+    uint32_t q3 = probeCall(q2, {0}, kEcho, 3, false, false, {});
+    part(name);
+    sendFinish(q2, false, true);
+    part(name);
+    if (pending.size() > before) {
+      Incoming in = pending[before];
+      pending.erase(pending.begin() + before);
+      sendReturnResults(in.wire, 10, false);
+      markAnswered(in.wire);
+    }
+    part(name);
+    sendFinish(q1, true, true);
+    sendFinish(q3, true, true);
+    part(name);
+  } else if (name == "TPH_PARAM_REFUSED") {
+    // Call params with thirdPartyHosted descriptors the peer refuses.
+    // C++ still imports each vine and releases it with the params.
+    exports[200].refs += 1;
+    exports[201].refs += 1;
+    uint32_t q1 = probeCall(-1, {}, kEcho, 1, false, false,
+                            {{'t', 200, {}}, {'T', 201, {}}});
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+  } else if (name == "DIS_FAILED_ANSWER") {
+    // Disembargo on an answer that failed aborts with its exception.
+    uint32_t q1 = probeCall(-1, {}, kFail, 1, false, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 77);
+    partAbort(name);
+  } else if (name == "DIS_PA_NON_STRUCT") {
+    // A transform that walks through a capability pointer.
+    uint32_t q1 = probeCall(-1, {}, kMake, 5, false, false, {});
+    part(name);
+    probeDisembargo(q1, {0, 0}, 78);
+    partAbort(name);
+  } else if (name == "FRAME_512_SEGS" || name == "FRAME_U32_MAX_SEGS" ||
+             name == "FRAME_OVERSIZED" || name == "FRAME_SEG_OVERFLOW_32" ||
+             name == "FRAME_SHORT") {
+    // A frame header C++ refuses, or a stream that ends inside a frame.
+    // The peer reports it with an Abort before it closes.
+    std::vector<uint8_t> b;
+    auto u32 = [&](uint32_t v) {
+      for (int i = 0; i < 4; ++i) b.push_back(uint8_t(v >> (8 * i)));
+    };
+    if (name == "FRAME_512_SEGS") {
+      u32(511);
+      u32(1);
+    } else if (name == "FRAME_U32_MAX_SEGS") {
+      u32(0xffffffffu);
+      u32(0);
+    } else if (name == "FRAME_OVERSIZED") {
+      u32(0);
+      u32(8u * 1024 * 1024 + 1);
+    } else if (name == "FRAME_SEG_OVERFLOW_32") {
+      u32(1);
+      u32(0x80000000u);
+      u32(0x80000000u);
+      u32(0);
+    } else {
+      u32(0);
+      u32(4);
+      u32(0);
+      u32(0);
+    }
+    sendBytes(b);
+    emit("D> FRAME " + name);
+    if (name == "FRAME_SHORT" || name == "FRAME_512_SEGS") ::shutdown(fd, SHUT_WR);
+    driverAborted = true;
+    partAbort(name);
+  } else if (name == "FRAME_512_FULL_VALID" || name == "FRAME_4097_FULL_VALID" ||
+             name == "FRAME_512_HDR_ONLY") {
+    // A well-formed frame with many segments. C++ reads every size, so
+    // 512 or 4097 segments are served, and a header with no body is a
+    // stream that ended inside a frame.
+    uint32_t segs = name == "FRAME_4097_FULL_VALID" ? 4097 : 512;
+    uint32_t q = newQuestion(kMethods[kEcho]);
+    capnp::MallocMessageBuilder mb;
+    auto c = mb.initRoot<rpc::Message>().initCall();
+    c.setQuestionId(q);
+    c.setInterfaceId(TARGET_ID);
+    c.setMethodId(kEcho);
+    c.initTarget().setImportedCap(bootImportWire);
+    c.initParams().getContent().initAs<N>().setN(7);
+    auto seg0 = mb.getSegmentsForOutput()[0].asBytes();
+    std::vector<uint8_t> b;
+    auto u32 = [&](uint32_t v) {
+      for (int i = 0; i < 4; ++i) b.push_back(uint8_t(v >> (8 * i)));
+    };
+    u32(segs - 1);
+    u32(uint32_t(seg0.size() / 8));
+    for (uint32_t i = 1; i < segs; ++i) u32(0);
+    while (b.size() % 8) b.push_back(0);
+    if (name != "FRAME_512_HDR_ONLY") b.insert(b.end(), seg0.begin(), seg0.end());
+    sendBytes(b);
+    emit("D> FRAME " + name);
+    if (name == "FRAME_512_HDR_ONLY") {
+      ::shutdown(fd, SHUT_WR);
+      driverAborted = true;
+      partAbort(name);
+    } else {
+      part(name);
+      sendFinish(q, true, true);
+      part(name);
+    }
+  } else if (name == "FRAME_HUGE_A" || name == "FRAME_HUGE_B" || name == "FRAME_HUGE_C") {
+    std::vector<uint8_t> b;
+    auto u32 = [&](uint32_t v) {
+      for (int i = 0; i < 4; ++i) b.push_back(uint8_t(v >> (8 * i)));
+    };
+    u32(name == "FRAME_HUGE_A" ? 100000u : name == "FRAME_HUGE_B" ? 0x7fffffffu : 0x00ffffffu);
+    u32(0);
+    sendBytes(b);
+    emit("D> FRAME " + name);
+    ::shutdown(fd, SHUT_WR);
+    driverAborted = true;
+    partAbort(name);
+  } else if (name == "DIS_YOURSELF_MAKE") {
+    uint32_t q1 = probeCall(-1, {}, kMake, 1, true, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 5002);
+    partAbort(name);
+  } else if (name == "OPP_SELF_REEXPORT") {
+    // A pipelined call on an onlyPromisePipeline answer returns the
+    // answer's server as a new export. The answer is finished, then
+    // the export is called.
+    uint32_t q1 = probeCall(-1, {}, kMake, 10, false, false, {}, true);
+    part(name);
+    uint32_t q2 = probeCall(q1, {0}, kSelf, 0, false, false, {});
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+    int64_t w = questions[q2].resultImports.empty() ? -1 : int64_t(questions[q2].resultImports[0]);
+    uint32_t q3 = probeCall(w >= 0 ? -2 - w : -1, {}, kEcho, 42, false, false, {});
+    part(name);
+    sendFinish(q3, true, true);
+    sendFinish(q2, true, true);
+    part(name);
+  } else if (name == "DIS_YOURSELF_REFLECT") {
+    // Disembargo on a local sendResultsTo.yourself answer that returns
+    // the driver's own capability. C++ echoes it as receiverLoopback.
+    uint32_t q1 = probeCall(-1, {}, kReflect, 1, true, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 5000);
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+  } else if (name == "DIS_YOURSELF_FAILED") {
+    uint32_t q1 = probeCall(-1, {}, kFail, 1, true, false, {});
+    part(name);
+    probeDisembargo(q1, {0}, 5001);
+    partAbort(name);
+  } else if (name == "TPH_SLOW_PREMATURE" || name == "TPH_YOURSELF_PREMATURE" ||
+             name == "TPH_MAKE_PREMATURE" || name == "TPH_OPP_PREMATURE") {
+    // A refused thirdPartyHosted param stays imported while the call
+    // runs, and is released when the call finishes.
+    exports[200].refs += 1;
+    size_t before = pending.size();
+    bool slow = name == "TPH_SLOW_PREMATURE" || name == "TPH_YOURSELF_PREMATURE";
+    bool yourself = name == "TPH_YOURSELF_PREMATURE";
+    bool opp = name == "TPH_OPP_PREMATURE";
+    uint32_t q1 = probeCall(-1, {}, slow ? kSlow : kMake, 1, yourself, false, {{'t', 200, {}}}, opp);
+    part(name);
+    probeAnswer(before, false);
+    part(name);
+    sendFinish(q1, true, true);
+    part(name);
+  } else if (name == "SLOW_PING_EXC_TYPES") {
+    // The ping of a slow call fails with each exception type, then
+    // returns. The slow call fails alike, and the Finish for the ping
+    // asks for no result release when nothing came back to release.
+    using T = rpc::Exception::Type;
+    struct Case {
+      T type;
+      const char* label;
+    } cases[] = {{T::OVERLOADED, "overloaded"},
+                 {T::DISCONNECTED, "disconnected"},
+                 {T::UNIMPLEMENTED, "unimplemented"},
+                 {T::FAILED, "failed"}};
+    std::vector<uint32_t> qs;
+    for (int i = 0; i < 4; ++i) {
+      size_t before = pending.size();
+      qs.push_back(probeCall(-1, {}, kSlow, i + 1, false, false, {}));
+      part(name);
+      if (pending.size() > before) {
+        Incoming in = pending.back();
+        pending.pop_back();
+        sendReturnExceptionType(in.wire, "PINGEXC", cases[i].type, cases[i].label);
+        markAnswered(in.wire);
+      }
+      part(name);
+    }
+    size_t before = pending.size();
+    qs.push_back(probeCall(-1, {}, kSlow, 5, false, false, {}));
+    part(name);
+    probeAnswer(before, false);
+    part(name);
+    for (auto q : qs) sendFinish(q, true, true);
+    part(name);
   } else {
     return false;
   }
@@ -1966,17 +2409,17 @@ void step(int k) {
     return;
   }
   // call, finish, release, answer, poke70, resolve, disembargo, bootstrap,
-  // then one weight per scenario
-  int w[13] = {35, 12, 8, pending.empty() ? 0 : 22, 2, 6, 1, 2, 2, 2, 2, 2, 2};
+  // unknown_method, self_pipeline, abort, then one weight per scenario
+  int w[16] = {35, 12, 8, pending.empty() ? 0 : 22, 2, 6, 1, 2, 3, 3, 1, 2, 2, 2, 2, 2};
   int total = 0;
   for (int x : w) total += x;
   int r = pick(total), a = 0;
-  for (; a < 12; ++a) {
+  for (; a < 15; ++a) {
     if (r < w[a]) break;
     r -= w[a];
   }
-  if (a >= 8) {
-    scenario(k, a - 8);
+  if (a >= 11) {
+    scenario(k, a - 11);
     return;
   }
   window.clear();
@@ -1988,12 +2431,20 @@ void step(int k) {
     case 4: actPoke(label); break;
     case 5: actResolve(label); break;
     case 6: actDisembargo(label); break;
-    default: actBoot(label); break;
+    case 7: actBoot(label); break;
+    case 8: actUnknownMethod(label); break;
+    case 9: actSelfPipeline(label); break;
+    default: actAbort(label); break;
   }
   std::vector<std::string> acted = window;
   window.clear();
   printf("== %d %s\n", k, label.c_str());
   for (auto& s : acted) printf("%s\n", s.c_str());
+  if (driverAborted) {
+    waitPeerClose();
+    flushWindow();
+    return;
+  }
   sync();
   flushWindow();
 }
@@ -2109,8 +2560,8 @@ int main(int argc, char** argv) {
     }
     steps = 0;
   }
-  for (int k = 1; k <= steps && !peerEof && !peerAborted && syncTimeouts < 3; ++k) step(k);
-  if (!peerEof && !peerAborted && syncTimeouts < 3) endPhase();
+  for (int k = 1; k <= steps && !peerEof && !peerAborted && !driverAborted && syncTimeouts < 3; ++k) step(k);
+  if (!peerEof && !peerAborted && !driverAborted && syncTimeouts < 3) endPhase();
   if (peerAborted || peerEof) {
     drainIdle(200);
     flushWindow();

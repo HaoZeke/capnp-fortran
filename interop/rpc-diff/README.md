@@ -47,11 +47,13 @@ random transforms (including unknown, capless, failed, pending and
 finished answers), with `sendResultsTo.yourself`,
 `noPromisePipelining`, `onlyPromisePipeline` and capabilities in the
 params; Finish with either `releaseResultCaps`; Release; answers to the
-peer's pending calls in random order, sometimes with an exception or a
-capability; seventy concurrent calls; Resolve of the driver's promises
+the peer's pending calls in random order, sometimes with an exception or
+a capability; seventy concurrent calls; Resolve of the driver's promises
 (also to `receiverAnswer` and to unknown promise ids); bad Disembargo;
-extra Bootstrap. A few ids are deliberately invalid, so some seeds end
-in an Abort that both peers must send alike.
+extra Bootstrap; unknown method or interface calls; self-pipelined calls
+targeting their own `questionId`; and peer Abort. A few ids are
+deliberately invalid, so some seeds end in an Abort that both peers must
+send alike.
 
 Five scenario shapes run as several parts, each its own window, and
 are counted per class in `summary.tsv`:
@@ -137,6 +139,45 @@ differed from C++ 1.4.0, and is its own class in `summary.tsv`:
 - `PARAM_PROMISE_WRITTEN_MERGE`, `PARAM_PROMISE_RESOLVE_TO_LIVE_IMPORT`:
   a param promise merges with another hold or a live import. The
   Disembargo and the Release counts follow C++.
+- `UNKNOWN_METHOD`, `UNKNOWN_INTERFACE`, `CALL_PA_SELF`, `PEER_ABORT`,
+  `DIS_SEND_PA_RETURNED`, `DIS_ACCEPT_UNIMPL`: unimplemented dispatch
+  errors, self-pipelined calls, peer Abort replies, and Disembargo
+  abort text.
+- `DISEMBARGO_PENDING_DEFERRED`, `DISEMBARGO_PENDING_FINISHED`: a
+  Disembargo on an answer that waits on the driver's `Callback`. C++
+  holds it until the answer returns, and the connection stays up. With
+  a Finish in between, the answer ends canceled.
+- `FINISH_QUEUED_CHAIN`: Finish for a queued call with a call pipelined
+  on it. The call runs, and only its Return is canceled.
+- `TPH_PARAM_REFUSED`: `thirdPartyHosted` descriptors in `Call.params`
+  with no id, or with a host that is too long. C++ still releases both
+  vines with the params.
+- `DIS_FAILED_ANSWER`, `DIS_PA_NON_STRUCT`: a Disembargo on a failed
+  answer aborts with its exception, and one whose transform walks
+  through a capability pointer aborts with the C++ schema text.
+- `FRAME_512_SEGS`, `FRAME_U32_MAX_SEGS`, `FRAME_OVERSIZED`,
+  `FRAME_SEG_OVERFLOW_32`, `FRAME_SHORT`: frame headers a peer refuses
+  and streams that end inside a frame. Each ends in an Abort with the
+  text C++ sends.
+- `FRAME_512_FULL_VALID`, `FRAME_4097_FULL_VALID`, `FRAME_512_HDR_ONLY`,
+  `FRAME_HUGE_A`, `FRAME_HUGE_B`, `FRAME_HUGE_C`: C++ reads every
+  segment size, so a call in 512 or 4097 segments is served. A header
+  with no body, or a count past what the stream holds, ends the stream
+  inside a frame and the peer aborts.
+- `DIS_YOURSELF_MAKE`, `DIS_YOURSELF_REFLECT`, `DIS_YOURSELF_FAILED`: a
+  Disembargo on a local `sendResultsTo.yourself` answer. C++ echoes it
+  when the result is the driver's own capability, and aborts for a
+  local capability or a failed answer.
+- `OPP_SELF_REEXPORT`: a pipelined call on an `onlyPromisePipeline`
+  answer returns the answer's server as a new export, which still
+  answers after the answer is finished.
+- `TPH_SLOW_PREMATURE`, `TPH_YOURSELF_PREMATURE`, `TPH_MAKE_PREMATURE`,
+  `TPH_OPP_PREMATURE`: a refused `thirdPartyHosted` param stays
+  imported while the call runs. C++ releases its vine when the call
+  finishes.
+- `SLOW_PING_EXC_TYPES`: the ping of a slow call fails with each
+  exception type. The slow call fails with the same type, and the
+  Finish for the ping asks for no result release.
 
 `run.py --probes` also replays the seeds in `FIXED_SEEDS`, random
 scripts that once differed, on a line of their own in the summary.
@@ -152,14 +193,15 @@ every reference) and `m<n>` for its embargo ids. Driver ids are
 `Finish.releaseResultCaps` is written as the `REL` line of each release
 it implies. A Return that sets `releaseParamCaps` also shows
 `rpc=1`, since a Return with no param caps implies no Release. A Finish
-sent before its Return shows `rrc=1` or `rrc=0`.
+sent before its Return shows `rrc=1` or `rrc=0`. A Finish that follows
+a Return with no capabilities shows `rrc=1` when it asks for a release.
 
 `run.py` then applies these rules to both logs:
 
 1. Lines inside one window are compared as a sorted list.
-2. In exception reasons a leading `remote exception: ` is dropped, and
-   `SRVEXC` and the Fortran dispatch text `method raised error` read
-   `APPEXC`. The ping exception `PINGEXC` is compared as it is.
+2. In exception reasons a leading `remote exception: ` is dropped.
+   Application and server exception texts (including `SRVEXC` and
+   unimplemented method or interface messages) are compared as they are.
 3. A leading `expected <condition> [<values>]; ` is dropped, the
    `KJ_REQUIRE` prefix that carries addresses.
 
