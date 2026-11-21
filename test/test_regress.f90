@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(57))
+      allocate (testsuite(58))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -120,6 +120,7 @@ contains
       testsuite(55) = new_unittest("json-value-depth", run_json_value_depth)
       testsuite(56) = new_unittest("text-plausible", run_text_plausible)
       testsuite(57) = new_unittest("canonical-reject", run_canonical_reject)
+      testsuite(58) = new_unittest("request-beside-exe", run_request_beside_exe)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3695,5 +3696,31 @@ contains
          call test_failed(error, 'canonical reject')
       end if
    end subroutine run_canonical_reject
+
+   !> From another directory, a type beside an unused broken one loads
+   !> through the schema-request found next to the executable.
+   subroutine run_request_beside_exe(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('test -x ./build/schema-request')) then
+         call skip_test(error, 'build/schema-request is missing; scripts/fypp-gen.sh builds it')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/beside && '//cap_setup() &
+         //' && test -x ./build/schema-request && unset CAPNP_SCHEMA_REQUEST' &
+         //' && cd '//tmp//'/beside' &
+         //' && printf ''@0x8123456789abcde1;\nstruct P { x @0 :Int32; }\n' &
+         //'struct UnusedBroken { bad @0 :NonExistentType; }\nconst p :P = (x = 7);\n''' &
+         //' > partial.capnp' &
+         //' && printf ''(x = 7)\n'' | "$CAP" convert text:text partial.capnp P > f.out' &
+         //' && printf ''(x = 7)\n'' | capnp convert text:text partial.capnp P > r.out' &
+         //' && "$CAP" eval partial.capnp p >> f.out && capnp eval partial.capnp p >> r.out' &
+         //' && cmp -s f.out r.out')) then
+         call test_failed(error, 'schema-request beside the executable')
+      end if
+   end subroutine run_request_beside_exe
 
 end module test_regress

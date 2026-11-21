@@ -357,9 +357,18 @@ contains
       else
          std = ''
       end if
-      shcmd = 'REQ=""; if test -x ./build/schema-request; then REQ=./build/schema-request;' &
-              //' elif command -v capnp-schema-request >/dev/null 2>&1;' &
-              //' then REQ=capnp-schema-request; fi;'
+      ! The helper may sit next to this executable when the working
+      ! directory is not the repository. capnp compile is the fallback.
+      shcmd = 'REQ=""; if [ -n "${CAPNP_SCHEMA_REQUEST:-}" ] && [ -x "$CAPNP_SCHEMA_REQUEST" ];' &
+              //' then REQ=$CAPNP_SCHEMA_REQUEST;' &
+              //' elif [ -x ./build/schema-request ]; then REQ=./build/schema-request;' &
+              //' else exe=$(readlink -f /proc/$PPID/exe 2>/dev/null || true);' &
+              //' if [ -n "$exe" ]; then base=$(dirname "$exe");' &
+              //' for cand in "$base/schema-request" "$base/../schema-request"' &
+              //' "$base/../../schema-request"; do' &
+              //' if [ -x "$cand" ]; then REQ=$cand; break; fi; done; fi;' &
+              //' if [ -z "$REQ" ] && command -v capnp-schema-request >/dev/null 2>&1;' &
+              //' then REQ=capnp-schema-request; fi; fi;'
       if (.not. no_std) then
          ! The helper is not installed beside the capnp headers, so the
          ! standard import path is the same one `capnp compile` uses.
