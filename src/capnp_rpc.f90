@@ -10377,8 +10377,25 @@ contains
       type(message_t), intent(in) :: msg
       integer, intent(out) :: err
       type(exception_t) :: ex
+      character(len=:), allocatable :: reply
+      integer :: etype
       ex = message_abort_get(msg, err)
-      if (err == CAPNP_OK) call exception_reason_get(ex, conn%abort_reason, err)
+      if (err == CAPNP_OK) then
+         call exception_reason_get(ex, conn%abort_reason, err)
+         etype = exception_type_get(ex)
+         if (err == CAPNP_OK .and. associated(conn%transport)) then
+            if (len(conn%abort_reason) >= 18) then
+               if (conn%abort_reason(1:18) == 'remote exception: ') then
+                  reply = conn%abort_reason
+               else
+                  reply = 'remote exception: '//conn%abort_reason
+               end if
+            else
+               reply = 'remote exception: '//conn%abort_reason
+            end if
+            call send_abort_frame(conn, etype, reply)
+         end if
+      end if
       conn%dead = .true.
       err = RPC_ERR_DEAD
    end subroutine handle_abort

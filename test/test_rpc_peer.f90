@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(40))
+      allocate (testsuite(41))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -113,6 +113,8 @@ contains
       testsuite(39)%test => t_dis_ra_running_q
       testsuite(40)%name = "call-promised-answer-self"
       testsuite(40)%test => t_call_pa_self
+      testsuite(41)%name = "peer-abort-echoes-remote-exception"
+      testsuite(41)%test => t_peer_abort_reply
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1198,6 +1200,59 @@ contains
       call capnp_message_free(reply)
       call close_peer(conn, fd)
    end subroutine t_call_pa_self
+
+   !> On a peer Abort, reply with Abort carrying "remote exception: "
+   !> and the peer's exception type, matching C++ disconnect().
+   subroutine t_peer_abort_reply(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      logical :: ready
+      integer :: fd, e, k
+      integer, parameter :: types(2) = [EXCEPTION_TYPE_FAILED_E, EXCEPTION_TYPE_UNIMPLEMENTED_E]
+      character(len=25), parameter :: sent(2) = [character(len=25) :: 'bye', &
+                                                 'remote exception: already']
+      character(len=25), parameter :: want(2) = [character(len=25) :: 'remote exception: bye', &
+                                                 'remote exception: already']
+      mix%inner => made
+      srv => mix
+      do k = 1, 2
+         call open_peer(conn, fd, srv)
+         call capnp_message_init_builder(m, e)
+         msg = message_new_root(m, e)
+         ex = message_abort_init(msg, e)
+         call exception_type_set(ex, types(k), e)
+         call exception_reason_set(ex, trim(sent(k)), e)
+         call rpc_send_message(fd, m, e)
+         call capnp_message_free(m)
+         call rpc_pump_once(conn, e)
+         call px_poll_in(fd, 200, ready, e)
+         if (.not. ready) then
+            call check(error, .false., 'peer-abort: no Abort reply received')
+            call close_peer(conn, fd)
+            return
+         end if
+         call rpc_recv_message(fd, reply, e)
+         msg = message_read_root(reply, e)
+         call check(error, message_which(msg) == MESSAGE_ABORT_TAG, &
+                    'peer-abort: expected Abort frame')
+         if (.not. allocated(error)) then
+            ex = message_abort_get(msg, e)
+            call exception_reason_get(ex, reason, e)
+            call check(error, exception_type_get(ex) == types(k) .and. &
+                       reason == trim(want(k)) .and. .not. rpc_conn_alive(conn), &
+                       'peer-abort: got '//reason)
+         end if
+         call capnp_message_free(reply)
+         call close_peer(conn, fd)
+         if (allocated(error)) return
+      end do
+   end subroutine t_peer_abort_reply
 
    !> A param promise resolves to a cap a plain forward's answer imports.
    !> The call keeps that import, and one Release counts both refs.
