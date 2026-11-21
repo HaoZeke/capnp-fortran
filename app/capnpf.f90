@@ -25,8 +25,9 @@ program capnpf
 
    character(len=4096) :: arg, next_arg
    character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
+   character(len=:), allocatable :: from_fmt, to_fmt
    logical :: short, packed_in, flat_in, no_std_inc
-   integer :: i, n, err
+   integer :: i, n, err, colon
    type(capnp_dyn_schema_t), target :: schema
    integer :: type_idx
 
@@ -102,11 +103,28 @@ program capnpf
    if (cmd /= 'encode' .and. cmd /= 'decode' .and. cmd /= 'convert' .and. cmd /= 'eval') &
       call die('unknown command '//cmd)
 
-   if (len(schema_path) == 0 .or. (cmd /= 'convert' .and. len(name) == 0)) call usage_err()
    if (cmd == 'convert') then
-      if (len(spec) == 0 .or. len(name) == 0) call usage_err()
+      colon = index(spec, ':')
+      if (colon <= 1 .or. colon >= len(spec)) call die('convert expects <from>:<to>')
+      from_fmt = spec(1:colon - 1)
+      to_fmt = spec(colon + 1:)
+      if (.not. valid_fmt(from_fmt)) call die('unknown input format '//from_fmt)
+      if (.not. valid_fmt(to_fmt)) call die('unknown output format '//to_fmt)
+      if (needs_schema(from_fmt) .or. needs_schema(to_fmt)) then
+         if (len(schema_path) == 0 .or. len(name) == 0) call usage_err()
+         call load_schema(schema_path, inc_flags, no_std_inc, schema, err)
+         if (err /= CAPNP_OK) call die('cannot load schema')
+         type_idx = capnp_dyn_find(schema, name, err)
+         if (type_idx <= 0) call die('unknown type '//name)
+      else
+         type_idx = 0
+      end if
+      call cmd_convert(schema, type_idx, spec, short)
+      call capnp_dyn_free(schema)
+      call c_exit(0_c_int)
    end if
 
+   if (len(schema_path) == 0 .or. len(name) == 0) call usage_err()
    call load_schema(schema_path, inc_flags, no_std_inc, schema, err)
    if (err /= CAPNP_OK) call die('cannot load schema')
 
@@ -119,11 +137,8 @@ program capnpf
       type_idx = capnp_dyn_find(schema, name, err)
       if (type_idx <= 0) call die('unknown type '//name)
       call cmd_decode(schema, type_idx, packed_in, flat_in, short, 'text')
-   case ('convert')
-      type_idx = capnp_dyn_find(schema, name, err)
-      if (type_idx <= 0) call die('unknown type '//name)
-      call cmd_convert(schema, type_idx, spec, short)
    case ('eval')
+      if (.not. valid_fmt(ofmt)) call die('unknown output format '//ofmt)
       call cmd_eval(schema, name, ofmt, short)
    end select
    call capnp_dyn_free(schema)
@@ -133,8 +148,8 @@ contains
    subroutine print_usage(u)
       integer, intent(in) :: u
       write (u, '(a)') 'usage: capnpf encode|decode|convert|eval [options] <schema> <type|name>'
-      write (u, '(a)') '  convert <from>:<to> <schema> <type>'
-      write (u, '(a)') 'formats: binary packed flat canonical text json'
+      write (u, '(a)') '  convert <from>:<to> [<schema> <type>]'
+      write (u, '(a)') 'formats: binary packed flat flat-packed canonical text json'
    end subroutine print_usage
 
    subroutine usage_ok()
@@ -152,6 +167,19 @@ contains
       write (error_unit, '(a)') 'capnpf: '//msg
       call c_exit(1_c_int)
    end subroutine die
+
+   pure function valid_fmt(fmt) result(y)
+      character(len=*), intent(in) :: fmt
+      logical :: y
+      y = fmt == 'binary' .or. fmt == 'packed' .or. fmt == 'flat' .or. &
+          fmt == 'flat-packed' .or. fmt == 'canonical' .or. fmt == 'text' .or. fmt == 'json'
+   end function valid_fmt
+
+   pure function needs_schema(fmt) result(y)
+      character(len=*), intent(in) :: fmt
+      logical :: y
+      y = fmt == 'text' .or. fmt == 'json'
+   end function needs_schema
 
    function shell_quote(s) result(q)
       character(len=*), intent(in) :: s
