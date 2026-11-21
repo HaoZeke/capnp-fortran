@@ -13,6 +13,7 @@ program test_gate2
    call case_9()
    call case_10()
    call case_11()
+   call case_12()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -326,4 +327,31 @@ contains
          'test ! -s /tmp/g2-err.o && test -s /tmp/g2-err.e && test "$(' // &
          'cat /tmp/g2-err.e1)" != 0')
    end subroutine case_11
+
+   subroutine case_12()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"big": 1}\n{"big": 2}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-two.in; "$CAP" convert json:json schema/codec.cap' // &
+         'np Sample < /tmp/g2-two.in > /tmp/g2-two.o; echo $? > /tmp/g' // &
+         '2-two.e1; capnp convert json:json schema/codec.capnp Sample ' // &
+         '< /tmp/g2-two.in > /tmp/g2-two.r; echo $? > /tmp/g2-two.e2; ' // &
+         'cmp -s /tmp/g2-two.o /tmp/g2-two.r && cmp -s /tmp/g2-two.e1 ' // &
+         '/tmp/g2-two.e2 && printf ' // &
+         achar(39) // &
+         '\020\015P\005\007\000\001\020x\000^' // &
+         achar(39) // &
+         ' > /tmp/g2-pk.in && { capnp convert packed:packed schema/code' // &
+         'c.capnp Sample < /tmp/g2-pk.in > /dev/null 2>&1; test $? -ne ' // &
+         '0; } && { "$CAP" convert packed:packed schema/codec.capnp Sam' // &
+         'ple < /tmp/g2-pk.in > /dev/null 2>&1; test $? -ne 0; }')
+   end subroutine case_12
 end program test_gate2

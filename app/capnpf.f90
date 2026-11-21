@@ -326,7 +326,6 @@ contains
          if (err /= CAPNP_OK) call die('convert failed')
          call capnp_message_free(msg)
          from = topos + 1
-         if (to == 'text' .or. to == 'json') exit
       end do
       close (unit)
    end subroutine text_to_out
@@ -336,16 +335,23 @@ contains
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
       type(capnp_message_t), target :: msg
-      integer :: err, unit
-      call capnp_json_decode(sch, idx, text, msg, err)
-      if (err /= CAPNP_OK) call die('json decode failed')
+      integer :: beg, topos, from, err, unit
+      from = 1
       open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
             action='write', status='old', iostat=err)
       if (err /= 0) call die('cannot write stdout')
-      call write_message(unit, msg, to, err)
-      if (err /= CAPNP_OK) call die('convert failed')
+      do
+         call capnp_json_span(text, from, beg, topos, err)
+         if (err /= CAPNP_OK) call die('bad json')
+         if (beg == 0) exit
+         call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
+         if (err /= CAPNP_OK) call die('json decode failed')
+         call write_message(unit, msg, to, err)
+         if (err /= CAPNP_OK) call die('convert failed')
+         call capnp_message_free(msg)
+         from = topos + 1
+      end do
       close (unit)
-      call capnp_message_free(msg)
    end subroutine json_to_out
 
    subroutine bytes_to_out(sch, idx, raw, pack, flat, to, pretty)
@@ -370,11 +376,18 @@ contains
          return
       end if
       if (pack) then
-         call capnp_deserialize_packed_bytes(raw, msg, err)
-         if (err /= CAPNP_OK) call die('bad packed input')
-         root = capnp_root(msg, err)
-         call emit_one(sch, idx, msg, root, to, pretty)
-         call capnp_message_free(msg)
+         off = 0_int64
+         total = size(raw, kind=int64)
+         do while (off < total)
+            call unpack_next_message(raw, off, one, err)
+            if (err /= CAPNP_OK) call die('bad packed input')
+            call capnp_deserialize_bytes(one, msg, err)
+            deallocate (one)
+            if (err /= CAPNP_OK) call die('bad packed message')
+            root = capnp_root(msg, err)
+            call emit_one(sch, idx, msg, root, to, pretty)
+            call capnp_message_free(msg)
+         end do
          return
       end if
       off = 0_int64
@@ -403,6 +416,119 @@ contains
       character(len=*), intent(in) :: kind
       call bytes_to_out(sch, idx, raw, pack, flat, kind, pretty)
    end subroutine emit_messages
+
+   subroutine unpack_next_message(raw, off, framed, err)
+      integer(int8), intent(in) :: raw(0:)
+      integer(int64), intent(inout) :: off
+      integer(int8), allocatable, intent(out) :: framed(:)
+      integer, intent(out) :: err
+      integer(int8) :: w8(0:7)
+      integer(int8) :: hdr(0:2055)
+      integer(int64) :: nsegs64, header_words, total_words, nwords, i, n
+      integer :: zero_left, raw_left
+      err = CAPNP_OK
+      zero_left = 0
+      raw_left = 0
+      call pull_packed_word(raw, off, zero_left, raw_left, w8, err)
+      if (err /= CAPNP_OK) return
+      ! capnp 1.4.0 reads the first word, the segment table, and the
+      ! segments separately. A run may not cross the end of one read.
+      if (zero_left /= 0 .or. raw_left /= 0) then
+         err = CAPNP_ERR_PACKED
+         return
+      end if
+      nsegs64 = iand(int(cp_get_i32(w8, 0_int64), int64), 4294967295_int64) + 1_int64
+      if (nsegs64 < 1_int64 .or. nsegs64 > 512_int64) then
+         err = CAPNP_ERR_FRAMING
+         return
+      end if
+      header_words = ((1_int64 + nsegs64)*4_int64 + 7_int64)/8_int64
+      hdr(0:7) = w8
+      do i = 2_int64, header_words
+         call pull_packed_word(raw, off, zero_left, raw_left, w8, err)
+         if (err /= CAPNP_OK) return
+         hdr((i - 1_int64)*8_int64:(i - 1_int64)*8_int64 + 7_int64) = w8
+      end do
+      if (zero_left /= 0 .or. raw_left /= 0) then
+         err = CAPNP_ERR_PACKED
+         return
+      end if
+      total_words = 0_int64
+      do i = 1_int64, nsegs64
+         n = iand(int(cp_get_i32(hdr, i*4_int64), int64), 4294967295_int64)
+         total_words = total_words + n
+      end do
+      nwords = header_words + total_words
+      allocate (framed(0:nwords*8_int64 - 1))
+      framed = 0_int8
+      framed(0:header_words*8_int64 - 1) = hdr(0:header_words*8_int64 - 1)
+      do i = header_words + 1_int64, nwords
+         call pull_packed_word(raw, off, zero_left, raw_left, w8, err)
+         if (err /= CAPNP_OK) return
+         framed((i - 1_int64)*8_int64:(i - 1_int64)*8_int64 + 7_int64) = w8
+      end do
+      if (zero_left /= 0 .or. raw_left /= 0) err = CAPNP_ERR_PACKED
+   end subroutine unpack_next_message
+
+   subroutine pull_packed_word(raw, off, zero_left, raw_left, w8, err)
+      integer(int8), intent(in) :: raw(0:)
+      integer(int64), intent(inout) :: off
+      integer, intent(inout) :: zero_left, raw_left
+      integer(int8), intent(out) :: w8(0:7)
+      integer, intent(out) :: err
+      integer(int64) :: total
+      integer :: tag, i
+      err = CAPNP_OK
+      w8 = 0_int8
+      total = size(raw, kind=int64)
+      if (zero_left > 0) then
+         zero_left = zero_left - 1
+         return
+      end if
+      if (raw_left > 0) then
+         if (off + 8_int64 > total) then
+            err = CAPNP_ERR_PACKED
+            return
+         end if
+         w8 = raw(off:off + 7_int64)
+         off = off + 8_int64
+         raw_left = raw_left - 1
+         return
+      end if
+      if (off >= total) then
+         err = CAPNP_ERR_PACKED
+         return
+      end if
+      tag = capnp_u_of_i8(raw(off))
+      off = off + 1_int64
+      if (tag == 0) then
+         if (off >= total) then
+            err = CAPNP_ERR_PACKED
+            return
+         end if
+         zero_left = capnp_u_of_i8(raw(off))
+         off = off + 1_int64
+      else if (tag == 255) then
+         if (off + 9_int64 > total) then
+            err = CAPNP_ERR_PACKED
+            return
+         end if
+         w8 = raw(off:off + 7_int64)
+         raw_left = capnp_u_of_i8(raw(off + 8_int64))
+         off = off + 9_int64
+      else
+         do i = 0, 7
+            if (btest(tag, i)) then
+               if (off >= total) then
+                  err = CAPNP_ERR_PACKED
+                  return
+               end if
+               w8(i) = raw(off)
+               off = off + 1_int64
+            end if
+         end do
+      end if
+   end subroutine pull_packed_word
 
    subroutine emit_one(sch, idx, msg, root, to, pretty)
       type(capnp_dyn_schema_t), intent(in) :: sch
