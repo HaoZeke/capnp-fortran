@@ -4139,7 +4139,7 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp, al
-      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent
+      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent, dn, pre
       integer(int64) :: i
       character(len=64), allocatable :: own(:), ex(:)
       type(nameset_t) :: seen
@@ -4149,6 +4149,8 @@ contains
       call iface_parent(np, parent, nsuper, err)
       if (err /= CAPNP_OK) return
       call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK) return
+      call node_display_name(np, dn, err)
       if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
       if (err /= CAPNP_OK) return
@@ -4211,6 +4213,8 @@ contains
       call w('      class('//tn//'_server_t), intent(inout) :: self')
       call w('      type(rpc_call_ctx_t), intent(inout) :: ctx')
       call w('      integer, intent(out) :: err')
+      pre = '      character(len=*), parameter :: ifname = '
+      call w(pre//ftext(dn, len(pre)))
       call w('      err = CAPNP_ERR_ARG')
       if (nextra > 0) then
          call emit_further_supers(np, tn, 'c', err)
@@ -4227,7 +4231,10 @@ contains
          call w('      end if')
       else
          call w('      if (ctx%interface_id /= '// &
-                ident_const(upcase(tn)//'_INTERFACE_ID')//') return')
+                ident_const(upcase(tn)//'_INTERFACE_ID')//') then')
+         call w('         call rpc_ctx_unimplemented_interface(ctx, ifname, err)')
+         call w('         return')
+         call w('      end if')
       end if
       call w('      select case (ctx%method_id)')
       do i = 0_int64, capnp_list_len(ml) - 1_int64
@@ -4251,7 +4258,8 @@ contains
          call w('         end block')
       end do
       call w('      case default')
-      call w('         err = CAPNP_ERR_ARG')
+      call w('         call rpc_ctx_unimplemented_method(ctx, ifname, &')
+      call w('            '//ident_const(upcase(tn)//'_INTERFACE_ID')//', err)')
       call w('      end select')
       call w('   end subroutine '//tn//'_dispatch')
       call w('')

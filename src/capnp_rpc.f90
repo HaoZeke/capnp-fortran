@@ -60,6 +60,7 @@ module capnp_rpc
    public :: rpc_request_cancellation
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
    public :: rpc_ctx_export_cap, rpc_make_cap_ptr
+   public :: rpc_ctx_fail, rpc_ctx_unimplemented_interface, rpc_ctx_unimplemented_method
    public :: rpc_ctx_defer, rpc_deferred_ctx, rpc_deferred_return
    public :: rpc_question_returned
    public :: rpc_conn_alive, rpc_conn_reason, rpc_cap_is_settled
@@ -176,6 +177,9 @@ module capnp_rpc
       integer(int64) :: answer_id = -1_int64
       !> Set by rpc_ctx_defer: the call returns once the server asks.
       logical :: deferred = .false.
+      !> Exception type and text set by dispatch when returning an error.
+      integer :: exc_type = EXCEPTION_TYPE_FAILED_E
+      character(len=:), allocatable :: exc_reason
    end type rpc_call_ctx_t
 
    !> A capability implementation hosted by this vat.
@@ -1761,7 +1765,11 @@ contains
          end if
          if (.not. dispatched .or. derr /= CAPNP_OK) then
             call rollback_staged(conn, ctx)
-            call fill_exception(r, 'method raised error', err)
+            if (allocated(ctx%exc_reason)) then
+               call fill_exception(r, ctx%exc_reason, err, ctx%exc_type)
+            else
+               call fill_exception(r, 'method raised error', err)
+            end if
          else
             call flush_cap_table(conn, ctx, err)
             if (err /= CAPNP_OK) then
@@ -2614,17 +2622,20 @@ contains
    !> Results content of a returned question. Errors with
    !> RPC_ERR_EXCEPTION (reason in conn%abort_reason) on exception
    !> returns.
-   subroutine rpc_result_content(conn, qid, content, err)
+   subroutine rpc_result_content(conn, qid, content, err, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       type(capnp_ptr_t), intent(out) :: content
       integer, intent(out) :: err
+      !> The exception type of an exception Return.
+      integer, intent(out), optional :: exc_type
       type(message_t) :: msg
       type(return_t) :: r
       type(payload_t) :: pl
       type(exception_t) :: ex
       integer :: q
       err = CAPNP_OK
+      if (present(exc_type)) exc_type = EXCEPTION_TYPE_FAILED_E
       q = int(qid)
       if (.not. qslot_ok(conn, int(q, int64))) then
          err = CAPNP_ERR_ARG
@@ -2643,6 +2654,7 @@ contains
          content = payload_content_get(pl, err)
       case (RETURN_EXCEPTION_TAG)
          ex = return_exception_get(r, err)
+         if (err == CAPNP_OK .and. present(exc_type)) exc_type = exception_type_get(ex)
          call exception_reason_get(ex, conn%abort_reason, err)
          err = RPC_ERR_EXCEPTION
       case (RETURN_CANCELED_TAG)
@@ -6434,7 +6446,11 @@ contains
          ! Owned servers staged for that table are freed here, once.
          ! A membrane that never received an export id is freed too.
          call rollback_staged(conn, ctx)
-         call fill_exception(r, 'method raised error', err)
+         if (allocated(ctx%exc_reason)) then
+            call fill_exception(r, ctx%exc_reason, err, ctx%exc_type)
+         else
+            call fill_exception(r, 'method raised error', err)
+         end if
       else
          call flush_cap_table(conn, ctx, err)
          if (err /= CAPNP_OK) then
@@ -6513,13 +6529,15 @@ contains
    !> Send the Return of deferred call `qid` with the results in its
    !> context, or an exception when `failed` is set. CAPNP_ERR_ARG when
    !> no such call is waiting.
-   recursive subroutine rpc_deferred_return(conn, qid, err, failed, reason)
+   recursive subroutine rpc_deferred_return(conn, qid, err, failed, reason, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
       logical, intent(in), optional :: failed
       !> Exception reason when `failed`; defaults to the dispatch text.
       character(len=*), intent(in), optional :: reason
+      !> Exception type when `failed`; defaults to FAILED.
+      integer, intent(in), optional :: exc_type
       type(rpc_deferred_t), pointer :: node, prev
       type(message_t) :: msg
       type(return_t) :: r
@@ -6548,9 +6566,9 @@ contains
       if (bad) then
          call rollback_staged(conn, node%ctx)
          if (present(reason)) then
-            call fill_exception(r, reason, e)
+            call fill_exception(r, reason, e, exc_type)
          else
-            call fill_exception(r, 'method raised error', e)
+            call fill_exception(r, 'method raised error', e, exc_type)
          end if
       else
          call flush_cap_table(conn, node%ctx, e)
@@ -10375,14 +10393,70 @@ contains
       call capnp_message_free(rm)
    end subroutine send_unimplemented
 
-   subroutine fill_exception(r, reason, err)
+   pure function u64_dec(v) result(o)
+      integer(int64), intent(in) :: v
+      character(len=:), allocatable :: o
+      character(len=24) :: buf
+      integer(int64) :: hi, q
+      integer :: r
+      if (v >= 0_int64) then
+         write (buf, '(i0)') v
+         o = trim(buf)
+      else
+         hi = ishft(v, -1)
+         q = hi/5_int64
+         r = int(iand(v, 1_int64) + 2_int64*mod(hi, 5_int64))
+         write (buf, '(i0,i1)') q, r
+         o = trim(buf)
+      end if
+   end function u64_dec
+
+   subroutine rpc_ctx_fail(ctx, reason, err, exc_type)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      character(len=*), intent(in) :: reason
+      integer, intent(out) :: err
+      integer, intent(in), optional :: exc_type
+      ctx%exc_reason = reason
+      ctx%exc_type = EXCEPTION_TYPE_FAILED_E
+      if (present(exc_type)) ctx%exc_type = exc_type
+      err = CAPNP_ERR_ARG
+   end subroutine rpc_ctx_fail
+
+   subroutine rpc_ctx_unimplemented_interface(ctx, iface_name, err)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      character(len=*), intent(in) :: iface_name
+      integer, intent(out) :: err
+      call rpc_ctx_fail(ctx, 'Requested interface not implemented.; ' // &
+                        'actualInterfaceName = '//iface_name// &
+                        '; requestedTypeId = '//u64_dec(ctx%interface_id), &
+                        err, EXCEPTION_TYPE_UNIMPLEMENTED_E)
+   end subroutine rpc_ctx_unimplemented_interface
+
+   subroutine rpc_ctx_unimplemented_method(ctx, iface_name, iface_id, err)
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      character(len=*), intent(in) :: iface_name
+      integer(int64), intent(in) :: iface_id
+      integer, intent(out) :: err
+      character(len=16) :: mbuf
+      write (mbuf, '(i0)') iand(ctx%method_id, 65535)
+      call rpc_ctx_fail(ctx, 'Method not implemented.; interfaceName = '// &
+                        iface_name//'; typeId = '//u64_dec(iface_id)// &
+                        '; methodId = '//trim(mbuf), &
+                        err, EXCEPTION_TYPE_UNIMPLEMENTED_E)
+   end subroutine rpc_ctx_unimplemented_method
+
+   subroutine fill_exception(r, reason, err, exc_type)
       type(return_t), intent(in) :: r
       character(len=*), intent(in) :: reason
       integer, intent(out) :: err
+      integer, intent(in), optional :: exc_type
       type(exception_t) :: ex
+      integer :: etype
+      etype = EXCEPTION_TYPE_FAILED_E
+      if (present(exc_type)) etype = exc_type
       ex = return_exception_init(r, err)
       if (err /= CAPNP_OK) return
-      call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, err)
+      call exception_type_set(ex, etype, err)
       call exception_reason_set(ex, reason, err)
    end subroutine fill_exception
 

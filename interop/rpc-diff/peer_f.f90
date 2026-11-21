@@ -45,7 +45,7 @@ contains
       integer :: idx, i
       err = CAPNP_OK
       if (ctx%interface_id /= TARGET_IFACE) then
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_interface(ctx, 'diff.capnp:Target', err)
          return
       end if
       n = capnp_get_i64(ctx%params, 0_int64)
@@ -53,7 +53,7 @@ contains
       case (0)
          call set_n(ctx, n + self%base, err)
       case (1)
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_fail(ctx, 'SRVEXC', err)
       case (2)
          s = capnp_new_struct(ctx%rmsg, 0, 1, err)
          if (err /= CAPNP_OK) return
@@ -80,7 +80,7 @@ contains
          end do
          call payload_content_set(ctx%results, s, err)
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, 'diff.capnp:Target', TARGET_IFACE, err)
       end select
    end subroutine target_dispatch
 
@@ -176,7 +176,7 @@ contains
       type(capnp_ptr_t) :: s, content
       type(slow_wait_t) :: w
       integer(int64) :: got
-      integer :: i, err, e
+      integer :: i, err, e, ping_type
       if (.not. allocated(g_slow)) return
       i = 1
       do while (i <= size(g_slow))
@@ -186,7 +186,7 @@ contains
          end if
          w = g_slow(i)
          g_slow = [g_slow(:i - 1), g_slow(i + 1:)]
-         call rpc_result_content(conn, w%ping, content, err)
+         call rpc_result_content(conn, w%ping, content, err, ping_type)
          if (err == CAPNP_OK) got = capnp_get_i64(content, 0_int64)
          call rpc_finish_send(conn, w%ping, .false., e)
          ctx => rpc_deferred_ctx(conn, w%answer)
@@ -202,7 +202,8 @@ contains
          end if
          if (err == RPC_ERR_EXCEPTION) then
             call rpc_deferred_return(conn, w%answer, e, failed=.true., &
-                                     reason='remote exception: '//rpc_conn_reason(conn))
+                                     reason='remote exception: '//rpc_conn_reason(conn), &
+                                     exc_type=ping_type)
          else
             call rpc_deferred_return(conn, w%answer, e, failed=err /= CAPNP_OK)
          end if

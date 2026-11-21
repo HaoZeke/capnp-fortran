@@ -361,8 +361,12 @@ contains
       class(adder_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
+      character(len=*), parameter :: ifname = 'schema/adder.capnp:Adder'
       err = CAPNP_ERR_ARG
-      if (ctx%interface_id /= ADDER_INTERFACE_ID) return
+      if (ctx%interface_id /= ADDER_INTERFACE_ID) then
+         call rpc_ctx_unimplemented_interface(ctx, ifname, err)
+         return
+      end if
       select case (ctx%method_id)
       case (0)
          block
@@ -398,7 +402,8 @@ contains
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, ifname, &
+            ADDER_INTERFACE_ID, err)
       end select
    end subroutine adder_dispatch
 
