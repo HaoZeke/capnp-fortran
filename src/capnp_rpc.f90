@@ -3456,7 +3456,7 @@ contains
       integer :: step
       broken = .false.
       out_id = id
-      do step = 1, 8
+      do step = 1, import_count(conn)
          call import_find(conn, out_id, node, found)
          if (.not. found) return
          select case (node%state)
@@ -3472,6 +3472,21 @@ contains
          end select
       end do
    end subroutine import_follow
+
+   !> Bound for walking resolved imports. A chain without a cycle visits
+   !> each node at most once, so a walk that takes more steps than there
+   !> are nodes has met a cycle and stops.
+   function import_count(conn) result(n)
+      type(rpc_conn_t), intent(in) :: conn
+      integer :: n
+      type(rpc_import_node_t), pointer :: node
+      n = 0
+      node => conn%imports
+      do while (associated(node))
+         n = n + 1
+         node => node%next
+      end do
+   end function import_count
 
    subroutine import_wire_id(conn, handle, wire_id)
       type(rpc_conn_t), intent(in) :: conn
@@ -4744,7 +4759,7 @@ contains
          call send_release(conn, cap%id, 1_int64, err)
          return
       end if
-      do step = 1, 8
+      do step = 1, import_count(conn)
          if (node%state /= IMP_REMOTE) exit
          if (node%local_refs <= 0) return
          node%local_refs = node%local_refs - 1
@@ -5876,7 +5891,19 @@ contains
                      call write_broken_export(conn, ocd, eid, why, err)
                   else
                      conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
-                     call cap_descriptor_sender_hosted_set(ocd, id, err)
+                     block
+                        logical :: as_promise
+                        as_promise = .false.
+                        select type (px => conn%exports(eid)%srv)
+                        type is (rpc_pipe_proxy_t)
+                           as_promise = px%aqid >= 0_int64
+                        end select
+                        if (as_promise) then
+                           call cap_descriptor_sender_promise_set(ocd, id, err)
+                        else
+                           call cap_descriptor_sender_hosted_set(ocd, id, err)
+                        end if
+                     end block
                   end if
                end if
             end if
@@ -7066,7 +7093,7 @@ contains
                   if (px%import >= 0_int64) then
                      call import_find(conn, px%import, inode, found)
                      if (found) then
-                        do step = 1, 8
+                        do step = 1, import_count(conn)
                            if (inode%state /= IMP_REMOTE .or. inode%borrowed) exit
                            call import_find(conn, inode%resolved_id, to, found)
                            if (.not. found) exit
@@ -7151,7 +7178,7 @@ contains
          end if
          call import_find_wire(conn, node%import_wire, imp, found)
          if (found) then
-            do step = 1, 8
+            do step = 1, import_count(conn)
                if (imp%state /= IMP_REMOTE .or. imp%borrowed) exit
                call import_find(conn, imp%resolved_id, to, found)
                if (.not. found) exit
@@ -10120,7 +10147,7 @@ contains
                      integer :: step
                      call import_find(conn, px%import, inode, ifound)
                      if (ifound) then
-                        do step = 1, 8
+                        do step = 1, import_count(conn)
                            if (inode%state /= IMP_REMOTE .or. inode%borrowed) exit
                            call import_find(conn, inode%resolved_id, to, ifound)
                            if (.not. ifound) exit

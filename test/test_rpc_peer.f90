@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(45))
+      allocate (testsuite(46))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -123,6 +123,8 @@ contains
       testsuite(44)%test => t_pipeline_exc_type
       testsuite(45)%name = "proxy-pin-frees-released-export-id"
       testsuite(45)%test => t_proxy_pin_frees_id
+      testsuite(46)%name = "fwd-rh-running-proxy"
+      testsuite(46)%test => t_fwd_rh_running_proxy
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -2176,6 +2178,38 @@ contains
                  'proxy-pin-free: expected reuse of sh'//itoa(eid)//', got '//c//' / '//d)
       call close_peer(conn, fd)
    end subroutine t_proxy_pin_frees_id
+
+   !> Forwarding a receiverHosted param that names an unsettled running-
+   !> answer proxy writes senderPromise, matching C++ exportPromise.
+   subroutine t_fwd_rh_running_proxy(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      character(len=:), allocatable :: a, b, c
+      integer(int64) :: k, px
+      integer :: fd, e, i
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 5, -1_int64, NOCAPS, NOIDS)
+      call wcall(fd, 2_int64, 7, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 2)
+      call wcall(fd, 5_int64, 0, 1_int64, ['ra'], [2_int64])
+      call rpc_pump_once(conn, e)
+      b = wtext(fd, k)
+      a = drain(fd)
+      i = index(b, '[sp')
+      px = -1_int64
+      if (i > 0) read (b(i + 3:index(b, ']') - 1), *) px
+      call wcall(fd, 6_int64, 0, 1_int64, ['rh'], [px])
+      call rpc_pump_once(conn, e)
+      c = wtext(fd, k)
+      a = drain(fd)
+      call check(error, px >= 0_int64 .and. index(c, '[sp'//itoa(px)//']') > 0, &
+                 'fwd-rh-running-proxy: expected [sp'//itoa(px)//'], got '//c)
+      call close_peer(conn, fd)
+   end subroutine t_fwd_rh_running_proxy
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
