@@ -849,6 +849,12 @@ contains
       total = size(raw, kind=int64)
       count = 0
       recover = .false.
+      ! Shorter than a segment table. capnp 1.4.0 writes the default
+      ! value and then reports the short read.
+      if (total > 0_int64 .and. total < 8_int64) then
+         call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+         return
+      end if
       do while (off < total)
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) then
@@ -867,7 +873,14 @@ contains
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK .or. .not. root_is_struct(root)) then
             call capnp_message_free(msg)
-            call fail('bad root', rc)
+            ! Eight zero bytes are one empty segment. capnp 1.4.0 writes
+            ! the default value and then reports the error. A longer
+            ! buffer that fails here has no output.
+            if (total == 8_int64 .and. count == 0) then
+               call emit_recovered(sch, idx, to, pretty, seg_words, rc)
+            else
+               call fail('bad root', rc)
+            end if
             return
          end if
          call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
@@ -884,6 +897,36 @@ contains
          rc = 1
       end if
    end subroutine bytes_to_out
+
+   !> Write the default value of a root that could not be read, then
+   !> fail. capnp 1.4.0 does this when a binary or flat read throws
+   !> after getRoot returns a null struct.
+   subroutine emit_recovered(sch, idx, to, pretty, seg_words, rc)
+      type(capnp_dyn_schema_t), intent(in) :: sch
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: to
+      logical, intent(in) :: pretty
+      integer(int64), intent(in) :: seg_words
+      integer, intent(out) :: rc
+      type(capnp_message_t), target :: msg
+      type(capnp_brand_env_t) :: empty_env
+      type(capnp_ptr_t) :: root
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      if (err /= CAPNP_OK) then
+         call fail('bad message', rc)
+         return
+      end if
+      root = capnp_root(msg, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(msg)
+         call fail('bad root', rc)
+         return
+      end if
+      call emit_one(sch, idx, empty_env, msg, root, to, pretty, seg_words, rc)
+      call capnp_message_free(msg)
+      if (rc == 0) rc = 1
+   end subroutine emit_recovered
 
    pure function root_is_struct(root) result(ok)
       type(capnp_ptr_t), intent(in) :: root
@@ -1049,7 +1092,7 @@ contains
          bopt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
          call capnp_message_init_builder(reseg, err, options=bopt)
          if (err /= CAPNP_OK) return
-         croot = capnp_copy(reseg, root, err)
+         croot = copy_root(reseg, root, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(reseg)
             return
@@ -1072,7 +1115,7 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_message_init_builder(reseg, err)
          if (err /= CAPNP_OK) return
-         croot = capnp_copy(reseg, root, err)
+         croot = copy_root(reseg, root, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(reseg)
             return
@@ -1105,11 +1148,16 @@ contains
       err = CAPNP_OK
       root = capnp_root(msg, err)
       if (err /= CAPNP_OK) return
-      need = 1_int64 + capnp_total_size(root, err)
-      if (err /= CAPNP_OK) return
+      if (root%kind == CAPNP_PK_NULL) then
+         ! A null root is written as a zero-size struct pointer.
+         need = 1_int64
+      else
+         need = 1_int64 + capnp_total_size(root, err)
+         if (err /= CAPNP_OK) return
+      end if
       call capnp_message_init_builder(single, err, first_words=max(need, 8_int64))
       if (err /= CAPNP_OK) return
-      croot = capnp_copy(single, root, err)
+      croot = copy_root(single, root, err)
       if (err /= CAPNP_OK) then
          call capnp_message_free(single)
          return
@@ -1129,6 +1177,20 @@ contains
       flatb = single%segs(1)%bytes(0:n - 1)
       call capnp_message_free(single)
    end subroutine to_flat_bytes
+
+   !> Copy a root. A null pointer becomes a zero-word struct, which is
+   !> the pointer capnp 1.4.0 writes for getRoot<AnyStruct>() on null.
+   function copy_root(dst, src, err) result(croot)
+      type(capnp_message_t), intent(inout), target :: dst
+      type(capnp_ptr_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: croot
+      if (src%kind == CAPNP_PK_NULL) then
+         croot = capnp_new_struct(dst, 0, 0, err)
+      else
+         croot = capnp_copy(dst, src, err)
+      end if
+   end function copy_root
 
    subroutine unpack_next_message(raw, off, framed, err)
       integer(int8), intent(in) :: raw(0:)
