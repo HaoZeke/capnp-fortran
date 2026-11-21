@@ -527,6 +527,179 @@ EOF
   echo "g9 ok"
 }
 
+g10() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > blobann.capnp << 'EOF'
+@0x8111111111111111;
+annotation mark @0xaaaaaaaaaaaaaaaa(struct) :Data;
+struct Host $mark(0x"0102") {
+  v @0 :Int32;
+}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" blobann.capnp
+  grep -q 'parameter :: HOST_MARK(0:1)' blobann_capnp.f90
+  grep -q '1, 2' blobann_capnp.f90
+  fc -c blobann_capnp.f90 -I "$MOD" -J .
+  echo "g10 ok"
+}
+
+g11() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > supers.capnp << 'EOF'
+@0x8111111111111112;
+interface Alpha {
+  foo @0 (x :Int32) -> (r :Int32);
+}
+interface Beta {
+  foo @0 (s :Text) -> (t :Text);
+  baz @1 () -> ();
+}
+interface Child extends(Alpha, Beta) {
+}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" supers.capnp
+  python3 - << 'PY'
+from pathlib import Path
+text = Path("supers_capnp.f90").read_text()
+key = "ctx%interface_id == BETA_INTERFACE_ID"
+start = text.find(key)
+if start < 0:
+    raise SystemExit("missing Beta dispatch")
+end = text.find("end select", start)
+chunk = text[start:end]
+if "case (0)" not in chunk:
+    raise SystemExit("Beta foo ordinal is not dispatched")
+if "beta_foo_params_t" not in chunk or "beta_foo_results_t" not in chunk:
+    raise SystemExit("Beta foo does not use Beta types")
+if "alpha_foo_params_t" in chunk:
+    raise SystemExit("Beta foo wrongly uses Alpha types")
+PY
+  cat > drv.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use supers_capnp
+   implicit none
+   integer :: alpha_hits = 0, beta_hits = 0, baz_hits = 0
+   type, extends(child_server_t) :: srv_t
+   contains
+      procedure :: foo => do_alpha_foo
+      procedure :: beta_foo => do_beta_foo
+      procedure :: baz => do_beta_baz
+   end type srv_t
+contains
+   subroutine do_alpha_foo(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(alpha_foo_params_t), intent(in) :: params
+      type(alpha_foo_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      alpha_hits = alpha_hits + 1
+      err = CAPNP_OK
+      call alpha_foo_results_r_set(results, alpha_foo_params_x_get(params) + 1_int32, err)
+   end subroutine do_alpha_foo
+
+   subroutine do_beta_foo(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(beta_foo_params_t), intent(in) :: params
+      type(beta_foo_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      character(len=:), allocatable :: s
+      beta_hits = beta_hits + 1
+      call beta_foo_params_s_get(params, s, err)
+      if (err == CAPNP_OK) call beta_foo_results_t_set(results, 'beta:'//s, err)
+   end subroutine do_beta_foo
+
+   subroutine do_beta_baz(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(beta_baz_params_t), intent(in) :: params
+      type(beta_baz_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      baz_hits = baz_hits + 1
+      err = CAPNP_OK
+   end subroutine do_beta_baz
+end module impl
+
+program drv
+   use capnp
+   use capnp_posix
+   use capnp_rpc
+   use supers_capnp
+   use impl
+   implicit none
+   type(rpc_conn_t), target :: cli, srv_conn
+   type(srv_t), target :: srv
+   class(rpc_server_t), pointer :: boot
+   type(rpc_cap_t) :: root
+   type(alpha_client_t) :: acli
+   type(beta_client_t) :: bcli
+   type(capnp_message_t), target :: m
+   type(alpha_foo_params_t) :: ap
+   type(alpha_foo_results_t) :: ar
+   type(beta_foo_params_t) :: bp
+   type(beta_foo_results_t) :: br
+   type(beta_baz_params_t) :: zp
+   type(beta_baz_results_t) :: zr
+   character(len=:), allocatable :: txt
+   integer(int64) :: q
+   integer :: fa, fb, err, rval
+   call px_socketpair(fa, fb, err)
+   if (err /= CAPNP_OK) error stop 1
+   boot => srv
+   call rpc_conn_init(srv_conn, fb, boot)
+   boot => null()
+   call rpc_conn_init(cli, fa, boot)
+   call rpc_bootstrap_send(cli, root, err)
+   q = root%id
+   call rpc_pump_once(srv_conn, err)
+   call rpc_wait(cli, q, err)
+   call rpc_result_cap(cli, q, [integer ::], root, err)
+   call rpc_finish_send(cli, q, .true., err)
+   call rpc_pump_once(srv_conn, err)
+
+   acli%cap = root
+   call alpha_foo_begin(cli, acli, m, ap, q, err)
+   call alpha_foo_params_x_set(ap, 41_int32, err)
+   call rpc_call_send(cli, m, err)
+   call rpc_pump_once(srv_conn, err)
+   call alpha_foo_wait(cli, q, ar, err)
+   rval = alpha_foo_results_r_get(ar)
+   call rpc_finish_send(cli, q, .false., err)
+   call rpc_pump_once(srv_conn, err)
+
+   bcli%cap = root
+   call beta_foo_begin(cli, bcli, m, bp, q, err)
+   call beta_foo_params_s_set(bp, 'hi', err)
+   call rpc_call_send(cli, m, err)
+   call rpc_pump_once(srv_conn, err)
+   call beta_foo_wait(cli, q, br, err)
+   call beta_foo_results_t_get(br, txt, err)
+   call rpc_finish_send(cli, q, .false., err)
+   call rpc_pump_once(srv_conn, err)
+
+   call beta_baz_begin(cli, bcli, m, zp, q, err)
+   call rpc_call_send(cli, m, err)
+   call rpc_pump_once(srv_conn, err)
+   call beta_baz_wait(cli, q, zr, err)
+   call rpc_finish_send(cli, q, .false., err)
+   call rpc_pump_once(srv_conn, err)
+
+   print '(i0,1x,a,1x,i0,1x,i0,1x,i0)', rval, txt, alpha_hits, beta_hits, baz_hits
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv_conn)
+end program drv
+EOF
+  fc supers_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  cmp_out "$(./drv)" "42 beta:hi 1 1 1"
+  echo "g11 ok"
+}
+
 case "${1:-all}" in
   g1) g1 ;;
   g2) g2 ;;
@@ -537,11 +710,13 @@ case "${1:-all}" in
   g7) g7 ;;
   g8) g8 ;;
   g9) g9 ;;
+  g10) g10 ;;
+  g11) g11 ;;
   all)
-    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|all" >&2
     exit 2
     ;;
 esac

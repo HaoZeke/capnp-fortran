@@ -32,6 +32,12 @@ module capnpc_emit
    character(len=:), allocatable :: g_prefix
    character(len=64) :: g_imports(64)
    integer :: g_nimports = 0
+   !> A set of identifiers, compared without regard to case.
+   type :: nameset_t
+      character(len=64), allocatable :: v(:)
+      integer :: n = 0
+   end type nameset_t
+
    type(blob_t) :: g_blobs(256)
    integer :: g_nblobs = 0
    !> Whether this file declares interfaces (adds `use capnp_rpc`).
@@ -741,6 +747,10 @@ contains
          if (err /= CAPNP_OK) return
          i = i + 1
       end do
+      ! Annotation Data values are blobs. Record them while collection
+      ! is open, before emit_blob_params writes the parameters.
+      call emit_annotation_surface(modname, fidx, err)
+      if (err /= CAPNP_OK) return
       g_suppress = .false.
 
       outfile = dir//snake(base)//'_capnp.f90'
@@ -2637,14 +2647,21 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp
-      character(len=:), allocatable :: tn, mn, pn, rn, parent
+      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent
       integer(int64) :: i
-      integer :: nsuper
+      character(len=64), allocatable :: own(:), ex(:)
+      type(nameset_t) :: seen
+      integer :: nsuper, extra_ids(64), nextra, base_ids(64), nbase, n_own, nex
+      logical :: has_ifc
       call iface_name(np, tn, err)
       if (err /= CAPNP_OK) return
       call iface_parent(np, parent, nsuper, err)
       if (err /= CAPNP_OK) return
+      call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
+      if (err /= CAPNP_OK) return
+      call server_bindings(np, tn, own, n_own, ex, nex, seen, 0, err)
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '//upcase(tn)//'_INTERFACE_ID = '// &
              itoa(node_id(np))//'_int64')
@@ -2662,24 +2679,25 @@ contains
          if (err /= CAPNP_OK) return
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
-         mn = snake(mn)
-         call w('      procedure('//tn//'_'//mn//'_ifc), deferred :: '//mn)
+         bn = trim(own(i + 1))
+         call w('      procedure('//ident_fit(tn//'_'//bn//'_ifc')//'), deferred :: '//bn)
       end do
       call emit_further_supers(np, tn, 'd', err)
       if (err /= CAPNP_OK) return
       call w('      procedure :: dispatch => '//tn//'_dispatch')
       call w('   end type '//tn//'_server_t')
-      if (capnp_list_len(ml) > 0_int64 .or. nsuper > 1) then
+      has_ifc = capnp_list_len(ml) > 0_int64 .or. extra_supers_have_methods(extra_ids, nextra)
+      if (has_ifc) then
          call w('   abstract interface')
          do i = 0_int64, capnp_list_len(ml) - 1_int64
             mp = capnp_list_get_struct(ml, int(i), err)
             if (err /= CAPNP_OK) return
             call method_name(mp, mn, err)
             if (err /= CAPNP_OK) return
-            mn = snake(mn)
+            bn = trim(own(i + 1))
             call method_types(mp, pn, rn, err)
             if (err /= CAPNP_OK) return
-            call emit_method_ifc(tn, mn, pn, rn)
+            call emit_method_ifc(tn, bn, pn, rn)
          end do
          call emit_further_supers(np, tn, 'a', err)
          if (err /= CAPNP_OK) return
@@ -2693,14 +2711,20 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp
-      character(len=:), allocatable :: tn, mn, pn, rn, parent
+      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent
       integer(int64) :: i
-      integer :: nsuper
+      character(len=64), allocatable :: own(:), ex(:)
+      type(nameset_t) :: seen
+      integer :: nsuper, extra_ids(64), nextra, base_ids(64), nbase, n_own, nex
       call iface_name(np, tn, err)
       if (err /= CAPNP_OK) return
       call iface_parent(np, parent, nsuper, err)
       if (err /= CAPNP_OK) return
+      call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK) return
       ml = node_interface_methods(np, err)
+      if (err /= CAPNP_OK) return
+      call server_bindings(np, tn, own, n_own, ex, nex, seen, 0, err)
       if (err /= CAPNP_OK) return
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)
@@ -2755,7 +2779,7 @@ contains
       call w('      type(rpc_call_ctx_t), intent(inout) :: ctx')
       call w('      integer, intent(out) :: err')
       call w('      err = CAPNP_ERR_ARG')
-      if (nsuper > 1) then
+      if (nextra > 0) then
          call emit_further_supers(np, tn, 'c', err)
          if (err /= CAPNP_OK) return
       end if
@@ -2776,7 +2800,7 @@ contains
          if (err /= CAPNP_OK) return
          call method_name(mp, mn, err)
          if (err /= CAPNP_OK) return
-         mn = snake(mn)
+         bn = trim(own(i + 1))
          call method_types(mp, pn, rn, err)
          if (err /= CAPNP_OK) return
          call w('      case ('//itoa(i)//')')
@@ -2787,7 +2811,7 @@ contains
          call w('            results%p = capnp_new_struct(ctx%rmsg, '//upcase(rn)// &
                 '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
-         call w('            call self%'//mn//'(ctx, params, results, err)')
+         call w('            call self%'//bn//'(ctx, params, results, err)')
          call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')
          call w('         end block')
       end do
@@ -2800,7 +2824,9 @@ contains
 
    subroutine emit_method_ifc(tn, mn, pn, rn)
       character(len=*), intent(in) :: tn, mn, pn, rn
-      call w('      subroutine '//tn//'_'//mn//'_ifc(self, ctx, params, results, err)')
+      character(len=:), allocatable :: ifcn
+      ifcn = ident_fit(tn//'_'//mn//'_ifc')
+      call w('      subroutine '//ifcn//'(self, ctx, params, results, err)')
       if (pn == rn) then
          call w('         import :: '//tn//'_server_t, rpc_call_ctx_t, '//pn//'_t')
       else
@@ -2811,11 +2837,14 @@ contains
       call w('         type('//pn//'_t), intent(in) :: params')
       call w('         type('//rn//'_t), intent(in) :: results')
       call w('         integer, intent(out) :: err')
-      call w('      end subroutine '//tn//'_'//mn//'_ifc')
+      call w('      end subroutine '//ifcn)
    end subroutine emit_method_ifc
 
    !> Methods of superclasses after the first. The first is inherited by
    !> extends; further ones are copied because Fortran has one parent.
+   !> Each (interface_id, method_id) keeps its own param/result types
+   !> (capnpc-c++.c++ dispatchCall); colliding Fortran binding names are
+   !> qualified with the declaring interface name.
    !> mode d = deferred binding, a = abstract interface, c = dispatch.
    subroutine emit_further_supers(np, tn, mode, err)
       type(capnp_ptr_t), intent(in) :: np
@@ -2834,22 +2863,21 @@ contains
       character(len=*), intent(in) :: tn
       character(len=1), intent(in) :: mode
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: sl, sc, ml, mp
-      character(len=:), allocatable :: sn, mn, pn, rn
-      character(len=64) :: seen(32)
-      integer :: sidx, nseen, k
-      integer(int64) :: s, i
-      logical :: skip
+      type(capnp_ptr_t) :: ml, mp
+      character(len=:), allocatable :: sn, mn, bn, pn, rn
+      character(len=64), allocatable :: own(:), ex(:)
+      type(nameset_t) :: seen
+      integer :: extra_ids(64), nextra, base_ids(64), nbase, n_own, nex
+      integer :: e, sidx, k
+      integer(int64) :: i
       err = CAPNP_OK
-      nseen = 0
-      sl = node_interface_superclasses(np, err)
+      call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK .or. nextra == 0) return
+      call server_bindings(np, tn, own, n_own, ex, nex, seen, 0, err)
       if (err /= CAPNP_OK) return
-      if (capnp_list_len(sl) < 2_int64) return
-      do s = 1_int64, capnp_list_len(sl) - 1_int64
-         sc = capnp_list_get_struct(sl, int(s), err)
-         if (err /= CAPNP_OK) return
-         sidx = find_node(superclass_id(sc))
-         if (sidx == 0) cycle
+      k = 0
+      do e = 1, nextra
+         sidx = extra_ids(e)
          call note_import(sidx, err)
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(sidx)%p, sn, err)
@@ -2863,30 +2891,15 @@ contains
          do i = 0_int64, capnp_list_len(ml) - 1_int64
             mp = capnp_list_get_struct(ml, int(i), err)
             if (err /= CAPNP_OK) return
-            call method_name(mp, mn, err)
-            if (err /= CAPNP_OK) return
-            mn = snake(mn)
-            if (iface_has_method(np, mn)) cycle
-            sidx = find_first_super(sl)
-            if (sidx > 0) then
-               if (iface_has_method(g_nodes(sidx)%p, mn)) cycle
-            end if
-            skip = .false.
-            do k = 1, nseen
-               if (seen(k) == mn) skip = .true.
-            end do
-            if (skip) cycle
-            if (nseen < 32) then
-               nseen = nseen + 1
-               seen(nseen) = mn
-            end if
+            k = k + 1
+            bn = trim(ex(k))
             call method_types(mp, pn, rn, err)
             if (err /= CAPNP_OK) return
             select case (mode)
             case ('d')
-               call w('      procedure('//tn//'_'//mn//'_ifc), deferred :: '//mn)
+               call w('      procedure('//ident_fit(tn//'_'//bn//'_ifc')//'), deferred :: '//bn)
             case ('a')
-               call emit_method_ifc(tn, mn, pn, rn)
+               call emit_method_ifc(tn, bn, pn, rn)
             case ('c')
                call w('         case ('//itoa(i)//')')
                call w('            block')
@@ -2896,7 +2909,7 @@ contains
                call w('               results%p = capnp_new_struct(ctx%rmsg, '// &
                       upcase(rn)//'_DWORDS, '//upcase(rn)//'_PWORDS, err)')
                call w('               if (err /= CAPNP_OK) return')
-               call w('               call self%'//mn//'(ctx, params, results, err)')
+               call w('               call self%'//bn//'(ctx, params, results, err)')
                call w('               if (err == CAPNP_OK) &')
                call w('                  call payload_content_set(ctx%results, results%p, err)')
                call w('            end block')
@@ -2912,6 +2925,213 @@ contains
       end do
    end subroutine emit_further_supers_body
 
+   function ns_has(set, name) result(yes)
+      type(nameset_t), intent(in) :: set
+      character(len=*), intent(in) :: name
+      logical :: yes
+      character(len=:), allocatable :: key
+      integer :: k
+      yes = .false.
+      key = lowcase(name)
+      do k = 1, set%n
+         if (trim(set%v(k)) == key) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function ns_has
+
+   subroutine ns_add(set, name)
+      type(nameset_t), intent(inout) :: set
+      character(len=*), intent(in) :: name
+      character(len=64), allocatable :: tmp(:)
+      if (.not. allocated(set%v)) allocate (set%v(64))
+      if (set%n == size(set%v)) then
+         allocate (tmp(2*size(set%v)))
+         tmp(1:set%n) = set%v(1:set%n)
+         call move_alloc(tmp, set%v)
+      end if
+      set%n = set%n + 1
+      set%v(set%n) = lowcase(name)
+   end subroutine ns_add
+
+   !> The Fortran binding of every method of a server type, in the order
+   !> the emitters walk them: own lists one name per method of np, ex one
+   !> per method of the further superclasses. A binding name must differ
+   !> from every name the type inherits or binds itself (not the schema
+   !> name: a method renamed in a parent is inherited under its new name).
+   !> Names the type already has are qualified with the interface name,
+   !> and an ordinal when that still collides. seen ends up holding every
+   !> binding of the type, inherited ones included.
+   recursive subroutine server_bindings(np, tn, own, n_own, ex, nex, seen, depth, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=*), intent(in) :: tn
+      character(len=64), allocatable, intent(out) :: own(:), ex(:)
+      integer, intent(out) :: n_own, nex
+      type(nameset_t), intent(inout) :: seen
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: sl, ml, mp
+      character(len=64), allocatable :: raw(:), o2(:), e2(:)
+      character(len=:), allocatable :: mn, sn, bn
+      integer :: extra_ids(64), nextra, base_ids(64), nbase, n2, ne2
+      integer :: fidx, e, k, j, n
+      integer(int64) :: i
+      err = CAPNP_OK
+      n_own = 0
+      nex = 0
+      seen%n = 0
+      sl = node_interface_superclasses(np, err)
+      if (err /= CAPNP_OK) return
+      fidx = find_first_super(sl)
+      if (fidx > 0 .and. depth < 32) then
+         call node_fname(g_nodes(fidx)%p, sn, err)
+         if (err /= CAPNP_OK) return
+         call server_bindings(g_nodes(fidx)%p, sn, o2, n2, e2, ne2, seen, depth + 1, err)
+         if (err /= CAPNP_OK) return
+      end if
+      ml = node_interface_methods(np, err)
+      if (err /= CAPNP_OK) return
+      n = int(capnp_list_len(ml))
+      allocate (raw(max(n, 1)), own(max(n, 1)))
+      do i = 0_int64, int(n, int64) - 1_int64
+         mp = capnp_list_get_struct(ml, int(i), err)
+         if (err /= CAPNP_OK) return
+         call method_name(mp, mn, err)
+         if (err /= CAPNP_OK) return
+         raw(i + 1) = ident_fit(snake(mn))
+      end do
+      do i = 0_int64, int(n, int64) - 1_int64
+         mn = trim(raw(i + 1))
+         bn = mn
+         if (bn == 'dispatch' .or. ns_has(seen, bn)) then
+            bn = ident_fit(tn//'_'//mn)
+            k = 0
+            do while (bn == 'dispatch' .or. ns_has(seen, bn) .or. is_raw(bn))
+               k = k + 1
+               bn = ident_fit(tn//'_'//mn//'_'//itoa(i))
+               if (k > 1) bn = ident_fit(tn//'_'//mn//'_'//itoa(i)//'_'//itoa(int(k, int64)))
+            end do
+         end if
+         own(i + 1) = bn
+         call ns_add(seen, bn)
+      end do
+      n_own = n
+      call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK) return
+      allocate (ex(64))
+      do e = 1, nextra
+         call node_fname(g_nodes(extra_ids(e))%p, sn, err)
+         if (err /= CAPNP_OK) return
+         ml = node_interface_methods(g_nodes(extra_ids(e))%p, err)
+         if (err /= CAPNP_OK) return
+         do i = 0_int64, capnp_list_len(ml) - 1_int64
+            mp = capnp_list_get_struct(ml, int(i), err)
+            if (err /= CAPNP_OK) return
+            call method_name(mp, mn, err)
+            if (err /= CAPNP_OK) return
+            mn = snake(mn)
+            bn = ident_fit(mn)
+            if (bn == 'dispatch' .or. ns_has(seen, bn)) then
+               bn = ident_fit(sn//'_'//mn)
+               if (bn == 'dispatch' .or. ns_has(seen, bn)) then
+                  bn = ident_fit(sn//'_'//mn//'_'//itoa(i))
+                  k = 1
+                  do while (ns_has(seen, bn))
+                     k = k + 1
+                     bn = ident_fit(sn//'_'//mn//'_'//itoa(i)//'_'//itoa(int(k, int64)))
+                  end do
+               end if
+            end if
+            nex = nex + 1
+            if (nex > size(ex)) call grow_names(ex)
+            ex(nex) = bn
+            call ns_add(seen, bn)
+         end do
+      end do
+   contains
+      logical function is_raw(name)
+         character(len=*), intent(in) :: name
+         is_raw = .false.
+         do j = 1, n
+            if (trim(raw(j)) == name) is_raw = .true.
+         end do
+      end function is_raw
+   end subroutine server_bindings
+
+   subroutine grow_names(v)
+      character(len=64), allocatable, intent(inout) :: v(:)
+      character(len=64), allocatable :: tmp(:)
+      allocate (tmp(2*size(v)))
+      tmp(1:size(v)) = v
+      call move_alloc(tmp, v)
+   end subroutine grow_names
+
+   recursive subroutine collect_super_closure(idx, ids, n, excl, nexcl, depth)
+      integer, intent(in) :: idx, excl(:), nexcl, depth
+      integer, intent(inout) :: ids(:), n
+      type(capnp_ptr_t) :: sl, sc
+      integer :: err, k, sidx
+      integer(int64) :: s
+      if (idx <= 0 .or. depth > 32) return
+      do k = 1, nexcl
+         if (excl(k) == idx) return
+      end do
+      do k = 1, n
+         if (ids(k) == idx) return
+      end do
+      if (n < size(ids)) then
+         n = n + 1
+         ids(n) = idx
+      end if
+      sl = node_interface_superclasses(g_nodes(idx)%p, err)
+      if (err /= CAPNP_OK) return
+      do s = 0_int64, capnp_list_len(sl) - 1_int64
+         sc = capnp_list_get_struct(sl, int(s), err)
+         if (err /= CAPNP_OK) return
+         sidx = find_node(superclass_id(sc))
+         if (sidx > 0) call collect_super_closure(sidx, ids, n, excl, nexcl, depth + 1)
+      end do
+   end subroutine collect_super_closure
+
+   subroutine collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: extra_ids(:), nextra, base_ids(:), nbase, err
+      type(capnp_ptr_t) :: sl, sc
+      integer :: fidx, sidx, empty(1)
+      integer(int64) :: s
+      err = CAPNP_OK
+      nextra = 0
+      nbase = 0
+      empty = 0
+      sl = node_interface_superclasses(np, err)
+      if (err /= CAPNP_OK) return
+      if (capnp_list_len(sl) < 1_int64) return
+      fidx = find_first_super(sl)
+      if (fidx > 0) call collect_super_closure(fidx, base_ids, nbase, empty, 0, 0)
+      do s = 1_int64, capnp_list_len(sl) - 1_int64
+         sc = capnp_list_get_struct(sl, int(s), err)
+         if (err /= CAPNP_OK) return
+         sidx = find_node(superclass_id(sc))
+         if (sidx > 0) call collect_super_closure(sidx, extra_ids, nextra, base_ids, nbase, 0)
+      end do
+   end subroutine collect_extra_supers
+
+   function extra_supers_have_methods(extra_ids, nextra) result(yes)
+      integer, intent(in) :: extra_ids(:), nextra
+      logical :: yes
+      type(capnp_ptr_t) :: ml
+      integer :: e, err
+      yes = .false.
+      do e = 1, nextra
+         ml = node_interface_methods(g_nodes(extra_ids(e))%p, err)
+         if (err == CAPNP_OK .and. capnp_list_len(ml) > 0_int64) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function extra_supers_have_methods
+
    function find_first_super(sl) result(idx)
       type(capnp_ptr_t), intent(in) :: sl
       integer :: idx
@@ -2923,30 +3143,6 @@ contains
       if (err /= CAPNP_OK) return
       idx = find_node(superclass_id(sc))
    end function find_first_super
-
-   function iface_has_method(np, want) result(yes)
-      type(capnp_ptr_t), intent(in) :: np
-      character(len=*), intent(in) :: want
-      logical :: yes
-      type(capnp_ptr_t) :: ml, mp
-      character(len=:), allocatable :: mn
-      integer :: err
-      integer(int64) :: i
-      yes = .false.
-      if (np%kind == CAPNP_PK_NULL) return
-      ml = node_interface_methods(np, err)
-      if (err /= CAPNP_OK) return
-      do i = 0_int64, capnp_list_len(ml) - 1_int64
-         mp = capnp_list_get_struct(ml, int(i), err)
-         if (err /= CAPNP_OK) return
-         call method_name(mp, mn, err)
-         if (err /= CAPNP_OK) return
-         if (snake(mn) == want) then
-            yes = .true.
-            return
-         end if
-      end do
-   end function iface_has_method
 
    subroutine emit_any_decls()
       if (g_need_any_struct) then
