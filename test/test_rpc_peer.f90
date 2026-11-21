@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(41))
+      allocate (testsuite(43))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -115,6 +115,10 @@ contains
       testsuite(40)%test => t_call_pa_self
       testsuite(41)%name = "peer-abort-echoes-remote-exception"
       testsuite(41)%test => t_peer_abort_reply
+      testsuite(42)%name = "disembargo-promised-answer-noncap"
+      testsuite(42)%test => t_dis_pa_noncap
+      testsuite(43)%name = "disembargo-unimplemented-text"
+      testsuite(43)%test => t_dis_unimpl_text
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1253,6 +1257,112 @@ contains
          if (allocated(error)) return
       end do
    end subroutine t_peer_abort_reply
+
+   !> A senderLoopback Disembargo on a returned struct answer with empty
+   !> transform aborts with C++'s non-capability schema mismatch text.
+   subroutine t_dis_pa_noncap(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(exception_t) :: ex
+      character(len=:), allocatable :: a, reason
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 2, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, 1_int64, e)
+      call disembargo_context_sender_loopback_set(d, 9_int64, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call rpc_recv_message(fd, reply, e)
+      msg = message_read_root(reply, e)
+      call check(error, message_which(msg) == MESSAGE_ABORT_TAG, 'dis-pa-noncap: expected Abort')
+      if (.not. allocated(error)) then
+         ex = message_abort_get(msg, e)
+         call exception_reason_get(ex, reason, e)
+         call check(error, reason == 'Schema mismatch: Message contains non-capability ' // &
+                    'pointer where capability pointer was expected.', &
+                    'dis-pa-noncap: got '//reason)
+      end if
+      call capnp_message_free(reply)
+      call close_peer(conn, fd)
+   end subroutine t_dis_pa_noncap
+
+   !> An unimplemented Disembargo context appends C++'s formatted
+   !> disembargo value to the Abort reason.
+   subroutine t_dis_unimpl_text(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(disembargo_t) :: d
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+
+      call open_peer(conn, fd, srv)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      call message_target_imported_cap_set(tgt, 0_int64, e)
+      call disembargo_context_accept_set(d, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call rpc_recv_message(fd, reply, e)
+      msg = message_read_root(reply, e)
+      ex = message_abort_get(msg, e)
+      call exception_reason_get(ex, reason, e)
+      call check(error, reason == 'Unimplemented Disembargo type.; disembargo = ' // &
+                 '(target = (importedCap = 0), context = (accept = void))', &
+                 'dis-unimpl imp: got '//reason)
+      call capnp_message_free(reply)
+      call close_peer(conn, fd)
+      if (allocated(error)) return
+
+      call open_peer(conn, fd, srv)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      d = message_disembargo_init(msg, e)
+      tgt = disembargo_target_init(d, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call set_answer(pa, 1_int64)
+      call disembargo_context_accept_set(d, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call rpc_recv_message(fd, reply, e)
+      msg = message_read_root(reply, e)
+      ex = message_abort_get(msg, e)
+      call exception_reason_get(ex, reason, e)
+      call check(error, reason == 'Unimplemented Disembargo type.; disembargo = ' // &
+                 '(target = (promisedAnswer = (questionId = 1, ' // &
+                 'transform = [(getPointerField = 0)])), context = (accept = void))', &
+                 'dis-unimpl pa: got '//reason)
+      call capnp_message_free(reply)
+      call close_peer(conn, fd)
+   end subroutine t_dis_unimpl_text
 
    !> A param promise resolves to a cap a plain forward's answer imports.
    !> The call keeps that import, and one Release counts both refs.

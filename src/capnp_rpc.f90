@@ -5342,15 +5342,21 @@ contains
 
    !> Tell the peer this connection is done and stop using it. The reason
    !> is the text a later rpc_conn_reason returns.
-   subroutine abort_conn(conn, reason, err)
+   subroutine abort_conn(conn, reason, err, kind)
       type(rpc_conn_t), intent(inout), target :: conn
       character(len=*), intent(in) :: reason
       integer, intent(out) :: err
+      !> Exception type of the Abort; defaults to FAILED.
+      integer, intent(in), optional :: kind
       conn%abort_reason = reason
       conn%dead = .true.
       err = CAPNP_ERR_BOUNDS
       if (.not. associated(conn%transport)) return
-      call send_abort_frame(conn, EXCEPTION_TYPE_FAILED_E, reason)
+      if (present(kind)) then
+         call send_abort_frame(conn, kind, reason)
+      else
+         call send_abort_frame(conn, EXCEPTION_TYPE_FAILED_E, reason)
+      end if
    end subroutine abort_conn
 
    !> Write one Abort frame. A failed write is ignored, since the
@@ -10024,7 +10030,8 @@ contains
          return
       end if
       if (which /= DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG) then
-         call abort_conn(conn, 'Unimplemented Disembargo type.', err)
+         call abort_conn(conn, 'Unimplemented Disembargo type.; disembargo = '// &
+                         format_disembargo(d), err)
          return
       end if
       ! senderLoopback. getMessageTarget on an importedCap that is not a
@@ -10237,6 +10244,20 @@ contains
          if (err == CAPNP_ERR_KIND) call abort_conn(conn, 'Unsupported pipeline op.', err)
          return
       end if
+      ! A failed answer's pipeline is broken with its exception, and
+      ! whenResolved() on it fails the Disembargo task with that exception.
+      if (return_which(ar) == RETURN_EXCEPTION_TAG) then
+         block
+            type(exception_t) :: aex
+            character(len=:), allocatable :: areason
+            aex = return_exception_get(ar, err)
+            if (err /= CAPNP_OK) return
+            call exception_reason_get(aex, areason, err)
+            if (err /= CAPNP_OK) return
+            call abort_conn(conn, areason, err, exception_type_get(aex))
+         end block
+         return
+      end if
       if (return_which(ar) /= RETURN_RESULTS_TAG) then
          call abort_conn(conn, back, err)
          return
@@ -10255,6 +10276,12 @@ contains
          select case (promised_answer_op_which(op))
          case (PROMISED_ANSWER_OP_NOOP_TAG)
          case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+            if (p%kind == CAPNP_PK_NULL) cycle
+            if (p%kind /= CAPNP_PK_STRUCT) then
+               call abort_conn(conn, 'Schema mismatch: Message contains ' // &
+                               'non-struct pointer where struct pointerwas expected.', err)
+               return
+            end if
             p = capnp_getp(p, int(promised_answer_op_get_pointer_field_get(op)), err)
             if (err /= CAPNP_OK) then
                call abort_conn(conn, back, err)
@@ -10265,8 +10292,13 @@ contains
             return
          end select
       end do
-      if (p%kind /= CAPNP_PK_CAP) then
+      if (p%kind == CAPNP_PK_NULL) then
          call abort_conn(conn, back, err)
+         return
+      end if
+      if (p%kind /= CAPNP_PK_CAP) then
+         call abort_conn(conn, 'Schema mismatch: Message contains ' // &
+                         'non-capability pointer where capability pointer was expected.', err)
          return
       end if
       ctab = payload_cap_table_get(apl, err)
@@ -10275,7 +10307,7 @@ contains
          return
       end if
       if (p%capidx < 0_int64 .or. p%capidx >= capnp_list_len(ctab)) then
-         call abort_conn(conn, back, err)
+         call abort_conn(conn, 'Message contains invalid capability pointer.', err)
          return
       end if
       cd%p = capnp_list_get_struct(ctab, int(p%capidx), err)
@@ -10417,6 +10449,68 @@ contains
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, rm, err)
       call capnp_message_free(rm)
    end subroutine send_unimplemented
+
+   function format_disembargo(d) result(txt)
+      type(disembargo_t), intent(in) :: d
+      character(len=:), allocatable :: txt
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(promised_answer_op_t) :: op
+      type(capnp_ptr_t) :: ops
+      character(len=:), allocatable :: tstr, cstr, ostr
+      character(len=24) :: buf
+      integer :: e, i, n
+      tstr = ''
+      tgt = disembargo_target_get(d, e)
+      if (e == CAPNP_OK .and. tgt%p%kind == CAPNP_PK_STRUCT) then
+         select case (message_target_which(tgt))
+         case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
+            tstr = 'target = (importedCap = '//u64_dec(message_target_imported_cap_get(tgt))//')'
+         case (MESSAGE_TARGET_PROMISED_ANSWER_TAG)
+            pa = message_target_promised_answer_get(tgt, e)
+            if (e == CAPNP_OK) then
+               tstr = 'target = (promisedAnswer = (questionId = '// &
+                      u64_dec(promised_answer_question_id_get(pa))
+               ops = capnp_getp(pa%p, 0, e)
+               if (e == CAPNP_OK .and. ops%kind == CAPNP_PK_LIST) then
+                  ostr = ''
+                  n = int(capnp_list_len(ops))
+                  do i = 0, n - 1
+                     if (i > 0) ostr = ostr//', '
+                     op%p = capnp_list_get_struct(ops, i, e)
+                     if (e /= CAPNP_OK) exit
+                     select case (promised_answer_op_which(op))
+                     case (PROMISED_ANSWER_OP_NOOP_TAG)
+                        ostr = ostr//'(noop = void)'
+                     case (PROMISED_ANSWER_OP_GET_POINTER_FIELD_TAG)
+                        write (buf, '(i0)') iand(int(promised_answer_op_get_pointer_field_get(op)), 65535)
+                        ostr = ostr//'(getPointerField = '//trim(buf)//')'
+                     end select
+                  end do
+                  tstr = tstr//', transform = ['//ostr//']'
+               end if
+               tstr = tstr//'))'
+            end if
+         end select
+      end if
+      select case (disembargo_context_which(d))
+      case (DISEMBARGO_CONTEXT_SENDER_LOOPBACK_TAG)
+         cstr = 'context = (senderLoopback = '//u64_dec(disembargo_context_sender_loopback_get(d))//')'
+      case (DISEMBARGO_CONTEXT_RECEIVER_LOOPBACK_TAG)
+         cstr = 'context = (receiverLoopback = '//u64_dec(disembargo_context_receiver_loopback_get(d))//')'
+      case (DISEMBARGO_CONTEXT_ACCEPT_TAG)
+         cstr = 'context = (accept = void)'
+      case (DISEMBARGO_CONTEXT_PROVIDE_TAG)
+         cstr = 'context = (provide = '//u64_dec(disembargo_context_provide_get(d))//')'
+      case default
+         cstr = 'context = ()'
+      end select
+      if (len(tstr) > 0) then
+         txt = '('//tstr//', '//cstr//')'
+      else
+         txt = '('//cstr//')'
+      end if
+   end function format_disembargo
 
    pure function u64_dec(v) result(o)
       integer(int64), intent(in) :: v
