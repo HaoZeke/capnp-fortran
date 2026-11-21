@@ -842,6 +842,7 @@ contains
       integer, intent(out) :: err
       type(capnp_message_t), target :: reseg
       type(capnp_ptr_t) :: root, croot
+      type(capnp_builder_options_t) :: bopt
       integer(int8), allocatable :: flatb(:)
       err = CAPNP_OK
       if (to == 'canonical') then
@@ -855,7 +856,33 @@ contains
       else if (seg_words > 0_int64 .and. (to == 'binary' .or. to == 'packed')) then
          root = capnp_root(msg, err)
          if (err /= CAPNP_OK) return
-         call capnp_message_init_builder(reseg, err, first_words=seg_words)
+         bopt%first_segment_words = seg_words
+         bopt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
+         call capnp_message_init_builder(reseg, err, options=bopt)
+         if (err /= CAPNP_OK) return
+         croot = capnp_copy(reseg, root, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         call capnp_set_root(reseg, croot, err)
+         if (err /= CAPNP_OK) then
+            call capnp_message_free(reseg)
+            return
+         end if
+         if (to == 'packed') then
+            call capnp_serialize_packed_bytes(reseg, outb, err)
+         else
+            call capnp_serialize_bytes(reseg, outb, err)
+         end if
+         call capnp_message_free(reseg)
+      else if (.not. msg%is_builder .and. (to == 'binary' .or. to == 'packed')) then
+         ! A reader segment keeps every word from the table, including a
+         ! zero tail the object does not use. The capnp tool copies the
+         ! root into a fresh builder, so that tail is not written back.
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) return
+         call capnp_message_init_builder(reseg, err)
          if (err /= CAPNP_OK) return
          croot = capnp_copy(reseg, root, err)
          if (err /= CAPNP_OK) then

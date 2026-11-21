@@ -28,6 +28,7 @@ program test_gate2
    call case_25()
    call case_26()
    call case_27()
+   call case_28()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -782,4 +783,25 @@ contains
          'cmp -s /tmp/g2-dot.o /tmp/g2-dot.r && cmp -s /tmp/g2-dot.e1 ' // &
          '/tmp/g2-dot.e2')
    end subroutine case_27
+
+   subroutine case_28()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '(x = 1)\n' // &
+         achar(39) // &
+         ' | capnp convert text:binary schema/common.capnp Vec3 > /tmp' // &
+         '/g2-seg.in; "$CAP" convert --segment-size=64 binary:binary s' // &
+         'chema/common.capnp Vec3 < /tmp/g2-seg.in > /tmp/g2-seg.o; ec' // &
+         'ho $? > /tmp/g2-seg.e1; capnp convert --segment-size=64 bina' // &
+         'ry:binary schema/common.capnp Vec3 < /tmp/g2-seg.in > /tmp/g' // &
+         '2-seg.r; echo $? > /tmp/g2-seg.e2; cmp -s /tmp/g2-seg.o /tmp' // &
+         '/g2-seg.r && cmp -s /tmp/g2-seg.e1 /tmp/g2-seg.e2')
+   end subroutine case_28
 end program test_gate2
