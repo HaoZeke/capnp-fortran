@@ -1,13 +1,22 @@
 !> JSON codec with the defaults and annotations of capnp/compat/json.h.
 !>
-!> Primitives are always encoded. Null pointers are omitted. Int64 and
-!> UInt64 are decimal strings. Data is an array of byte values unless the
-!> field carries $Json.base64 or $Json.hex. Enums are names, or the raw
-!> number when the ordinal is unknown. $Json.name renames fields, groups,
-!> unions, and enumerants; $Json.flatten inlines sub-structs, groups, and
-!> discriminated union variants with an optional prefix; $Json.discriminator
-!> tags unions with an explicit variant field and optional valueName. NaN
-!> and infinities are the strings "NaN", "Infinity", and "-Infinity".
+!> Primitives are always encoded. A null pointer outside a union is
+!> omitted. The active union arm is still written when its pointer is
+!> null, using the schema default for text and data, or empty when the
+!> arm has none. Int64 and UInt64 are decimal strings. Data is an array
+!> of byte values unless the field carries $Json.base64 or $Json.hex.
+!> Enums are names, or the raw number when the ordinal is unknown.
+!> $Json.name renames fields, groups, unions, and enumerants.
+!> $Json.flatten inlines sub-structs, groups, and discriminated union
+!> variants with an optional prefix. $Json.discriminator tags unions
+!> with an explicit variant field and optional valueName. An unknown
+!> discriminator string leaves the union unchanged and does not apply
+!> other union fields in that object. A non-string discriminator is
+!> rejected. NaN and infinities are the strings "NaN", "Infinity", and
+!> "-Infinity". A high surrogate followed by a low surrogate is one
+!> scalar, and an unquoted integer past 2^53 keeps its exact value.
+!> These two reads differ from capnp 1.4.0 only by adding precision or
+!> correctness, and both accept every input that version accepts.
 module capnp_json
    use capnp
    use capnp_schema
@@ -1359,8 +1368,16 @@ contains
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
       err = CAPNP_OK
+      iv = 0_int64
       if (jv%k == JK_STR) then
-         call capnp_parse_i64(jv%str, iv, err)
+         call kj_parse_i64(jv%str, iv, err)
+      else if (jv%k == JK_NUM .and. allocated(jv%str)) then
+         if (json_int_token(jv%str)) then
+            call kj_parse_i64(jv%str, iv, err)
+            if (err /= CAPNP_OK) call capnp_f64_to_i64(jv%num, iv, err)
+         else
+            call capnp_f64_to_i64(jv%num, iv, err)
+         end if
       else if (jv%k == JK_NUM) then
          call capnp_f64_to_i64(jv%num, iv, err)
       else
@@ -1373,14 +1390,212 @@ contains
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
       err = CAPNP_OK
+      iv = 0_int64
       if (jv%k == JK_STR) then
-         call capnp_parse_u64(jv%str, iv, err)
+         call kj_parse_u64(jv%str, iv, err)
+      else if (jv%k == JK_NUM .and. allocated(jv%str)) then
+         if (jv%str == '-0') then
+            iv = 0_int64
+         else if (json_int_token(jv%str)) then
+            call kj_parse_u64(jv%str, iv, err)
+            if (err /= CAPNP_OK) call capnp_f64_to_u64(jv%num, iv, err)
+         else
+            call capnp_f64_to_u64(jv%num, iv, err)
+         end if
       else if (jv%k == JK_NUM) then
          call capnp_f64_to_u64(jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
    end subroutine j_unsigned
+
+   function json_int_token(tok) result(y)
+      character(len=*), intent(in) :: tok
+      logical :: y
+      integer :: i, n
+      y = .false.
+      n = len(tok)
+      if (n == 0) return
+      i = 1
+      if (tok(1:1) == '-') then
+         if (n == 1) return
+         i = 2
+      end if
+      do while (i <= n)
+         if (tok(i:i) < '0' .or. tok(i:i) > '9') return
+         i = i + 1
+      end do
+      y = .true.
+   end function json_int_token
+
+   function kj_hex_prefix(tok) result(y)
+      character(len=*), intent(in) :: tok
+      logical :: y
+      integer :: i
+      y = .false.
+      i = 1
+      if (len(tok) >= 1) then
+         if (tok(1:1) == '-') i = 2
+      end if
+      if (i + 1 > len(tok)) return
+      y = tok(i:i) == '0' .and. (tok(i + 1:i + 1) == 'x' .or. tok(i + 1:i + 1) == 'X')
+   end function kj_hex_prefix
+
+   function kj_is_space(ch) result(y)
+      character(len=1), intent(in) :: ch
+      logical :: y
+      integer :: c
+      c = ichar(ch)
+      y = c == 9 .or. c == 10 .or. c == 11 .or. c == 12 .or. c == 13 .or. c == 32
+   end function kj_is_space
+
+   function kj_digit(ch, base, dig) result(ok)
+      character(len=1), intent(in) :: ch
+      integer, intent(in) :: base
+      integer, intent(out) :: dig
+      logical :: ok
+      integer :: c
+      ok = .false.
+      dig = 0
+      c = ichar(ch)
+      if (c >= ichar('0') .and. c <= ichar('9')) then
+         dig = c - ichar('0')
+      else if (c >= ichar('a') .and. c <= ichar('f')) then
+         dig = c - ichar('a') + 10
+      else if (c >= ichar('A') .and. c <= ichar('F')) then
+         dig = c - ichar('A') + 10
+      else
+         return
+      end if
+      ok = dig < base
+   end function kj_digit
+
+   subroutine kj_acc(hi, lo, base, dig, err)
+      integer(int64), intent(inout) :: hi, lo
+      integer, intent(in) :: base, dig
+      integer, intent(out) :: err
+      integer(int64) :: prod, carry, b
+      integer(int64), parameter :: limb = 4294967295_int64
+      integer(int64), parameter :: base32 = 4294967296_int64
+      err = CAPNP_OK
+      b = int(base, int64)
+      if (lo > (huge(lo) - int(dig, int64))/b) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      prod = lo*b + int(dig, int64)
+      carry = prod/base32
+      lo = mod(prod, base32)
+      if (hi > (limb - carry)/b) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      hi = hi*b + carry
+   end subroutine kj_acc
+
+   function kj_as_i64(hi, lo) result(v)
+      integer(int64), intent(in) :: hi, lo
+      integer(int64) :: v
+      integer(int64), parameter :: base32 = 4294967296_int64
+      integer(int64), parameter :: signbit = 2147483648_int64
+      if (hi >= signbit) then
+         v = (hi - base32)*base32 + lo
+      else
+         v = hi*base32 + lo
+      end if
+   end function kj_as_i64
+
+   subroutine kj_parse_mag(tok, neg, hi, lo, err)
+      character(len=*), intent(in) :: tok
+      logical, intent(out) :: neg
+      integer(int64), intent(out) :: hi, lo
+      integer, intent(out) :: err
+      integer :: i, n, base, dig
+      logical :: any, hex
+      err = CAPNP_OK
+      neg = .false.
+      hi = 0_int64
+      lo = 0_int64
+      n = len(tok)
+      i = 1
+      do while (i <= n)
+         if (.not. kj_is_space(tok(i:i))) exit
+         i = i + 1
+      end do
+      if (i <= n) then
+         if (tok(i:i) == '+') then
+            i = i + 1
+         else if (tok(i:i) == '-') then
+            neg = .true.
+            i = i + 1
+         end if
+      end if
+      hex = kj_hex_prefix(tok)
+      base = 10
+      if (hex) base = 16
+      if (hex) then
+         if (i + 1 > n) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         i = i + 2
+      end if
+      any = .false.
+      do while (i <= n)
+         if (.not. kj_digit(tok(i:i), base, dig)) exit
+         any = .true.
+         call kj_acc(hi, lo, base, dig, err)
+         if (err /= CAPNP_OK) return
+         i = i + 1
+      end do
+      if (.not. any .or. i <= n) err = CAPNP_ERR_ARG
+   end subroutine kj_parse_mag
+
+   subroutine kj_parse_i64(tok, v, err)
+      character(len=*), intent(in) :: tok
+      integer(int64), intent(out) :: v
+      integer, intent(out) :: err
+      logical :: neg
+      integer(int64) :: hi, lo
+      integer(int64), parameter :: signbit = 2147483648_int64
+      err = CAPNP_OK
+      v = 0_int64
+      call kj_parse_mag(tok, neg, hi, lo, err)
+      if (err /= CAPNP_OK) return
+      if (hi > signbit .or. (hi == signbit .and. (lo /= 0_int64 .or. .not. neg))) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (hi == signbit) then
+         v = int(z'8000000000000000', int64)
+         return
+      end if
+      v = kj_as_i64(hi, lo)
+      if (neg) v = -v
+   end subroutine kj_parse_i64
+
+   subroutine kj_parse_u64(tok, v, err)
+      character(len=*), intent(in) :: tok
+      integer(int64), intent(out) :: v
+      integer, intent(out) :: err
+      logical :: neg
+      integer(int64) :: hi, lo
+      integer(int64), parameter :: min_i64 = int(z'8000000000000000', int64)
+      err = CAPNP_OK
+      v = 0_int64
+      if (len(tok) == 0) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (tok(1:1) == '-') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call kj_parse_mag(tok, neg, hi, lo, err)
+      if (err /= CAPNP_OK) return
+      v = kj_as_i64(hi, lo)
+      if (neg .and. v /= 0_int64 .and. v /= min_i64) v = -v
+   end subroutine kj_parse_u64
 
    subroutine j_float(jv, fv, err)
       type(jval), intent(in) :: jv
@@ -1569,7 +1784,7 @@ contains
       type(scan_t), intent(inout) :: sc
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      integer :: cp, h, k
+      integer :: cp, low
       character(len=1) :: c
       err = CAPNP_OK
       s = ''
@@ -1606,20 +1821,16 @@ contains
          case ('r'); s = s//achar(13)
          case ('t'); s = s//achar(9)
          case ('u')
-            cp = 0
-            do k = 1, 4
-               if (sc%i > sc%n) then
-                  err = CAPNP_ERR_ARG
-                  return
+            call read_u4(sc, cp, err)
+            if (err /= CAPNP_OK) return
+            if (cp >= 55296 .and. cp <= 56319) then
+               if (peek_u4(sc, low)) then
+                  if (low >= 56320 .and. low <= 57343) then
+                     sc%i = sc%i + 6
+                     cp = 65536 + ishft(cp - 55296, 10) + (low - 56320)
+                  end if
                end if
-               h = capnp_hex_digit(sc%s(sc%i:sc%i))
-               if (h < 0) then
-                  err = CAPNP_ERR_ARG
-                  return
-               end if
-               cp = cp*16 + h
-               sc%i = sc%i + 1
-            end do
+            end if
             call append_utf8(s, cp, err)
             if (err /= CAPNP_OK) return
          case default
@@ -1628,6 +1839,45 @@ contains
          end select
       end do
    end subroutine parse_string
+
+   subroutine read_u4(sc, cp, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(out) :: cp
+      integer, intent(out) :: err
+      integer :: h, k
+      err = CAPNP_OK
+      cp = 0
+      do k = 1, 4
+         if (sc%i > sc%n) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         h = capnp_hex_digit(sc%s(sc%i:sc%i))
+         if (h < 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         cp = cp*16 + h
+         sc%i = sc%i + 1
+      end do
+   end subroutine read_u4
+
+   function peek_u4(sc, cp) result(y)
+      type(scan_t), intent(in) :: sc
+      integer, intent(out) :: cp
+      logical :: y
+      integer :: h, k
+      y = .false.
+      cp = 0
+      if (sc%i + 5 > sc%n) return
+      if (sc%s(sc%i:sc%i + 1) /= '\u') return
+      do k = 1, 4
+         h = capnp_hex_digit(sc%s(sc%i + 1 + k:sc%i + 1 + k))
+         if (h < 0) return
+         cp = cp*16 + h
+      end do
+      y = .true.
+   end function peek_u4
 
    subroutine parse_word(sc, jv, err)
       type(scan_t), intent(inout) :: sc

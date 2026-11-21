@@ -158,12 +158,20 @@ an explicit variant field and optional `valueName`. 64-bit integers are
 decimal strings. Data is a JSON array of byte values, or a base64 string
 under `$Json.base64`, or lowercase hex under `$Json.hex`. Enums are names
 and unknown ordinals are numbers. NaN and infinities are `"NaN"`,
-`"Infinity"`, and `"-Infinity"`. Null pointers are omitted outside unions;
-primitives, groups, and the active union arm are written, with non-union
-fields emitted before the union arm. Unknown JSON fields are ignored on
+`"Infinity"`, and `"-Infinity"`. Null pointers are omitted outside unions.
+The active union arm is still written when its pointer is null: text and
+data use the schema default, or are empty when the arm has none.
+Primitives, groups, and that arm are written, with non-union fields
+emitted before the union arm. An unknown discriminator string leaves the
+union unchanged and does not apply other union fields in that object. A
+non-string discriminator is rejected. Unknown JSON fields are ignored on
 decode. Pretty output matches `capnp convert binary:json`; pass
 `pretty=.false.` for `--short`, and use `capnp_json_span` to step through
-multi-value JSON streams.
+multi-value JSON streams. A high UTF-16 surrogate followed by a low
+surrogate is one scalar, and an unquoted integer past 2^53 keeps its
+exact value. These two reads differ from capnp 1.4.0 only by adding
+precision or correctness, and both accept every input that version
+accepts.
 
 ## capnpf
 

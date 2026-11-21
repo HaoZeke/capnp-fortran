@@ -503,6 +503,10 @@ contains
       call check_(error, err /= CAPNP_OK, 'json-edges: reject fractional int')
       call capnp_json_decode(schema, idx, '{"ubig":-1}', decoded, err)
       call check_(error, err /= CAPNP_OK, 'json-edges: reject negative uint')
+      call capnp_json_decode(schema, idx, '{"ubig":""}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject empty uint string')
+      call capnp_json_decode(schema, idx, '{"ubig":"-1"}', decoded, err)
+      call check_(error, err /= CAPNP_OK, 'json-edges: reject negative uint string')
       call capnp_json_decode(schema, uidx, '{"u2sub":null}', decoded, err)
       call check_(error, err /= CAPNP_OK, 'json-edges: reject null struct')
       call capnp_json_decode(schema, idx, '{"display_name":null}', decoded, err)
@@ -560,7 +564,8 @@ contains
          '(id = 11, mode = (custom = (city = "Riga", code = 1050)), extra = (on = "ready"))', &
          'multi-union: custom/on')
 
-      ! Non-string discriminator must be rejected; unknown discriminator tag must be ignored like C++.
+      ! A non-string discriminator is an error. An unknown string leaves
+      ! the union unchanged and does not apply other union fields.
       idx = capnp_dyn_find(schema, 'TaggedEvent', err)
       call capnp_json_decode(schema, idx, '{"kind":123}', decoded, err)
       call check_(error, err /= CAPNP_OK, 'disc: reject non-string tag')
