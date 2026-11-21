@@ -55,6 +55,13 @@ program capnpf
 
 contains
 
+   !> The capnp tool reads with both limits at the maximum.
+   function tool_limits() result(opt)
+      type(capnp_reader_options_t) :: opt
+      opt%traversal_words = huge(0_int64)
+      opt%nesting_limit = huge(0)
+   end function tool_limits
+
    subroutine main_run(rc)
       integer, intent(out) :: rc
       character(len=:), allocatable :: arg, next_arg
@@ -624,7 +631,7 @@ contains
             return
          end if
          wrapped = wrap_flat(unpacked)
-         call capnp_deserialize_bytes(wrapped, msg, err)
+         call capnp_deserialize_bytes(wrapped, msg, err, options=tool_limits())
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
             call fail('bad flat-packed message', rc)
@@ -646,7 +653,7 @@ contains
             return
          end if
          wrapped = wrap_flat(raw)
-         call capnp_deserialize_bytes(wrapped, msg, err)
+         call capnp_deserialize_bytes(wrapped, msg, err, options=tool_limits())
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
             call fail('bad flat input', rc)
@@ -676,7 +683,7 @@ contains
                call fail('bad packed input', rc)
                return
             end if
-            call capnp_deserialize_bytes(one, msg, err)
+            call capnp_deserialize_bytes(one, msg, err, options=tool_limits())
             deallocate (one)
             if (err /= CAPNP_OK) then
                call capnp_message_free(msg)
@@ -712,7 +719,7 @@ contains
          end if
          allocate (one(0:n - 1))
          one = raw(off:off + n - 1)
-         call capnp_deserialize_bytes(one, msg, err)
+         call capnp_deserialize_bytes(one, msg, err, options=tool_limits())
          deallocate (one)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -749,7 +756,8 @@ contains
       integer :: err
       rc = 0
       if (to == 'text') then
-         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
+         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('text encode failed', rc)
             return
@@ -760,7 +768,8 @@ contains
             return
          end if
       else if (to == 'json') then
-         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env)
+         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
@@ -1445,7 +1454,8 @@ contains
       integer :: err
       rc = 0
       if (fmt == 'text') then
-         call capnp_text_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env)
+         call capnp_text_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('text encode failed', rc)
             return
@@ -1455,7 +1465,8 @@ contains
          return
       end if
       if (fmt == 'json') then
-         call capnp_json_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env)
+         call capnp_json_encode(sch, idx, obj, text, err, pretty=pretty, brand_env=env, &
+                                traversal_words=huge(0_int64))
          if (err /= CAPNP_OK) then
             call fail('json encode failed', rc)
             return
