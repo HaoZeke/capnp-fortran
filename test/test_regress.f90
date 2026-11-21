@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(59))
+      allocate (testsuite(60))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -122,6 +122,7 @@ contains
       testsuite(57) = new_unittest("canonical-reject", run_canonical_reject)
       testsuite(58) = new_unittest("request-beside-exe", run_request_beside_exe)
       testsuite(59) = new_unittest("generic-root", run_generic_root)
+      testsuite(60) = new_unittest("zero-size-list", run_zero_size_list)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3785,5 +3786,17 @@ contains
          call test_failed(error, 'generic root')
       end if
    end subroutine run_generic_root
+
+   !> A composite list of 2**28-1 zero-word elements converts in linear time.
+   subroutine run_zero_size_list(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
+         //' && printf ''\0\0\0\0\3\0\0\0\0\0\0\0\0\0\1\0\1\0\0\0\7\0\0\0\374\377\377\77\0\0\0\0''' &
+         //' > '//tmp//'/zl.bin' &
+         //' && for f in canonical binary flat packed; do' &
+         //' timeout 10 "$CAP" convert binary:$f < '//tmp//'/zl.bin > /dev/null || exit 1; done')) then
+         call test_failed(error, 'zero-size list conversion')
+      end if
+   end subroutine run_zero_size_list
 
 end module test_regress

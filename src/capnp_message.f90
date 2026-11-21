@@ -2414,6 +2414,7 @@ contains
                r%dwords = src%dwords
                r%pwords = src%pwords
                r%depth = src%depth
+               if (src%dwords + src%pwords == 0) exit copy_walk
                do i = 0_int64, src%nelem - 1_int64
                   c = capnp_list_get_struct(q, int(i), err)
                   if (err /= CAPNP_OK) exit copy_walk

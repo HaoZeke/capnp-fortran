@@ -466,6 +466,10 @@ contains
       err = CAPNP_OK
       nd = 0
       np = 0
+      if (p%dwords + p%pwords == 0) then
+         if (p%nelem > 0_int64) el = capnp_list_get_struct(p, 0, err)
+         return
+      end if
       do i = 0_int64, p%nelem - 1_int64
          el = capnp_list_get_struct(p, int(i), err)
          if (err /= CAPNP_OK) return
@@ -537,6 +541,7 @@ contains
             call composite_trim(p, nd, np, err)
             if (err /= CAPNP_OK) exit meas
             words = 1_int64 + p%nelem*int(nd + np, int64) ! tag + elements
+            if (np == 0) exit meas
             do i = 0_int64, p%nelem - 1_int64
                q = capnp_list_get_struct(p, int(i), err)
                if (err /= CAPNP_OK) exit meas
@@ -640,6 +645,7 @@ contains
             if (err /= CAPNP_OK) exit copyc
             q = capnp_new_composite_list(canon, p%nelem, nd, np, err)
             if (err /= CAPNP_OK) exit copyc
+            if (nd + np == 0) exit copyc
             do i = 0_int64, p%nelem - 1_int64
                sel = capnp_list_get_struct(p, int(i), err)
                if (err /= CAPNP_OK) exit copyc
