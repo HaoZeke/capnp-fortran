@@ -463,8 +463,7 @@ contains
          call fail('empty input', rc)
          return
       end if
-      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., &
-                       to_fmt == 'flat' .or. to_fmt == 'flat-packed', seg_words, rc)
+      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., seg_words, rc)
    end subroutine cmd_encode
 
    subroutine cmd_decode(sch, idx, from_fmt, short, rc)
@@ -492,7 +491,6 @@ contains
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       integer(int8), allocatable :: raw(:)
-      logical :: single_out
       integer :: err
       rc = 0
       call read_stdin(raw, err)
@@ -500,21 +498,20 @@ contains
          call fail('empty input', rc)
          return
       end if
-      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'text') then
-         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words, rc)
+         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else if (from == 'json') then
-         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out, seg_words, rc)
+         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, seg_words, rc)
       else
          call bytes_to_out(sch, idx, raw, from, to, .not. short, seg_words, rc)
       end if
    end subroutine cmd_convert
 
-   subroutine text_to_out(sch, idx, text, to, pretty, single_only, seg_words, rc)
+   subroutine text_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
-      logical, intent(in) :: pretty, single_only
+      logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
@@ -531,10 +528,6 @@ contains
             return
          end if
          if (beg == 0) exit
-         if (single_only .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -556,11 +549,11 @@ contains
       if (count == 0) call fail('empty input', rc)
    end subroutine text_to_out
 
-   subroutine json_to_out(sch, idx, text, to, pretty, single_only, seg_words, rc)
+   subroutine json_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
-      logical, intent(in) :: pretty, single_only
+      logical, intent(in) :: pretty
       integer(int64), intent(in) :: seg_words
       integer, intent(out) :: rc
       type(capnp_message_t), target :: msg
@@ -577,10 +570,6 @@ contains
             return
          end if
          if (beg == 0) exit
-         if (single_only .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -616,9 +605,7 @@ contains
       integer(int64) :: off, n, total
       integer :: err, count
       type(capnp_ptr_t) :: root
-      logical :: single_out
       rc = 0
-      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'flat-packed') then
          call capnp_unpack(raw, unpacked, err)
          if (err /= CAPNP_OK) then
@@ -674,10 +661,6 @@ contains
          total = size(raw, kind=int64)
          count = 0
          do while (off < total)
-            if (single_out .and. count >= 1) then
-               call fail('flat output supports only one message', rc)
-               return
-            end if
             call unpack_next_message(raw, off, one, err)
             if (err /= CAPNP_OK) then
                call fail('bad packed input', rc)
@@ -708,10 +691,6 @@ contains
       total = size(raw, kind=int64)
       count = 0
       do while (off < total)
-         if (single_out .and. count >= 1) then
-            call fail('flat output supports only one message', rc)
-            return
-         end if
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) then
             call fail('bad framing', rc)
