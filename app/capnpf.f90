@@ -3,6 +3,7 @@
 !> (`capnp compile -o-`) and loaded as a CodeGeneratorRequest.
 program capnpf
    use, intrinsic :: iso_c_binding, only: c_int
+   use, intrinsic :: iso_fortran_env, only: error_unit
    use capnp
    use capnp_schema
    use capnp_codec
@@ -16,6 +17,10 @@ program capnpf
          import c_int
          integer(c_int) :: p
       end function c_getpid
+      subroutine c_exit(code) bind(c, name="exit")
+         import c_int
+         integer(c_int), value :: code
+      end subroutine c_exit
    end interface
 
    character(len=4096) :: arg
@@ -34,7 +39,7 @@ program capnpf
    packed_in = .false.
    flat_in = .false.
    n = command_argument_count()
-   if (n < 1) call usage()
+   if (n < 1) call usage_err()
    do i = 1, n
       call get_command_argument(i, arg)
       if (trim(arg) == '--short') then
@@ -68,9 +73,10 @@ program capnpf
 
    if (cmd /= 'encode' .and. cmd /= 'decode' .and. cmd /= 'convert' .and. cmd /= 'eval') &
       call die('unknown command '//cmd)
-   if (len(schema_path) == 0 .or. (cmd /= 'convert' .and. len(name) == 0)) call usage()
+
+   if (len(schema_path) == 0 .or. (cmd /= 'convert' .and. len(name) == 0)) call usage_err()
    if (cmd == 'convert') then
-      if (len(spec) == 0 .or. len(name) == 0) call usage()
+      if (len(spec) == 0 .or. len(name) == 0) call usage_err()
    end if
 
    call load_schema(schema_path, schema, err)
@@ -96,17 +102,22 @@ program capnpf
 
 contains
 
-   subroutine usage()
-      write (*, '(a)') 'usage: capnpf encode|decode|convert|eval [options] <schema> <type|name>'
-      write (*, '(a)') '  convert <from>:<to> <schema> <type>'
-      write (*, '(a)') 'formats: binary packed flat canonical text json'
-      error stop 1
-   end subroutine usage
+   subroutine print_usage(u)
+      integer, intent(in) :: u
+      write (u, '(a)') 'usage: capnpf encode|decode|convert|eval [options] <schema> <type|name>'
+      write (u, '(a)') '  convert <from>:<to> <schema> <type>'
+      write (u, '(a)') 'formats: binary packed flat canonical text json'
+   end subroutine print_usage
+
+   subroutine usage_err()
+      call print_usage(error_unit)
+      call c_exit(1_c_int)
+   end subroutine usage_err
 
    subroutine die(msg)
       character(len=*), intent(in) :: msg
-      write (*, '(a)') 'capnpf: '//msg
-      error stop 1
+      write (error_unit, '(a)') 'capnpf: '//msg
+      call c_exit(1_c_int)
    end subroutine die
 
    subroutine remove_file(path)
