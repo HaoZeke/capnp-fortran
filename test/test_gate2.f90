@@ -38,6 +38,7 @@ program test_gate2
    call case_35()
    call case_36()
    call case_37()
+   call case_38()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -1058,4 +1059,35 @@ contains
          'timeout 60 "$CAP" convert binary:canonical /tmp/g2-cyc.capnp' // &
          ' N < /tmp/g2-cyc.in > /dev/null 2>&1; test $? -eq 1')
    end subroutine case_37
+
+   subroutine case_38()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '@0xb4c5d6e7f8091a2b;\nstruct N { next @0 :N; }\n' // &
+         achar(39) // &
+         ' > /tmp/g2-cyc.capnp' // &
+         achar(10) // &
+         'python3 -c ' // &
+         achar(39) // &
+         'import sys; sys.stdout.buffer.write(bytes([0,0,0,0,2,0,0,0, ' // &
+         '0,0,0,0,0,0,1,0, 0xfc,0xff,0xff,0xff,0,0,1,0]))' // &
+         achar(39) // &
+         ' > /tmp/g2-cyc.in' // &
+         achar(10) // &
+         'for t in binary packed flat flat-packed; do' // &
+         achar(10) // &
+         '  timeout 60 "$CAP" convert binary:$t /tmp/g2-cyc.capnp N < ' // &
+         '/tmp/g2-cyc.in > /dev/null 2>&1; test $? -eq 1 || exit 1' // &
+         achar(10) // &
+         'done')
+   end subroutine case_38
 end program test_gate2

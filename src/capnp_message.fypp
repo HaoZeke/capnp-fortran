@@ -75,6 +75,13 @@ module capnp_message
    integer, allocatable, save :: copy_seg(:)
    integer(int64), allocatable, save :: copy_off(:)
 
+   !> Objects entered by the current size walk. Separate from the copy stack
+   !> so a size pass cannot disturb a copy, and a path (not a global set)
+   !> so a DAG is still legal.
+   integer, save :: size_n = 0
+   integer, allocatable, save :: size_seg(:)
+   integer(int64), allocatable, save :: size_off(:)
+
 contains
 
    ! ------------------------------------------------------------------
@@ -1758,7 +1765,9 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       integer(int64) :: words
+      size_n = 0
       words = size_depth(p, 0, err)
+      size_n = 0
    end function capnp_total_size
 
    recursive function size_depth(p, depth, err) result(words)
@@ -1768,8 +1777,10 @@ contains
       integer(int64) :: words
       type(capnp_ptr_t) :: r
       integer(int64) :: i
+      logical :: tracked
       err = CAPNP_OK
       words = 0_int64
+      tracked = .false.
       if (p%kind == CAPNP_PK_NULL .or. p%kind == CAPNP_PK_CAP) return
       if (associated(p%msg)) then
          if (depth > p%msg%depth_limit) then
@@ -1777,41 +1788,56 @@ contains
             return
          end if
       end if
-      select case (p%kind)
-      case (CAPNP_PK_STRUCT)
-         words = int(p%dwords, int64) + int(p%pwords, int64) + &
-                 size_children(p, depth, err)
-      case (CAPNP_PK_LIST)
-         select case (p%esize)
-         case (CAPNP_SZ_COMPOSITE)
-            words = 1_int64 + p%nelem*(int(p%dwords, int64) + int(p%pwords, int64))
-            if (p%pwords > 0) then
-               r = capnp_ptr_t()
-               r%msg => p%msg
-               r%kind = CAPNP_PK_STRUCT
-               r%seg = p%seg
-               r%dwords = p%dwords
-               r%pwords = p%pwords
-               r%depth = p%depth
+      ! A pointer back to an object already on this walk is a cycle.
+      ! Flat output sizes the message before copying it, and that size
+      ! walk has no nesting cap on the tool path.
+      if (size_has_body(p)) then
+         if (size_on_stack(p)) then
+            err = CAPNP_ERR_DEPTH
+            return
+         end if
+         call size_push(p, err)
+         if (err /= CAPNP_OK) return
+         tracked = .true.
+      end if
+      size_walk: block
+         select case (p%kind)
+         case (CAPNP_PK_STRUCT)
+            words = int(p%dwords, int64) + int(p%pwords, int64) + &
+                    size_children(p, depth, err)
+         case (CAPNP_PK_LIST)
+            select case (p%esize)
+            case (CAPNP_SZ_COMPOSITE)
+               words = 1_int64 + p%nelem*(int(p%dwords, int64) + int(p%pwords, int64))
+               if (p%pwords > 0) then
+                  r = capnp_ptr_t()
+                  r%msg => p%msg
+                  r%kind = CAPNP_PK_STRUCT
+                  r%seg = p%seg
+                  r%dwords = p%dwords
+                  r%pwords = p%pwords
+                  r%depth = p%depth
+                  do i = 0_int64, p%nelem - 1_int64
+                     r%off = p%off + i*int(p%dwords + p%pwords, int64)*8_int64
+                     words = words + size_children(r, depth, err)
+                     if (err /= CAPNP_OK) exit size_walk
+                  end do
+               end if
+            case (CAPNP_SZ_PTR)
+               words = p%nelem
                do i = 0_int64, p%nelem - 1_int64
-                  r%off = p%off + i*int(p%dwords + p%pwords, int64)*8_int64
-                  words = words + size_children(r, depth, err)
-                  if (err /= CAPNP_OK) return
+                  r = capnp_getp(p, int(i), err)
+                  if (err /= CAPNP_OK) exit size_walk
+                  words = words + size_depth(r, depth + 1, err)
+                  if (err /= CAPNP_OK) exit size_walk
                end do
-            end if
-         case (CAPNP_SZ_PTR)
-            words = p%nelem
-            do i = 0_int64, p%nelem - 1_int64
-               r = capnp_getp(p, int(i), err)
-               if (err /= CAPNP_OK) return
-               words = words + size_depth(r, depth + 1, err)
-               if (err /= CAPNP_OK) return
-            end do
-         case default
-            words = (p%nelem*int(capnp_list_step_bits(p%esize), int64) + &
-                     63_int64)/64_int64
+            case default
+               words = (p%nelem*int(capnp_list_step_bits(p%esize), int64) + &
+                        63_int64)/64_int64
+            end select
          end select
-      end select
+      end block size_walk
+      if (tracked) call size_pop()
    end function size_depth
 
    !> Sum of size_depth over a struct's pointer slots.
@@ -1986,6 +2012,87 @@ contains
    subroutine copy_pop()
       if (copy_n > 0) copy_n = copy_n - 1
    end subroutine copy_pop
+
+   !> Identity of an object on a walk. A composite list is the tag word,
+   !> one word before its first element, so a pointer to that element is
+   !> not the list.
+   subroutine size_key(p, seg, off)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: seg
+      integer(int64), intent(out) :: off
+      seg = p%seg
+      off = p%off
+      if (p%kind == CAPNP_PK_LIST .and. p%esize == CAPNP_SZ_COMPOSITE) then
+         off = p%off - 8_int64
+      end if
+   end subroutine size_key
+
+   !> Zero-word objects have no distinct offset, so they are not cycle keys.
+   logical function size_has_body(p)
+      type(capnp_ptr_t), intent(in) :: p
+      size_has_body = .false.
+      select case (p%kind)
+      case (CAPNP_PK_STRUCT)
+         size_has_body = p%dwords > 0 .or. p%pwords > 0
+      case (CAPNP_PK_LIST)
+         if (p%esize == CAPNP_SZ_COMPOSITE) then
+            size_has_body = .true.
+         else
+            size_has_body = p%nelem > 0_int64
+         end if
+      end select
+   end function size_has_body
+
+   logical function size_on_stack(p)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: i, seg
+      integer(int64) :: off
+      call size_key(p, seg, off)
+      size_on_stack = .false.
+      do i = 1, size_n
+         if (size_seg(i) == seg .and. size_off(i) == off) then
+            size_on_stack = .true.
+            return
+         end if
+      end do
+   end function size_on_stack
+
+   subroutine size_push(p, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      integer, allocatable :: grown_seg(:)
+      integer(int64), allocatable :: grown_off(:)
+      integer :: n, stat, seg
+      integer(int64) :: off
+      err = CAPNP_OK
+      if (.not. allocated(size_seg)) then
+         allocate (size_seg(64), size_off(64), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
+      if (size_n >= size(size_seg)) then
+         n = size(size_seg)*2
+         allocate (grown_seg(n), grown_off(n), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown_seg(1:size_n) = size_seg(1:size_n)
+         grown_off(1:size_n) = size_off(1:size_n)
+         call move_alloc(grown_seg, size_seg)
+         call move_alloc(grown_off, size_off)
+      end if
+      call size_key(p, seg, off)
+      size_n = size_n + 1
+      size_seg(size_n) = seg
+      size_off(size_n) = off
+   end subroutine size_push
+
+   subroutine size_pop()
+      if (size_n > 0) size_n = size_n - 1
+   end subroutine size_pop
 
    !> Copy the contents of struct src into the (already allocated) struct
    !> dst: overlapping data bytes verbatim, pointer fields recursively.
