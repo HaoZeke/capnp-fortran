@@ -1,6 +1,28 @@
 program test_gate2
    use capnp
+   use, intrinsic :: iso_c_binding, only: c_int, c_char, c_size_t, c_null_char
    implicit none
+   interface
+      function c_getpid() bind(c, name='getpid') result(p)
+         import c_int
+         integer(c_int) :: p
+      end function c_getpid
+      function c_readlink(path, buf, n) bind(c, name='readlink') result(r)
+         import c_char, c_size_t
+         character(kind=c_char), intent(in) :: path(*)
+         character(kind=c_char), intent(out) :: buf(*)
+         integer(c_size_t), value :: n
+         integer(c_size_t) :: r
+      end function c_readlink
+   end interface
+   character(len=:), allocatable :: cap
+   integer :: skipped = 0, rc0, st0
+   call execute_command_line('command -v capnp > /dev/null 2>&1', exitstat=rc0, cmdstat=st0)
+   if (st0 /= 0 .or. rc0 /= 0) then
+      write (*, '(a)') 'test_gate2: capnp is not on PATH, every case skipped'
+      stop 77
+   end if
+   cap = capnpf_path()
    call case_0()
    call case_1()
    call case_2()
@@ -42,26 +64,54 @@ program test_gate2
    call case_39()
    call case_40()
    call case_41()
+   if (skipped > 0) then
+      write (*, '(a,i0,a)') 'test_gate2: ', skipped, ' case(s) skipped'
+      stop 77
+   end if
 contains
-   subroutine gate(cmd)
-      character(len=*), intent(in) :: cmd
+   !> capnpf from the same fpm profile as this test.
+   function capnpf_path() result(p)
+      character(len=:), allocatable :: p
+      character(kind=c_char) :: buf(4096)
+      integer(c_size_t) :: n
+      integer :: i, k
+      n = c_readlink('/proc/self/exe'//c_null_char, buf, int(size(buf), c_size_t))
+      if (n <= 0) error stop 'test_gate2: cannot read /proc/self/exe'
+      p = repeat(' ', int(n))
+      do i = 1, int(n)
+         p(i:i) = buf(i)
+      end do
+      do k = 1, 2
+         p = p(:index(p, '/', back=.true.) - 1)
+      end do
+      p = p//'/app/capnpf'
+   end function capnpf_path
+
+   !> Run one shell case. Exit 77 means a tool it needs is missing.
+   subroutine gate(name, cmd)
+      character(len=*), intent(in) :: name, cmd
+      character(len=64) :: path
       integer :: u, rc, st
-      open (newunit=u, file='/tmp/g2-cmd.sh', status='replace')
+      write (path, '(a,i0,a)') '/tmp/g2-cmd-', c_getpid(), '.sh'
+      open (newunit=u, file=trim(path), status='replace')
+      write (u, '(a)') "CAP='"//cap//"'; export CAP"
       write (u, '(a)') trim(cmd)
       close (u)
-      call execute_command_line('bash /tmp/g2-cmd.sh', exitstat=rc, cmdstat=st)
-      if (st /= 0 .or. rc /= 0) error stop 1
+      call execute_command_line('bash '//trim(path), exitstat=rc, cmdstat=st)
+      open (newunit=u, file=trim(path))
+      close (u, status='delete')
+      if (st == 0 .and. rc == 77) then
+         write (*, '(a)') 'test_gate2: '//name//' skipped, a tool it needs is missing'
+         skipped = skipped + 1
+      else if (st /= 0 .or. rc /= 0) then
+         write (*, '(a)') 'test_gate2: '//name//' failed'
+         error stop 1
+      end if
    end subroutine gate
 
    subroutine case_0()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_0', &
+         'printf ' // &
          achar(39) // &
          '(big = 010)\n' // &
          achar(39) // &
@@ -74,14 +124,8 @@ contains
    end subroutine case_0
 
    subroutine case_1()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "open(' // &
+      call gate('case_1', &
+         'python3 -c "open(' // &
          achar(39) // &
          '/tmp/g2-nl.in' // &
          achar(39) // &
@@ -102,15 +146,7 @@ contains
    end subroutine case_1
 
    subroutine case_2()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_2', &
          'cat > /tmp/g2-dv.capnp <<' // &
          achar(39) // &
          'EOF' // &
@@ -157,15 +193,7 @@ contains
    end subroutine case_2
 
    subroutine case_3()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_3', &
          'printf ' // &
          achar(39) // &
          '(textBox = (value = "hi", label = "l"), listBox = (value = [' // &
@@ -199,14 +227,8 @@ contains
    end subroutine case_3
 
    subroutine case_4()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_4', &
+         'printf ' // &
          achar(39) // &
          '{"big": 1.6}\n' // &
          achar(39) // &
@@ -215,14 +237,8 @@ contains
    end subroutine case_4
 
    subroutine case_5()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_5', &
+         'printf ' // &
          achar(39) // &
          '{"b64": null}\n' // &
          achar(39) // &
@@ -231,14 +247,8 @@ contains
    end subroutine case_5
 
    subroutine case_6()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_6', &
+         'printf ' // &
          achar(39) // &
          '{"hue": "azure"}\n' // &
          achar(39) // &
@@ -251,15 +261,7 @@ contains
    end subroutine case_6
 
    subroutine case_7()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_7', &
          'printf ' // &
          achar(39) // &
          '{"textBox": {"value": "hi"}, "listBox": {"value": ["a", "b"]' // &
@@ -282,14 +284,8 @@ contains
    end subroutine case_7
 
    subroutine case_8()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c ' // &
+      call gate('case_8', &
+         'python3 -c ' // &
          achar(39) // &
          'print(chr(123)+chr(34)+"title"+chr(34)+": "+chr(34)+("ab"*20' // &
          '0)+chr(34)+chr(125))' // &
@@ -303,14 +299,8 @@ contains
    end subroutine case_8
 
    subroutine case_9()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_9', &
+         'printf ' // &
          achar(39) // &
          '{"b64": "Y Q = ="}\n' // &
          achar(39) // &
@@ -323,14 +313,8 @@ contains
    end subroutine case_9
 
    subroutine case_10()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_10', &
+         'printf ' // &
          achar(39) // &
          '{"label": "a"}\n' // &
          achar(39) // &
@@ -343,28 +327,15 @@ contains
    end subroutine case_10
 
    subroutine case_11()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; "$CAP" --not-a-fla' // &
-         'g >/tmp/g2-err.o 2>/tmp/g2-err.e; echo $? > /tmp/g2-err.e1; ' // &
-         'test ! -s /tmp/g2-err.o && test -s /tmp/g2-err.e && test "$(' // &
-         'cat /tmp/g2-err.e1)" != 0')
+      call gate('case_11', &
+         '"$CAP" --not-a-flag >/tmp/g2-err.o 2>/tmp/g2-err.e; echo $? ' // &
+         '> /tmp/g2-err.e1; test ! -s /tmp/g2-err.o && test -s /tmp/g2' // &
+         '-err.e && test "$(cat /tmp/g2-err.e1)" != 0')
    end subroutine case_11
 
    subroutine case_12()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_12', &
+         'printf ' // &
          achar(39) // &
          '{"big": 1}\n{"big": 2}\n' // &
          achar(39) // &
@@ -384,14 +355,8 @@ contains
    end subroutine case_12
 
    subroutine case_13()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_13', &
+         'printf ' // &
          achar(39) // &
          '(x = 1)\n' // &
          achar(39) // &
@@ -405,15 +370,7 @@ contains
    end subroutine case_13
 
    subroutine case_14()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_14', &
          'for v in ' // &
          achar(39) // &
          '{"big": 3.0}' // &
@@ -469,14 +426,8 @@ contains
    end subroutine case_14
 
    subroutine case_15()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_15', &
+         'printf ' // &
          achar(39) // &
          '{"b64": null}\n' // &
          achar(39) // &
@@ -489,14 +440,8 @@ contains
    end subroutine case_15
 
    subroutine case_16()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_16', &
+         'printf ' // &
          achar(39) // &
          '(title = "abcdefghij")\n' // &
          achar(39) // &
@@ -509,14 +454,8 @@ contains
    end subroutine case_16
 
    subroutine case_17()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_17', &
+         'printf ' // &
          achar(39) // &
          '{"title": "abcdefghij"}\n' // &
          achar(39) // &
@@ -529,15 +468,7 @@ contains
    end subroutine case_17
 
    subroutine case_18()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_18', &
          'd=/tmp/g2-plug-$$; mkdir -p "$d"; cp test/fixtures/box.cgr.b' // &
          'in "$d/req.bin"' // &
          achar(10) // &
@@ -565,15 +496,7 @@ contains
    end subroutine case_18
 
    subroutine case_19()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_19', &
          'for p in Vec3 Vec3. Status ' // &
          achar(39) // &
          achar(39) // &
@@ -593,14 +516,8 @@ contains
    end subroutine case_19
 
    subroutine case_20()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_20', &
+         'printf ' // &
          achar(39) // &
          'abc' // &
          achar(39) // &
@@ -613,15 +530,7 @@ contains
    end subroutine case_20
 
    subroutine case_21()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_21', &
          'command -v cc > /dev/null || exit 77' // &
          achar(10) // &
          'd=/tmp/g2-eintr-$$; mkdir -p "$d"' // &
@@ -687,15 +596,7 @@ contains
    end subroutine case_21
 
    subroutine case_22()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_22', &
          'python3 -c ' // &
          achar(39) // &
          'import sys; sys.stdout.write("{\"scores\": [" + ", ".join(st' // &
@@ -718,14 +619,8 @@ contains
    end subroutine case_22
 
    subroutine case_24()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_24', &
+         'printf ' // &
          achar(39) // &
          '{"kind": "count", "count": 3}\n' // &
          achar(39) // &
@@ -738,14 +633,8 @@ contains
    end subroutine case_24
 
    subroutine case_25()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_25', &
+         'printf ' // &
          achar(39) // &
          '(big = 18446744073709551616)\n' // &
          achar(39) // &
@@ -758,14 +647,8 @@ contains
    end subroutine case_25
 
    subroutine case_26()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_26', &
+         'printf ' // &
          achar(39) // &
          '(big = -1)\n' // &
          achar(39) // &
@@ -778,14 +661,8 @@ contains
    end subroutine case_26
 
    subroutine case_27()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_27', &
+         'printf ' // &
          achar(39) // &
          '{"big": 1.}\n' // &
          achar(39) // &
@@ -798,14 +675,8 @@ contains
    end subroutine case_27
 
    subroutine case_28()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_28', &
+         'printf ' // &
          achar(39) // &
          '(x = 1)\n' // &
          achar(39) // &
@@ -819,15 +690,7 @@ contains
    end subroutine case_28
 
    subroutine case_29()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_29', &
          'command -v meson > /dev/null && command -v ninja > /dev/null' // &
          ' || exit 77' // &
          achar(10) // &
@@ -861,14 +724,8 @@ contains
    end subroutine case_29
 
    subroutine case_30()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "body=' // &
+      call gate('case_30', &
+         'python3 -c "body=' // &
          achar(39) // &
          '(v = 1)' // &
          achar(39) // &
@@ -909,15 +766,7 @@ contains
    end subroutine case_30
 
    subroutine case_31()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_31', &
          'printf ' // &
          achar(39) // &
          '(x = 1)\n' // &
@@ -960,14 +809,8 @@ contains
    end subroutine case_wide
 
    subroutine case_33()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_33', &
+         'printf ' // &
          achar(39) // &
          '(bogus)\n' // &
          achar(39) // &
@@ -976,14 +819,8 @@ contains
    end subroutine case_33
 
    subroutine case_34()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_34', &
+         'printf ' // &
          achar(39) // &
          '{"scores": 1}\n' // &
          achar(39) // &
@@ -992,14 +829,8 @@ contains
    end subroutine case_34
 
    subroutine case_35()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+      call gate('case_35', &
+         'printf ' // &
          achar(39) // &
          '(big = 1, nope)\n' // &
          achar(39) // &
@@ -1012,14 +843,8 @@ contains
    end subroutine case_35
 
    subroutine case_36()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; python3 -c "open(' // &
+      call gate('case_36', &
+         'test -x ./build/schema-request || exit 77; python3 -c "open(' // &
          achar(39) // &
          '/tmp/g2-bad.capnp' // &
          achar(39) // &
@@ -1037,15 +862,7 @@ contains
    end subroutine case_36
 
    subroutine case_37()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_37', &
          'printf ' // &
          achar(39) // &
          '@0xb4c5d6e7f8091a2b;\nstruct N { next @0 :N; }\n' // &
@@ -1064,15 +881,7 @@ contains
    end subroutine case_37
 
    subroutine case_38()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_38', &
          'printf ' // &
          achar(39) // &
          '@0xb4c5d6e7f8091a2b;\nstruct N { next @0 :N; }\n' // &
@@ -1095,15 +904,7 @@ contains
    end subroutine case_38
 
    subroutine case_39()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_39', &
          'J=$(dirname $(dirname $(command -v capnp)))/include/capnp/co' // &
          'mpat/json.capnp' // &
          achar(10) // &
@@ -1125,31 +926,16 @@ contains
    end subroutine case_39
 
    subroutine case_40()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; "$CAP" convert --q' // &
-         'uiet text:text schema/common.capnp Vec3 < /dev/null > /tmp/g' // &
-         '2-q.o; echo $? > /tmp/g2-q.e1; capnp convert --quiet text:te' // &
-         'xt schema/common.capnp Vec3 < /dev/null > /tmp/g2-q.r; echo ' // &
-         '$? > /tmp/g2-q.e2; cmp -s /tmp/g2-q.o /tmp/g2-q.r && cmp -s ' // &
-         '/tmp/g2-q.e1 /tmp/g2-q.e2')
+      call gate('case_40', &
+         '"$CAP" convert --quiet text:text schema/common.capnp Vec3 < ' // &
+         '/dev/null > /tmp/g2-q.o; echo $? > /tmp/g2-q.e1; capnp conve' // &
+         'rt --quiet text:text schema/common.capnp Vec3 < /dev/null > ' // &
+         '/tmp/g2-q.r; echo $? > /tmp/g2-q.e2; cmp -s /tmp/g2-q.o /tmp' // &
+         '/g2-q.r && cmp -s /tmp/g2-q.e1 /tmp/g2-q.e2')
    end subroutine case_40
 
    subroutine case_41()
-      call gate( &
-         'ppid=$(awk ' // &
-         achar(39) // &
-         '/PPid/ {print $2}' // &
-         achar(39) // &
-         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
-         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
-         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
-         achar(10) // &
+      call gate('case_41', &
          'command -v valgrind > /dev/null || exit 77' // &
          achar(10) // &
          'printf ' // &
