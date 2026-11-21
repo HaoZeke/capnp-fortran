@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(41))
+      allocate (testsuite(42))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -96,14 +96,15 @@ contains
       testsuite(31) = new_unittest("json-nul-eof", run_json_nul_eof)
       testsuite(32) = new_unittest("json-nest-limit", run_json_nest_limit)
       testsuite(33) = new_unittest("cli-json-stream", run_cli_json_stream)
-      testsuite(34) = new_unittest("text-shorthand", run_text_shorthand)
-      testsuite(35) = new_unittest("text-group-replace", run_text_group_replace)
-      testsuite(36) = new_unittest("text-ws-vt-ff", run_text_ws_vt_ff)
-      testsuite(37) = new_unittest("json-dup-bad", run_json_dup_bad)
-      testsuite(38) = new_unittest("canonical-null-root", run_canonical_null_root)
-      testsuite(39) = new_unittest("json-ptr-kind", run_json_ptr_kind)
-      testsuite(40) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
-      testsuite(41) = new_unittest("text-inactive-arm", run_text_inactive_arm)
+      testsuite(34) = new_unittest("cli-text-nul", run_cli_text_nul)
+      testsuite(35) = new_unittest("text-shorthand", run_text_shorthand)
+      testsuite(36) = new_unittest("text-group-replace", run_text_group_replace)
+      testsuite(37) = new_unittest("text-ws-vt-ff", run_text_ws_vt_ff)
+      testsuite(38) = new_unittest("json-dup-bad", run_json_dup_bad)
+      testsuite(39) = new_unittest("canonical-null-root", run_canonical_null_root)
+      testsuite(40) = new_unittest("json-ptr-kind", run_json_ptr_kind)
+      testsuite(41) = new_unittest("bin-ptr-kind", run_bin_ptr_kind)
+      testsuite(42) = new_unittest("text-inactive-arm", run_text_inactive_arm)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -2408,6 +2409,48 @@ contains
          end if
       end subroutine check_stream
    end subroutine run_cli_json_stream
+
+   !> A NUL in a string or comment is text, as for capnp 1.4.0. One its
+   !> lexer cannot read fails that message before it prints.
+   subroutine run_cli_text_nul(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: nl = achar(10), nul = achar(0)
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      call check_nul('string', '(title = "ab'//nul//'cd")'//nl)
+      call check_nul('comment', '(big = 3) # c'//nul//nl//'(big = 4)'//nl)
+      call check_nul('trailing', '(big = 3)'//nul//nl)
+      call check_nul('between', '(big = 3)'//nl//nul//'(big = 4)'//nl)
+      call check_nul('second', '(big = 3)'//nl//'(big = 4'//nul//')'//nl)
+      call check_nul('escape', '(title = "a\'//nul//'")'//nl)
+      call check_nul('quote', "(title = 'a"//nul//"b')"//nl)
+      call check_nul('hex', '(blob = 0x"'//nul//'")'//nl)
+   contains
+      subroutine check_nul(label, payload)
+         character(len=*), intent(in) :: label, payload
+         integer :: e2
+         if (allocated(error)) return
+         call spit(tmp//'/tn.in', payload, e2)
+         if (e2 /= CAPNP_OK) then
+            call test_failed(error, 'cli-text-nul: write '//label)
+            return
+         end if
+         if (.not. sh(cap_setup() &
+            //' && { "$CAP" convert --quiet text:text schema/codec.capnp Sample' &
+            //' < '//tmp//'/tn.in > '//tmp//'/tn.o 2>/dev/null; echo $? >> '//tmp//'/tn.o; }' &
+            //' && { capnp convert --quiet text:text schema/codec.capnp Sample' &
+            //' < '//tmp//'/tn.in > '//tmp//'/tn.r 2>/dev/null; echo $? >> '//tmp//'/tn.r; }' &
+            //' && cmp -s '//tmp//'/tn.o '//tmp//'/tn.r')) then
+            call test_failed(error, 'cli-text-nul: '//label)
+         end if
+      end subroutine check_nul
+   end subroutine run_cli_text_nul
 
    subroutine run_text_shorthand(error)
       type(error_type), allocatable, intent(out) :: error

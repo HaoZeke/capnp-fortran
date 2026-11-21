@@ -517,7 +517,7 @@ contains
       type(capnp_message_t), target :: msg
       type(capnp_brand_env_t) :: empty_env
       type(capnp_ptr_t) :: root
-      integer :: beg, topos, from, count, err
+      integer :: beg, topos, from, count, err, nbeg, nto, last
       rc = 0
       from = 1
       count = 0
@@ -528,6 +528,15 @@ contains
             return
          end if
          if (beg == 0) exit
+         ! capnp 1.4.0 lexes a message with the text up to the next one. A
+         ! NUL its lexer cannot read there fails before the message prints.
+         call capnp_text_span(text, topos + 1, nbeg, nto, err)
+         last = len(text)
+         if (err == CAPNP_OK .and. nbeg > 0) last = nbeg - 1
+         if (.not. nul_lexes(text(from:last))) then
+            call fail('text decode failed', rc)
+            return
+         end if
          call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(msg)
@@ -548,6 +557,49 @@ contains
       end do
       if (count == 0) call fail('empty input', rc)
    end subroutine text_to_out
+
+   !> Whether every NUL in s is one the Cap'n Proto lexer reads: a raw
+   !> byte of a double-quoted string or of a # comment.
+   pure function nul_lexes(s) result(ok)
+      character(len=*), intent(in) :: s
+      logical :: ok
+      integer, parameter :: st_code = 0, st_com = 1, st_str = 2, st_esc = 3, st_hex = 4
+      integer :: i, state
+      ok = .true.
+      if (index(s, achar(0)) == 0) return
+      state = st_code
+      do i = 1, len(s)
+         select case (state)
+         case (st_code)
+            if (s(i:i) == '#') then
+               state = st_com
+            else if (s(i:i) == '"') then
+               state = st_str
+               if (i > 2) then
+                  if (s(i - 2:i - 1) == '0x') state = st_hex
+               end if
+            end if
+         case (st_com)
+            if (s(i:i) == achar(10)) state = st_code
+            cycle
+         case (st_str)
+            if (s(i:i) == '\') then
+               state = st_esc
+            else if (s(i:i) == '"') then
+               state = st_code
+            end if
+            cycle
+         case (st_esc)
+            state = st_str
+         case (st_hex)
+            if (s(i:i) == '"') state = st_code
+         end select
+         if (s(i:i) == achar(0)) then
+            ok = .false.
+            return
+         end if
+      end do
+   end function nul_lexes
 
    subroutine json_to_out(sch, idx, text, to, pretty, seg_words, rc)
       type(capnp_dyn_schema_t), intent(in) :: sch
