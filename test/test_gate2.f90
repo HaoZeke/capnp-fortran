@@ -34,6 +34,7 @@ program test_gate2
    call case_31()
    call case_wide()
    call case_33()
+   call case_34()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -966,4 +967,20 @@ contains
          ' > /tmp/g2-sh.in; "$CAP" convert text:text schema/codec.capn' // &
          'p Sample < /tmp/g2-sh.in > /tmp/g2-sh.o; test $? -ne 0')
    end subroutine case_33
+
+   subroutine case_34()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '{"scores": 1}\n' // &
+         achar(39) // &
+         ' > /tmp/g2-sat.in; "$CAP" convert json:json schema/codec.cap' // &
+         'np Sample < /tmp/g2-sat.in > /tmp/g2-sat.o; test $? -ne 0')
+   end subroutine case_34
 end program test_gate2

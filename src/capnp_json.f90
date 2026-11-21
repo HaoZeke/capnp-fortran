@@ -1636,7 +1636,14 @@ contains
          return
       end if
       if (jv%k /= JK_ARR) then
-         err = CAPNP_ERR_ARG
+         ! A non-array where a list is expected is an empty list, and the
+         ! message is still written. An object where a number is expected
+         ! stays a hard error in fill_scalar.
+         value_bad = .true.
+         et = capnp_brand_resolve(env, raw_et)
+         lst = capnp_codec_alloc_list(parent, et, 0, schema, err, env=env)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(parent, slot, lst, err)
          return
       end if
       if (allocated(jv%kids)) then
