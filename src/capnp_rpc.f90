@@ -5488,7 +5488,6 @@ contains
       c = message_call_get(msg, err)
       if (err /= CAPNP_OK) return
       qid = call_question_id_get(c)
-      if (.not. claim_question(conn, qid, err)) return
       elsewhere = call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
       if (call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_THIRD_PARTY_TAG .or. &
           (call_send_results_to_which(c) /= CALL_SEND_RESULTS_TO_CALLER_TAG .and. &
@@ -5522,6 +5521,10 @@ contains
             end if
          end if
       end block
+      ! Claim the answer slot after resolving the target, as in rpc.c++
+      ! handleCall, so a Call targeting its own promisedAnswer fails as a
+      ! closed pipeline rather than waiting on itself.
+      if (.not. claim_question(conn, qid, err)) return
       ! A call that reaches a server, a queue or the peer with the hint
       ! gets a disabled pipeline. A broken target keeps its own pipeline,
       ! and a call sent on through sendForPipeline a live one.
@@ -5684,7 +5687,7 @@ contains
       if (.not. allocated(pids)) call hold_call_params(conn, c, pids)
       if (err == CAPNP_OK) inp = call_params_get(c, err)
       if (err == CAPNP_OK) outp = call_params_init(fc, err)
-      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err)
+      if (err == CAPNP_OK) call copy_forwarded_payload(conn, inp, outp, cm, err, self_qid=qid)
       if (err == CAPNP_OK) call rpc_send_message(conn%transport, cm, err)
       call capnp_message_free(cm)
       if (err /= CAPNP_OK) then
@@ -5745,7 +5748,7 @@ contains
    !> capability is written as C++ 1.4.0 writeDescriptor writes it for
    !> that connection: the peer's own export as receiverHosted, ours as
    !> senderHosted with one more reference, a vine as the import it is.
-   subroutine copy_forwarded_payload(conn, inp, outp, m, err, local)
+   subroutine copy_forwarded_payload(conn, inp, outp, m, err, local, self_qid)
       type(rpc_conn_t), intent(inout), target :: conn
       type(payload_t), intent(in) :: inp
       type(payload_t), intent(inout) :: outp
@@ -5754,6 +5757,7 @@ contains
       !> The copy stays in this vat (a yourself Return), so nothing is
       !> written to a descriptor.
       logical, intent(in), optional :: local
+      integer(int64), intent(in), optional :: self_qid
       character(len=:), allocatable :: why
       type(capnp_ptr_t) :: content, ictab, octab
       type(cap_descriptor_t) :: icd, ocd
@@ -5863,7 +5867,7 @@ contains
                   ocd, third_party_cap_descriptor_vine_id_get(tp), err)
             end block
          case (CAP_DESCRIPTOR_RECEIVER_ANSWER_TAG)
-            call forward_answer_param(conn, icd, ocd, err)
+            call forward_answer_param(conn, icd, ocd, err, self_qid)
          case default
             call cap_descriptor_none_set(ocd, err)
          end select
@@ -5879,10 +5883,11 @@ contains
    !> when it returns. A cap broken by an exception, a disabled pipeline
    !> or an answer that is gone is a new promise export resolved to the
    !> exception (rpc.c++ receiveCap, writeDescriptor). A null cap is none.
-   subroutine forward_answer_param(conn, icd, ocd, err)
+   subroutine forward_answer_param(conn, icd, ocd, err, self_qid)
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: icd, ocd
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: self_qid
       type(promised_answer_t) :: rpa, opa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
@@ -5906,6 +5911,9 @@ contains
             fields(i) = int(promised_answer_op_get_pointer_field_get(op))
       end do
       call answer_find(conn, promised_answer_question_id_get(rpa), slot, found)
+      if (present(self_qid)) then
+         if (promised_answer_question_id_get(rpa) == self_qid) found = .false.
+      end if
       if (found) found = associated(slot)
       if (found) found = slot%used .and. .not. slot%finished
       if (.not. found) then

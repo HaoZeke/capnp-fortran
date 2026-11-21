@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(39))
+      allocate (testsuite(40))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -111,6 +111,8 @@ contains
       testsuite(38)%test => t_ra_ret_npp
       testsuite(39)%name = "disembargo-running-answer-proxy-question"
       testsuite(39)%test => t_dis_ra_running_q
+      testsuite(40)%name = "call-promised-answer-self"
+      testsuite(40)%test => t_call_pa_self
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -1142,6 +1144,60 @@ contains
                  " (expected 'DIS I7 rl 9')")
       call close_peer(conn, fd)
    end subroutine t_dis_ra_running_q
+
+   !> A Call whose target is promisedAnswer of its own question id fails
+   !> with C++'s closed-pipeline exception instead of waiting on itself.
+   subroutine t_call_pa_self(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(promised_answer_t) :: pa
+      type(return_t) :: r
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      logical :: ready
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call capnp_message_init_builder(m, e)
+      msg = message_new_root(m, e)
+      c = message_call_init(msg, e)
+      call call_question_id_set(c, 1_int64, e)
+      call call_interface_id_set(c, ECHO_IFACE, e)
+      call call_method_id_set(c, 0_int32, e)
+      tgt = call_target_init(c, e)
+      pa = message_target_promised_answer_init(tgt, e)
+      call promised_answer_question_id_set(pa, 1_int64, e)
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+      call rpc_pump_once(conn, e)
+      call px_poll_in(fd, 200, ready, e)
+      if (.not. ready) then
+         call check(error, .false., 'call-pa-self: no Return received')
+         call close_peer(conn, fd)
+         return
+      end if
+      call rpc_recv_message(fd, reply, e)
+      msg = message_read_root(reply, e)
+      r = message_return_get(msg, e)
+      call check(error, return_which(r) == RETURN_EXCEPTION_TAG, 'call-pa-self: expected exception')
+      if (.not. allocated(error)) then
+         ex = return_exception_get(r, e)
+         call exception_reason_get(ex, reason, e)
+         call check(error, exception_type_get(ex) == EXCEPTION_TYPE_FAILED_E .and. &
+                    reason == 'Pipeline call on a request that returned no ' // &
+                    'capabilities or was already closed.' .and. rpc_conn_alive(conn), &
+                    'call-pa-self: got '//reason)
+      end if
+      call capnp_message_free(reply)
+      call close_peer(conn, fd)
+   end subroutine t_call_pa_self
 
    !> A param promise resolves to a cap a plain forward's answer imports.
    !> The call keeps that import, and one Release counts both refs.
