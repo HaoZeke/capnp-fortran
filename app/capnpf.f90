@@ -3,7 +3,7 @@
 !> (`capnp compile -o-`) and loaded as a CodeGeneratorRequest.
 program capnpf
    use, intrinsic :: iso_c_binding, only: c_int
-   use, intrinsic :: iso_fortran_env, only: error_unit
+   use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
    use capnp
    use capnp_schema
    use capnp_codec
@@ -23,7 +23,7 @@ program capnpf
       end subroutine c_exit
    end interface
 
-   character(len=4096) :: arg
+   character(len=4096) :: arg, next_arg
    character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt
    logical :: short, packed_in, flat_in
    integer :: i, n, err
@@ -40,10 +40,18 @@ program capnpf
    flat_in = .false.
    n = command_argument_count()
    if (n < 1) call usage_err()
-   do i = 1, n
+   i = 1
+   do while (i <= n)
       call get_command_argument(i, arg)
-      if (trim(arg) == '--short') then
+      if (trim(arg) == '--help' .or. trim(arg) == '-h') then
+         call usage_ok()
+      else if (trim(arg) == '--version') then
+         write (output_unit, '(a)') "Cap'n Proto (capnpf) version 0.3.1"
+         call c_exit(0_c_int)
+      else if (trim(arg) == '--short') then
          short = .true.
+      else if (trim(arg) == '--quiet' .or. trim(arg) == '--verbose') then
+         continue
       else if (trim(arg) == '--packed' .or. trim(arg) == '-p') then
          packed_in = .true.
          ofmt = 'packed'
@@ -52,6 +60,11 @@ program capnpf
          ofmt = 'flat'
       else if (trim(arg) == '-b' .or. trim(arg) == '--binary') then
          ofmt = 'binary'
+      else if (trim(arg) == '-o') then
+         if (i + 1 > n) call die('-o requires a format')
+         i = i + 1
+         call get_command_argument(i, next_arg)
+         ofmt = trim(next_arg)
       else if (len_trim(arg) > 2 .and. arg(1:2) == '-o') then
          ofmt = trim(arg(3:))
       else if (index(trim(arg), '--output=') == 1) then
@@ -60,6 +73,7 @@ program capnpf
          call die('unknown option '//trim(arg))
       else if (len(cmd) == 0) then
          cmd = trim(arg)
+         if (cmd == 'help') call usage_ok()
       else if (cmd == 'convert' .and. len(spec) == 0) then
          spec = trim(arg)
       else if (len(schema_path) == 0) then
@@ -69,6 +83,7 @@ program capnpf
       else
          call die('too many arguments')
       end if
+      i = i + 1
    end do
 
    if (cmd /= 'encode' .and. cmd /= 'decode' .and. cmd /= 'convert' .and. cmd /= 'eval') &
@@ -108,6 +123,11 @@ contains
       write (u, '(a)') '  convert <from>:<to> <schema> <type>'
       write (u, '(a)') 'formats: binary packed flat canonical text json'
    end subroutine print_usage
+
+   subroutine usage_ok()
+      call print_usage(output_unit)
+      call c_exit(0_c_int)
+   end subroutine usage_ok
 
    subroutine usage_err()
       call print_usage(error_unit)
