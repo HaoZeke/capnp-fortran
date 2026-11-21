@@ -41,6 +41,7 @@ program test_gate2
    call case_38()
    call case_39()
    call case_40()
+   call case_41()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -1138,4 +1139,44 @@ contains
          '$? > /tmp/g2-q.e2; cmp -s /tmp/g2-q.o /tmp/g2-q.r && cmp -s ' // &
          '/tmp/g2-q.e1 /tmp/g2-q.e2')
    end subroutine case_40
+
+   subroutine case_41()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; ' // &
+         achar(10) // &
+         'command -v valgrind > /dev/null || exit 77' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '(x = 1)\n' // &
+         achar(39) // &
+         ' > /tmp/g2-vg.t' // &
+         achar(10) // &
+         'valgrind -q --error-exitcode=99 "$CAP" encode schema/common.' // &
+         'capnp Vec3 < /tmp/g2-vg.t > /dev/null 2>&1 || exit 77' // &
+         achar(10) // &
+         'printf ' // &
+         achar(39) // &
+         '(textBox = (value = "hi"), boxes = [(value = "a"), (value = ' // &
+         '"b")])\n' // &
+         achar(39) // &
+         ' | capnp convert text:binary schema/box.capnp BoxUse > /tmp/' // &
+         'g2-vg.in' // &
+         achar(10) // &
+         'for t in canonical binary; do' // &
+         achar(10) // &
+         '  valgrind -q --error-exitcode=99 --leak-check=full --show-l' // &
+         'eak-kinds=all --errors-for-leak-kinds=all \' // &
+         achar(10) // &
+         '    "$CAP" convert --segment-size=2 binary:$t schema/box.cap' // &
+         'np BoxUse < /tmp/g2-vg.in > /dev/null 2>&1 || exit 1' // &
+         achar(10) // &
+         'done')
+   end subroutine case_41
 end program test_gate2

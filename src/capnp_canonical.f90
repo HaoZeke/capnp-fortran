@@ -23,6 +23,12 @@ module capnp_canonical
 
 contains
 
+   subroutine release_walk()
+      walk_n = 0
+      if (allocated(walk_seg)) deallocate (walk_seg)
+      if (allocated(walk_off)) deallocate (walk_off)
+   end subroutine release_walk
+
    !> Canonical bytes of a message's root object: one raw segment starting
    !> with the root pointer, no segment table (`capnp convert
    !> binary:canonical` output format).
@@ -59,9 +65,9 @@ contains
 
       ! Measure with the live traversal budget so amplified DAGs abort immediately.
       remaining = msg%traversal_words
-      walk_n = 0
+      call release_walk()
       need = 1_int64 + measure(root, 0, err) ! + root pointer word
-      walk_n = 0
+      call release_walk()
       if (err /= CAPNP_OK) return
       after = msg%traversal_words
       msg%traversal_words = remaining
@@ -72,9 +78,9 @@ contains
          msg%traversal_words = after
          return
       end if
-      walk_n = 0
+      call release_walk()
       croot = canon_copy(canon, root, 0, err)
-      walk_n = 0
+      call release_walk()
       if (err /= CAPNP_OK) then
          call capnp_message_free(canon)
          msg%traversal_words = after

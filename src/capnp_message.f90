@@ -76,6 +76,7 @@ module capnp_message
 
    !> Objects entered by the current deep copy. A repeated address is a cycle.
    integer, save :: copy_n = 0
+   integer, save :: copy_live = 0
    integer, allocatable, save :: copy_seg(:)
    integer(int64), allocatable, save :: copy_off(:)
 
@@ -83,6 +84,7 @@ module capnp_message
    !> so a size pass cannot disturb a copy, and a path (not a global set)
    !> so a DAG is still legal.
    integer, save :: size_n = 0
+   integer, save :: size_live = 0
    integer, allocatable, save :: size_seg(:)
    integer(int64), allocatable, save :: size_off(:)
 
@@ -2228,9 +2230,12 @@ contains
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       integer(int64) :: words
+      size_live = size_live + 1
       size_n = 0
       words = size_depth(p, 0, err)
       size_n = 0
+      if (size_live == 1) call release_size()
+      size_live = size_live - 1
    end function capnp_total_size
 
    recursive function size_depth(p, depth, err) result(words)
@@ -2321,6 +2326,18 @@ contains
       end do
    end function size_children
 
+   subroutine release_size()
+      size_n = 0
+      if (allocated(size_seg)) deallocate (size_seg)
+      if (allocated(size_off)) deallocate (size_off)
+   end subroutine release_size
+
+   subroutine release_copy()
+      copy_n = 0
+      if (allocated(copy_seg)) deallocate (copy_seg)
+      if (allocated(copy_off)) deallocate (copy_off)
+   end subroutine release_copy
+
    ! ------------------------------------------------------------------
    ! Deep copy: clone an object (from any message) into a builder message.
    ! This is what capnp C++ set() does for cross-message pointers and the
@@ -2336,9 +2353,12 @@ contains
       integer :: seg
       seg = 1
       if (present(from_seg)) seg = from_seg
+      copy_live = copy_live + 1
       copy_n = 0
       q = copy_depth(msg, src, 0, seg, err)
       copy_n = 0
+      if (copy_live == 1) call release_copy()
+      copy_live = copy_live - 1
    end function capnp_copy
 
    recursive function copy_depth(msg, src, depth, from_seg, err) result(q)
