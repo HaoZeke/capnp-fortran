@@ -26,7 +26,7 @@ program capnpf
    character(len=4096) :: arg, next_arg
    character(len=:), allocatable :: cmd, schema_path, name, spec, ofmt, inc_flags
    character(len=:), allocatable :: from_fmt, to_fmt
-   logical :: short, packed_in, flat_in, no_std_inc
+   logical :: short, packed_flag, flat_flag, ofmt_explicit, no_std_inc
    integer :: i, n, err, colon
    type(capnp_dyn_schema_t), target :: schema
    integer :: type_idx
@@ -38,8 +38,9 @@ program capnpf
    ofmt = 'text'
    inc_flags = ''
    short = .false.
-   packed_in = .false.
-   flat_in = .false.
+   packed_flag = .false.
+   flat_flag = .false.
+   ofmt_explicit = .false.
    no_std_inc = .false.
    n = command_argument_count()
    if (n < 1) call usage_err()
@@ -67,22 +68,24 @@ program capnpf
       else if (index(trim(arg), '--import-path=') == 1) then
          inc_flags = inc_flags//' -I'//shell_quote(trim(arg(15:)))
       else if (trim(arg) == '--packed' .or. trim(arg) == '-p') then
-         packed_in = .true.
-         ofmt = 'packed'
+         packed_flag = .true.
       else if (trim(arg) == '--flat') then
-         flat_in = .true.
-         ofmt = 'flat'
+         flat_flag = .true.
       else if (trim(arg) == '-b' .or. trim(arg) == '--binary') then
          ofmt = 'binary'
+         ofmt_explicit = .true.
       else if (trim(arg) == '-o') then
          if (i + 1 > n) call die('-o requires a format')
          i = i + 1
          call get_command_argument(i, next_arg)
          ofmt = trim(next_arg)
+         ofmt_explicit = .true.
       else if (len_trim(arg) > 2 .and. arg(1:2) == '-o') then
          ofmt = trim(arg(3:))
+         ofmt_explicit = .true.
       else if (index(trim(arg), '--output=') == 1) then
          ofmt = trim(arg(10:))
+         ofmt_explicit = .true.
       else if (arg(1:1) == '-') then
          call die('unknown option '//trim(arg))
       else if (len(cmd) == 0) then
@@ -99,6 +102,16 @@ program capnpf
       end if
       i = i + 1
    end do
+
+   if (.not. ofmt_explicit) then
+      if (flat_flag .and. packed_flag) then
+         ofmt = 'flat-packed'
+      else if (flat_flag) then
+         ofmt = 'flat'
+      else if (packed_flag) then
+         ofmt = 'packed'
+      end if
+   end if
 
    if (cmd /= 'encode' .and. cmd /= 'decode' .and. cmd /= 'convert' .and. cmd /= 'eval') &
       call die('unknown command '//cmd)
@@ -119,7 +132,7 @@ program capnpf
       else
          type_idx = 0
       end if
-      call cmd_convert(schema, type_idx, spec, short)
+      call cmd_convert(schema, type_idx, from_fmt, to_fmt, short)
       call capnp_dyn_free(schema)
       call c_exit(0_c_int)
    end if
@@ -132,11 +145,28 @@ program capnpf
    case ('encode')
       type_idx = capnp_dyn_find(schema, name, err)
       if (type_idx <= 0) call die('unknown type '//name)
-      call cmd_encode(schema, type_idx, packed_in)
+      if (flat_flag .and. packed_flag) then
+         call cmd_encode(schema, type_idx, 'flat-packed')
+      else if (flat_flag) then
+         call cmd_encode(schema, type_idx, 'flat')
+      else if (packed_flag) then
+         call cmd_encode(schema, type_idx, 'packed')
+      else
+         call cmd_encode(schema, type_idx, 'binary')
+      end if
    case ('decode')
       type_idx = capnp_dyn_find(schema, name, err)
       if (type_idx <= 0) call die('unknown type '//name)
-      call cmd_decode(schema, type_idx, packed_in, flat_in, short, 'text')
+      if (flat_flag .and. packed_flag) then
+         from_fmt = 'flat-packed'
+      else if (flat_flag) then
+         from_fmt = 'flat'
+      else if (packed_flag) then
+         from_fmt = 'packed'
+      else
+         from_fmt = 'binary'
+      end if
+      call cmd_decode(schema, type_idx, from_fmt, short)
    case ('eval')
       if (.not. valid_fmt(ofmt)) call die('unknown output format '//ofmt)
       call cmd_eval(schema, name, ofmt, short)
@@ -233,189 +263,281 @@ contains
       call capnp_dyn_load(sch, bytes, err)
    end subroutine load_schema
 
-   subroutine cmd_encode(sch, idx, pack)
+   subroutine cmd_encode(sch, idx, to_fmt)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
-      logical, intent(in) :: pack
-      character(len=:), allocatable :: text
-      integer(int8), allocatable :: raw(:), framed(:)
-      type(capnp_message_t), target :: msg
-      integer :: beg, to, from, err, unit
+      character(len=*), intent(in) :: to_fmt
+      integer(int8), allocatable :: raw(:)
+      integer :: err
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) call die('empty input')
-      text = bytes_to_text(raw)
-      from = 1
-      open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-            action='write', status='old', iostat=err)
-      if (err /= 0) call die('cannot write stdout')
-      do
-         call capnp_text_span(text, from, beg, to, err)
-         if (err /= CAPNP_OK) call die('bad text')
-         if (beg == 0) exit
-         call capnp_text_decode(sch, idx, text(beg:to), msg, err)
-         if (err /= CAPNP_OK) call die('decode failed')
-         if (pack) then
-            call capnp_serialize_packed_bytes(msg, framed, err)
-         else
-            call capnp_serialize_bytes(msg, framed, err)
-         end if
-         if (err /= CAPNP_OK) call die('serialize failed')
-         write (unit) framed
-         call capnp_message_free(msg)
-         from = to + 1
-      end do
-      close (unit)
+      call text_to_out(sch, idx, bytes_to_text(raw), to_fmt, .true., &
+                       to_fmt == 'flat' .or. to_fmt == 'flat-packed')
    end subroutine cmd_encode
 
-   subroutine cmd_decode(sch, idx, pack, flat, short, kind)
+   subroutine cmd_decode(sch, idx, from_fmt, short)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
-      logical, intent(in) :: pack, flat, short
-      character(len=*), intent(in) :: kind
+      character(len=*), intent(in) :: from_fmt
+      logical, intent(in) :: short
       integer(int8), allocatable :: raw(:)
       integer :: err
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) call die('empty input')
-      call emit_messages(sch, idx, raw, pack, flat, kind, .not. short)
+      call bytes_to_out(sch, idx, raw, from_fmt, 'text', .not. short)
    end subroutine cmd_decode
 
-   subroutine cmd_convert(sch, idx, conv, short)
+   subroutine cmd_convert(sch, idx, from, to, short)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
-      character(len=*), intent(in) :: conv
+      character(len=*), intent(in) :: from, to
       logical, intent(in) :: short
-      integer :: colon
-      character(len=:), allocatable :: from, to
       integer(int8), allocatable :: raw(:)
-      logical :: pack, flat
+      logical :: single_out
       integer :: err
-      colon = index(conv, ':')
-      if (colon <= 1) call die('convert expects from:to')
-      from = conv(1:colon - 1)
-      to = conv(colon + 1:)
-      pack = from == 'packed' .or. from == 'flat-packed'
-      flat = from == 'flat' .or. from == 'flat-packed' .or. from == 'canonical'
       call read_stdin(raw, err)
       if (err /= CAPNP_OK) call die('empty input')
+      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
       if (from == 'text') then
-         call text_to_out(sch, idx, bytes_to_text(raw), to)
+         call text_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out)
       else if (from == 'json') then
-         call json_to_out(sch, idx, bytes_to_text(raw), to)
+         call json_to_out(sch, idx, bytes_to_text(raw), to, .not. short, single_out)
       else
-         call bytes_to_out(sch, idx, raw, pack, flat, to, .not. short)
+         call bytes_to_out(sch, idx, raw, from, to, .not. short)
       end if
    end subroutine cmd_convert
 
-   subroutine text_to_out(sch, idx, text, to)
+   subroutine text_to_out(sch, idx, text, to, pretty, single_only)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
+      logical, intent(in) :: pretty, single_only
       type(capnp_message_t), target :: msg
-      integer :: beg, topos, from, err, unit
+      type(capnp_ptr_t) :: root
+      integer :: beg, topos, from, count, err
       from = 1
-      open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-            action='write', status='old', iostat=err)
-      if (err /= 0) call die('cannot write stdout')
+      count = 0
       do
          call capnp_text_span(text, from, beg, topos, err)
          if (err /= CAPNP_OK) call die('bad text')
          if (beg == 0) exit
+         if (single_only .and. count >= 1) call die('flat output supports only one message')
          call capnp_text_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) call die('text decode failed')
-         call write_message(unit, msg, to, err)
-         if (err /= CAPNP_OK) call die('convert failed')
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) call die('bad root')
+         call emit_one(sch, idx, msg, root, to, pretty)
          call capnp_message_free(msg)
+         count = count + 1
          from = topos + 1
       end do
-      close (unit)
+      if (count == 0) call die('empty input')
    end subroutine text_to_out
 
-   subroutine json_to_out(sch, idx, text, to)
+   subroutine json_to_out(sch, idx, text, to, pretty, single_only)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       character(len=*), intent(in) :: text, to
+      logical, intent(in) :: pretty, single_only
       type(capnp_message_t), target :: msg
-      integer :: beg, topos, from, err, unit
+      type(capnp_ptr_t) :: root
+      integer :: beg, topos, from, count, err
       from = 1
-      open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-            action='write', status='old', iostat=err)
-      if (err /= 0) call die('cannot write stdout')
+      count = 0
       do
          call capnp_json_span(text, from, beg, topos, err)
          if (err /= CAPNP_OK) call die('bad json')
          if (beg == 0) exit
+         if (single_only .and. count >= 1) call die('flat output supports only one message')
          call capnp_json_decode(sch, idx, text(beg:topos), msg, err)
          if (err /= CAPNP_OK) call die('json decode failed')
-         call write_message(unit, msg, to, err)
-         if (err /= CAPNP_OK) call die('convert failed')
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) call die('bad root')
+         call emit_one(sch, idx, msg, root, to, pretty)
          call capnp_message_free(msg)
+         count = count + 1
          from = topos + 1
       end do
-      close (unit)
+      if (count == 0) call die('empty input')
    end subroutine json_to_out
 
-   subroutine bytes_to_out(sch, idx, raw, pack, flat, to, pretty)
+   subroutine bytes_to_out(sch, idx, raw, from, to, pretty)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
       integer(int8), intent(in) :: raw(0:)
-      logical, intent(in) :: pack, flat, pretty
-      character(len=*), intent(in) :: to
+      character(len=*), intent(in) :: from, to
+      logical, intent(in) :: pretty
       type(capnp_message_t), target :: msg
-      integer(int8), allocatable :: one(:), wrapped(:)
+      integer(int8), allocatable :: one(:), wrapped(:), unpacked(:)
       integer(int64) :: off, n, total
-      integer :: err
-      character(len=:), allocatable :: text
+      integer :: err, count
       type(capnp_ptr_t) :: root
-      if (flat) then
-         wrapped = wrap_flat(raw)
+      logical :: single_out
+      single_out = to == 'flat' .or. to == 'flat-packed' .or. to == 'canonical'
+      if (from == 'flat-packed') then
+         call capnp_unpack(raw, unpacked, err)
+         if (err /= CAPNP_OK) call die('bad flat-packed input')
+         if (size(unpacked, kind=int64) == 0_int64 .or. &
+             mod(size(unpacked, kind=int64), 8_int64) /= 0_int64) &
+            call die('bad flat-packed input')
+         wrapped = wrap_flat(unpacked)
          call capnp_deserialize_bytes(wrapped, msg, err)
-         if (err /= CAPNP_OK) call die('bad flat input')
+         if (err /= CAPNP_OK) call die('bad flat-packed message')
          root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) call die('bad root')
          call emit_one(sch, idx, msg, root, to, pretty)
          call capnp_message_free(msg)
          return
       end if
-      if (pack) then
+      if (from == 'flat' .or. from == 'canonical') then
+         if (size(raw, kind=int64) == 0_int64 .or. mod(size(raw, kind=int64), 8_int64) /= 0_int64) &
+            call die('bad flat input')
+         wrapped = wrap_flat(raw)
+         call capnp_deserialize_bytes(wrapped, msg, err)
+         if (err /= CAPNP_OK) call die('bad flat input')
+         root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) call die('bad root')
+         call emit_one(sch, idx, msg, root, to, pretty)
+         call capnp_message_free(msg)
+         return
+      end if
+      if (from == 'packed') then
          off = 0_int64
          total = size(raw, kind=int64)
+         count = 0
          do while (off < total)
+            if (single_out .and. count >= 1) call die('flat output supports only one message')
             call unpack_next_message(raw, off, one, err)
             if (err /= CAPNP_OK) call die('bad packed input')
             call capnp_deserialize_bytes(one, msg, err)
             deallocate (one)
             if (err /= CAPNP_OK) call die('bad packed message')
             root = capnp_root(msg, err)
+            if (err /= CAPNP_OK) call die('bad root')
             call emit_one(sch, idx, msg, root, to, pretty)
             call capnp_message_free(msg)
+            count = count + 1
          end do
+         if (count == 0) call die('empty input')
          return
       end if
       off = 0_int64
       total = size(raw, kind=int64)
+      count = 0
       do while (off < total)
+         if (single_out .and. count >= 1) call die('flat output supports only one message')
          n = frame_nbytes(raw, off, err)
          if (err /= CAPNP_OK) call die('bad framing')
          allocate (one(0:n - 1))
          one = raw(off:off + n - 1)
          call capnp_deserialize_bytes(one, msg, err)
+         deallocate (one)
          if (err /= CAPNP_OK) call die('bad message')
          root = capnp_root(msg, err)
+         if (err /= CAPNP_OK) call die('bad root')
          call emit_one(sch, idx, msg, root, to, pretty)
          call capnp_message_free(msg)
-         deallocate (one)
+         count = count + 1
          off = off + n
       end do
-      if (allocated(text)) text = ''
+      if (count == 0) call die('empty input')
    end subroutine bytes_to_out
 
-   subroutine emit_messages(sch, idx, raw, pack, flat, kind, pretty)
+   subroutine emit_one(sch, idx, msg, root, to, pretty)
       type(capnp_dyn_schema_t), intent(in) :: sch
       integer, intent(in) :: idx
-      integer(int8), intent(in) :: raw(0:)
-      logical, intent(in) :: pack, flat, pretty
-      character(len=*), intent(in) :: kind
-      call bytes_to_out(sch, idx, raw, pack, flat, kind, pretty)
-   end subroutine emit_messages
+      type(capnp_message_t), intent(inout), target :: msg
+      type(capnp_ptr_t), intent(in) :: root
+      character(len=*), intent(in) :: to
+      logical, intent(in) :: pretty
+      character(len=:), allocatable :: text
+      integer :: err, unit
+      if (to == 'text') then
+         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty)
+         if (err /= CAPNP_OK) call die('text encode failed')
+         write (output_unit, '(a)') text
+      else if (to == 'json') then
+         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty)
+         if (err /= CAPNP_OK) call die('json encode failed')
+         write (output_unit, '(a)') text
+      else
+         open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
+               action='write', status='old', iostat=err)
+         if (err /= 0) call die('cannot write stdout')
+         call write_binary_message(unit, msg, to, err)
+         close (unit)
+         if (err /= CAPNP_OK) call die('binary encode failed')
+      end if
+   end subroutine emit_one
+
+   subroutine write_binary_message(unit, msg, to, err)
+      integer, intent(in) :: unit
+      type(capnp_message_t), intent(inout), target :: msg
+      character(len=*), intent(in) :: to
+      integer, intent(out) :: err
+      integer(int8), allocatable :: outb(:), flatb(:)
+      err = CAPNP_OK
+      if (to == 'canonical') then
+         call capnp_canonicalize(msg, outb, err)
+      else if (to == 'flat') then
+         call to_flat_bytes(msg, outb, err)
+      else if (to == 'flat-packed') then
+         call to_flat_bytes(msg, flatb, err)
+         if (err /= CAPNP_OK) return
+         call capnp_pack(flatb, outb, err)
+      else if (to == 'packed') then
+         call capnp_serialize_packed_bytes(msg, outb, err)
+      else
+         call capnp_serialize_bytes(msg, outb, err)
+      end if
+      if (err /= CAPNP_OK) return
+      if (size(outb) > 0) write (unit) outb
+   end subroutine write_binary_message
+
+   subroutine to_flat_bytes(msg, flatb, err)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer(int8), allocatable, intent(out) :: flatb(:)
+      integer, intent(out) :: err
+      type(capnp_message_t), target :: single
+      type(capnp_ptr_t) :: root, croot
+      integer(int64) :: n, need
+      err = CAPNP_OK
+      if (msg%nsegs == 1) then
+         n = msg%segs(1)%len
+         if (n <= 0_int64) then
+            allocate (flatb(0))
+         else
+            allocate (flatb(0:n - 1))
+            flatb = msg%segs(1)%bytes(0:n - 1)
+         end if
+         return
+      end if
+      root = capnp_root(msg, err)
+      if (err /= CAPNP_OK) return
+      need = 1_int64 + capnp_total_size(root, err)
+      if (err /= CAPNP_OK) return
+      call capnp_message_init_builder(single, err, first_words=max(need, 8_int64))
+      if (err /= CAPNP_OK) return
+      croot = capnp_copy(single, root, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(single)
+         return
+      end if
+      call capnp_set_root(single, croot, err)
+      if (err /= CAPNP_OK) then
+         call capnp_message_free(single)
+         return
+      end if
+      if (single%nsegs /= 1) then
+         call capnp_message_free(single)
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      n = single%segs(1)%len
+      allocate (flatb(0:n - 1))
+      flatb = single%segs(1)%bytes(0:n - 1)
+      call capnp_message_free(single)
+   end subroutine to_flat_bytes
 
    subroutine unpack_next_message(raw, off, framed, err)
       integer(int8), intent(in) :: raw(0:)
@@ -530,83 +652,12 @@ contains
       end if
    end subroutine pull_packed_word
 
-   subroutine emit_one(sch, idx, msg, root, to, pretty)
-      type(capnp_dyn_schema_t), intent(in) :: sch
-      integer, intent(in) :: idx
-      type(capnp_message_t), intent(inout), target :: msg
-      type(capnp_ptr_t), intent(in) :: root
-      character(len=*), intent(in) :: to
-      logical, intent(in) :: pretty
-      character(len=:), allocatable :: text
-      integer(int8), allocatable :: framed(:)
-      integer :: err, unit
-      if (to == 'text') then
-         call capnp_text_encode(sch, idx, root, text, err, pretty=pretty)
-         if (err /= CAPNP_OK) call die('text encode failed')
-         write (*, '(a)') text
-      else if (to == 'json') then
-         call capnp_json_encode(sch, idx, root, text, err, pretty=pretty)
-         if (err /= CAPNP_OK) call die('json encode failed')
-         write (*, '(a)') text
-      else
-         open (newunit=unit, file='/dev/stdout', access='stream', form='unformatted', &
-               action='write', status='old', iostat=err)
-         if (err /= 0) call die('cannot write stdout')
-         call write_message(unit, msg, to, err)
-         if (err /= CAPNP_OK) call die('binary encode failed')
-         close (unit)
-      end if
-      if (allocated(framed)) deallocate (framed)
-   end subroutine emit_one
-
-   subroutine write_message(unit, msg, to, err)
-      integer, intent(in) :: unit
-      type(capnp_message_t), intent(inout), target :: msg
-      character(len=*), intent(in) :: to
-      integer, intent(out) :: err
-      integer(int8), allocatable :: framed(:)
-      character(len=:), allocatable :: text
-      type(capnp_ptr_t) :: root
-      err = CAPNP_OK
-      if (to == 'canonical') then
-         call capnp_canonicalize(msg, framed, err)
-      else if (to == 'packed') then
-         call capnp_serialize_packed_bytes(msg, framed, err)
-      else if (to == 'flat') then
-         call capnp_serialize_bytes(msg, framed, err)
-         if (err /= CAPNP_OK) return
-         framed = strip_header(framed)
-      else if (to == 'text' .or. to == 'json') then
-         root = capnp_root(msg, err)
-         if (err /= CAPNP_OK) return
-         if (to == 'text') then
-            call capnp_text_encode(schema, type_at(), root, text, err, pretty=.true.)
-         else
-            call capnp_json_encode(schema, type_at(), root, text, err, pretty=.true.)
-         end if
-         if (err /= CAPNP_OK) return
-         write (*, '(a)') text
-         return
-      else
-         call capnp_serialize_bytes(msg, framed, err)
-      end if
-      if (err /= CAPNP_OK) return
-      write (unit) framed
-   end subroutine write_message
-
-   function type_at() result(idx)
-      integer :: idx
-      integer :: err
-      idx = capnp_dyn_find(schema, name, err)
-   end function type_at
-
    subroutine cmd_eval(sch, spec, fmt, short)
       type(capnp_dyn_schema_t), intent(in) :: sch
       character(len=*), intent(in) :: spec, fmt
       logical, intent(in) :: short
       integer :: idx, best, i, err, nlen
       character(len=:), allocatable :: trial, rest, text
-      logical :: as_json
       idx = 0
       best = 0
       nlen = len(spec)
@@ -640,14 +691,12 @@ contains
       else
          rest = ''
       end if
-      as_json = fmt == 'json'
-      call render_node(sch, idx, rest, .not. short, as_json, text, err)
-      if (err /= CAPNP_OK) call die('eval failed')
-      if (fmt == 'text' .or. fmt == 'json') then
-         write (*, '(a)') text
-      else
+      if (fmt /= 'text' .and. fmt /= 'json') then
          call die('eval binary output is not implemented for this value')
       end if
+      call render_node(sch, idx, rest, .not. short, fmt == 'json', text, err)
+      if (err /= CAPNP_OK) call die('eval failed')
+      write (output_unit, '(a)') text
    end subroutine cmd_eval
 
    subroutine render_node(sch, idx, rest, pretty, as_json, text, err)
@@ -667,13 +716,15 @@ contains
          val = node_const_value(sch%nodes(idx), err)
          if (err /= CAPNP_OK) return
          if (len(rest) == 0) then
-            if (as_json .and. type_which(typ) == TYPE_STRUCT) then
-               gidx = find_id(sch, type_type_id(typ))
+            if (as_json) then
+               if (type_which(typ) /= TYPE_STRUCT) then
+                  err = CAPNP_ERR_KIND
+                  return
+               end if
+               gidx = capnp_codec_find_id(sch, type_type_id(typ))
                f = value_pointer(val, err)
                if (err /= CAPNP_OK) return
                call capnp_json_encode(sch, gidx, f, text, err, pretty=pretty)
-            else if (as_json) then
-               call capnp_text_encode_value(sch, typ, val, text, err, pretty=.false.)
             else
                call capnp_text_encode_value(sch, typ, val, text, err, pretty=pretty)
             end if
@@ -686,14 +737,10 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (index(rest(2:), '.') /= 0 .or. index(rest, '[') /= 0) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      call find_field(sch, idx, rest(2:), f, err)
+      call capnp_codec_find_field(sch, idx, rest(2:), f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
-         gidx = find_id(sch, field_group_type_id(f))
+         gidx = capnp_codec_find_id(sch, field_group_type_id(f))
          if (as_json) then
             call capnp_json_encode(sch, gidx, capnp_ptr_t(), text, err, pretty=pretty)
          else
@@ -706,7 +753,12 @@ contains
       val = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       if (as_json) then
-         call json_value(sch, typ, val, text, err, pretty)
+         if (type_which(typ) /= TYPE_STRUCT) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         gidx = capnp_codec_find_id(sch, type_type_id(typ))
+         call capnp_json_encode(sch, gidx, value_pointer(val, err), text, err, pretty=pretty)
       else
          call capnp_text_encode_value(sch, typ, val, text, err, pretty=pretty)
       end if
@@ -1029,17 +1081,6 @@ contains
       framed(7) = int(iand(shiftr(words, 24), 255_int64), int8)
       if (n > 0_int64) framed(8:n + 7) = raw
    end function wrap_flat
-
-   function strip_header(framed) result(raw)
-      integer(int8), intent(in) :: framed(0:)
-      integer(int8), allocatable :: raw(:)
-      integer(int64) :: nsegs, header, n
-      nsegs = iand(int(cp_get_i32(framed, 0_int64), int64), 4294967295_int64) + 1_int64
-      header = ((1_int64 + nsegs)*4_int64 + 7_int64)/8_int64*8_int64
-      n = size(framed, kind=int64) - header
-      allocate (raw(0:max(n, 1_int64) - 1))
-      if (n > 0_int64) raw = framed(header:header + n - 1)
-   end function strip_header
 
    function bytes_to_text(raw) result(s)
       integer(int8), intent(in) :: raw(0:)

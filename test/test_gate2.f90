@@ -14,6 +14,7 @@ program test_gate2
    call case_10()
    call case_11()
    call case_12()
+   call case_13()
 contains
    subroutine gate(cmd)
       character(len=*), intent(in) :: cmd
@@ -354,4 +355,25 @@ contains
          '0; } && { "$CAP" convert packed:packed schema/codec.capnp Sam' // &
          'ple < /tmp/g2-pk.in > /dev/null 2>&1; test $? -ne 0; }')
    end subroutine case_12
+
+   subroutine case_13()
+      call gate( &
+         'ppid=$(awk ' // &
+         achar(39) // &
+         '/PPid/ {print $2}' // &
+         achar(39) // &
+         ' /proc/$PPID/status); exe=$(readlink -f /proc/$ppid/exe); CA' // &
+         'P=$(dirname $(dirname "$exe"))/app/capnpf; SRC=${CAPNP_SRC:-' // &
+         '/tmp/capnp-peer/capnproto-c++-1.4.0/src}; printf ' // &
+         achar(39) // &
+         '(x = 1)\n' // &
+         achar(39) // &
+         ' | capnp convert text:binary schema/common.capnp Vec3 > /tmp' // &
+         '/g2-fp.in; "$CAP" convert binary:flat-packed schema/common.c' // &
+         'apnp Vec3 < /tmp/g2-fp.in > /tmp/g2-fp.o; echo $? > /tmp/g2-' // &
+         'fp.e1; capnp convert binary:flat-packed schema/common.capnp ' // &
+         'Vec3 < /tmp/g2-fp.in > /tmp/g2-fp.r; echo $? > /tmp/g2-fp.e2' // &
+         '; cmp -s /tmp/g2-fp.o /tmp/g2-fp.r && cmp -s /tmp/g2-fp.e1 /' // &
+         'tmp/g2-fp.e2')
+   end subroutine case_13
 end program test_gate2
