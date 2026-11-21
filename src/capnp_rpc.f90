@@ -271,6 +271,7 @@ module capnp_rpc
       logical :: settled = .false.
       integer(int64) :: import = -1_int64
       integer :: eid = -1
+      integer :: exc_type = EXCEPTION_TYPE_FAILED_E
       character(len=:), allocatable :: reason
       !> Our answer `aqid`, a call still running, when the proxy stands
       !> for its pipeline `ops`. C++ exports that QueuedClient as a
@@ -4114,13 +4115,16 @@ contains
 
    !> The reason of an exception Return. A pipelined capability on that
    !> answer breaks with it (rpc.c++ sendErrorReturn keeps the pipeline).
-   subroutine return_exception_reason(ret, reason)
+   subroutine return_exception_reason(ret, reason, exc_type)
       type(return_t), intent(in) :: ret
       character(len=:), allocatable, intent(inout) :: reason
+      integer, intent(out), optional :: exc_type
       type(exception_t) :: ex
       character(len=:), allocatable :: txt
       integer :: e
+      if (present(exc_type)) exc_type = EXCEPTION_TYPE_FAILED_E
       ex = return_exception_get(ret, e)
+      if (e == CAPNP_OK .and. present(exc_type)) exc_type = exception_type_get(ex)
       if (e == CAPNP_OK) call exception_reason_get(ex, txt, e)
       if (e == CAPNP_OK .and. allocated(txt)) reason = txt
    end subroutine return_exception_reason
@@ -4872,7 +4876,7 @@ contains
             if (px%qid /= int(q, int64) .or. px%settled) cycle
             px%settled = .true.
             call answer_pipeline_cap(conn, conn%questions(q)%retmsg, px%ops, kind, id, why, e, &
-                                     deferred=.true.)
+                                     deferred=.true., exc_type=px%exc_type)
             px%reason = why
             select case (kind)
             case (PIPE_EXPORT)
@@ -5294,7 +5298,7 @@ contains
             if (e == CAPNP_OK) rv = message_resolve_init(msg, e)
             if (e == CAPNP_OK) call resolve_promise_id_set(rv, int(eid, int64), e)
             if (e == CAPNP_OK) ex = resolve_exception_init(rv, e)
-            if (e == CAPNP_OK) call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+            if (e == CAPNP_OK) call exception_type_set(ex, px%exc_type, e)
             if (e == CAPNP_OK) call exception_reason_set(ex, px%reason, e)
             if (e == CAPNP_OK) call rpc_send_message(conn%transport, m, e)
             call capnp_message_free(m)
@@ -5486,7 +5490,7 @@ contains
       type(call_t) :: c
       type(payload_t) :: params
       integer(int64) :: qid, aqid, fid
-      integer :: eid, terr, fkind
+      integer :: eid, terr, fkind, exc_type
       logical :: elsewhere
       character(len=:), allocatable :: reason
       integer(int64), allocatable :: spill(:), pids(:)
@@ -5512,7 +5516,8 @@ contains
       if (conn%dead .or. err /= CAPNP_OK) return
 
       reason = 'no such capability'
-      call resolve_target(conn, c, eid, terr, reason, aqid, fkind, fid, fops)
+      exc_type = EXCEPTION_TYPE_FAILED_E
+      call resolve_target(conn, c, eid, terr, reason, aqid, fkind, fid, fops, exc_type)
       if (conn%dead) return
       block
          type(message_target_t) :: tgt
@@ -5563,7 +5568,8 @@ contains
          call forward_call(conn, c, qid, fkind, fid, fops, err, held=pids, &
                            plain=.not. can_forward(c))
       else
-         call run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held=pids)
+         call run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held=pids, &
+                       exc_type=exc_type)
       end if
    end subroutine handle_call
 
@@ -5901,7 +5907,7 @@ contains
       integer, allocatable :: fields(:), qops(:)
       character(len=:), allocatable :: reason
       integer(int64) :: id
-      integer :: i, kind, e
+      integer :: i, kind, e, why_type
       logical :: found
       call cap_descriptor_none_set(ocd, err)
       if (err /= CAPNP_OK) return
@@ -5960,11 +5966,12 @@ contains
          return
       end if
       call answer_pipeline_cap(conn, slot%retmsg, fields, kind, id, reason, e, &
-                               deferred=.true., qops=qops)
+                               deferred=.true., qops=qops, exc_type=why_type)
       if (e /= CAPNP_OK) return
       select case (kind)
       case (PIPE_BROKEN)
-         if (reason /= 'Called null capability.') call write_broken_promise(conn, ocd, reason, err)
+         if (reason /= 'Called null capability.') &
+            call write_broken_promise(conn, ocd, reason, err, exc_type=why_type)
       case (PIPE_EXPORT)
          id = int(pipeline_export(slot, int(id)), int64)
          if (.not. eslot_ok(conn, id)) return
@@ -6137,12 +6144,13 @@ contains
    !> writes a broken cap (rpc.c++ writeDescriptor, BrokenClient). With
    !> `promise` true, C++ holds a local promise that broke, so writing it
    !> again makes a new cap.
-   subroutine write_broken_promise(conn, ocd, reason, err, promise)
+   subroutine write_broken_promise(conn, ocd, reason, err, promise, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       type(cap_descriptor_t), intent(in) :: ocd
       character(len=*), intent(in) :: reason
       integer, intent(out) :: err
       logical, intent(in), optional :: promise
+      integer, intent(in), optional :: exc_type
       type(rpc_pipe_proxy_t), pointer :: px
       class(*), pointer :: srv
       integer :: peid
@@ -6150,6 +6158,7 @@ contains
       allocate (px)
       px%settled = .true.
       px%reason = reason
+      if (present(exc_type)) px%exc_type = exc_type
       px%for_broken = .true.
       if (present(promise)) px%for_broken = .not. promise
       srv => px
@@ -6177,16 +6186,19 @@ contains
       integer, intent(in) :: eid
       character(len=*), intent(in) :: reason
       integer, intent(out) :: err
+      integer :: etype
       err = CAPNP_OK
+      etype = EXCEPTION_TYPE_FAILED_E
       select type (px => conn%exports(eid)%srv)
       type is (rpc_pipe_proxy_t)
+         etype = px%exc_type
          if (px%for_broken .and. conn%exports(eid)%refcount > 0) then
             conn%exports(eid)%refcount = conn%exports(eid)%refcount + 1
             call cap_descriptor_sender_promise_set(ocd, int(eid, int64), err)
             return
          end if
       end select
-      call write_broken_promise(conn, ocd, reason, err)
+      call write_broken_promise(conn, ocd, reason, err, exc_type=etype)
    end subroutine write_broken_export
 
    !> Write the pipeline `ops` of answer `aqid`, a call still running, as
@@ -6248,7 +6260,7 @@ contains
       character(len=:), allocatable :: why
       class(*), pointer :: srv
       integer(int64) :: id
-      integer :: i, k, kind, e, peid
+      integer :: i, k, kind, e, peid, why_type
       logical :: found, sfound, own
       if (.not. allocated(conn%exports)) return
       call answer_find(conn, qid, slot, sfound)
@@ -6262,15 +6274,16 @@ contains
             px%aqid = -1_int64
             px%settled = .true.
             e = CAPNP_OK
-            call proxy_cap_kind(kind, id, why, qops, e)
+            call proxy_cap_kind(kind, id, why, why_type, qops, e)
             call capnp_message_init_builder(m, e)
             if (e == CAPNP_OK) msg = message_new_root(m, e)
             if (e == CAPNP_OK) rv = message_resolve_init(msg, e)
             if (e == CAPNP_OK) call resolve_promise_id_set(rv, int(i, int64), e)
             if (e == CAPNP_OK .and. kind == PIPE_BROKEN .and. why /= 'Called null capability.') then
                px%reason = why
+               px%exc_type = why_type
                ex = resolve_exception_init(rv, e)
-               if (e == CAPNP_OK) call exception_type_set(ex, EXCEPTION_TYPE_FAILED_E, e)
+               if (e == CAPNP_OK) call exception_type_set(ex, why_type, e)
                if (e == CAPNP_OK) call exception_reason_set(ex, why, e)
             else if (e == CAPNP_OK) then
                cd = resolve_cap_init(rv, e)
@@ -6355,16 +6368,17 @@ contains
          end select
       end do
    contains
-      subroutine proxy_cap_kind(kind, id, why, qops, e)
-         integer, intent(out) :: kind
+      subroutine proxy_cap_kind(kind, id, why, why_type, qops, e)
+         integer, intent(out) :: kind, why_type
          integer(int64), intent(out) :: id
          character(len=:), allocatable, intent(out) :: why
          integer, allocatable, intent(out) :: qops(:)
          integer, intent(inout) :: e
+         why_type = EXCEPTION_TYPE_FAILED_E
          select type (px => conn%exports(i)%srv)
          type is (rpc_pipe_proxy_t)
             call answer_pipeline_cap(conn, rm, px%ops, kind, id, why, e, deferred=.true., &
-                                     qops=qops)
+                                     qops=qops, exc_type=why_type)
          end select
          if (e /= CAPNP_OK) then
             kind = PIPE_BROKEN
@@ -6376,7 +6390,7 @@ contains
 
    !> Dispatch an incoming Call to export `eid` and answer it, or answer
    !> it with `reason` when the target did not resolve.
-   recursive subroutine run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held)
+   recursive subroutine run_call(conn, c, qid, eid, terr, reason, elsewhere, err, held, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer(int64), intent(in) :: qid
@@ -6386,6 +6400,7 @@ contains
       integer, intent(out) :: err
       !> Param holds the call took when it arrived, if it was queued.
       integer(int64), allocatable, intent(inout), optional :: held(:)
+      integer, intent(in), optional :: exc_type
       type(payload_t) :: params
       type(rpc_call_ctx_t) :: ctx
       type(capnp_message_t), pointer :: rm
@@ -6423,7 +6438,7 @@ contains
       call return_release_param_caps_set(r, .false., err)
       if (terr /= CAPNP_OK .or. eid < 0) then
          call release_unflushed(conn, ctx)
-         call fill_exception(r, reason, err)
+         call fill_exception(r, reason, err, exc_type)
          call finish_answer(conn, qid, rm, ctx, err, elsewhere=elsewhere, pids=pids, &
                             quiet=quiet)
          deallocate (rm)
@@ -6695,7 +6710,7 @@ contains
       integer, allocatable :: fields(:), qops(:)
       character(len=:), allocatable :: reason
       integer(int64) :: id
-      integer :: i, kind, eid, e
+      integer :: i, kind, eid, e, exc_type
       type(rpc_answer_slot_t), pointer :: cslot
       logical :: cfound
       err = CAPNP_OK
@@ -6746,8 +6761,10 @@ contains
                   end do
                end if
             end if
+            exc_type = EXCEPTION_TYPE_FAILED_E
             if (e == CAPNP_OK) call answer_pipeline_cap(conn, rm, fields, kind, id, reason, e, &
-                                                        deferred=.true., qops=qops)
+                                                        deferred=.true., qops=qops, &
+                                                        exc_type=exc_type)
             cfound = .false.
             if (e == CAPNP_OK .and. (kind == PIPE_IMPORT .or. kind == PIPE_QUESTION)) then
                call answer_find(conn, node%call_qid, cslot, cfound)
@@ -6765,7 +6782,7 @@ contains
                end if
                call run_call(conn, c, node%call_qid, eid, CAPNP_OK, reason, &
                              call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG, &
-                             err, held=node%pids)
+                             err, held=node%pids, exc_type=exc_type)
             end if
          end if
          if (allocated(node%pids)) then
@@ -7212,7 +7229,7 @@ contains
    !> `pending_qid` names the answer when the target is the pipeline of
    !> an answer still running, and is -1 otherwise.
    subroutine resolve_target(conn, c, out_eid, err, reason, pending_qid, &
-                             fwd_kind, fwd_id, fwd_ops)
+                             fwd_kind, fwd_id, fwd_ops, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       type(call_t), intent(in) :: c
       integer, intent(out) :: out_eid
@@ -7222,15 +7239,17 @@ contains
       integer, intent(out) :: fwd_kind
       integer(int64), intent(out) :: fwd_id
       integer, allocatable, intent(out) :: fwd_ops(:)
+      integer, intent(out), optional :: exc_type
       type(message_target_t) :: tgt
       out_eid = -1
       pending_qid = -1_int64
       fwd_kind = PIPE_BROKEN
       fwd_id = -1_int64
+      if (present(exc_type)) exc_type = EXCEPTION_TYPE_FAILED_E
       tgt = call_target_get(c, err)
       if (err /= CAPNP_OK) return
       call resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid, &
-                                  fwd_kind, fwd_id, fwd_ops)
+                                  fwd_kind, fwd_id, fwd_ops, exc_type)
    end subroutine resolve_target
 
    !> Resolve a MessageTarget to a local export index, or -1 when it names
@@ -7238,7 +7257,7 @@ contains
    !> capabilities the same way. `reason` is set when the target is a
    !> broken capability with a known text.
    subroutine resolve_message_target(conn, tgt, out_eid, err, reason, pending_qid, &
-                                     fwd_kind, fwd_id, fwd_ops)
+                                     fwd_kind, fwd_id, fwd_ops, exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       type(message_target_t), intent(in) :: tgt
       integer, intent(out) :: out_eid
@@ -7248,11 +7267,12 @@ contains
       integer, intent(out), optional :: fwd_kind
       integer(int64), intent(out), optional :: fwd_id
       integer, allocatable, intent(out), optional :: fwd_ops(:)
+      integer, intent(out), optional :: exc_type
       type(promised_answer_t) :: pa
       type(promised_answer_op_t) :: op
       type(capnp_ptr_t) :: ops
       integer(int64) :: aqid, eid
-      integer :: i, kind
+      integer :: i, kind, why_type
       integer, allocatable :: fields(:)
       character(len=:), allocatable :: why
       type(rpc_answer_slot_t), pointer :: aslot
@@ -7263,6 +7283,7 @@ contains
       if (present(pending_qid)) pending_qid = -1_int64
       if (present(fwd_kind)) fwd_kind = PIPE_BROKEN
       if (present(fwd_id)) fwd_id = -1_int64
+      if (present(exc_type)) exc_type = EXCEPTION_TYPE_FAILED_E
       select case (message_target_which(tgt))
       case (MESSAGE_TARGET_IMPORTED_CAP_TAG)
          eid = message_target_imported_cap_get(tgt)
@@ -7302,6 +7323,7 @@ contains
                else if (present(reason)) then
                   reason = 'no such capability'
                   if (allocated(px%reason)) reason = px%reason
+                  if (present(exc_type)) exc_type = px%exc_type
                end if
             end select
          end if
@@ -7364,7 +7386,8 @@ contains
             if (present(reason)) reason = 'Invalid pipeline transform.'
             return
          end if
-         call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err, qops=qops)
+         call answer_pipeline_cap(conn, aslot%retmsg, fields, kind, eid, why, err, &
+                                  qops=qops, exc_type=why_type)
          if (err /= CAPNP_OK .or. conn%dead) return
          select case (kind)
          case (PIPE_IMPORT, PIPE_QUESTION)
@@ -7386,6 +7409,7 @@ contains
             end if
          case (PIPE_BROKEN)
             if (present(reason)) reason = why
+            if (present(exc_type)) exc_type = why_type
          end select
       case default
          call abort_conn(conn, 'Unknown message target type.', err)
@@ -7400,7 +7424,8 @@ contains
    !> cap index abort the connection (layout.c++ readCapabilityPointer).
    !> With `deferred`, the answer was pending when the capability was
    !> taken, so a read error breaks the capability with that text.
-   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err, deferred, qops)
+   subroutine answer_pipeline_cap(conn, retmsg, fields, kind, id, reason, err, deferred, qops, &
+                                  exc_type)
       type(rpc_conn_t), intent(inout), target :: conn
       type(capnp_message_t), intent(inout) :: retmsg
       integer, intent(in) :: fields(:)
@@ -7410,6 +7435,7 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: deferred
       integer, allocatable, intent(out), optional :: qops(:)
+      integer, intent(out), optional :: exc_type
       type(message_t) :: amsg
       type(return_t) :: ar
       type(payload_t) :: apl
@@ -7419,6 +7445,7 @@ contains
       logical :: later
       later = .false.
       if (present(deferred)) later = deferred
+      if (present(exc_type)) exc_type = EXCEPTION_TYPE_FAILED_E
       kind = PIPE_BROKEN
       id = -1_int64
       reason = 'no such capability'
@@ -7426,7 +7453,7 @@ contains
       if (err == CAPNP_OK) ar = message_return_get(amsg, err)
       if (err /= CAPNP_OK) return
       if (return_which(ar) == RETURN_EXCEPTION_TAG) then
-         call return_exception_reason(ar, reason)
+         call return_exception_reason(ar, reason, exc_type)
          return
       end if
       if (return_which(ar) == RETURN_TAKE_FROM_OTHER_QUESTION_TAG) then

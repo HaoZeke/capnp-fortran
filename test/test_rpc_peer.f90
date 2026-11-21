@@ -32,7 +32,7 @@ contains
 
    subroutine collect_rpc_peer(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(43))
+      allocate (testsuite(44))
       testsuite(1)%name = "param-promise-merge-hosted"
       testsuite(1)%test => t_merge_hosted
       testsuite(2)%name = "param-promise-merge-promise"
@@ -119,6 +119,8 @@ contains
       testsuite(42)%test => t_dis_pa_noncap
       testsuite(43)%name = "disembargo-unimplemented-text"
       testsuite(43)%test => t_dis_unimpl_text
+      testsuite(44)%name = "pipeline-preserves-exception-type"
+      testsuite(44)%test => t_pipeline_exc_type
    end subroutine collect_rpc_peer
 
    subroutine mix_dispatch(self, ctx, err)
@@ -131,6 +133,10 @@ contains
       if (ctx%method_id == 7) then
          err = CAPNP_OK
          call rpc_ctx_defer(ctx)
+         return
+      end if
+      if (ctx%method_id == 99) then
+         call rpc_ctx_unimplemented_method(ctx, 'test.capnp:Mix', ECHO_IFACE, err)
          return
       end if
       s = capnp_new_struct(ctx%rmsg, 0, 1, err)
@@ -2076,6 +2082,50 @@ contains
                  'resolve to returned npp: got '//a//' / '//c//' / '//d//' / '//conn%abort_reason)
       call close_peer(conn, fd)
    end subroutine t_ra_ret_npp
+
+   !> A pipelined call on an answer that returned an unimplemented
+   !> exception preserves the exception type, matching C++ 1.4.0.
+   subroutine t_pipeline_exc_type(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: conn
+      type(mix_srv_t), target :: mix
+      class(rpc_server_t), pointer :: srv
+      type(capnp_message_t), target :: rm
+      type(message_t) :: msg
+      type(return_t) :: ret
+      type(exception_t) :: ex
+      character(len=:), allocatable :: a, txt
+      integer :: fd, e
+      mix%inner => made
+      srv => mix
+      call open_peer(conn, fd, srv)
+      call wcall(fd, 1_int64, 99, -1_int64, NOCAPS, NOIDS)
+      a = step(conn, fd, 1)
+      call wcall(fd, 2_int64, 0, 1_int64, NOCAPS, NOIDS)
+      call rpc_pump_once(conn, e)
+      call rpc_recv_message(fd, rm, e)
+      if (e /= CAPNP_OK) then
+         call check(error, .false., 'pipeline-exc-type: no Return received')
+         call close_peer(conn, fd)
+         return
+      end if
+      msg = message_read_root(rm, e)
+      ret = message_return_get(msg, e)
+      if (return_which(ret) /= RETURN_EXCEPTION_TAG) then
+         call check(error, .false., 'pipeline-exc-type: expected exception Return')
+         call capnp_message_free(rm)
+         call close_peer(conn, fd)
+         return
+      end if
+      ex = return_exception_get(ret, e)
+      call exception_reason_get(ex, txt, e)
+      call check(error, exception_type_get(ex) == EXCEPTION_TYPE_UNIMPLEMENTED_E .and. &
+                 index(txt, 'Method not implemented.') > 0, &
+                 'pipeline-exc-type: got type='//itoa(int(exception_type_get(ex), int64))// &
+                 ' text='//txt)
+      call capnp_message_free(rm)
+      call close_peer(conn, fd)
+   end subroutine t_pipeline_exc_type
 
    function itoa(i) result(s)
       integer(int64), intent(in) :: i
