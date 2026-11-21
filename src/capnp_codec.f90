@@ -27,6 +27,7 @@ module capnp_codec
    public :: capnp_dec_digit, capnp_oct_digit, capnp_hex_digit
    public :: capnp_codec_find_id, capnp_codec_find_field, capnp_codec_field_present
    public :: capnp_codec_new_struct, capnp_codec_alloc_list, capnp_codec_elem_esize
+   public :: capnp_list_fits
    public :: capnp_def_bool, capnp_def_i8, capnp_def_i16, capnp_def_i32, capnp_def_i64
    public :: capnp_def_u8, capnp_def_u16, capnp_def_u32, capnp_def_f32, capnp_def_f64
    public :: capnp_put_signed, capnp_put_unsigned
@@ -543,6 +544,51 @@ contains
       case default; es = -1
       end select
    end function capnp_codec_elem_esize
+
+   !> True when a wire list can be read as expect (a CAPNP_SZ_* code).
+   !> Composite is the code for a struct list. Matches the reader checks
+   !> in layout.c++: a data element may be wider, a pointer list needs a
+   !> pointer, and a bit list upgrades to nothing else.
+   pure function capnp_list_fits(p, expect) result(ok)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: expect
+      logical :: ok
+      integer :: wb, eb, wp, ep
+      ok = .false.
+      if (p%kind /= CAPNP_PK_LIST) return
+      if (p%esize == CAPNP_SZ_COMPOSITE) then
+         select case (expect)
+         case (CAPNP_SZ_VOID, CAPNP_SZ_COMPOSITE)
+            ok = .true.
+         case (CAPNP_SZ_BYTE, CAPNP_SZ_TWO, CAPNP_SZ_FOUR, CAPNP_SZ_EIGHT)
+            ok = p%dwords >= 1
+         case (CAPNP_SZ_PTR)
+            ok = p%pwords >= 1
+         end select
+         return
+      end if
+      if (p%esize == CAPNP_SZ_BIT .and. expect /= CAPNP_SZ_BIT) return
+      wb = fit_bits(p%esize)
+      eb = fit_bits(expect)
+      wp = 0
+      if (p%esize == CAPNP_SZ_PTR) wp = 1
+      ep = 0
+      if (expect == CAPNP_SZ_PTR) ep = 1
+      ok = eb <= wb .and. ep <= wp
+   end function capnp_list_fits
+
+   pure function fit_bits(esize) result(bits)
+      integer, intent(in) :: esize
+      integer :: bits
+      select case (esize)
+      case (CAPNP_SZ_BIT); bits = 1
+      case (CAPNP_SZ_BYTE); bits = 8
+      case (CAPNP_SZ_TWO); bits = 16
+      case (CAPNP_SZ_FOUR); bits = 32
+      case (CAPNP_SZ_EIGHT); bits = 64
+      case default; bits = 0
+      end select
+   end function fit_bits
 
    function capnp_brand_resolve(env, t) result(rt)
       type(capnp_brand_env_t), intent(in) :: env

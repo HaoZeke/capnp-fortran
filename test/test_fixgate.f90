@@ -12,6 +12,7 @@ program test_fixgate
    call case_esc()
    call case_span()
    call case_real()
+   call case_fits()
    if (nfail /= 0) error stop 1
 contains
    subroutine bad()
@@ -67,5 +68,12 @@ contains
       if (err /= 0) call bad()
       if (iv /= -9223372036854775807_int64 - 1_int64) call bad()
    end subroutine case_real
+
+
+   subroutine case_fits()
+      type(capnp_ptr_t) :: p
+      p = capnp_ptr_t()
+      if (capnp_list_fits(p, 2)) call bad()
+   end subroutine case_fits
 
 end program
