@@ -15,6 +15,12 @@ module capnp_canonical
 
    public :: capnp_canonicalize, capnp_is_canonical
 
+   !> Objects entered by the current canonical walk. A path, so a DAG
+   !> is visited twice and a cycle stops with an error.
+   integer, save :: walk_n = 0
+   integer, allocatable, save :: walk_seg(:)
+   integer(int64), allocatable, save :: walk_off(:)
+
 contains
 
    !> Canonical bytes of a message's root object: one raw segment starting
@@ -53,7 +59,9 @@ contains
 
       ! Measure with the live traversal budget so amplified DAGs abort immediately.
       remaining = msg%traversal_words
+      walk_n = 0
       need = 1_int64 + measure(root, 0, err) ! + root pointer word
+      walk_n = 0
       if (err /= CAPNP_OK) return
       after = msg%traversal_words
       msg%traversal_words = remaining
@@ -64,7 +72,9 @@ contains
          msg%traversal_words = after
          return
       end if
+      walk_n = 0
       croot = canon_copy(canon, root, 0, err)
+      walk_n = 0
       if (err /= CAPNP_OK) then
          call capnp_message_free(canon)
          msg%traversal_words = after
@@ -471,8 +481,10 @@ contains
       type(capnp_ptr_t) :: q
       integer(int64) :: i
       integer :: nd, np, k
+      logical :: tracked
       err = CAPNP_OK
       words = 0_int64
+      tracked = .false.
       select case (p%kind)
       case (CAPNP_PK_NULL)
          return
@@ -484,31 +496,44 @@ contains
          err = CAPNP_ERR_DEPTH
          return
       end if
+      ! A zero-word object has no address of its own. The next object in
+      ! the segment starts at the same offset, so tracking it looks like
+      ! a cycle. It also has no pointer to follow.
+      if (walk_body(p)) then
+         if (walk_on(p)) then
+            err = CAPNP_ERR_DEPTH
+            return
+         end if
+         call walk_push(p, err)
+         if (err /= CAPNP_OK) return
+         tracked = .true.
+      end if
+      meas: block
       select case (p%kind)
       case (CAPNP_PK_STRUCT)
          nd = trimmed_dwords(p)
          np = trimmed_pwords(p, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit meas
          words = int(nd + np, int64)
          do k = 0, np - 1
             q = capnp_getp(p, k, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit meas
             words = words + measure(q, depth + 1, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit meas
          end do
       case (CAPNP_PK_LIST)
          select case (p%esize)
          case (CAPNP_SZ_COMPOSITE)
             if (p%nelem > 0_int64 .and. depth + 1 >= p%msg%depth_limit) then
                err = CAPNP_ERR_DEPTH
-               return
+               exit meas
             end if
             call composite_trim(p, nd, np, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit meas
             words = 1_int64 + p%nelem*int(nd + np, int64) ! tag + elements
             do i = 0_int64, p%nelem - 1_int64
                q = capnp_list_get_struct(p, int(i), err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit meas
                ! layout.c++ setListPointer(canonical=true) copies element
                ! pointers using the list's nestingLimit, after getStructElement
                ! already checked nestingLimit > 0.
@@ -517,9 +542,9 @@ contains
                   block
                      type(capnp_ptr_t) :: r
                      r = capnp_getp(q, k, err)
-                     if (err /= CAPNP_OK) return
+                     if (err /= CAPNP_OK) exit meas
                      words = words + measure(r, depth + 1, err)
-                     if (err /= CAPNP_OK) return
+                     if (err /= CAPNP_OK) exit meas
                   end block
                end do
             end do
@@ -527,14 +552,16 @@ contains
             words = p%nelem
             do i = 0_int64, p%nelem - 1_int64
                q = capnp_getp(p, int(i), err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit meas
                words = words + measure(q, depth + 1, err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit meas
             end do
          case default
             words = (int(capnp_list_step_bits(p%esize), int64)*p%nelem + 63_int64)/64_int64
          end select
       end select
+      end block meas
+      if (tracked) call walk_pop()
    end function measure
 
    ! --- canonical copy ------------------------------------------------------
@@ -551,8 +578,10 @@ contains
       type(capnp_ptr_t) :: r, c, del, sel
       integer(int64) :: i, nb
       integer :: nd, np, k
+      logical :: tracked
       err = CAPNP_OK
       q = capnp_ptr_t()
+      tracked = .false.
       select case (p%kind)
       case (CAPNP_PK_NULL)
          return
@@ -565,70 +594,80 @@ contains
          err = CAPNP_ERR_DEPTH
          return
       end if
+      if (walk_body(p)) then
+         if (walk_on(p)) then
+            err = CAPNP_ERR_DEPTH
+            return
+         end if
+         call walk_push(p, err)
+         if (err /= CAPNP_OK) return
+         tracked = .true.
+      end if
+      copyc: block
       select case (p%kind)
       case (CAPNP_PK_STRUCT)
          nd = trimmed_dwords(p)
          np = trimmed_pwords(p, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit copyc
          q = capnp_new_struct(canon, nd, np, err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) exit copyc
          nb = min(int(nd, int64)*8_int64, (data_bits_of(p) + 7_int64)/8_int64)
          if (nb > 0_int64) q%msg%segs(q%seg)%bytes(q%off:q%off + nb - 1) = &
             p%msg%segs(p%seg)%bytes(p%off:p%off + nb - 1)
          do k = 0, np - 1
             r = capnp_getp(p, k, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             if (r%kind == CAPNP_PK_NULL) cycle
             c = canon_copy(canon, r, depth + 1, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             call capnp_setp(q, k, c, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
          end do
       case (CAPNP_PK_LIST)
          select case (p%esize)
          case (CAPNP_SZ_COMPOSITE)
             if (p%nelem > 0_int64 .and. depth + 1 >= p%msg%depth_limit) then
                err = CAPNP_ERR_DEPTH
-               return
+               exit copyc
             end if
             call composite_trim(p, nd, np, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             q = capnp_new_composite_list(canon, p%nelem, nd, np, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             do i = 0_int64, p%nelem - 1_int64
                sel = capnp_list_get_struct(p, int(i), err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit copyc
                sel%depth = p%depth
                del = capnp_list_get_struct(q, int(i), err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit copyc
                nb = min(int(nd, int64)*8_int64, int(sel%dwords, int64)*8_int64)
                if (nb > 0_int64) del%msg%segs(del%seg)%bytes(del%off:del%off + nb - 1) = &
                   sel%msg%segs(sel%seg)%bytes(sel%off:sel%off + nb - 1)
                do k = 0, min(np, sel%pwords) - 1
                   r = capnp_getp(sel, k, err)
-                  if (err /= CAPNP_OK) return
+                  if (err /= CAPNP_OK) exit copyc
                   if (r%kind == CAPNP_PK_NULL) cycle
                   c = canon_copy(canon, r, depth + 1, err)
-                  if (err /= CAPNP_OK) return
+                  if (err /= CAPNP_OK) exit copyc
                   call capnp_setp(del, k, c, err)
-                  if (err /= CAPNP_OK) return
+                  if (err /= CAPNP_OK) exit copyc
                end do
             end do
          case (CAPNP_SZ_PTR)
             q = capnp_new_list(canon, CAPNP_SZ_PTR, p%nelem, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             do i = 0_int64, p%nelem - 1_int64
                r = capnp_getp(p, int(i), err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit copyc
                if (r%kind == CAPNP_PK_NULL) cycle
                c = canon_copy(canon, r, depth + 1, err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit copyc
                call capnp_setp(q, int(i), c, err)
-               if (err /= CAPNP_OK) return
+               if (err /= CAPNP_OK) exit copyc
             end do
          case default
             q = capnp_new_list(canon, p%esize, p%nelem, err)
-            if (err /= CAPNP_OK) return
+            if (err /= CAPNP_OK) exit copyc
             nb = (int(capnp_list_step_bits(p%esize), int64)*p%nelem + 7_int64)/8_int64
             if (nb > 0_int64) q%msg%segs(q%seg)%bytes(q%off:q%off + nb - 1) = &
                p%msg%segs(p%seg)%bytes(p%off:p%off + nb - 1)
@@ -639,7 +678,88 @@ contains
             end if
          end select
       end select
+      end block copyc
+      if (tracked) call walk_pop()
    end function canon_copy
+
+   subroutine walk_key(p, seg, off)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: seg
+      integer(int64), intent(out) :: off
+      seg = p%seg
+      off = p%off
+      if (p%kind == CAPNP_PK_LIST .and. p%esize == CAPNP_SZ_COMPOSITE) then
+         off = p%off - 8_int64
+      end if
+   end subroutine walk_key
+
+   !> An object that occupies at least one word. Zero-word structs and
+   !> empty lists share their offset with whatever is allocated next.
+   logical function walk_body(p)
+      type(capnp_ptr_t), intent(in) :: p
+      walk_body = .false.
+      select case (p%kind)
+      case (CAPNP_PK_STRUCT)
+         walk_body = p%dwords > 0 .or. p%pwords > 0
+      case (CAPNP_PK_LIST)
+         if (p%esize == CAPNP_SZ_COMPOSITE) then
+            walk_body = .true.
+         else
+            walk_body = p%nelem > 0_int64
+         end if
+      end select
+   end function walk_body
+
+   logical function walk_on(p)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: i, seg
+      integer(int64) :: off
+      call walk_key(p, seg, off)
+      walk_on = .false.
+      do i = 1, walk_n
+         if (walk_seg(i) == seg .and. walk_off(i) == off) then
+            walk_on = .true.
+            return
+         end if
+      end do
+   end function walk_on
+
+   subroutine walk_push(p, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      integer, allocatable :: grown_seg(:)
+      integer(int64), allocatable :: grown_off(:)
+      integer :: n, stat, seg
+      integer(int64) :: off
+      err = CAPNP_OK
+      if (.not. allocated(walk_seg)) then
+         allocate (walk_seg(64), walk_off(64), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      end if
+      if (walk_n >= size(walk_seg)) then
+         n = size(walk_seg)*2
+         allocate (grown_seg(n), grown_off(n), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown_seg(1:walk_n) = walk_seg(1:walk_n)
+         grown_off(1:walk_n) = walk_off(1:walk_n)
+         call move_alloc(grown_seg, walk_seg)
+         call move_alloc(grown_off, walk_off)
+      end if
+      call walk_key(p, seg, off)
+      walk_n = walk_n + 1
+      walk_seg(walk_n) = seg
+      walk_off(walk_n) = off
+   end subroutine walk_push
+
+   subroutine walk_pop()
+      if (walk_n > 0) walk_n = walk_n - 1
+   end subroutine walk_pop
 
    pure function data_bits_of(p) result(b)
       type(capnp_ptr_t), intent(in) :: p
