@@ -67,6 +67,18 @@ contains
                   'connect: the check does not search the build tree')
       if (allocated(error)) return
       call get_command_argument(0, bin)
+      ! The shell can start `unshare` and still return nonzero when user
+      ! namespaces are blocked. cmdstat stays zero in that case, so probe
+      ! `unshare -n -r` and skip unless the probe itself exits zero.
+      stat = 0
+      cs = 0
+      call execute_command_line( &
+         'unshare -n -r true >/dev/null 2>/dev/null', &
+         exitstat=stat, cmdstat=cs)
+      if (cs /= 0 .or. stat /= 0) then
+         call skip_test(error, 'unshare -n -r is not available')
+         return
+      end if
       stat = 0
       cs = 0
       call execute_command_line( &
