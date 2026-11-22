@@ -19,9 +19,28 @@ LIB=$(cd "$(dirname "$LIB")" && pwd)/$(basename "$LIB")
 
 FC=${FC:-gfortran}
 CXX=${CXX:-g++}
+# The library says what its drivers need at link time: the gcov runtime for
+# an instrumented one, the sanitizer runtimes for a sanitized one.
+NM_FLAG=-g
+[[ "$LIB" == *.so ]] && NM_FLAG=-D
+LIB_SYMS=$(nm "$NM_FLAG" "$LIB" 2> /dev/null) || LIB_SYMS=
+has_sym() {
+  grep -- "$1" <<< "$LIB_SYMS" > /dev/null
+}
 SAN=()
+SAN_KINDS=
 if [[ "${SANITIZE:-0}" == 1 ]]; then
-  SAN=(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  SAN_KINDS=address,undefined
+else
+  has_sym __asan_ && SAN_KINDS=address
+  has_sym __ubsan_ && SAN_KINDS=${SAN_KINDS:+$SAN_KINDS,}undefined
+fi
+if [[ -n "$SAN_KINDS" ]]; then
+  SAN=(-fsanitize="$SAN_KINDS" -fno-omit-frame-pointer)
+fi
+COV=()
+if has_sym __gcov_init; then
+  COV=(--coverage)
 fi
 export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
@@ -43,7 +62,7 @@ work() {
 }
 
 fc() {
-  "$FC" -std=f2018 "${SAN[@]}" "$@"
+  "$FC" -std=f2018 "${SAN[@]}" "${COV[@]}" "$@"
 }
 
 cmp_out() {
