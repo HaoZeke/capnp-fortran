@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g11|g12|g13|g14|g15|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g51|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -249,6 +249,25 @@ cmp_out() {
   fi
 }
 
+# The schema is valid for Cap'n Proto C++ 1.4.0: capnp generates the C++ code
+# and g++ accepts it. Each case calls this before it checks the Fortran side.
+cxx_ok() {
+  local f
+  capnp_cxx_flags
+  capnp compile "${CAPNP_INC[@]}" -oc++ "$@"
+  for f in "$@"; do
+    "$CXX" -std=c++17 -fsyntax-only "${CAPNP_PC[@]}" "$f.c++"
+  done
+}
+
+# No generated line may pass the free-form limit of 132 columns.
+no_long_lines() {
+  if awk 'length($0) > 132 { bad = 1 } END { exit !bad }' "$@"; then
+    echo "generated line passes 132 columns in $*" >&2
+    exit 1
+  fi
+}
+
 g1() {
   local d
   d=$(work)
@@ -351,7 +370,7 @@ EOF
   echo "g2 ok"
 }
 
-g34() {
+g3_g4() {
   local d which=$1
   d=$(work)
   cd "$d"
@@ -1021,11 +1040,1493 @@ EOF
   echo "g15 ok"
 }
 
+g16() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > imp.capnp << 'EOF'
+@0x9200000000000002;
+struct SessionLoginRequestPayloadData {}
+struct SessionLoginResponseData {}
+interface UserAuthenticationServiceApi {
+  login @0 SessionLoginRequestPayloadData -> SessionLoginResponseData;
+}
+EOF
+  cxx_ok imp.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" imp.capnp
+  no_long_lines imp_capnp.f90
+  fc -c imp_capnp.f90 -I "$MOD" -J .
+  echo "g16 ok"
+}
+
+g17() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > inh_long.capnp << 'EOF'
+@0x9100000000000031;
+interface VeryLongPrimarySuperInterfaceAlpha { alpha @0 () -> (); }
+interface VeryLongSecondarySuperInterfaceBeta {
+  executeRemoteDiagnosticCheckOperationNow @0 () -> ();
+}
+interface CombinedChildServiceImplementation
+    extends(VeryLongPrimarySuperInterfaceAlpha, VeryLongSecondarySuperInterfaceBeta) {}
+EOF
+  cat > f64long.capnp << 'EOF'
+@0x9100000000000016;
+annotation veryLongAnnotationIdentifierForFloatingPointBounds @0x9100000000000017 (field) :Float64;
+annotation veryLongAnnotationIdentifierForSinglePrecisionBounds @0x9100000000000018 (field) :Float32;
+struct VeryLongConfigurationContainerRecord {
+  veryLongMeasurementThresholdField @0 :Float64
+    $veryLongAnnotationIdentifierForFloatingPointBounds(-1.0)
+    $veryLongAnnotationIdentifierForSinglePrecisionBounds(-2.5);
+}
+EOF
+  cxx_ok inh_long.capnp f64long.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" inh_long.capnp f64long.capnp
+  no_long_lines inh_long_capnp.f90 f64long_capnp.f90
+  fc -c inh_long_capnp.f90 f64long_capnp.f90 -I "$MOD" -J .
+  echo "g17 ok"
+}
+
+g18() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > strm.capnp << 'EOF'
+@0x9100000000000032;
+interface AbcdefghijklmnopqrstuvwxyzA {
+  abcdefghijklmnopqrstuvwxyzAbc @0 (x :Int32) -> stream;
+}
+EOF
+  cxx_ok strm.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" strm.capnp
+  no_long_lines strm_capnp.f90
+  fc -c strm_capnp.f90 -I "$MOD" -J .
+  echo "g18 ok"
+}
+
+g19() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > ov1.capnp << 'EOF'
+@0x9300000000000003;
+interface Base { foo @0 () -> (); }
+interface Sub extends(Base) {
+  foo @0 () -> ();
+  subFoo @1 () -> ();
+}
+EOF
+  cxx_ok ov1.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" ov1.capnp
+  fc -c ov1_capnp.f90 -I "$MOD" -J .
+  grep -q 'deferred :: sub_foo_0$' ov1_capnp.f90
+  grep -q 'deferred :: sub_foo$' ov1_capnp.f90
+  echo "g19 ok"
+}
+
+g20() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > ov2.capnp << 'EOF'
+@0x9300000000000004;
+interface Base { foo @0 () -> (); }
+interface Mid extends(Base) { foo @0 () -> (); }
+interface Top extends(Mid) { midFoo @0 () -> (); }
+EOF
+  cxx_ok ov2.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" ov2.capnp
+  fc -c ov2_capnp.f90 -I "$MOD" -J .
+  grep -q 'deferred :: mid_foo$' ov2_capnp.f90
+  grep -q 'deferred :: top_mid_foo$' ov2_capnp.f90
+  echo "g20 ok"
+}
+
+g21() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOF'
+@0x9100000000000005;
+annotation tag @0x9100000000000006 (struct, field) :Text;
+struct SA $tag("sa") { x @0 :Int32; }
+EOF
+  cat > b.capnp << 'EOF'
+@0x9100000000000007;
+using A = import "a.capnp";
+annotation tag @0x9100000000000008 (struct, field) :Int32;
+struct SB $tag(42) { a @0 :A.SA; }
+EOF
+  cat > a2.capnp << 'EOF'
+@0x9400000000000001;
+annotation tag @0x9400000000000002 (struct, field) :Text;
+struct S { foo @0 :Int32 $tag("from_a"); }
+EOF
+  cat > b2.capnp << 'EOF'
+@0x9400000000000003;
+using A = import "a2.capnp";
+struct SFoo $A.tag("from_b") { s @0 :A.S; }
+EOF
+  cxx_ok a.capnp b.capnp
+  cxx_ok a2.capnp b2.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp a2.capnp b2.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use b_capnp
+   use b2_capnp
+   implicit none
+   print '(i0,1x,a)', B_S_B_TAG, B2_S_FOO_TAG
+end program drv
+EOF
+  fc a_capnp.f90 b_capnp.f90 a2_capnp.f90 b2_capnp.f90 drv.f90 -I "$MOD" -J . \
+    "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "42 from_b"
+  echo "g21 ok"
+}
+
+g22() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOF'
+@0x9100000000000020;
+interface Gen(T) { get @0 () -> (v :T); }
+EOF
+  cat > b.capnp << 'EOF'
+@0x9100000000000021;
+using A = import "a.capnp";
+struct SB { g @0 :A.Gen(Text); }
+EOF
+  cat > c.capnp << 'EOF'
+@0x9100000000000022;
+using A = import "a.capnp";
+using B = import "b.capnp";
+struct SC { b @0 :B.SB; g @1 :A.Gen(Text); }
+EOF
+  cxx_ok a.capnp b.capnp c.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp c.capnp
+  fc -c a_capnp.f90 b_capnp.f90 c_capnp.f90 -I "$MOD" -J .
+  echo "g22 ok"
+}
+
+g23() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > pay.capnp << 'EOF'
+@0x9300000000000001;
+struct Payload {
+  id @0 :UInt64;
+  cap @1 :Capability;
+}
+struct CapDescriptor { id @0 :UInt64; cap @1 :Capability; }
+interface Svc { call @0 (p :Payload) -> (d :CapDescriptor); }
+EOF
+  cat > ifc.capnp << 'EOF'
+@0x9300000000000010;
+interface Svc { ping @0 () -> (); }
+struct Msg { x @0 :Int32; }
+EOF
+  cat > usr.capnp << 'EOF'
+@0x9300000000000011;
+using I = import "ifc.capnp";
+struct Payload { m @0 :I.Msg; }
+struct CapDescriptor { x @0 :Int32; }
+EOF
+  cat > res.capnp << 'EOF'
+@0x9300000000000020;
+struct Payload { content @0 :Text; c @1 :Capability; }
+const capResolve :Int32 = 5;
+const capResolveId :Int32 = 6;
+interface Svc { go @0 (p :Payload) -> (r :Capability); }
+EOF
+  cxx_ok pay.capnp ifc.capnp usr.capnp res.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" pay.capnp ifc.capnp usr.capnp res.capnp
+  fc -c pay_capnp.f90 ifc_capnp.f90 usr_capnp.f90 res_capnp.f90 -I "$MOD" -J .
+  echo "g23 ok"
+}
+
+g24() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir dir_a dir_b
+  cat > msg.capnp << 'EOF'
+@0x9100000000000040;
+annotation tag @0x9100000000000041 (field) :Int32;
+struct Msg {
+  union {
+    ping @0 :Int32 $tag(100);
+    pong @1 :Text;
+  }
+}
+EOF
+  cat > route.capnp << 'EOF'
+@0x9100000000000042;
+annotation get @0x9100000000000043 (field) :Text;
+annotation set @0x9100000000000044 (field) :Text;
+annotation has @0x9100000000000045 (field) :Text;
+annotation init @0x9100000000000046 (field) :Text;
+annotation t @0x9100000000000047 (field) :Text;
+annotation new @0x9100000000000048 (field) :Text;
+annotation dwords @0x9100000000000049 (field) :Text;
+annotation pwords @0x910000000000004a (field) :Text;
+annotation which @0x910000000000004b (field) :Text;
+struct Route {
+  struct User { x @0 :Int32; }
+  user @0 :Text $get("g") $set("s") $has("h") $init("i") $t("t") $new("n")
+    $dwords("d") $pwords("p") $which("w");
+}
+EOF
+  cat > foo.capnp << 'EOF'
+@0x910000000000004c;
+using Cxx = import "/capnp/c++.capnp";
+struct Foo $Cxx.name("CppFoo") {
+  const name :Text = "logical-foo";
+  x @0 :Int32;
+}
+EOF
+  cat > nf.capnp << 'EOF'
+@0x910000000000004d;
+using Cxx = import "/capnp/c++.capnp";
+struct Outer {
+  enum Status $Cxx.name("CppStatus") { ok @0; }
+  status @0 :Status $Cxx.name("cppStatus");
+}
+EOF
+  cat > dir_a/ann.capnp << 'EOF'
+@0x910000000000004e;
+annotation name @0x910000000000004f (field) :Text;
+EOF
+  cat > dir_b/ann.capnp << 'EOF'
+@0x9100000000000050;
+annotation name @0x9100000000000051 (field) :Text;
+EOF
+  cat > use.capnp << 'EOF'
+@0x9100000000000052;
+using A = import "dir_a/ann.capnp";
+using B = import "dir_b/ann.capnp";
+struct S { f @0 :Int32 $A.name("af") $B.name("bf"); }
+EOF
+  cat > foo-bar.capnp << 'EOF'
+@0x9100000000000053;
+annotation name @0x9100000000000054 (field) :Text;
+EOF
+  cat > foobar.capnp << 'EOF'
+@0x9100000000000055;
+annotation name @0x9100000000000056 (field) :Text;
+EOF
+  cat > use2.capnp << 'EOF'
+@0x9100000000000057;
+using A = import "foo-bar.capnp";
+using B = import "foobar.capnp";
+struct S2 { f @0 :Int32 $A.name("af") $B.name("bf"); }
+EOF
+  cxx_ok msg.capnp route.capnp foo.capnp nf.capnp use.capnp use2.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" msg.capnp route.capnp foo.capnp nf.capnp \
+    use.capnp use2.capnp
+  fc -c msg_capnp.f90 route_capnp.f90 foo_capnp.f90 nf_capnp.f90 use_capnp.f90 \
+    use2_capnp.f90 -I "$MOD" -J .
+  echo "g24 ok"
+}
+
+g25() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xb100000000000001;
+struct SvcTag { x @0 :Int32; }
+struct SvcList { x @0 :Int32; }
+interface SvcCall { ping @0 () -> (); }
+struct Outer { interface Inner { ping @0 () -> (); } }
+interface Base { hello @0 () -> (); }
+interface Other { bye @0 () -> (); }
+struct Pt { x @0 :Int32; }
+struct Res { y @0 :Int32; }
+EOS
+  cat > b.capnp << 'EOS'
+@0xb100000000000002;
+using A = import "a.capnp";
+annotation t @0xb100000000000003 (field) :Int32;
+annotation clientT @0xb100000000000004 (field) :Int32;
+struct Svc {
+  tag @0 :A.SvcTag $t(1);
+  list @1 :List(A.SvcList) $t(2);
+  call @2 :A.SvcCall $clientT(3);
+}
+interface OuterInner extends(A.Outer.Inner) { pong @0 () -> (); }
+struct BaseServer { x @0 :Int32; }
+struct OtherServer { x @0 :Int32; }
+interface Multi extends(A.Base, A.Other) { m @0 () -> (); }
+const ptT :Int32 = 5;
+const resT :Int32 = 6;
+interface Caller { go @0 A.Pt -> A.Res; }
+const svcTagDwords :A.SvcTag = (x = 7);
+EOS
+  cxx_ok a.capnp b.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp
+  fc -c a_capnp.f90 b_capnp.f90 -I "$MOD" -J .
+  echo "g25 ok"
+}
+
+g26() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > s1.capnp << 'EOS'
+@0xd100000000000003;
+annotation capResolve @0xd100000000000004 (struct) :Int32;
+struct Slot { c @0 :Capability; }
+EOS
+  cat > s2.capnp << 'EOS'
+@0xd100000000000001;
+annotation resolve @0xd100000000000002 (struct) :Int32;
+interface Ping { go @0 () -> (); }
+struct Cap $resolve(1) {}
+EOS
+  cat > s3.capnp << 'EOS'
+@0xd100000000000005;
+annotation resolve @0xd100000000000006 (struct) :Int32;
+struct Plain $resolve(1) { x @0 :Int32; }
+EOS
+  cxx_ok s1.capnp s2.capnp s3.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" s1.capnp s2.capnp s3.capnp
+  fc -c s1_capnp.f90 s2_capnp.f90 s3_capnp.f90 -I "$MOD" -J .
+  echo "g26 ok"
+}
+
+g27() {
+  local d k prev_a prev_b sa sb n
+  d=$(work)
+  cd "$d"
+  cat > d0.capnp << 'EOS'
+@0xd200000000000000;
+annotation tag @0xd200000000000100 (field) :Int32;
+struct S0 { x @0 :Int32 $tag(1); }
+EOS
+  for k in $(seq 1 11); do
+    if ((k == 1)); then
+      prev_a=d0
+      prev_b=d0
+      sa=S0
+      sb=S0
+    else
+      prev_a=da$((k - 1))
+      prev_b=db$((k - 1))
+      sa=SA$((k - 1))
+      sb=SB$((k - 1))
+    fi
+    local hex_a hex_b
+    hex_a=$(printf '%016x' $((0xd200000000001000 + k)))
+    hex_b=$(printf '%016x' $((0xd200000000002000 + k)))
+    cat > da$k.capnp << EOS
+@0x$hex_a;
+using P = import "$prev_a.capnp";
+using Q = import "$prev_b.capnp";
+struct SA$k { p @0 :P.$sa; q @1 :Q.$sb; }
+EOS
+    cat > db$k.capnp << EOS
+@0x$hex_b;
+using P = import "$prev_a.capnp";
+using Q = import "$prev_b.capnp";
+struct SB$k { p @0 :P.$sa; q @1 :Q.$sb; }
+EOS
+  done
+  cat > top.capnp << 'EOS'
+@0xd200000000003000;
+using A = import "da11.capnp";
+using B = import "db11.capnp";
+annotation tag @0xd200000000003001 (field) :Int32;
+struct Top { a @0 :A.SA11; b @1 :B.SB11; x @2 :Int32 $tag(2); }
+EOS
+  local files=(d0.capnp)
+  for k in $(seq 1 11); do
+    files+=(da$k.capnp db$k.capnp)
+  done
+  files+=(top.capnp)
+  cxx_ok "${files[@]}"
+  SECONDS=0
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" "${files[@]}"
+  if ((SECONDS > 20)); then
+    echo "generating the diamond chain took ${SECONDS}s" >&2
+    exit 1
+  fi
+  n=$(wc -l < top_capnp.f90)
+  if ((n > 300)); then
+    echo "top_capnp.f90 has $n lines; the output grows with the import depth" >&2
+    exit 1
+  fi
+  fc -c d0_capnp.f90 -I "$MOD" -J .
+  for k in $(seq 1 11); do
+    fc -c da${k}_capnp.f90 db${k}_capnp.f90 -I "$MOD" -J .
+  done
+  fc -c top_capnp.f90 -I "$MOD" -J .
+  echo "g27 ok"
+}
+
+g28() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir dir_a dir_b dir_c
+  cat > dir_a/sub.capnp << 'EOS'
+@0xe200000000000011;
+struct FromA { y @0 :Int32; }
+EOS
+  cat > dir_b/sub.capnp << 'EOS'
+@0xe200000000000012;
+struct FromB { y @0 :Int32; }
+EOS
+  cat > dir_c/sub.capnp << 'EOS'
+@0xe200000000000013;
+struct FromC { y @0 :Int32; }
+EOS
+  cat > dir_a_sub.capnp << 'EOS'
+@0xe200000000000099;
+struct Flat { z @0 :Int32; }
+EOS
+  cat > only.capnp << 'EOS'
+@0xe200000000000014;
+struct Only { w @0 :Int32; }
+EOS
+  cat > use_all.capnp << 'EOS'
+@0xe200000000000098;
+using A = import "dir_a/sub.capnp";
+using B = import "dir_b/sub.capnp";
+using C = import "dir_c/sub.capnp";
+using F = import "dir_a_sub.capnp";
+using O = import "only.capnp";
+struct All { a @0 :A.FromA; b @1 :B.FromB; c @2 :C.FromC; f @3 :F.Flat; o @4 :O.Only; }
+EOS
+  cat > use_both.capnp << 'EOS'
+@0xe200000000000097;
+using A = import "dir_a/sub.capnp";
+using B = import "dir_b/sub.capnp";
+struct Both { a @0 :A.FromA; b @1 :B.FromB; }
+EOS
+  cxx_ok dir_a/sub.capnp dir_b/sub.capnp dir_c/sub.capnp dir_a_sub.capnp only.capnp \
+    use_all.capnp use_both.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" dir_a/sub.capnp dir_b/sub.capnp dir_c/sub.capnp \
+    dir_a_sub.capnp only.capnp use_all.capnp use_both.capnp
+  local mods
+  mods=$(grep -h '^module ' dir_a/*.f90 dir_b/*.f90 dir_c/*.f90 dir_a_sub_capnp.f90 | sort -u | wc -l)
+  if ((mods != 4)); then
+    echo "expected four distinct modules for the four colliding schemas, got $mods" >&2
+    exit 1
+  fi
+  grep -q '^module only_capnp$' only_capnp.f90 || {
+    echo "a schema whose basename is unique keeps the plain module name" >&2
+    exit 1
+  }
+  grep -q '^module use_all_capnp$' use_all_capnp.f90
+  fc -c dir_a/*.f90 dir_b/*.f90 dir_c/*.f90 dir_a_sub_capnp.f90 only_capnp.f90 \
+    -I "$MOD" -J .
+  fc -c use_all_capnp.f90 use_both_capnp.f90 -I "$MOD" -J .
+  echo "g28 ok"
+}
+
+g29() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > h.capnp << 'EOS'
+@0xf100000000000001;
+struct Box(T) { v @0 :T; }
+struct Pair(A, B) { a @0 :A; b @1 :B; }
+interface Gen(T) { put @0 (x :T) -> (y :T); }
+struct TagList(T) { v @0 :T; }
+interface Tag(T) { put @0 (x :T) -> (y :T); }
+interface Base(T) { get @0 () -> (v :T); }
+interface D1 extends(Base(Box(Text))) { a @0 () -> (); }
+interface D2 extends(Base(Box(Data))) { b @0 () -> (); }
+struct H {
+  g1 @0 :Gen(Box(Text));
+  g2 @1 :Gen(Box(Data));
+  g3 @2 :Gen(Box(Box(Text)));
+  g4 @3 :Gen(Box(Box(Data)));
+  g5 @4 :Gen(Box(Box(Box(Text))));
+  g6 @5 :Gen(Box(Box(Box(Data))));
+  l1 @6 :List(Box(Text));
+  l2 @7 :List(Box(Data));
+  p1 @8 :Pair(Box(Text), Box(Data));
+  p2 @9 :Pair(Box(Data), Box(Text));
+  p3 @10 :Pair(Box(Text), Box(Text));
+  t1 @11 :TagList(TagList(Text));
+  t2 @12 :Tag(List(Text));
+  t3 @13 :TagList(Text);
+}
+EOS
+  cxx_ok h.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" h.capnp
+  local ty
+  for ty in box_text_t box_data_t h_box_box_text_t h_box_box_data_t h_box_box_box_text_t \
+    h_box_box_box_data_t h_gen_box_text_client_t h_gen_box_data_client_t \
+    h_gen_box_box_text_client_t h_gen_box_box_data_client_t \
+    h_gen_box_box_box_text_client_t h_gen_box_box_box_data_client_t \
+    pair_box_box_t pair_box_data_box_text_t pair_box_text_box_text_t; do
+    grep -q "^   type :: $ty\$" h_capnp.f90 || {
+      echo "h_capnp.f90 has no type $ty" >&2
+      exit 1
+    }
+  done
+  mkdir own
+  cat > own/own.capnp << 'EOS'
+@0xf100000000000002;
+struct Box(T) { v @0 :T; }
+struct BoxText { v @0 :Text; }
+struct Own { b @0 :Box(Text); c @1 :BoxText; }
+EOS
+  (
+    cd own
+    cxx_ok own.capnp
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" own.capnp
+    grep -q '^   type :: box_text_t$' own_capnp.f90
+    grep -q '^   type :: box_text_2_t$' own_capnp.f90
+    fc -c own_capnp.f90 -I "$MOD" -J .
+  )
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use h_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(box_data_t) :: bd
+   type(h_box_box_data_t) :: bbd
+   type(box_text_t) :: bt
+   integer :: err
+   integer(int8), allocatable :: got(:)
+   call capnp_message_init_builder(m, err)
+   bd = box_data_new(m, err)
+   call box_data_v_set(bd, [1_int8, 2_int8, 3_int8], err)
+   call box_data_v_get(bd, got, err)
+   bbd = h_box_box_data_new(m, err)
+   bt = box_text_new(m, err)
+   call box_text_v_set(bt, 'hi', err)
+   print '(i0,1x,i0,1x,i0,1x,i0,1x,i0)', err, size(got), sum(int(got)), BOX_DATA_PWORDS, &
+      H_BOX_BOX_DATA_PWORDS
+   deallocate (got)
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc h_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "0 3 6 1 1"
+  echo "g29 ok"
+}
+
+g30() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir h1 h3 h4 h5 h6
+  cat > h1/a.capnp << 'EOS'
+@0xb200000000000001;
+struct SvcTag { x @0 :Int32; }
+const defTag :SvcTag = (x = 7);
+EOS
+  cat > h1/b.capnp << 'EOS'
+@0xb200000000000002;
+using A = import "a.capnp";
+annotation t @0xb200000000000003 (field) :Int32;
+struct Svc { tag @0 :List(A.SvcTag) $t(1); one @1 :A.SvcTag; }
+const myTag :A.SvcTag = (x = 9);
+const aTags :List(A.SvcTag) = [(x = 1)];
+EOS
+  cat > h3/a.capnp << 'EOS'
+@0xb300000000000001;
+struct Outer { interface Inner { ping @0 () -> (); } }
+EOS
+  cat > h3/b.capnp << 'EOS'
+@0xb300000000000002;
+using A = import "a.capnp";
+struct OuterInner { x @0 :Int32; }
+struct Holder { c @0 :A.Outer.Inner; l @1 :List(A.Outer.Inner); }
+interface UseIt { take @0 (c :A.Outer.Inner) -> (c2 :A.Outer.Inner); }
+EOS
+  cat > h4/a.capnp << 'EOS'
+@0xb400000000000001;
+interface Base1 { one @0 () -> (); }
+struct Outer { interface Inner { ping @0 () -> (); } }
+EOS
+  cat > h4/b.capnp << 'EOS'
+@0xb400000000000002;
+using A = import "a.capnp";
+interface OuterInner { own @0 () -> (); }
+interface Both extends(A.Outer.Inner, A.Base1, OuterInner) { both @0 () -> (); }
+EOS
+  cat > h5/a.capnp << 'EOS'
+@0xb500000000000001;
+struct SvcReq { x @0 :Int32; }
+struct SvcRes { y @0 :Int32; }
+EOS
+  cat > h5/b.capnp << 'EOS'
+@0xb500000000000002;
+using A = import "a.capnp";
+struct Svc { req @0 :Int32; res @1 :Int32; }
+interface Api { call @0 A.SvcReq -> A.SvcRes; }
+EOS
+  cat > h6/a1.capnp << 'EOS'
+@0xb600000000000001;
+struct Outer { interface Inner { ping @0 () -> (); } struct Rec { x @0 :Int32; } }
+EOS
+  cat > h6/a2.capnp << 'EOS'
+@0xb600000000000002;
+interface OuterInner { pong @0 () -> (); }
+struct OuterRec { y @0 :Int32; }
+EOS
+  cat > h6/b.capnp << 'EOS'
+@0xb600000000000003;
+using A1 = import "a1.capnp";
+using A2 = import "a2.capnp";
+struct Both {
+  i1 @0 :A1.Outer.Inner;
+  i2 @1 :A2.OuterInner;
+  r1 @2 :A1.Outer.Rec;
+  r2 @3 :A2.OuterRec;
+}
+EOS
+  local sub
+  for sub in h1 h3 h4 h5; do
+    (
+      cd "$sub"
+      cxx_ok a.capnp b.capnp
+      capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp
+      fc -c a_capnp.f90 b_capnp.f90 -I "$MOD" -J .
+    )
+  done
+  (
+    cd h6
+    cxx_ok a1.capnp a2.capnp b.capnp
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" a1.capnp a2.capnp b.capnp
+    fc -c a1_capnp.f90 a2_capnp.f90 b_capnp.f90 -I "$MOD" -J .
+  )
+  echo "g30 ok"
+}
+
+g31() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0xc100000000000001;
+interface Svc { req @0 () -> (); }
+struct Tag { struct Gen { v @0 :Int32; } }
+EOS
+  cat > f1.capnp << 'EOS'
+@0xc100000000000002;
+using F0 = import "f0.capnp";
+interface Gen { go @0 () -> (); }
+interface Ping extends(F0.Svc, Gen) { ping @0 () -> (); }
+struct List { svc @0 :F0.Tag.Gen; }
+const tagGenPwords :Int32 = 1;
+EOS
+  cat > f2.capnp << 'EOS'
+@0xc100000000000003;
+using F0 = import "f0.capnp";
+using F1 = import "f1.capnp";
+annotation yT @0xc100000000000004 (field, struct) :Text;
+struct PingList { req @0 :F1.List $yT("v"); }
+interface Req extends(F0.Svc) { more @0 () -> (); }
+const tagGenT :Int32 = 1;
+EOS
+  cxx_ok f0.capnp f1.capnp f2.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" f0.capnp f1.capnp f2.capnp
+  fc -c f0_capnp.f90 f1_capnp.f90 f2_capnp.f90 -I "$MOD" -J .
+  echo "g31 ok"
+}
+
+g32() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a0.capnp << 'EOS'
+@0xd200000000000001;
+struct CapDescriptor { x @0 :Int32; }
+struct Payload { y @0 :Int32; }
+EOS
+  cat > b.capnp << 'EOS'
+@0xd200000000000002;
+using A = import "a0.capnp";
+interface Svc { go @0 (p :A.Payload) -> (c :A.CapDescriptor); }
+EOS
+  cat > c.capnp << 'EOS'
+@0xd200000000000003;
+using B = import "b.capnp";
+interface Svc2 { go @0 () -> (); }
+struct H { s @0 :B.Svc; }
+EOS
+  cxx_ok a0.capnp b.capnp c.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a0.capnp b.capnp c.capnp
+  fc -c a0_capnp.f90 b_capnp.f90 c_capnp.f90 -I "$MOD" -J .
+  echo "g32 ok"
+}
+
+g33() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a0.capnp << 'EOS'
+@0xd300000000000001;
+annotation tagT @0xd300000000000011 (struct) :Int32;
+struct Svc $tagT(1) { x @0 :Int32; }
+EOS
+  cat > a1.capnp << 'EOS'
+@0xd300000000000002;
+using A0 = import "a0.capnp";
+struct One { x @0 :Int32; s @1 :A0.Svc; }
+EOS
+  cat > a2.capnp << 'EOS'
+@0xd300000000000003;
+struct SvcTag { x @0 :Int32; }
+EOS
+  cat > c.capnp << 'EOS'
+@0xd300000000000004;
+using A1 = import "a1.capnp";
+using A2 = import "a2.capnp";
+struct C { a @0 :A1.One; s @1 :A2.SvcTag; }
+EOS
+  cxx_ok a0.capnp a1.capnp a2.capnp c.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a0.capnp a1.capnp a2.capnp c.capnp
+  fc -c a0_capnp.f90 a1_capnp.f90 a2_capnp.f90 c_capnp.f90 -I "$MOD" -J .
+  echo "g33 ok"
+}
+
+g34() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a0.capnp << 'EOS'
+@0xd600000000000001;
+annotation resolve @0xd600000000000011 (struct) :Int32;
+struct Cap $resolve(1) { x @0 :Int32; }
+EOS
+  cat > a1.capnp << 'EOS'
+@0xd600000000000002;
+using A0 = import "a0.capnp";
+interface Ping { go @0 (c :A0.Cap) -> (); }
+struct Holder { c @0 :Capability; k @1 :A0.Cap; }
+EOS
+  cat > a2.capnp << 'EOS'
+@0xd600000000000003;
+using A1 = import "a1.capnp";
+interface Pong { go @0 (h :A1.Holder) -> (); }
+struct Keeper { c @0 :Capability; h @1 :A1.Holder; }
+EOS
+  cxx_ok a0.capnp a1.capnp a2.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a0.capnp a1.capnp a2.capnp
+  fc -c a0_capnp.f90 a1_capnp.f90 a2_capnp.f90 -I "$MOD" -J .
+  echo "g34 ok"
+}
+
+g35() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a1.capnp << 'EOS'
+@0xd500000000000001;
+using Cxx = import "/capnp/c++.capnp";
+$Cxx.namespace("na1");
+struct Item { a @0 :UInt64; }
+EOS
+  cat > a2.capnp << 'EOS'
+@0xd500000000000002;
+using Cxx = import "/capnp/c++.capnp";
+$Cxx.namespace("na2");
+struct Item { a @0 :UInt64; b @1 :UInt64; c @2 :Text; }
+EOS
+  cat > b.capnp << 'EOS'
+@0xd500000000000003;
+using A1 = import "a1.capnp";
+using A2 = import "a2.capnp";
+struct Box(T) { v @0 :T; }
+struct H { x @0 :Box(A1.Item); y @1 :Box(A2.Item); }
+EOS
+  cxx_ok a1.capnp a2.capnp b.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a1.capnp a2.capnp b.capnp
+  fc -c a1_capnp.f90 a2_capnp.f90 b_capnp.f90 -I "$MOD" -J .
+  grep -A3 'function box_item_v_init' b_capnp.f90 | grep -q 'a1_capnp_item_t) :: o' || {
+    echo "Box(A1.Item) is not bound to A1.Item" >&2
+    exit 1
+  }
+  grep -q 'a2_capnp_item_t) :: o' b_capnp.f90 || {
+    echo "Box(A2.Item) is not bound to A2.Item" >&2
+    exit 1
+  }
+  echo "g35 ok"
+}
+
+g36() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > h.capnp << 'EOS'
+@0xd400000000000001;
+struct Box(T) { val @0 :T; }
+struct Outer(U) { inner @0 :Box(Box(U)); }
+struct H { t @0 :Outer(Text); d @1 :Outer(Data); }
+EOS
+  cxx_ok h.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" h.capnp
+  fc -c h_capnp.f90 -I "$MOD" -J .
+  grep -A3 'function box_box_text_val_get' h_capnp.f90 | grep -q 'box_text_t) :: o' || {
+    echo "Box(Box(Text)).val is not a Box(Text)" >&2
+    exit 1
+  }
+  grep -A3 'function box_box_data_val_get' h_capnp.f90 | grep -q 'box_data_t) :: o' || {
+    echo "Box(Box(Data)).val is not a Box(Data)" >&2
+    exit 1
+  }
+  echo "g36 ok"
+}
+
+g37() {
+  local d
+  d=$(work)
+  cd "$d"
+  mkdir whole each
+  for w in whole each; do
+    mkdir "$w/dir_a" "$w/dir_b"
+    cat > "$w/dir_a/sub.capnp" << 'EOS'
+@0xe200000000000011;
+struct FromA { y @0 :Int32; }
+EOS
+    cat > "$w/dir_b/sub.capnp" << 'EOS'
+@0xe200000000000012;
+struct FromB { y @0 :Int32; }
+EOS
+    cat > "$w/use_both.capnp" << 'EOS'
+@0xe200000000000097;
+using A = import "dir_a/sub.capnp";
+using B = import "dir_b/sub.capnp";
+struct Both { a @0 :A.FromA; b @1 :B.FromB; }
+EOS
+  done
+  (
+    cd whole
+    cxx_ok dir_a/sub.capnp dir_b/sub.capnp use_both.capnp
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" dir_a/sub.capnp dir_b/sub.capnp use_both.capnp
+  )
+  (
+    cd each
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" dir_a/sub.capnp
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" dir_b/sub.capnp
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" use_both.capnp
+    fc -c dir_a/sub_capnp.f90 dir_b/sub_capnp.f90 use_both_capnp.f90 -I "$MOD" -J .
+  )
+  local f
+  for f in dir_a/sub_capnp.f90 dir_b/sub_capnp.f90; do
+    if [[ $(grep -m1 '^module ' whole/$f) != "$(grep -m1 '^module ' each/$f)" ]]; then
+      echo "$f names its module by the request" >&2
+      exit 1
+    fi
+  done
+  if [[ $(grep -m1 '^module ' each/dir_a/sub_capnp.f90) == "$(grep -m1 '^module ' each/dir_b/sub_capnp.f90)" ]]; then
+    echo "same-basename files share a module name" >&2
+    exit 1
+  fi
+  if [[ $(grep '^   use ' whole/use_both_capnp.f90 | grep -v 'use capnp') != \
+        "$(grep '^   use ' each/use_both_capnp.f90 | grep -v 'use capnp')" ]]; then
+    echo "an importer names modules by the request" >&2
+    exit 1
+  fi
+  mkdir solo
+  (
+    cd solo
+    mkdir dir_a
+    cp ../whole/dir_a/sub.capnp dir_a/
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" dir_a/sub.capnp
+    cat > user.f90 << 'EOS'
+module user
+   use sub_capnp
+   type(from_a_t) :: x
+end module user
+EOS
+    fc -c dir_a/sub_capnp.f90 user.f90 -I "$MOD" -J .
+  )
+  echo "g37 ok"
+}
+
+g38() {
+  local d f
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0xf000000000112b41;
+annotation tagTag(field, struct) :Text;
+annotation xTag(field, struct) :Text;
+interface ListList {
+  tagT @0 (a :Int32) -> (b :Text);
+  innerTag @1 (a :Int32) -> (b :Text);
+}
+struct Inner {
+  innerTag @0 :ListList;
+  innerSvc :group { a @1 :Int32; b @2 :Text; }
+}
+struct TagInner {
+  item @0 :ListList;
+}
+const c0 :TagInner = ();
+EOS
+  cat > f1.capnp << 'EOS'
+@0xf000000000112b42;
+using F0 = import "f0.capnp";
+annotation pingSvc(field, struct) :Text;
+annotation outer(field, struct) :Text;
+struct List {
+  outerSvc @0 :Int32;
+}
+struct Tag {
+  reqT @0 :Int32;
+  reqSvc :group { a @1 :Int32; b @2 :Text; }
+}
+interface Ping(T) { put @0 (x :T) -> (y :T); }
+struct Inst1 {
+  g0 @0 :Ping(F0.TagInner);
+}
+const innerDwords :Int32 = 1;
+const tagInnerDwords :Int32 = 1;
+EOS
+  cxx_ok f0.capnp f1.capnp
+  mkdir whole each
+  cp f0.capnp f1.capnp whole/
+  cp f0.capnp f1.capnp each/
+  (
+    cd whole
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" f0.capnp f1.capnp
+    fc -c f0_capnp.f90 f1_capnp.f90 -I "$MOD" -J .
+  )
+  (
+    cd each
+    for f in f0.capnp f1.capnp; do
+      capnp compile "${CAPNP_INC[@]}" -o"$BIN" "$f"
+    done
+    fc -c f0_capnp.f90 f1_capnp.f90 -I "$MOD" -J .
+  )
+  echo "g38 ok"
+}
+
+g39() {
+  local d f
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0xf000000000139201;
+annotation boxTag(field, struct) :Text;
+struct ItemPing(T) { v @0 :T; }
+struct Svc {
+  innerTag @0 :Float64 $boxTag("v");
+}
+struct Tag {
+  itemTag @0 :Svc $boxTag("v");
+  xTag @1 :Int32;
+  reqTag @2 :Float64;
+  pingT @3 :UInt16;
+  struct ItemBox { v @0 :Int32; }
+  interface TagReq { ping @0 () -> (); }
+}
+struct ItemInner {
+  ping @0 :List(Tag) $boxTag("v");
+  itemT @1 :Data;
+  outerTag @2 :Svc;
+  struct ReqGen { v @0 :Int32; }
+  outerT :group { a @3 :Int32; b @4 :Text; }
+}
+interface Gen(T) { put @0 (x :T) -> (y :T); }
+struct Inst0 {
+  g0 @0 :ItemPing(Tag.ItemBox);
+  g1 @1 :Gen(ItemPing(Text));
+}
+EOS
+  cat > f1.capnp << 'EOS'
+@0xf000000000139202;
+using F0 = import "f0.capnp";
+annotation outerTag(field, struct) :Text;
+interface BoxReq extends(F0.Tag.TagReq) {
+  pingTag @0 (a :Int32) -> (b :Text);
+  tagT @1 (a :Int32) -> (b :Text);
+  pingT @2 F0.ItemInner -> F0.ItemInner.ReqGen;
+}
+struct Item {
+  outerT @0 :F0.Tag.TagReq $outerTag("v");
+  pingTag @1 :F0.Tag;
+  outer @2 :F0.ItemInner $outerTag("v");
+  struct BoxReq { v @0 :Int32; }
+  interface Req { ping @0 () -> (); }
+}
+interface Box(T) { put @0 (x :T) -> (y :T); }
+struct Inner(T) { v @0 :T; }
+struct Req {
+  pingT @0 :Float64 $outerTag("v");
+  reqT @1 :List(Item.BoxReq);
+  svcTag :group { a @2 :Int32; b @3 :Text; }
+}
+struct Inst1 {
+  g0 @0 :Inner(F0.ItemPing(Data));
+  g1 @1 :F0.Gen(F0.Tag.ItemBox);
+}
+EOS
+  cat > f2.capnp << 'EOS'
+@0xf000000000139203;
+using F0 = import "f0.capnp";
+using F1 = import "f1.capnp";
+annotation tagTag(field, struct) :Text;
+struct GenGen {
+  innerT @0 :F1.BoxReq;
+  tagSvc @1 :Text $tagTag("v");
+  pingT @2 :F1.Req;
+  svcTag @3 :Bool;
+}
+struct TagOuter {
+  tagTag @0 :F0.Tag.ItemBox;
+  reqT @1 :Float64 $tagTag("v");
+  pingTag @2 :F1.Item $tagTag("v");
+  itemSvc @3 :Int32 $tagTag("v");
+  struct PingInner { v @0 :Int32; }
+}
+interface PingTag {
+  xT @0 (a :Int32) -> (b :Text);
+  ySvc @1 (a :Int32) -> (b :Text);
+  itemTag @2 (a :Int32) -> (b :Text);
+}
+struct SvcInner {
+  box @0 :F0.Tag.ItemBox $tagTag("v");
+  reqT @1 :F0.Tag.ItemBox;
+  svc @2 :Bool $tagTag("v");
+  innerSvc @3 :TagOuter $tagTag("v");
+  struct ListSvc { v @0 :Int32; }
+}
+struct Inst2 {
+  g0 @0 :F0.ItemPing(F0.ItemPing(Text));
+  g1 @1 :F0.Gen(F1.Inner(Data));
+}
+const c2 :F0.ItemInner = ();
+EOS
+  cxx_ok f0.capnp f1.capnp f2.capnp
+  mkdir whole each
+  cp f0.capnp f1.capnp f2.capnp whole/
+  cp f0.capnp f1.capnp f2.capnp each/
+  (
+    cd whole
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" f0.capnp f1.capnp f2.capnp
+    fc -c f0_capnp.f90 f1_capnp.f90 f2_capnp.f90 -I "$MOD" -J .
+  )
+  (
+    cd each
+    for f in f0.capnp f1.capnp f2.capnp; do
+      capnp compile "${CAPNP_INC[@]}" -o"$BIN" "$f"
+    done
+    fc -c f0_capnp.f90 f1_capnp.f90 f2_capnp.f90 -I "$MOD" -J .
+  )
+  echo "g39 ok"
+}
+
+g40() {
+  local d f
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0xf000000000139b51;
+annotation reqT(field, struct) :Text;
+annotation tagT(field, struct) :Text;
+interface Ping {
+  xTag @0 (a :Int32) -> (b :Text);
+  inner @1 (a :Int32) -> (b :Text);
+  ping @2 (a :Int32) -> (b :Text);
+}
+struct ReqTag {
+  pingT @0 :Ping;
+  xT @1 :Ping;
+  innerT @2 :Ping;
+  boxT @3 :Ping $tagT("v");
+}
+EOS
+  cat > f1.capnp << 'EOS'
+@0xf000000000139b52;
+using F0 = import "f0.capnp";
+annotation svc(field, struct) :Text;
+annotation reqT(field, struct) :Text;
+struct Box {
+  tagT @0 :F0.ReqTag;
+  x @1 :List(F0.ReqTag);
+  boxSvc @2 :Int32 $svc("v");
+  xSvc :group { a @3 :Int32; b @4 :Text; }
+}
+struct Gen {
+  tagTag @0 :List(Box) $svc("v");
+  reqT @1 :UInt16 $reqT("v");
+  svc @2 :F0.Ping;
+  tagT @3 :Box;
+}
+interface SvcGen {
+  svcTag @0 F0.ReqTag -> Gen;
+  ping @1 Box -> Box;
+  xT @2 Box -> F0.ReqTag;
+}
+EOS
+  cxx_ok f0.capnp f1.capnp
+  mkdir whole each
+  cp f0.capnp f1.capnp whole/
+  cp f0.capnp f1.capnp each/
+  (
+    cd whole
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" f0.capnp f1.capnp
+    fc -c f0_capnp.f90 f1_capnp.f90 -I "$MOD" -J .
+  )
+  (
+    cd each
+    for f in f0.capnp f1.capnp; do
+      capnp compile "${CAPNP_INC[@]}" -o"$BIN" "$f"
+    done
+    fc -c f0_capnp.f90 f1_capnp.f90 -I "$MOD" -J .
+  )
+  echo "g40 ok"
+}
+
+# Compile the schema files in $1.. as one request and one file at a time, and
+# check that the generated modules compile in both layouts.
+compile_both() {
+  local f
+  rm -rf whole each
+  mkdir whole each
+  cp "$@" whole/
+  cp "$@" each/
+  (
+    cd whole
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" "$@"
+    fc -c "${@/.capnp/_capnp.f90}" -I "$MOD" -J .
+  )
+  (
+    cd each
+    for f in "$@"; do
+      capnp compile "${CAPNP_INC[@]}" -o"$BIN" "$f"
+    done
+    fc -c "${@/.capnp/_capnp.f90}" -I "$MOD" -J .
+  )
+}
+
+g41() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0x9000000000000c41;
+struct CapDescriptor { x @0 :Int32; }
+struct HasCap { c @0 :Capability; }
+EOS
+  cat > f1.capnp << 'EOS'
+@0x9000000000000c42;
+using F0 = import "f0.capnp";
+struct Wrap { cd @0 :F0.CapDescriptor; }
+EOS
+  cat > f2.capnp << 'EOS'
+@0x9000000000000c43;
+using F1 = import "f1.capnp";
+interface Svc { m0 @0 () -> (w :F1.Wrap); }
+EOS
+  cxx_ok f0.capnp f1.capnp f2.capnp
+  compile_both f0.capnp f1.capnp f2.capnp
+  echo "g41 ok"
+}
+
+g42() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a0.capnp << 'EOS'
+@0x90000000000005d1;
+struct Keep { v @0 :Int32; }
+interface Unused { m0 @0 () -> (); }
+EOS
+  cat > a1.capnp << 'EOS'
+@0x90000000000005d2;
+using F0 = import "a0.capnp";
+struct Wrap { k @0 :F0.Keep; }
+struct CapDescriptor { x @0 :Int32; }
+EOS
+  cat > b0.capnp << 'EOS'
+@0x9000000000001391;
+struct Keep { v @0 :Int32; }
+struct CapDescriptor { x @0 :Int32; }
+EOS
+  cat > b1.capnp << 'EOS'
+@0x9000000000001392;
+using F0 = import "b0.capnp";
+struct Wrap { k @0 :F0.Keep; }
+interface Svc { m0 @0 () -> (); }
+struct Held { c @0 :Capability; }
+EOS
+  cxx_ok a0.capnp a1.capnp
+  cxx_ok b0.capnp b1.capnp
+  mkdir pa pb
+  cp a0.capnp a1.capnp pa/
+  cp b0.capnp b1.capnp pb/
+  (cd pa && compile_both a0.capnp a1.capnp)
+  (cd pb && compile_both b0.capnp b1.capnp)
+  echo "g42 ok"
+}
+
+g43() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > f1.capnp << 'EOS'
+@0x9000000000002302;
+annotation box (struct) :Data;
+struct Keep { x @0 :Int32; }
+const nodeBox :Text = "a";
+EOS
+  cat > f2.capnp << 'EOS'
+@0x9000000000002303;
+using F1 = import "f1.capnp";
+struct Node $F1.box(0x"0102") { k @0 :F1.Keep; }
+EOS
+  cxx_ok f1.capnp f2.capnp
+  compile_both f1.capnp f2.capnp
+  echo "g43 ok"
+}
+
+g44() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xab00000000000007;
+struct AnyStruct { x @0 :Int32; }
+struct AnyList { x @0 :Int32; }
+struct CapabilityClient { x @0 :Int32; }
+EOS
+  cat > b.capnp << 'EOS'
+@0xab00000000000008;
+struct Holder {
+  s @0 :AnyStruct;
+  l @1 :AnyList;
+  c @2 :Capability;
+}
+EOS
+  cxx_ok a.capnp b.capnp
+  compile_both a.capnp b.capnp
+  echo "g44 ok"
+}
+
+g45() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xab00000000000001;
+struct Inner { v @0 :Int32; }
+struct S { foo @0 :Text; bar @1 :Inner; nums @2 :List(Int32); ptr @3 :AnyPointer; }
+const sFooHas :Int32 = 1;
+const sBarSet :Int32 = 2;
+const sNumsSetElem :Int32 = 3;
+const sPtrHas :Int32 = 4;
+const sNumsHas :Int32 = 5;
+EOS
+  cxx_ok a.capnp
+  compile_both a.capnp
+  (
+    cd whole
+    grep -q 'parameter :: S_FOO_HAS = 1' a_capnp.f90
+    grep -q 'parameter :: S_BAR_SET = 2' a_capnp.f90
+  )
+  echo "g45 ok"
+}
+
+g46() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > f0.capnp << 'EOS'
+@0xf0000000000008d1;
+struct Inner(T) { v @0 :T; }
+interface InnerY(T) { put @0 (x :T) -> (y :T); }
+struct Y { v @0 :Int32; }
+struct Inst0 { g0 @0 :Inner(Y); }
+EOS
+  cxx_ok f0.capnp
+  compile_both f0.capnp
+  (
+    cd whole
+    grep -q 'type :: inner_y_t$' f0_capnp.f90
+    grep -q 'function inner_y_new(' f0_capnp.f90
+    if grep -q 'inner_y_2' f0_capnp.f90; then
+      echo "g46: an instantiation was renamed for an interface" >&2
+      exit 1
+    fi
+  )
+  echo "g46 ok"
+}
+
+g47() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > h.capnp << 'EOS'
+@0xf0000000000008d2;
+struct Box(T) { v @0 :T; }
+struct Pair(A, B) { a @0 :A; b @1 :B; }
+struct Five(A, B, C, D, E) { a @0 :A; e @1 :E; }
+struct H {
+  b @0 :Box(Box(Text));
+  d @1 :Box(Box(Data));
+  p @2 :Pair(Box(Text), Box(Data));
+  l @3 :Box(List(Box(Text)));
+  f @4 :Five(Text, Text, Text, Text, Data);
+}
+EOS
+  cxx_ok h.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" h.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use h_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(box_box_t) :: b
+   type(box_box_data_t) :: d
+   type(pair_box_box_t) :: p
+   type(box_list_box_t) :: l
+   type(five_text_text_text_text_t) :: f
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   b = box_box_new(m, err)
+   if (err /= 0) error stop 1
+   d = box_box_data_new(m, err)
+   if (err /= 0) error stop 2
+   p = pair_box_box_new(m, err)
+   if (err /= 0) error stop 3
+   l = box_list_box_new(m, err)
+   if (err /= 0) error stop 4
+   f = five_text_text_text_text_new(m, err)
+   if (err /= 0) error stop 5
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc h_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g47 ok"
+}
+
+g48() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xab00000000000002;
+struct Inner { v @0 :Int32; }
+struct S { foo @0 :Text; bar @1 :Inner; nums @2 :List(Int32); }
+const sFooHas :Inner = (v = 1);
+const sBarSet :Inner = (v = 2);
+const sNumsSetElem :Inner = (v = 3);
+EOS
+  cxx_ok a.capnp
+  compile_both a.capnp
+  (
+    cd whole
+    local n
+    for n in s_foo_has s_bar_set s_nums_set_elem; do
+      grep -q "^   function $n(err) result" a_capnp.f90 || {
+        echo "g48: the constant accessor $n was renamed" >&2
+        exit 1
+      }
+    done
+  )
+  echo "g48 ok"
+}
+
+g49() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xab00000000000003;
+struct Inner { v @0 :Int32; }
+struct S { foo @0 :Text; bar @1 :Inner; }
+const sFooHas :Text = "s_foo_has";
+const sBarSet :Text = "it's s_bar_set";
+const sNote :Inner = (v = 1);
+EOS
+  cxx_ok a.capnp
+  compile_both a.capnp
+  (
+    cd whole
+    grep -q "parameter :: S_FOO_HAS = 's_foo_has'" a_capnp.f90
+    grep -q "parameter :: S_BAR_SET = 'it''s s_bar_set'" a_capnp.f90
+  )
+  echo "g49 ok"
+}
+
+g50() {
+  local d a b
+  d=$(work)
+  cd "$d"
+  {
+    echo '@0xab00000000000004;'
+    echo 'struct Inner { v @0 :Int32; }'
+    for a in a b c d e f g h i j; do
+      for b in a b c d e f g h; do
+        echo "struct Q$a$b { foo @0 :Text; }"
+        echo "const q${a}${b}FooHas :Inner = (v = 1);"
+      done
+    done
+  } > a.capnp
+  cxx_ok a.capnp
+  compile_both a.capnp
+  (
+    cd whole
+    grep -q '^   function qaa_foo_has(err) result' a_capnp.f90
+    grep -q '^   function qjh_foo_has(err) result' a_capnp.f90
+  )
+  echo "g50 ok"
+}
+
+g51() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > h.capnp << 'EOS'
+@0xf0000000000008d3;
+struct Item {
+  n @0 :Int32;
+  xPing :group { a @1 :Int32; }
+}
+struct ItemX(T) { v @0 :T; }
+struct Ping { v @0 :Int32; }
+struct H { i @0 :ItemX(Ping); }
+EOS
+  cxx_ok h.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" h.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use h_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(item_x_ping_t) :: x
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   x = item_x_ping_new(m, err)
+   if (err /= 0) error stop 1
+   print '(a)', 'ok'
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc h_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  cmp_out "$(./drv)" "ok"
+  echo "g51 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
-  g3) g34 g3 ;;
-  g4) g34 g4 ;;
+  g3) g3_g4 g3 ;;
+  g4) g3_g4 g4 ;;
   g5) g5 ;;
   g6) g6 ;;
   g7) g7 ;;
@@ -1037,11 +2538,47 @@ case "$CASE" in
   g13) g13 ;;
   g14) g14 ;;
   g15) g15 ;;
+  g16) g16 ;;
+  g17) g17 ;;
+  g18) g18 ;;
+  g19) g19 ;;
+  g20) g20 ;;
+  g21) g21 ;;
+  g22) g22 ;;
+  g23) g23 ;;
+  g24) g24 ;;
+  g25) g25 ;;
+  g26) g26 ;;
+  g27) g27 ;;
+  g28) g28 ;;
+  g29) g29 ;;
+  g30) g30 ;;
+  g31) g31 ;;
+  g32) g32 ;;
+  g33) g33 ;;
+  g34) g34 ;;
+  g35) g35 ;;
+  g36) g36 ;;
+  g37) g37 ;;
+  g38) g38 ;;
+  g39) g39 ;;
+  g40) g40 ;;
+  g41) g41 ;;
+  g42) g42 ;;
+  g43) g43 ;;
+  g44) g44 ;;
+  g45) g45 ;;
+  g46) g46 ;;
+  g47) g47 ;;
+  g48) g48 ;;
+  g49) g49 ;;
+  g50) g50 ;;
+  g51) g51 ;;
   all)
-    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|all" >&2
     exit 2
     ;;
 esac
