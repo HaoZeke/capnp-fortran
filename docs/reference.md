@@ -249,3 +249,27 @@ fields of `Nest(T)` settle through the instantiation's own bindings).
 Unbound parameters keep AnyPointer accessors. Interface-typed struct
 fields emit capability-slot pointer accessors for use with
 `rpc_make_cap_ptr`/`rpc_result_cap`.
+
+An instantiation of a generic interface, and a struct instantiation met
+only while writing one, takes its names from the module (`h_gen_box_text_client_t`
+for `Gen(Box(Text))` in `h.capnp`), as do annotation constants
+(`<MODULE>_<NAME>_ID`, and a value constant `<MODULE>_<OWNER>_<NAME>`). Two schemas compiled one file at a time cannot
+then declare the same name, and a name that main's generator wrote
+(`box_text_t`) is unchanged. A module imported only for such names, or
+for a superclass, is read with `use <module>, only: ...`.
+
+Typed `AnyStruct`, `AnyList` and capability fields use `any_struct_t`,
+`any_list_t` and `capability_client_t` from the `capnp_any` module. A
+generated module imports only the ones it uses, under private aliases, so
+user code that declares such a variable needs `use capnp_any`, and a schema
+may declare its own `AnyStruct`, `AnyList` or `CapabilityClient`. The
+`rpc_capnp` symbols a module needs are private aliases too, apart from
+`payload_t` and `payload_content_set` in a file with interfaces. A procedure
+that would share a name with a constant of the module (`_has` beside
+`const sFooHas`) takes an `_f` suffix.
+
+An instantiation keeps the name the generator gave it before: the generic's
+name plus the node name of each of its first four bindings, so
+`Box(Box(Text))` is `box_box_t` and `Pair(Box(Text), Box(Data))` is
+`pair_box_box_t`. A distinct instantiation that would repeat a taken name
+is spelled out in full (`box_box_data_t`), and every binding is kept.
