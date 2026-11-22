@@ -502,42 +502,72 @@ contains
       end do
    end function upcase
 
-   !> Fortran character expression for an arbitrary string.
-   !> Printable characters stay inside a quoted literal (quotes doubled).
-   !> Controls and DEL become achar() calls, matching the decoded value of
-   !> a Cap'n Proto string escape (kj/parse/char.h escapeSequence).
-   pure function ftext(s) result(o)
+   !> Fortran character expression for an arbitrary string, written after
+   !> lead columns of the caller's line. Printable characters stay inside
+   !> quoted literals (quotes doubled). Controls, DEL and bytes above 126
+   !> become achar() calls, matching the decoded value of a Cap'n Proto
+   !> string escape (kj/parse/char.h escapeSequence). Long values continue
+   !> on following lines, so no line passes the free-form limit.
+   pure function ftext(s, lead) result(o)
       character(len=*), intent(in) :: s
-      character(len=:), allocatable :: o
-      integer :: i, a
-      logical :: in_lit
+      integer, intent(in) :: lead
+      character(len=:), allocatable :: o, run
+      integer, parameter :: max_run = 60
+      integer :: i, a, col
+      logical :: first
       if (len(s) == 0) then
          o = "''"
          return
       end if
       o = ''
-      in_lit = .false.
+      run = ''
+      col = lead
+      first = .true.
       do i = 1, len(s)
          a = iachar(s(i:i))
          if (a < 32 .or. a >= 127) then
-            if (in_lit) then
-               o = o//"'"
-               in_lit = .false.
+            if (len(run) > 0) then
+               call ftext_put(o, col, first, "'"//run//"'")
+               run = ''
             end if
-            if (len(o) > 0) o = o//'//'
-            o = o//'achar('//itoa(int(a, int64))//')'
+            call ftext_put(o, col, first, 'achar('//itoa(int(a, int64))//')')
          else
-            if (.not. in_lit) then
-               if (len(o) > 0) o = o//'//'
-               o = o//"'"
-               in_lit = .true.
+            run = run//s(i:i)
+            if (s(i:i) == "'") run = run//"'"
+            if (len(run) >= max_run) then
+               call ftext_put(o, col, first, "'"//run//"'")
+               run = ''
             end if
-            o = o//s(i:i)
-            if (s(i:i) == "'") o = o//"'"
          end if
       end do
-      if (in_lit) o = o//"'"
+      if (len(run) > 0) call ftext_put(o, col, first, "'"//run//"'")
    end function ftext
+
+   !> Append one piece of an ftext expression, continuing the line when the
+   !> piece would pass column 100.
+   pure subroutine ftext_put(o, col, first, piece)
+      character(len=:), allocatable, intent(inout) :: o
+      integer, intent(inout) :: col
+      logical, intent(inout) :: first
+      character(len=*), intent(in) :: piece
+      integer, parameter :: max_col = 100, indent = 6
+      if (first) then
+         first = .false.
+         if (col + len(piece) > max_col) then
+            o = '&'//achar(10)//repeat(' ', indent)//piece
+            col = indent + len(piece)
+         else
+            o = piece
+            col = col + len(piece)
+         end if
+      else if (col + len(piece) + 3 > max_col) then
+         o = o//'//&'//achar(10)//repeat(' ', indent)//piece
+         col = indent + len(piece)
+      else
+         o = o//'//'//piece
+         col = col + 2 + len(piece)
+      end if
+   end subroutine ftext_put
 
    !> Kind-suffixed integer token. The most negative value of a kind has
    !> no literal: Fortran parses the sign apart from the digits, so
@@ -1803,7 +1833,7 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: v
-      character(len=:), allocatable :: cn, s
+      character(len=:), allocatable :: cn, s, pre
       integer(int8), allocatable :: db(:)
       logical :: has
       call node_fname(np, cn, err)
@@ -1831,7 +1861,8 @@ contains
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
-         call w('   character(len=*), parameter :: '//upcase(cn)//' = '//ftext(s))
+         pre = '   character(len=*), parameter :: '//upcase(cn)//' = '
+         call w(pre//ftext(s, len(pre)))
       case (TYPE_DATA)
          call value_data(v, db, err)
          if (err /= CAPNP_OK) return
@@ -2527,7 +2558,7 @@ contains
          call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
-         call w('         s = '//ftext(dtext))
+         call w('         s = '//ftext(dtext, 14))
          call w('         return')
          call w('      end if')
       end if
@@ -4264,7 +4295,8 @@ contains
          case (TYPE_TEXT)
             call value_text(v, s, err)
             if (err /= CAPNP_OK) return
-            call w('   character(len=*), parameter :: '//cname//' = '//ftext(s))
+            pre = '   character(len=*), parameter :: '//cname//' = '
+            call w(pre//ftext(s, len(pre)))
          case (TYPE_DATA)
             call value_data(v, db, err)
             if (err /= CAPNP_OK) return
