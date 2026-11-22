@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g11|g12|g13|g14|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g11|g12|g13|g14|g15|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -1004,6 +1004,23 @@ EOF
   echo "g14 ok"
 }
 
+g15() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > gen.capnp << 'EOF'
+@0x8666666666666601;
+interface Base { ping @0 () -> (); }
+interface Gen(T) extends(Base) { get @0 () -> (v :T); }
+struct Holder { g @0 :Gen(Text); }
+EOF
+  capnp compile "${CAPNP_INC[@]}" -oc++ gen.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" gen.capnp
+  grep -q 'extends(base_server_t), abstract :: gen_gen_text_server_t' gen_capnp.f90
+  fc -c gen_capnp.f90 -I "$MOD" -J .
+  echo "g15 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -1019,11 +1036,12 @@ case "$CASE" in
   g12) g12 ;;
   g13) g13 ;;
   g14) g14 ;;
+  g15) g15 ;;
   all)
-    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|all" >&2
     exit 2
     ;;
 esac

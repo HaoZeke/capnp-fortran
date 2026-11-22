@@ -25,7 +25,8 @@ contains
          new_unittest("g11_super_dispatch", test_g11), &
          new_unittest("g12_import_shared_types", test_g12), &
          new_unittest("g13_same_name_annotations", test_g13), &
-         new_unittest("g14_long_text_literals", test_g14) &
+         new_unittest("g14_long_text_literals", test_g14), &
+         new_unittest("g15_generic_extends_base", test_g15) &
          ]
    end subroutine collect_codegen_parity
 
@@ -108,5 +109,10 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_gap(error, 'g14')
    end subroutine test_g14
+
+   subroutine test_g15(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, 'g15')
+   end subroutine test_g15
 
 end module test_codegen_parity

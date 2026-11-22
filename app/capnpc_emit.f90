@@ -1075,18 +1075,7 @@ contains
       ! Interface declarations follow every struct declaration: their
       ! abstract method interfaces IMPORT the param/result handle types,
       ! which must already be declared.
-      if (err == CAPNP_OK) then
-         do i = 1, size(g_nodes)
-            call node_display_name(g_nodes(i)%p, dn, err)
-            if (err /= CAPNP_OK) exit
-            mine = len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1
-            if (.not. mine) cycle
-            if (node_which(g_nodes(i)%p) == NODE_INTERFACE) then
-               call emit_interface_decl(g_nodes(i)%p, err)
-               if (err /= CAPNP_OK) exit
-            end if
-         end do
-      end if
+      if (err == CAPNP_OK) call emit_iface_decls_ordered(g_prefix, err)
 
       call w('contains')
       call w('')
@@ -3395,7 +3384,7 @@ contains
    !> a client and a server, declared after the struct handles they import.
    subroutine emit_inst_decls(err)
       integer, intent(out) :: err
-      integer :: k, prev
+      integer :: k
       type(capnp_ptr_t) :: np
       err = CAPNP_OK
       do k = 1, g_ninsts
@@ -3412,19 +3401,99 @@ contains
          if (err /= CAPNP_OK) return
          call w('')
       end do
-      prev = g_cur_inst
+   end subroutine emit_inst_decls
+
+   !> Interface declarations of this file and of its branded instantiations.
+   !> A server type extends its parent's server type, so a declaration is
+   !> written after the declaration of the interface it extends.
+   subroutine emit_iface_decls_ordered(prefix, err)
+      character(len=*), intent(in) :: prefix
+      integer, intent(out) :: err
+      integer, parameter :: max_items = 512
+      character(len=128), allocatable :: names(:), parents(:)
+      integer, allocatable :: node_of(:), inst_of(:)
+      logical, allocatable :: done(:)
+      character(len=:), allocatable :: dn, tn, parent
+      integer :: i, j, k, n, nsuper, left, prev
+      logical :: ready, progress
+      err = CAPNP_OK
+      allocate (names(max_items), parents(max_items), node_of(max_items), &
+                inst_of(max_items), done(max_items))
+      n = 0
       do k = 1, g_ninsts
-         np = g_nodes(g_insts(k)%gidx)%p
-         if (node_which(np) /= NODE_INTERFACE) cycle
-         g_cur_inst = k
-         g_has_iface = .true.
-         g_soft = .true.
-         call emit_interface_decl(np, err)
-         g_soft = .false.
+         if (node_which(g_nodes(g_insts(k)%gidx)%p) /= NODE_INTERFACE) cycle
+         n = n + 1
+         if (n > max_items) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         node_of(n) = g_insts(k)%gidx
+         inst_of(n) = k
+      end do
+      do i = 1, size(g_nodes)
+         call node_display_name(g_nodes(i)%p, dn, err)
+         if (err /= CAPNP_OK) return
+         if (.not. (len(dn) > len(prefix) .and. index(dn, prefix//':') == 1)) cycle
+         if (node_which(g_nodes(i)%p) /= NODE_INTERFACE) cycle
+         n = n + 1
+         if (n > max_items) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         node_of(n) = i
+         inst_of(n) = 0
+      end do
+      prev = g_cur_inst
+      do i = 1, n
+         g_cur_inst = inst_of(i)
+         call iface_name(g_nodes(node_of(i))%p, tn, err)
          if (err /= CAPNP_OK) exit
+         call iface_parent(g_nodes(node_of(i))%p, parent, nsuper, err)
+         if (err /= CAPNP_OK) exit
+         names(i) = tn
+         parents(i) = parent
+         done(i) = .false.
       end do
       g_cur_inst = prev
-   end subroutine emit_inst_decls
+      if (err /= CAPNP_OK) return
+      left = n
+      do while (left > 0)
+         progress = .false.
+         do i = 1, n
+            if (done(i)) cycle
+            ready = .true.
+            if (len_trim(parents(i)) > 0) then
+               do j = 1, n
+                  if (j == i .or. done(j)) cycle
+                  if (names(j) == parents(i)) ready = .false.
+               end do
+            end if
+            if (.not. ready) cycle
+            call emit_one_iface_decl(i)
+            if (err /= CAPNP_OK) return
+            progress = .true.
+         end do
+         if (.not. progress) then
+            do i = 1, n
+               if (done(i)) cycle
+               call emit_one_iface_decl(i)
+               if (err /= CAPNP_OK) return
+            end do
+         end if
+      end do
+   contains
+      subroutine emit_one_iface_decl(i)
+         integer, intent(in) :: i
+         g_cur_inst = inst_of(i)
+         if (inst_of(i) > 0) g_has_iface = .true.
+         g_soft = inst_of(i) > 0
+         call emit_interface_decl(g_nodes(node_of(i))%p, err)
+         g_soft = .false.
+         g_cur_inst = prev
+         done(i) = .true.
+         left = left - 1
+      end subroutine emit_one_iface_decl
+   end subroutine emit_iface_decls_ordered
 
    !> Accessors for one instantiation: struct fields with parameters
    !> substituted, or the branded interface's client and server.
