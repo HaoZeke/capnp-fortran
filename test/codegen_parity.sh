@@ -65,6 +65,16 @@ fc() {
   "$FC" -std=f2018 "${SAN[@]}" "${COV[@]}" "$@"
 }
 
+run_drv() {
+  local rc=0
+  DRV_OUT=$(./drv) || rc=$?
+  if ((rc != 0)); then
+    echo "drv exited with status $rc" >&2
+    echo "$DRV_OUT" >&2
+    exit 1
+  fi
+}
+
 cmp_out() {
   local got=$1 exp=$2
   if [[ "$got" != "$exp" ]]; then
@@ -131,7 +141,8 @@ int main() {
 EOF
   "$CXX" -std=c++17 cpp.cpp minmax.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
   local f c
-  f=$(./drv | tr 'A-F' 'a-f')
+  run_drv
+  f=$(tr 'A-F' 'a-f' <<< "$DRV_OUT")
   c=$(./cppdrv | tr 'A-F' 'a-f')
   cmp_out "$f" "$c"
   echo "g1 ok"
@@ -170,7 +181,8 @@ program drv
 end program drv
 EOF
   fc textesc_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" "ok"
+  run_drv
+  cmp_out "$DRV_OUT" "ok"
   echo "g2 ok"
 }
 
@@ -229,7 +241,8 @@ int main() {
 EOF
   "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
   local f c
-  f=$(./drv)
+  run_drv
+  f=$DRV_OUT
   c=$(./cppdrv)
   cmp_out "$f" "$c"
   if [[ "$which" == g3 ]]; then
@@ -305,7 +318,8 @@ program drv
 end program drv
 EOF
   fc ifaces_capnp.f90 impl.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" "1"
+  run_drv
+  cmp_out "$DRV_OUT" "1"
   echo "g5 ok"
 }
 
@@ -373,7 +387,8 @@ program drv
 end program drv
 EOF
   fc generics_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" "ok"
+  run_drv
+  cmp_out "$DRV_OUT" "ok"
   echo "g6 ok"
 }
 
@@ -476,7 +491,8 @@ program drv
 end program drv
 EOF
   fc caps_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" $'11\n0 7\n0'
+  run_drv
+  cmp_out "$DRV_OUT" $'11\n0 7\n0'
   echo "g8 ok"
 }
 
@@ -542,7 +558,8 @@ program drv
 end program drv
 EOF
   fc surf_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" "ok"
+  run_drv
+  cmp_out "$DRV_OUT" "ok"
   echo "g9 ok"
 }
 
@@ -710,12 +727,14 @@ program drv
    call rpc_pump_once(srv_conn, err)
 
    print '(i0,1x,a,1x,i0,1x,i0,1x,i0)', rval, txt, alpha_hits, beta_hits, baz_hits
+   deallocate (txt)
    call rpc_conn_close(cli)
    call rpc_conn_close(srv_conn)
 end program drv
 EOF
   fc supers_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
-  cmp_out "$(./drv)" "42 beta:hi 1 1 1"
+  run_drv
+  cmp_out "$DRV_OUT" "42 beta:hi 1 1 1"
   echo "g11 ok"
 }
 
