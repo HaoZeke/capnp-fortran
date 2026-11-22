@@ -6,7 +6,7 @@ platforms = ["linux-64"]
 
 [dependencies]
 fypp = ">=3.2"
-fpm = ">=0.10"
+fpm = ">=0.13"
 gfortran = ">=13"
 capnproto = ">=1.0"
 
@@ -41,7 +41,7 @@ linkcheck = { cmd = "lychee --config lychee.toml --no-progress 'docs/build/**/*.
 # Coverage aggregation uses gfortran's matching gcov (no gcovr required).
 [feature.coverage.dependencies]
 fypp = ">=3.2"
-fpm = ">=0.10"
+fpm = ">=0.13"
 gfortran = ">=13"
 capnproto = ">=1.0"
 

@@ -47,6 +47,7 @@ set(CAPNP_FORTRAN_SOURCES
   src/capnp_pointer.f90
   src/capnp_arena.f90
   src/capnp_message.f90
+  src/capnp_any.f90
   src/capnp_packed.f90
   src/capnp_union.f90
   src/capnp_serialize.f90
