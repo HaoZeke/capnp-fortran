@@ -53,6 +53,11 @@ module capnpc_emit
    !> While set, w() leaves the procedure names of the lines it writes as
    !> they are: a constant accessor keeps the name of its constant.
    logical :: g_ren_off = .false.
+   !> Annotation constants named so far in one walk of the annotation surface.
+   type(nameset_t) :: g_ann_used
+   !> The module tag that prefixes an annotation constant, and the module
+   !> name that the file's own annotations are already named by.
+   character(len=64) :: g_ann_tag = '', g_ann_mod = ''
    !> While set, w() records declared names and writes no text.
    logical :: g_capture = .false.
    !> While set, a walk leaves out the annotation constants and helpers.
@@ -4060,10 +4065,14 @@ contains
       character(len=*), intent(in) :: modname
       integer, intent(in) :: fidx
       integer, intent(out) :: err
-      character(len=:), allocatable :: dn, owner
+      character(len=:), allocatable :: dn, owner, ftag
       integer :: i
       logical :: mine
       err = CAPNP_OK
+      g_ann_used%n = 0
+      call file_tag(ftag)
+      g_ann_tag = ftag
+      g_ann_mod = modname
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) return
@@ -4072,7 +4081,9 @@ contains
          call node_fname(g_nodes(i)%p, owner, err)
          if (err /= CAPNP_OK) return
          if (node_which(g_nodes(i)%p) == NODE_ANNOTATION) then
-            call w('   integer(int64), parameter :: '//upcase(owner)//'_ID = '// &
+            call w('   integer(int64), parameter :: '// &
+                   unique_const(ident_fit(upcase(ftag)//'_'//upcase(owner)//'_ID'), &
+                                node_id(g_nodes(i)%p))//' = '// &
                    signed_lit(node_id(g_nodes(i)%p), '_int64'))
          end if
          call emit_applied(g_nodes(i)%p, owner, err)
@@ -4122,26 +4133,116 @@ contains
       end select
    end subroutine emit_applied
 
+   !> An annotation constant named after its owner and annotation can meet
+   !> another name of the module: a union tag, an accessor, a nested type or
+   !> constant, or the constant of a different annotation or owner that
+   !> spells the same. The constant keeps the plain name unless the module
+   !> already has it. Then it takes the annotation's id as a suffix, and a
+   !> counter if that is taken too. The walk is deterministic, so every
+   !> pass picks the same name.
+   function unique_const(cand, id) result(o)
+      character(len=*), intent(in) :: cand
+      integer(int64), intent(in) :: id
+      character(len=:), allocatable :: o
+      character(len=16) :: hx
+      integer :: k
+      o = cand
+      if (.not. const_taken(o)) then
+         call ns_add(g_ann_used, o)
+         return
+      end if
+      write (hx, '(z16.16)') id
+      hx = lowcase(hx)
+      o = ident_fit(cand//'_'//hx(9:16))
+      k = 1
+      do while (const_taken(o))
+         k = k + 1
+         o = ident_fit(cand//'_'//hx(9:16)//'_'//itoa(int(k, int64)))
+      end do
+      call ns_add(g_ann_used, o)
+   end function unique_const
+
+   function const_taken(name) result(yes)
+      character(len=*), intent(in) :: name
+      logical :: yes
+      yes = ns_has(g_reserved, name) .or. ns_has(g_ann_used, name)
+   end function const_taken
+
+   !> File stem of the schema that declares annotation node np, as
+   !> identifier characters. It tells apart annotations that share a name.
+   subroutine annotation_scope_tag(np, tag, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=:), allocatable, intent(out) :: tag
+      integer, intent(out) :: err
+      character(len=:), allocatable :: dn
+      integer :: i, b, e
+      call node_display_name(np, dn, err)
+      if (err /= CAPNP_OK) return
+      e = index(dn, ':') - 1
+      if (e < 0) e = len(dn)
+      dn = dn(1:e)
+      b = index(dn, '/', back=.true.) + 1
+      e = index(dn(b:), '.', back=.true.)
+      if (e > 0) dn = dn(b:b + e - 2)
+      if (e == 0) dn = dn(b:)
+      tag = ''
+      do i = 1, len(dn)
+         if ((dn(i:i) >= 'a' .and. dn(i:i) <= 'z') .or. &
+             (dn(i:i) >= 'A' .and. dn(i:i) <= 'Z') .or. &
+             (dn(i:i) >= '0' .and. dn(i:i) <= '9') .or. dn(i:i) == '_') then
+            tag = tag//dn(i:i)
+         else if (dn(i:i) == '+') then
+            tag = tag//'x'
+         end if
+      end do
+      if (len(tag) == 0) tag = 'file'
+   end subroutine annotation_scope_tag
+
    subroutine emit_ann_list(owner, al, err)
       character(len=*), intent(in) :: owner
       type(capnp_ptr_t), intent(in) :: al
       integer, intent(out) :: err
       type(capnp_ptr_t) :: a, v
-      character(len=:), allocatable :: aname, cname, s
+      character(len=:), allocatable :: aname, cname, s, tag, pre
+      character(len=64), allocatable :: names(:)
+      integer, allocatable :: aidxs(:)
       integer(int8), allocatable :: db(:)
-      integer :: aidx
+      integer :: aidx, n, j
       integer(int64) :: i
       err = CAPNP_OK
-      do i = 0_int64, capnp_list_len(al) - 1_int64
+      n = int(capnp_list_len(al))
+      allocate (names(max(n, 1)), aidxs(max(n, 1)))
+      do i = 0_int64, int(n, int64) - 1_int64
          a = capnp_list_get_struct(al, int(i), err)
          if (err /= CAPNP_OK) return
-         aidx = find_node(annotation_id(a))
-         if (aidx == 0) cycle
-         call node_fname(g_nodes(aidx)%p, aname, err)
+         aidxs(i + 1) = find_node(annotation_id(a))
+         names(i + 1) = ''
+         if (aidxs(i + 1) == 0) cycle
+         call node_fname(g_nodes(aidxs(i + 1))%p, aname, err)
          if (err /= CAPNP_OK) return
+         names(i + 1) = aname
+      end do
+      do i = 0_int64, int(n, int64) - 1_int64
+         a = capnp_list_get_struct(al, int(i), err)
+         if (err /= CAPNP_OK) return
+         aidx = aidxs(i + 1)
+         if (aidx == 0) cycle
+         aname = trim(names(i + 1))
+         do j = 1, n
+            if (j == i + 1) cycle
+            if (aidxs(j) == 0) cycle
+            if (names(j) /= names(i + 1)) cycle
+            call annotation_scope_tag(g_nodes(aidx)%p, tag, err)
+            if (err /= CAPNP_OK) return
+            aname = tag//'_'//aname
+            exit
+         end do
          v = annotation_value(a, err)
          if (err /= CAPNP_OK) return
-         cname = ident_fit(upcase(owner)//'_'//upcase(aname))
+         pre = ''
+         if (owner /= trim(g_ann_mod) .and. len_trim(g_ann_tag) > 0) &
+            pre = upcase(trim(g_ann_tag))//'_'
+         cname = unique_const(ident_fit(pre//upcase(owner)//'_'//upcase(aname)), annotation_id(a))
          select case (value_which(v))
          case (TYPE_BOOL)
             if (value_bool(v)) then

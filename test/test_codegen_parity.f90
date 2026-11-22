@@ -23,7 +23,8 @@ contains
          new_unittest("g9_surface", test_g9), &
          new_unittest("g10_data_annotation", test_g10), &
          new_unittest("g11_super_dispatch", test_g11), &
-         new_unittest("g12_import_shared_types", test_g12) &
+         new_unittest("g12_import_shared_types", test_g12), &
+         new_unittest("g13_same_name_annotations", test_g13) &
          ]
    end subroutine collect_codegen_parity
 
@@ -96,5 +97,10 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_gap(error, 'g12')
    end subroutine test_g12
+
+   subroutine test_g13(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, 'g13')
+   end subroutine test_g13
 
 end module test_codegen_parity

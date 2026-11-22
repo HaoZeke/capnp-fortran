@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g11|g12|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g11|g12|g13|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -702,7 +702,7 @@ program drv
    call capnp_message_init_builder(m, err)
    h = s_new_root(m, err)
    if (s_inner_has(h)) error stop 1
-   if (s_my_tag /= 'hello') error stop 2
+   if (surf_s_my_tag /= 'hello') error stop 2
    inner = s_inner_init(h, err)
    call s_n_set(inner, 4, err)
    call s_inner_set(h, inner, err)
@@ -719,7 +719,7 @@ program drv
    al = s_any_l_get(h, err)
    cap = s_cap_get(h, err)
    if (err /= 0) error stop 6
-   if (my_tag_id /= -8531619134090667774_int64) error stop 7
+   if (surf_my_tag_id /= -8531619134090667774_int64) error stop 7
    print '(a)', 'ok'
    call capnp_message_free(m)
 end program drv
@@ -742,7 +742,7 @@ struct Host $mark(0x"0102") {
 }
 EOF
   capnp compile "${CAPNP_INC[@]}" -o"$BIN" blobann.capnp
-  grep -q 'parameter :: HOST_MARK(0:1)' blobann_capnp.f90
+  grep -q 'parameter :: BLOBANN_HOST_MARK(0:1)' blobann_capnp.f90
   grep -q '1, 2' blobann_capnp.f90
   fc -c blobann_capnp.f90 -I "$MOD" -J .
   echo "g10 ok"
@@ -941,6 +941,26 @@ EOF
   echo "g12 ok"
 }
 
+g13() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > an.capnp << 'EOF'
+@0x8555555555555501;
+using Cxx = import "/capnp/c++.capnp";
+using Json = import "/capnp/compat/json.capnp";
+struct S {
+  f @0 :Int32 $Cxx.name("ff") $Json.name("jf");
+}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -oc++ an.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" an.capnp
+  grep -q "parameter :: AN_S_F_CXX_NAME = 'ff'" an_capnp.f90
+  grep -q "parameter :: AN_S_F_JSON_NAME = 'jf'" an_capnp.f90
+  fc -c an_capnp.f90 -I "$MOD" -J .
+  echo "g13 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -954,11 +974,12 @@ case "$CASE" in
   g10) g10 ;;
   g11) g11 ;;
   g12) g12 ;;
+  g13) g13 ;;
   all)
-    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|all" >&2
     exit 2
     ;;
 esac
