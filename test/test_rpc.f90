@@ -2500,7 +2500,7 @@ contains
       type(rpc_vat_t), pointer :: vp
       class(rpc_server_t), pointer :: boot
       type(rpc_cap_t) :: cap
-      integer(int64) :: qboot, ans
+      integer(int64) :: qboot, answer_id
       integer :: afd, ahfd, cfd, chfd, kind
       logical :: is_exc, readable
       e = CAPNP_OK
@@ -2534,9 +2534,9 @@ contains
       if (e /= CAPNP_OK) return
       call rpc_pump_once(host_a, e)
       if (e /= CAPNP_OK) return
-      call recv_return_fd(alice%fd, ans, is_exc, kind, e)
+      call recv_return_fd(alice%fd, answer_id, is_exc, kind, e)
       if (e /= CAPNP_OK) return
-      if (is_exc .or. ans /= provide_q) then
+      if (is_exc .or. answer_id /= provide_q) then
          e = CAPNP_ERR_KIND
          return
       end if
@@ -2565,7 +2565,7 @@ contains
       type(rpc_vat_t), target :: shared
       type(rpc_conn_t), target :: alice, carol, host_a, host_b
       type(echo_srv_t), target :: echo
-      integer(int64) :: ans
+      integer(int64) :: answer_id
       integer :: e, kind
       logical :: is_exc, readable
       integer(int64), parameter :: provide_q = 10_int64
@@ -2581,8 +2581,8 @@ contains
       end if
       call send_finish_fd(alice%fd, provide_q, e)
       call rpc_pump_once(host_a, e)
-      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
-      call check_(error, e == CAPNP_OK .and. is_exc .and. ans == accept_q, &
+      call recv_return_fd(carol%fd, answer_id, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. is_exc .and. answer_id == accept_q, &
                   'embargo finish: recipient Accept is answered')
       call px_poll_in(alice%fd, 50, readable, e)
       call check_(error, e == CAPNP_OK .and. .not. readable, &
@@ -2607,7 +2607,7 @@ contains
       type(rpc_vat_t), target :: shared
       type(rpc_conn_t), target :: alice, carol, host_a, host_b
       type(echo_srv_t), target :: echo
-      integer(int64) :: ans
+      integer(int64) :: answer_id
       integer :: e, kind
       logical :: is_exc
       integer(int64), parameter :: provide_q = 10_int64
@@ -2621,8 +2621,8 @@ contains
          return
       end if
       call rpc_conn_close(host_a)
-      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
-      call check_(error, e == CAPNP_OK .and. is_exc .and. ans == accept_q, &
+      call recv_return_fd(carol%fd, answer_id, is_exc, kind, e)
+      call check_(error, e == CAPNP_OK .and. is_exc .and. answer_id == accept_q, &
                   'embargo close: recipient Accept is answered')
       call check_(error, .not. host_b%exports(0)%used, &
                   'embargo close: recipient export is released')
@@ -2639,7 +2639,7 @@ contains
       type(rpc_vat_t), target :: shared
       type(rpc_conn_t), target :: alice, carol, host_a, host_b
       type(echo_srv_t), target :: echo
-      integer(int64) :: ans
+      integer(int64) :: answer_id
       integer :: e, kind
       logical :: is_exc, readable
       integer(int64), parameter :: provide_q = 10_int64
@@ -2654,9 +2654,9 @@ contains
       end if
       call send_disembargo_fd(alice%fd, provide_q, e)
       call rpc_pump_once(host_a, e)
-      call recv_return_fd(carol%fd, ans, is_exc, kind, e)
+      call recv_return_fd(carol%fd, answer_id, is_exc, kind, e)
       call check_(error, e == CAPNP_OK .and. .not. is_exc .and. &
-                  ans == accept_q .and. kind == CAPNP_PK_CAP, &
+                  answer_id == accept_q .and. kind == CAPNP_PK_CAP, &
                   'embargo lift: recipient receives the capability')
       call px_poll_in(alice%fd, 50, readable, e)
       call check_(error, e == CAPNP_OK .and. .not. readable, &
@@ -2675,7 +2675,7 @@ contains
       type(echo_srv_t), target :: local_echo
       class(rpc_server_t), pointer :: local_boot
       type(rpc_cap_t) :: cap
-      integer(int64) :: qboot, ans
+      integer(int64) :: qboot, answer_id
       integer :: fa, fb, e, i
       logical :: ok, held, readable
       call px_socketpair(fa, fb, e)
@@ -2713,13 +2713,13 @@ contains
       end if
       call send_finish_fd(cconn%fd, 10_int64, e)
       call rpc_pump_once(sconn, e)
-      call recv_join_fd(cconn%fd, ans, ok, e)
-      call check_(error, e == CAPNP_OK .and. ans == 11_int64 .and. .not. ok, &
+      call recv_join_fd(cconn%fd, answer_id, ok, e)
+      call check_(error, e == CAPNP_OK .and. answer_id == 11_int64 .and. .not. ok, &
                   'join finish rest: arrived part is answered')
       call send_join_fd(cconn%fd, 12_int64, 0, 42_int64, 3, 2, e)
       call rpc_pump_once(sconn, e)
-      call recv_join_fd(cconn%fd, ans, ok, e)
-      call check_(error, e == CAPNP_OK .and. ans == 12_int64 .and. .not. ok, &
+      call recv_join_fd(cconn%fd, answer_id, ok, e)
+      call check_(error, e == CAPNP_OK .and. answer_id == 12_int64 .and. .not. ok, &
                   'join finish rest: later part is answered')
       held = .false.
       do i = 0, 7
