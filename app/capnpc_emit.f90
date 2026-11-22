@@ -31,12 +31,92 @@ module capnpc_emit
    logical :: g_suppress = .false.
    character(len=:), allocatable :: g_prefix
    character(len=64) :: g_imports(64)
+   logical :: g_imp_soft(64) = .false.
    integer :: g_nimports = 0
    !> A set of identifiers, compared without regard to case.
    type :: nameset_t
       character(len=64), allocatable :: v(:)
       integer :: n = 0
    end type nameset_t
+
+   !> The module-scope names the last captured walk declared (g_own) and
+   !> made private (g_priv); g_reserved lists the names of a walk without
+   !> annotation constants and helper procedures.
+   type(nameset_t) :: g_own, g_priv, g_reserved
+   !> A procedure this module declares under the name of a constant it also
+   !> declares is renamed (g_ren_from -> g_ren_to) wherever it is written.
+   !> g_dup_scan is set for the one walk that finds them; g_proc_seen and
+   !> g_other_seen hold what that walk has declared so far.
+   logical :: g_dup_scan = .false.
+   type(nameset_t) :: g_proc_seen, g_other_seen, g_dup_found, g_ren_from
+   character(len=64), allocatable :: g_ren_to(:)
+   !> While set, w() leaves the procedure names of the lines it writes as
+   !> they are: a constant accessor keeps the name of its constant.
+   logical :: g_ren_off = .false.
+   !> While set, w() records declared names and writes no text.
+   logical :: g_capture = .false.
+   !> While set, a walk leaves out the annotation constants and helpers.
+   logical :: g_probe = .false.
+   logical :: g_in_abstract = .false.
+   character(len=64) :: g_cap_resolve = 'cap_resolve'
+   character(len=64) :: g_cap_resolve_id = 'cap_resolve_id'
+   character(len=512) :: g_imp_prefix(64)
+   !> Names this file declares itself, renamed where it imports them.
+   type :: use_t
+      character(len=64) :: module = ''
+      character(len=:), allocatable :: text
+   end type use_t
+   type(use_t) :: g_uses(64)
+   integer :: g_nuses = 0
+   !> Exported names per walked file, cached for the request, and the part
+   !> of them the file declares itself.
+   type :: export_t
+      character(len=512) :: prefix = ''
+      type(nameset_t) :: names
+      type(nameset_t) :: declared
+      !> The module that declares each name of names, in the same order.
+      character(len=64), allocatable :: src(:)
+   end type export_t
+   type(export_t) :: g_exports(256)
+   integer :: g_nexports = 0
+   integer :: g_depth = 0
+   type(nameset_t) :: g_declared
+   !> The declaring module of each name analyze_file last exported.
+   character(len=64), allocatable :: g_src(:)
+   !> Foreign nodes this file refers to, found while it is walked.
+   integer :: g_refs(2048)
+   integer :: g_nrefs = 0
+   !> A foreign node whose generated names clash here is referred to by an
+   !> alias stem, and the `use` statement renames the symbols it needs.
+   type :: alias_t
+      integer :: idx = 0
+      character(len=64) :: stem = ''
+   end type alias_t
+   type(alias_t) :: g_alias(512)
+   integer :: g_nalias = 0
+   character(len=64) :: g_pre_mod(3072), g_pre_from(3072), g_pre_to(3072)
+   integer :: g_npre = 0
+   integer, parameter :: N_REF_SUFFIXES = 7
+   character(len=14), parameter :: REF_SUFFIXES(N_REF_SUFFIXES) = [character(len=14) :: &
+      '_t', '_dwords', '_pwords', '_client_t', '_server_t', '_dispatch', '_interface_id']
+   integer, parameter :: N_RPC_SYMS = 11
+   character(len=40), parameter :: RPC_SYMS(N_RPC_SYMS) = [character(len=40) :: &
+      'payload_t', 'payload_content_set', 'cap_descriptor_t', &
+      'cap_descriptor_which', 'cap_descriptor_sender_hosted_get', &
+      'cap_descriptor_sender_promise_get', 'cap_descriptor_receiver_hosted_get', &
+      'cap_descriptor_none_tag', 'cap_descriptor_sender_hosted_tag', &
+      'cap_descriptor_sender_promise_tag', 'cap_descriptor_receiver_hosted_tag']
+   !> The name this module gives each rpc_capnp symbol, blank for its own.
+   !> g_rpc_pub marks the symbols the module imports under their own name
+   !> and so re-exports.
+   character(len=64) :: g_rpc_to(N_RPC_SYMS) = ''
+   logical :: g_rpc_pub(N_RPC_SYMS) = .false.
+   logical :: g_rpc_imp(N_RPC_SYMS) = .false.
+   !> The private names this module gives any_struct_t, any_list_t and
+   !> capability_client_t, which the unbranded emitter had no use for.
+   character(len=64) :: g_capcli = 'capnp_any_capability_client_t'
+   character(len=64) :: g_anystruct = 'capnp_any_any_struct_t'
+   character(len=64) :: g_anylist = 'capnp_any_any_list_t'
 
    type(blob_t) :: g_blobs(256)
    integer :: g_nblobs = 0
@@ -494,8 +574,86 @@ contains
    subroutine w(line)
       character(len=*), intent(in) :: line
       if (g_suppress) return
+      if (g_ren_from%n > 0 .and. .not. g_ren_off) then
+         call w_renamed(line)
+         return
+      end if
+      if (g_capture) then
+         call note_decl(line)
+         return
+      end if
       call w_fitted(line)
    end subroutine w
+
+   !> Write a line with the renamed procedures spelled under their new names.
+   !> Text inside a character literal or a comment is left as written.
+   subroutine w_renamed(line)
+      character(len=*), intent(in) :: line
+      character(len=:), allocatable :: t
+      character(len=1) :: quote
+      integer :: k, p, n
+      logical :: before, after
+      t = line
+      do k = 1, g_ren_from%n
+         n = len_trim(g_ren_from%v(k))
+         p = 1
+         quote = ' '
+         do while (p + n - 1 <= len(t))
+            if (quote /= ' ') then
+               if (t(p:p) == quote) quote = ' '
+               p = p + 1
+               cycle
+            end if
+            if (t(p:p) == "'" .or. t(p:p) == '"') then
+               quote = t(p:p)
+               p = p + 1
+               cycle
+            end if
+            if (t(p:p) == '!') exit
+            if (t(p:p + n - 1) == g_ren_from%v(k)(1:n)) then
+               before = p > 1
+               if (before) before = is_word_char(t(p - 1:p - 1))
+               after = p + n <= len(t)
+               if (after) after = is_word_char(t(p + n:p + n))
+               if (.not. before .and. .not. after) then
+                  t = t(1:p - 1)//trim(g_ren_to(k))//t(p + n:)
+                  p = p + len_trim(g_ren_to(k))
+                  cycle
+               end if
+            end if
+            p = p + 1
+         end do
+      end do
+      if (g_capture) then
+         call note_decl(t)
+      else
+         call w_fitted(t)
+      end if
+   end subroutine w_renamed
+
+   pure function is_word_char(c) result(yes)
+      character(len=1), intent(in) :: c
+      logical :: yes
+      yes = (c >= 'a' .and. c <= 'z') .or. (c >= 'A' .and. c <= 'Z') .or. &
+            (c >= '0' .and. c <= '9') .or. c == '_'
+   end function is_word_char
+
+   !> Note a name a line declares, and when a walk is scanning for them a
+   !> procedure that shares its name with a constant or type.
+   subroutine declare_name(name, is_proc)
+      character(len=*), intent(in) :: name
+      logical, intent(in) :: is_proc
+      call ns_add(g_own, name)
+      if (.not. g_dup_scan) return
+      if (is_proc) then
+         if (ns_has(g_other_seen, name) .or. ns_has(g_proc_seen, name)) &
+            call ns_add(g_dup_found, name)
+         call ns_add(g_proc_seen, name)
+      else
+         if (ns_has(g_proc_seen, name)) call ns_add(g_dup_found, name)
+         call ns_add(g_other_seen, name)
+      end if
+   end subroutine declare_name
 
    !> The file node with this display name, or 0.
    function find_file_node(prefix) result(idx)
@@ -596,29 +754,59 @@ contains
    end subroutine node_module
 
    !> Record a cross-file type reference during pass 1.
-   subroutine note_import(idx, err)
+   subroutine note_import(idx, err, soft)
       type(capnp_ptr_t) :: np
       integer, intent(in) :: idx
       integer, intent(out) :: err
+      logical, intent(in), optional :: soft
       character(len=:), allocatable :: dn, m
       integer :: i
+      logical :: sf
       err = CAPNP_OK
+      sf = g_soft
+      if (present(soft)) sf = sf .or. soft
       np = g_nodes(idx)%p
       call node_display_name(np, dn, err)
       if (err /= CAPNP_OK) return
       i = index(dn, ':')
       if (i > 0) dn = dn(1:i - 1)
       if (dn == g_prefix) return
+      do i = 1, g_nrefs
+         if (g_refs(i) == idx) exit
+      end do
+      if (i > g_nrefs .and. g_nrefs < size(g_refs)) then
+         g_nrefs = g_nrefs + 1
+         g_refs(g_nrefs) = idx
+      end if
       call node_module(np, m, err)
       if (err /= CAPNP_OK) return
       do i = 1, g_nimports
-         if (trim(g_imports(i)) == m) return
+         if (trim(g_imports(i)) == m) then
+            if (.not. sf) g_imp_soft(i) = .false.
+            return
+         end if
       end do
       if (g_nimports < size(g_imports)) then
          g_nimports = g_nimports + 1
          g_imports(g_nimports) = m
+         g_imp_soft(g_nimports) = sf
+         g_imp_prefix(g_nimports) = dn
       end if
    end subroutine note_import
+
+   !> The stem to build the names of a foreign node from: its own, or the
+   !> alias this file refers to it by.
+   subroutine ref_stem(idx, st)
+      integer, intent(in) :: idx
+      character(len=:), allocatable, intent(inout) :: st
+      integer :: k
+      do k = 1, g_nalias
+         if (g_alias(k)%idx == idx) then
+            st = trim(g_alias(k)%stem)
+            return
+         end if
+      end do
+   end subroutine ref_stem
 
    !> Register a default-object blob during pass 1; emitted as an int8
    !> parameter array in the declaration section.
@@ -668,12 +856,13 @@ contains
       integer(int64), intent(in) :: file_id
       character(len=*), intent(in) :: filename
       integer, intent(out) :: err
-      character(len=:), allocatable :: modname, base, prefix, dn, dir, outfile
+      character(len=:), allocatable :: modname, base, dir, outfile
+      type(nameset_t) :: exported
       integer :: i, ios, fidx
-      logical :: mine
 
       call load_nodes(root, err)
       if (err /= CAPNP_OK) return
+      g_nexports = 0
 
       ! capnpc-c++.c++ writeFile keeps the requested file's directory, so
       ! two schemas that share a basename do not overwrite each other.
@@ -700,58 +889,8 @@ contains
       end if
       call node_module(g_nodes(fidx)%p, modname, err)
       if (err /= CAPNP_OK) return
-      call node_display_name(g_nodes(fidx)%p, prefix, err)
+      call analyze_file(fidx, modname, exported, err)
       if (err /= CAPNP_OK) return
-      g_prefix = prefix
-      g_nimports = 0
-      g_nblobs = 0
-      g_has_iface = .false.
-      g_need_any_struct = .false.
-      g_need_any_list = .false.
-      g_need_capability = .false.
-      g_ninsts = 0
-      g_cur_inst = 0
-
-      ! Pass 1 (dry): walk the procedures to discover cross-file imports and
-      ! explicit pointer-default blobs before the header is written.
-      g_suppress = .true.
-      do i = 1, size(g_nodes)
-         call node_display_name(g_nodes(i)%p, dn, err)
-         if (err /= CAPNP_OK) return
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
-         if (.not. mine) cycle
-         select case (node_which(g_nodes(i)%p))
-         case (NODE_STRUCT)
-            if (.not. node_struct_is_group(g_nodes(i)%p)) then
-               call emit_struct_procs(g_nodes(i)%p, err)
-               if (err /= CAPNP_OK) return
-            end if
-         case (NODE_CONST)
-            call emit_const_decl(g_nodes(i)%p, err)
-            if (err /= CAPNP_OK) return
-            call emit_const_proc(g_nodes(i)%p, err)
-            if (err /= CAPNP_OK) return
-         case (NODE_INTERFACE)
-            g_has_iface = .true.
-            call emit_interface_decl(g_nodes(i)%p, err)
-            if (err /= CAPNP_OK) return
-            call emit_interface_procs(g_nodes(i)%p, err)
-            if (err /= CAPNP_OK) return
-         end select
-      end do
-      ! Converge the instantiation worklist: emitting an instantiation's
-      ! accessors can register further instantiations.
-      i = 1
-      do while (i <= g_ninsts)
-         call emit_inst_procs(i, err)
-         if (err /= CAPNP_OK) return
-         i = i + 1
-      end do
-      ! Annotation Data values are blobs. Record them while collection
-      ! is open, before emit_blob_params writes the parameters.
-      call emit_annotation_surface(modname, fidx, err)
-      if (err /= CAPNP_OK) return
-      g_suppress = .false.
 
       outfile = dir//snake(base)//'_capnp.f90'
       if (len(dir) > 0) then
@@ -767,25 +906,108 @@ contains
          err = CAPNP_ERR_IO
          return
       end if
+      call pass_write(fidx, modname, filename, err)
+      if (err == CAPNP_OK .and. allocated(g_shim)) then
+         if (len_trim(g_shim(fidx)) > 0) then
+            write (g_out, '(a)') ''
+            write (g_out, '(a)') '!> '//trim(g_shim(fidx))//' re-exports '//modname//'.'
+            write (g_out, '(a)') 'module '//trim(g_shim(fidx))
+            write (g_out, '(a)') '   use '//modname
+            write (g_out, '(a)') 'end module '//trim(g_shim(fidx))
+         end if
+      end if
+      close (g_out)
+   end subroutine emit_file
+
+   !> Reset the per-file state before a walk of the file with this prefix.
+   subroutine begin_file(prefix)
+      character(len=*), intent(in) :: prefix
+      g_prefix = prefix
+      g_nimports = 0
+      g_nrefs = 0
+      g_nblobs = 0
+      g_has_iface = .false.
+      g_need_any_struct = .false.
+      g_need_any_list = .false.
+      g_need_capability = .false.
+      g_ninsts = 0
+      g_cur_inst = 0
+   end subroutine begin_file
+
+   !> Pass 1 (dry): walk the procedures to discover cross-file imports,
+   !> instantiations and explicit pointer-default blobs before the header
+   !> is written.
+   subroutine pass_collect(fidx, modname, err)
+      integer, intent(in) :: fidx
+      character(len=*), intent(in) :: modname
+      integer, intent(out) :: err
+      character(len=:), allocatable :: dn
+      integer :: i
+      logical :: mine
+      err = CAPNP_OK
+      g_suppress = .true.
+      do i = 1, size(g_nodes)
+         call node_display_name(g_nodes(i)%p, dn, err)
+         if (err /= CAPNP_OK) exit
+         mine = len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1
+         if (.not. mine) cycle
+         select case (node_which(g_nodes(i)%p))
+         case (NODE_STRUCT)
+            if (.not. node_struct_is_group(g_nodes(i)%p)) then
+               call emit_struct_procs(g_nodes(i)%p, err)
+               if (err /= CAPNP_OK) exit
+            end if
+         case (NODE_CONST)
+            call emit_const_decl(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) exit
+            g_ren_off = .true.
+            call emit_const_proc(g_nodes(i)%p, err)
+            g_ren_off = .false.
+            if (err /= CAPNP_OK) exit
+         case (NODE_INTERFACE)
+            g_has_iface = .true.
+            call emit_interface_decl(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) exit
+            call emit_interface_procs(g_nodes(i)%p, err)
+            if (err /= CAPNP_OK) exit
+         end select
+      end do
+      ! Converge the instantiation worklist: emitting an instantiation's
+      ! accessors can register further instantiations.
+      i = 1
+      do while (err == CAPNP_OK .and. i <= g_ninsts)
+         call emit_inst_procs(i, err)
+         i = i + 1
+      end do
+      ! Annotation Data values are blobs. Record them while collection
+      ! is open, before emit_blob_params writes the parameters.
+      if (err == CAPNP_OK .and. .not. g_probe) &
+         call emit_annotation_surface(surface_name(fidx, modname), fidx, err)
+      g_suppress = .false.
+   end subroutine pass_collect
+
+   !> Pass 2: the module text, written to g_out, or only its declared
+   !> names while g_capture is set.
+   subroutine pass_write(fidx, modname, filename, err)
+      integer, intent(in) :: fidx
+      character(len=*), intent(in) :: modname, filename
+      integer, intent(out) :: err
+      character(len=:), allocatable :: dn
+      integer :: i
+      logical :: mine
+      err = CAPNP_OK
 
       call w('!> Generated by capnpc-fortran from '//trim(filename)//'. Do not edit.')
       call w('module '//modname)
       call w('   use capnp')
+      call emit_any_use()
       if (g_has_iface) call w('   use capnp_rpc')
       ! rpc_capnp is the schema module. capnp_rpc already uses the
       ! three-party schema, so a capability field must not pull capnp_rpc
       ! back in. Descriptor symbols are enough to read a cap table.
-      if (g_has_iface .or. g_need_capability) then
-         call w('   use rpc_capnp, only: payload_t, payload_content_set, &')
-         call w('      cap_descriptor_t, cap_descriptor_which, &')
-         call w('      cap_descriptor_sender_hosted_get, &')
-         call w('      cap_descriptor_sender_promise_get, &')
-         call w('      cap_descriptor_receiver_hosted_get, &')
-         call w('      cap_descriptor_none_tag, cap_descriptor_sender_hosted_tag, &')
-         call w('      cap_descriptor_sender_promise_tag, cap_descriptor_receiver_hosted_tag')
-      end if
+      if (g_has_iface .or. g_need_capability) call emit_rpc_use()
       do i = 1, g_nimports
-         call w('   use '//trim(g_imports(i)))
+         call emit_import_use(trim(g_imports(i)))
       end do
       call w('   implicit none')
       call w('   public')
@@ -795,7 +1017,7 @@ contains
       do i = 1, size(g_nodes)
          call node_display_name(g_nodes(i)%p, dn, err)
          if (err /= CAPNP_OK) exit
-         mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+         mine = len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1
          if (.not. mine) cycle
          select case (node_which(g_nodes(i)%p))
          case (NODE_ENUM)
@@ -811,7 +1033,8 @@ contains
 
       call emit_blob_params()
       if (err == CAPNP_OK) call emit_inst_decls(err)
-      if (err == CAPNP_OK) call emit_annotation_surface(surface_name(fidx, modname), fidx, err)
+      if (err == CAPNP_OK .and. .not. g_probe) &
+         call emit_annotation_surface(surface_name(fidx, modname), fidx, err)
       if (err == CAPNP_OK) call emit_any_decls()
 
       ! Interface declarations follow every struct declaration: their
@@ -821,7 +1044,7 @@ contains
          do i = 1, size(g_nodes)
             call node_display_name(g_nodes(i)%p, dn, err)
             if (err /= CAPNP_OK) exit
-            mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+            mine = len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1
             if (.not. mine) cycle
             if (node_which(g_nodes(i)%p) == NODE_INTERFACE) then
                call emit_interface_decl(g_nodes(i)%p, err)
@@ -838,7 +1061,7 @@ contains
          do i = 1, size(g_nodes)
             call node_display_name(g_nodes(i)%p, dn, err)
             if (err /= CAPNP_OK) exit
-            mine = len(dn) > len(prefix) .and. index(dn, prefix//':') == 1
+            mine = len(dn) > len(g_prefix) .and. index(dn, g_prefix//':') == 1
             if (.not. mine) cycle
             select case (node_which(g_nodes(i)%p))
             case (NODE_STRUCT)
@@ -847,7 +1070,9 @@ contains
                   if (err /= CAPNP_OK) exit
                end if
             case (NODE_CONST)
+               g_ren_off = .true.
                call emit_const_proc(g_nodes(i)%p, err)
+               g_ren_off = .false.
                if (err /= CAPNP_OK) exit
             case (NODE_INTERFACE)
                call emit_interface_procs(g_nodes(i)%p, err)
@@ -862,20 +1087,687 @@ contains
          end if
       end if
 
-      if (err == CAPNP_OK .and. g_has_iface) call emit_cap_resolve()
-      if (err == CAPNP_OK .and. g_need_capability) call emit_cap_resolve_id()
+      if (err == CAPNP_OK .and. g_has_iface .and. .not. g_probe) call emit_cap_resolve()
+      if (err == CAPNP_OK .and. g_need_capability .and. .not. g_probe) &
+         call emit_cap_resolve_id()
       call w('end module '//modname)
-      if (allocated(g_shim)) then
-         if (len_trim(g_shim(fidx)) > 0) then
-            write (g_out, '(a)') ''
-            write (g_out, '(a)') '!> '//trim(g_shim(fidx))//' re-exports '//modname//'.'
-            write (g_out, '(a)') 'module '//trim(g_shim(fidx))
-            write (g_out, '(a)') '   use '//modname
-            write (g_out, '(a)') 'end module '//trim(g_shim(fidx))
-         end if
+   end subroutine pass_write
+
+   ! --- scoped names ----------------------------------------------------------
+   !
+   ! Every schema becomes one module, and a module re-exports what it uses, so
+   ! a name that two schemas both declare (an annotation of the same name, a
+   ! generic instantiated in two files, a struct called Payload next to the
+   ! rpc.capnp symbols a capability needs) would clash in the importer. Each
+   ! file is walked first to learn the names it declares and exports. An
+   ! imported name that the importing module declares itself is renamed on
+   ! use, so the module's own names keep their plain spelling.
+
+   !> The names the module of one file exports, as a sorted-by-use set:
+   !> its own public declarations and those of everything it imports.
+   !> The result is cached for the request.
+   recursive subroutine exports_of(prefix, k)
+      character(len=*), intent(in) :: prefix
+      integer, intent(out) :: k
+      character(len=:), allocatable :: modname
+      type(nameset_t) :: names
+      integer :: fidx, err
+      do k = 1, g_nexports
+         if (trim(g_exports(k)%prefix) == prefix) return
+      end do
+      k = g_nexports + 1
+      if (k > size(g_exports)) then
+         k = 0
+         return
       end if
-      close (g_out)
-   end subroutine emit_file
+      g_nexports = k
+      g_exports(k)%prefix = prefix
+      g_exports(k)%names%n = 0
+      g_exports(k)%declared%n = 0
+      fidx = find_file_node(prefix)
+      if (fidx == 0 .or. g_depth >= 32) return
+      call node_module(g_nodes(fidx)%p, modname, err)
+      if (err /= CAPNP_OK) return
+      g_depth = g_depth + 1
+      call analyze_file(fidx, modname, names, err)
+      g_depth = g_depth - 1
+      if (err == CAPNP_OK) then
+         g_exports(k)%names = names
+         g_exports(k)%declared = g_declared
+         g_exports(k)%src = g_src
+      end if
+   end subroutine exports_of
+
+   !> Learn what the module of file fidx declares and how it must import,
+   !> leaving the file state ready for pass_write. The file is walked
+   !> without its annotation constants and helper procedures to collect the
+   !> names everything else declares, then with them.
+   recursive subroutine analyze_file(fidx, modname, exported, err)
+      integer, intent(in) :: fidx
+      character(len=*), intent(in) :: modname
+      type(nameset_t), intent(out) :: exported
+      integer, intent(out) :: err
+      character(len=:), allocatable :: prefix
+      character(len=512) :: ipfx(64)
+      character(len=64) :: imod(64)
+      integer :: iek(64), nimp, i, k, j
+      logical :: rpc_uses, isoft(64)
+      type(nameset_t) :: own_pub, need
+
+      call node_display_name(g_nodes(fidx)%p, prefix, err)
+      if (err /= CAPNP_OK) return
+
+      g_ren_from%n = 0
+      call begin_file(prefix)
+      g_probe = .true.
+      call pass_collect(fidx, modname, err)
+      if (err /= CAPNP_OK) return
+      nimp = g_nimports
+      do i = 1, nimp
+         ipfx(i) = g_imp_prefix(i)
+         imod(i) = g_imports(i)
+         isoft(i) = g_imp_soft(i)
+      end do
+      do i = 1, nimp
+         call exports_of(trim(ipfx(i)), iek(i))
+      end do
+      g_nalias = 0
+      g_npre = 0
+
+      call begin_file(prefix)
+      g_probe = .true.
+      call pass_collect(fidx, modname, err)
+      if (err /= CAPNP_OK) return
+      g_ren_from%n = 0
+      g_dup_found%n = 0
+      g_proc_seen%n = 0
+      g_other_seen%n = 0
+      g_dup_scan = .true.
+      call capture_names(fidx, modname, err)
+      g_dup_scan = .false.
+      if (err /= CAPNP_OK) return
+      if (allocated(g_ren_to)) deallocate (g_ren_to)
+      allocate (g_ren_to(max(g_dup_found%n, 1)))
+      do k = 1, g_dup_found%n
+         g_ren_to(k) = free_name(trim(g_dup_found%v(k))//'_f', g_own)
+      end do
+      g_ren_from = g_dup_found
+      call capture_names(fidx, modname, err)
+      if (err /= CAPNP_OK) return
+      g_reserved = g_own
+      g_cap_resolve = free_name('cap_resolve', g_reserved)
+      if (g_has_iface) call ns_add(g_reserved, trim(g_cap_resolve))
+      g_cap_resolve_id = free_name('cap_resolve_id', g_reserved)
+      if (g_need_capability) call ns_add(g_reserved, trim(g_cap_resolve_id))
+
+      call begin_file(prefix)
+      g_probe = .false.
+      call pass_collect(fidx, modname, err)
+      if (err /= CAPNP_OK) return
+      call capture_names(fidx, modname, err)
+      if (err /= CAPNP_OK) return
+      rpc_uses = g_has_iface .or. g_need_capability
+
+      exported%n = 0
+      do k = 1, g_own%n
+         if (.not. ns_has(g_priv, g_own%v(k))) call ns_add(exported, g_own%v(k))
+      end do
+      own_pub = exported
+      do k = 1, size(RPC_SYMS)
+         g_rpc_to(k) = ''
+         g_rpc_pub(k) = .false.
+         g_rpc_imp(k) = .false.
+         if (.not. rpc_uses .or. surface_name(fidx, modname) == 'rpc_capnp') cycle
+         if (k <= 2 .and. .not. g_has_iface) cycle
+         g_rpc_imp(k) = .true.
+         if (k > 2 .or. .not. g_has_iface) then
+            ! The unbranded emitter never imported this symbol, so it comes
+            ! in under a private alias that no importer sees.
+            g_rpc_to(k) = free_name('rpc_capnp_'//trim(RPC_SYMS(k)), taken_names(nimp, iek))
+         else if (rpc_sym_clash(trim(RPC_SYMS(k)), nimp, iek)) then
+            g_rpc_to(k) = free_name('rpc_capnp_'//trim(RPC_SYMS(k)), taken_names(nimp, iek))
+            g_rpc_pub(k) = .true.
+            call ns_add(exported, trim(g_rpc_to(k)))
+         else
+            g_rpc_pub(k) = .true.
+            call ns_add(exported, trim(RPC_SYMS(k)))
+         end if
+      end do
+      g_capcli = free_name('capnp_any_capability_client_t', taken_names(nimp, iek))
+      g_anystruct = free_name('capnp_any_any_struct_t', taken_names(nimp, iek))
+      g_anylist = free_name('capnp_any_any_list_t', taken_names(nimp, iek))
+      g_declared = exported
+      call plan_ref_aliases(nimp, imod, iek, exported)
+      g_nuses = 0
+      do i = 1, nimp
+         if (iek(i) == 0) cycle
+         call plan_import_use(trim(imod(i)), g_exports(iek(i))%names, exported, isoft(i))
+      end do
+      do i = 1, nimp
+         if (iek(i) == 0) cycle
+         if (isoft(i)) need = ref_names(trim(imod(i)), g_exports(iek(i))%names)
+         do j = 1, g_exports(iek(i))%names%n
+            if (is_pre_renamed(trim(imod(i)), g_exports(iek(i))%names%v(j))) cycle
+            if (isoft(i)) then
+               if (.not. ns_has(need, g_exports(iek(i))%names%v(j))) cycle
+            end if
+            call ns_add(exported, g_exports(iek(i))%names%v(j))
+         end do
+         do j = 1, g_npre
+            if (trim(g_pre_mod(j)) == trim(imod(i))) call ns_add(exported, trim(g_pre_to(j)))
+         end do
+      end do
+      call note_sources(surface_name(fidx, modname), nimp, imod, iek, exported, own_pub)
+
+      call begin_file(prefix)
+      g_probe = .false.
+      call pass_collect(fidx, modname, err)
+   end subroutine analyze_file
+
+   !> Whether this file's use statement for the module renames the name,
+   !> which then reaches the file, and whoever imports it, only as its alias.
+   function is_pre_renamed(imod, name) result(yes)
+      character(len=*), intent(in) :: imod, name
+      logical :: yes
+      integer :: j
+      yes = .false.
+      do j = 1, g_npre
+         if (trim(g_pre_mod(j)) /= imod) cycle
+         if (trim(g_pre_from(j)) == lowcase(name)) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function is_pre_renamed
+
+   !> Whether an rpc_capnp symbol meets another entity of the same name:
+   !> one this file declares, or one an imported module makes visible.
+   function rpc_sym_clash(sym, nimp, iek) result(yes)
+      character(len=*), intent(in) :: sym
+      integer, intent(in) :: nimp
+      integer, intent(in) :: iek(:)
+      logical :: yes
+      integer :: i
+      yes = ns_has(g_own, sym)
+      do i = 1, nimp
+         if (yes) return
+         if (iek(i) == 0) cycle
+         if (.not. ns_has(g_exports(iek(i))%names, sym)) cycle
+         if (export_src(iek(i), sym) /= 'rpc_capnp') yes = .true.
+      end do
+   end function rpc_sym_clash
+
+   !> Every name this file declares or imports.
+   function taken_names(nimp, iek) result(set)
+      integer, intent(in) :: nimp
+      integer, intent(in) :: iek(:)
+      type(nameset_t) :: set
+      integer :: i, j
+      set = g_own
+      do i = 1, nimp
+         if (iek(i) == 0) cycle
+         do j = 1, g_exports(iek(i))%names%n
+            call ns_add(set, g_exports(iek(i))%names%v(j))
+         end do
+      end do
+   end function taken_names
+
+   !> The position of a name in a set, or 0.
+   function ns_find(set, name) result(k)
+      type(nameset_t), intent(in) :: set
+      character(len=*), intent(in) :: name
+      integer :: k
+      character(len=:), allocatable :: key
+      key = lowcase(name)
+      do k = 1, set%n
+         if (trim(set%v(k)) == key) return
+      end do
+      k = 0
+   end function ns_find
+
+   !> The module that declares a name an imported module exports, or blank.
+   function export_src(i, name) result(s)
+      integer, intent(in) :: i
+      character(len=*), intent(in) :: name
+      character(len=64) :: s
+      integer :: k
+      s = ''
+      if (i <= 0) return
+      k = ns_find(g_exports(i)%names, name)
+      if (k == 0) return
+      if (.not. allocated(g_exports(i)%src)) return
+      if (k <= size(g_exports(i)%src)) s = g_exports(i)%src(k)
+   end function export_src
+
+   !> Record, for each exported name, the module that declares the entity.
+   !> One entity reaching a file by two paths does not clash.
+   subroutine note_sources(modname, nimp, imod, iek, exported, own_pub)
+      character(len=*), intent(in) :: modname
+      integer, intent(in) :: nimp
+      character(len=64), intent(in) :: imod(:)
+      integer, intent(in) :: iek(:)
+      type(nameset_t), intent(in) :: exported, own_pub
+      character(len=64) :: s
+      character(len=:), allocatable :: nm
+      integer :: k, q, i, j
+      logical :: found
+      if (allocated(g_src)) deallocate (g_src)
+      allocate (g_src(max(1, exported%n)))
+      g_src = ''
+      do k = 1, exported%n
+         nm = trim(exported%v(k))
+         s = ''
+         found = ns_has(own_pub, nm)
+         if (found) s = modname
+         do q = 1, size(RPC_SYMS)
+            if (found) exit
+            if (.not. g_rpc_pub(q)) cycle
+            if (len_trim(g_rpc_to(q)) > 0) then
+               found = nm == trim(g_rpc_to(q))
+            else
+               found = nm == trim(RPC_SYMS(q)) .and. .not. ns_has(g_own, nm)
+            end if
+            if (found) s = 'rpc_capnp'
+         end do
+         do j = 1, g_npre
+            if (found) exit
+            if (trim(g_pre_to(j)) /= nm) cycle
+            do i = 1, nimp
+               if (trim(imod(i)) == trim(g_pre_mod(j))) s = export_src(iek(i), trim(g_pre_from(j)))
+            end do
+            found = .true.
+         end do
+         do i = 1, nimp
+            if (found) exit
+            if (iek(i) == 0) cycle
+            if (.not. ns_has(g_exports(iek(i))%names, nm)) cycle
+            s = export_src(iek(i), nm)
+            found = .true.
+         end do
+         g_src(k) = s
+      end do
+   end subroutine note_sources
+
+   !> Run pass_write for its declarations only: g_own gets every name the
+   !> module declares at module scope and g_priv the ones it makes private.
+   subroutine capture_names(fidx, modname, err)
+      integer, intent(in) :: fidx
+      character(len=*), intent(in) :: modname
+      integer, intent(out) :: err
+      g_own%n = 0
+      g_priv%n = 0
+      g_in_abstract = .false.
+      g_capture = .true.
+      call pass_write(fidx, modname, g_prefix, err)
+      g_capture = .false.
+   end subroutine capture_names
+
+   !> A name built from base that is not in taken.
+   function free_name(base, taken) result(o)
+      character(len=*), intent(in) :: base
+      type(nameset_t), intent(in) :: taken
+      character(len=:), allocatable :: o
+      integer :: k
+      o = ident_fit(base)
+      k = 1
+      do while (ns_has(taken, o))
+         k = k + 1
+         o = ident_fit(base//'_'//itoa(int(k, int64)))
+      end do
+   end function free_name
+
+   !> A foreign node whose generated names meet a name this file declares,
+   !> or a name another imported file declares, is referred to by an alias
+   !> stem. The renames that bring its symbols in under the alias are kept
+   !> for plan_import_use.
+   subroutine plan_ref_aliases(nimp, imod, iek, exported)
+      integer, intent(in) :: nimp
+      character(len=64), intent(in) :: imod(:)
+      integer, intent(in) :: iek(:)
+      type(nameset_t), intent(inout) :: exported
+      character(len=:), allocatable :: m, stem, cand
+      integer :: r, i, j, q, k, idx, err
+      logical :: clash
+      do r = 1, g_nrefs
+         idx = g_refs(r)
+         call node_module(g_nodes(idx)%p, m, err)
+         if (err /= CAPNP_OK) cycle
+         i = 0
+         do j = 1, nimp
+            if (trim(imod(j)) == m .and. iek(j) > 0) i = j
+         end do
+         if (i == 0) cycle
+         call node_fname(g_nodes(idx)%p, stem, err)
+         if (err /= CAPNP_OK) cycle
+         clash = .false.
+         do q = 1, N_REF_SUFFIXES
+            cand = stem//trim(REF_SUFFIXES(q))
+            if (.not. ns_has(g_exports(iek(i))%names, cand)) cycle
+            if (ns_has(g_own, cand)) clash = .true.
+            do j = 1, nimp
+               if (j == i .or. iek(j) == 0) cycle
+               if (.not. ns_has(g_exports(iek(j))%names, cand)) cycle
+               if (export_src(iek(j), cand) /= export_src(iek(i), cand) .or. &
+                   len_trim(export_src(iek(i), cand)) == 0) clash = .true.
+            end do
+         end do
+         if (.not. clash) cycle
+         if (g_nalias >= size(g_alias) .or. g_npre + N_REF_SUFFIXES > size(g_pre_mod)) cycle
+         cand = ident_fit(m//'_'//stem, 40)
+         k = 1
+         do while (alias_taken(cand, nimp, iek, exported))
+            k = k + 1
+            cand = ident_fit(m//'_'//stem//'_'//itoa(int(k, int64)), 40)
+         end do
+         g_nalias = g_nalias + 1
+         g_alias(g_nalias)%idx = idx
+         g_alias(g_nalias)%stem = cand
+         do q = 1, N_REF_SUFFIXES
+            if (.not. ns_has(g_exports(iek(i))%names, stem//trim(REF_SUFFIXES(q)))) cycle
+            g_npre = g_npre + 1
+            g_pre_mod(g_npre) = m
+            g_pre_from(g_npre) = lowcase(stem//trim(REF_SUFFIXES(q)))
+            g_pre_to(g_npre) = lowcase(cand//trim(REF_SUFFIXES(q)))
+            call ns_add(exported, trim(g_pre_to(g_npre)))
+         end do
+      end do
+   end subroutine plan_ref_aliases
+
+   !> Whether an alias stem would give a name that is already in use.
+   function alias_taken(cand, nimp, iek, exported) result(yes)
+      character(len=*), intent(in) :: cand
+      integer, intent(in) :: nimp
+      integer, intent(in) :: iek(:)
+      type(nameset_t), intent(in) :: exported
+      logical :: yes
+      integer :: q, j
+      yes = .false.
+      do q = 1, N_REF_SUFFIXES
+         if (ns_has(g_own, cand//trim(REF_SUFFIXES(q)))) yes = .true.
+         if (ns_has(exported, cand//trim(REF_SUFFIXES(q)))) yes = .true.
+         do j = 1, nimp
+            if (iek(j) == 0) cycle
+            if (ns_has(g_exports(iek(j))%names, cand//trim(REF_SUFFIXES(q)))) yes = .true.
+         end do
+      end do
+   end function alias_taken
+
+   !> Choose the `use` statement for one imported module: names the
+   !> importer declares itself come in under a module-qualified alias,
+   !> and so do the symbols of the foreign nodes given an alias stem.
+   subroutine plan_import_use(imod, theirs, exported, soft)
+      character(len=*), intent(in) :: imod
+      type(nameset_t), intent(in) :: theirs
+      type(nameset_t), intent(inout) :: exported
+      logical, intent(in) :: soft
+      integer, parameter :: per_stmt = 24
+      character(len=:), allocatable :: text, stmts, alias, lead
+      type(nameset_t) :: done, need
+      integer :: j, n
+      stmts = ''
+      text = ''
+      n = 0
+      lead = '   use '//imod//', '
+      if (soft) then
+         lead = lead//'only: '
+         need = ref_names(imod, theirs)
+      end if
+      do j = 1, g_npre
+         if (trim(g_pre_mod(j)) /= imod) cycle
+         call ns_add(done, trim(g_pre_from(j)))
+         call add_item(trim(g_pre_to(j))//' => '//trim(g_pre_from(j)))
+      end do
+      do j = 1, theirs%n
+         if (soft) then
+            if (.not. ns_has(need, theirs%v(j))) cycle
+         end if
+         if (ns_has(done, theirs%v(j))) cycle
+         if (.not. ns_has(g_own, theirs%v(j))) then
+            if (soft) call add_item(trim(theirs%v(j)))
+            cycle
+         end if
+         alias = free_name(imod//'_'//trim(theirs%v(j)), g_own)
+         do while (ns_has(exported, alias))
+            alias = free_name(alias//'_x', g_own)
+         end do
+         call ns_add(exported, alias)
+         call add_item(alias//' => '//trim(theirs%v(j)))
+         if (g_npre < size(g_pre_mod)) then
+            g_npre = g_npre + 1
+            g_pre_mod(g_npre) = imod
+            g_pre_from(g_npre) = lowcase(trim(theirs%v(j)))
+            g_pre_to(g_npre) = lowcase(alias)
+         end if
+      end do
+      if (n == 0 .and. .not. soft) return
+      if (g_nuses >= size(g_uses)) return
+      g_nuses = g_nuses + 1
+      g_uses(g_nuses)%module = imod
+      g_uses(g_nuses)%text = stmts//lead//text
+   contains
+      subroutine add_item(item)
+         character(len=*), intent(in) :: item
+         if (n == per_stmt) then
+            stmts = stmts//lead//text//achar(10)
+            text = ''
+            n = 0
+         end if
+         if (n > 0) text = text//', '
+         text = text//item
+         n = n + 1
+      end subroutine add_item
+   end subroutine plan_import_use
+
+   !> The names of the foreign nodes this file refers to in one module that
+   !> the generated code uses: a name per suffix a node's symbols take.
+   function ref_names(imod, theirs) result(set)
+      character(len=*), intent(in) :: imod
+      type(nameset_t), intent(in) :: theirs
+      type(nameset_t) :: set
+      character(len=:), allocatable :: m, stem
+      integer :: r, q, err
+      do r = 1, g_nrefs
+         call node_module(g_nodes(g_refs(r))%p, m, err)
+         if (err /= CAPNP_OK) cycle
+         if (m /= imod) cycle
+         call node_fname(g_nodes(g_refs(r))%p, stem, err)
+         if (err /= CAPNP_OK) cycle
+         do q = 1, N_REF_SUFFIXES
+            if (ns_has(theirs, stem//trim(REF_SUFFIXES(q)))) &
+               call ns_add(set, stem//trim(REF_SUFFIXES(q)))
+         end do
+      end do
+   end function ref_names
+
+   subroutine emit_import_use(imod)
+      character(len=*), intent(in) :: imod
+      integer :: k
+      do k = 1, g_nuses
+         if (trim(g_uses(k)%module) == imod) then
+            call w(g_uses(k)%text)
+            return
+         end if
+      end do
+      call w('   use '//imod)
+   end subroutine emit_import_use
+
+   !> The typed any-pointer handles this file uses, taken from capnp_any under
+   !> private names so that a schema may declare structs called AnyStruct,
+   !> AnyList or CapabilityClient.
+   subroutine emit_any_use()
+      if (g_need_any_struct) call w('   use capnp_any, only: '//trim(g_anystruct)//' => any_struct_t')
+      if (g_need_any_list) call w('   use capnp_any, only: '//trim(g_anylist)//' => any_list_t')
+      if (g_need_capability) call w('   use capnp_any, only: '//trim(g_capcli)//' => capability_client_t')
+   end subroutine emit_any_use
+
+   !> Keep the aliases of the rpc_capnp symbols the module imports for its own
+   !> use out of what an importing module sees.
+   subroutine emit_rpc_private()
+      character(len=:), allocatable :: text
+      integer :: k
+      text = ''
+      do k = 1, size(RPC_SYMS)
+         if (len_trim(g_rpc_to(k)) == 0 .or. g_rpc_pub(k)) cycle
+         if (len(text) > 0 .and. len(text) + len_trim(g_rpc_to(k)) > 80) then
+            call w('   private :: '//text)
+            text = ''
+         end if
+         if (len(text) > 0) text = text//', '
+         text = text//trim(g_rpc_to(k))
+      end do
+      if (g_need_any_struct) then
+         if (len(text) > 0) text = text//', '
+         text = text//trim(g_anystruct)
+      end if
+      if (g_need_any_list) then
+         if (len(text) > 0) text = text//', '
+         text = text//trim(g_anylist)
+      end if
+      if (g_need_capability) then
+         if (len(text) > 0) text = text//', '
+         text = text//trim(g_capcli)
+      end if
+      if (len(text) > 0) call w('   private :: '//text)
+   end subroutine emit_rpc_private
+
+   !> The rpc_capnp symbols a capability or interface file reads a cap
+   !> table with. A symbol the file declares itself keeps its plain name
+   !> there and is renamed on use.
+   subroutine emit_rpc_use()
+      character(len=:), allocatable :: text, item
+      integer :: k
+      text = ''
+      do k = 1, size(RPC_SYMS)
+         if (.not. g_rpc_imp(k)) cycle
+         if (len_trim(g_rpc_to(k)) > 0) then
+            item = trim(g_rpc_to(k))//' => '//trim(RPC_SYMS(k))
+         else
+            item = trim(RPC_SYMS(k))
+         end if
+         if (len(text) > 0 .and. len(text) + len(item) > 80) then
+            call w('   use rpc_capnp, only: '//text)
+            text = ''
+         end if
+         if (len(text) > 0) text = text//', '
+         text = text//item
+      end do
+      if (len(text) > 0) call w('   use rpc_capnp, only: '//text)
+   end subroutine emit_rpc_use
+
+   !> A symbol of rpc_capnp under the name this module uses for it.
+   function rpcn(sym) result(o)
+      character(len=*), intent(in) :: sym
+      character(len=:), allocatable :: o
+      integer :: k
+      o = sym
+      do k = 1, size(RPC_SYMS)
+         if (trim(RPC_SYMS(k)) == sym .and. len_trim(g_rpc_to(k)) > 0) then
+            o = trim(g_rpc_to(k))
+            return
+         end if
+      end do
+   end function rpcn
+
+   !> Record the module-scope names a written line declares (capture mode).
+   subroutine note_decl(line)
+      character(len=*), intent(in) :: line
+      character(len=:), allocatable :: t
+      integer :: p, q
+      if (len(line) < 4) return
+      if (line(1:3) /= '   ') return
+      ! The procedures of an abstract interface are module entities too.
+      if (line(4:4) == ' ') then
+         if (g_in_abstract .and. len(line) > 6) then
+            if (line(1:6) == '      ' .and. line(7:7) /= ' ') then
+               t = lowcase(line(7:))
+               if (starts(t, 'end ')) return
+               p = index(t, 'function ')
+               q = 9
+               if (p == 0) then
+                  p = index(t, 'subroutine ')
+                  q = 11
+               end if
+               if (p > 0) then
+                  call ident_at(t, p + q, p, q)
+                  if (q >= p) call declare_name(t(p:q), .true.)
+               end if
+            end if
+         end if
+         return
+      end if
+      t = lowcase(line(4:))
+      if (starts(t, 'abstract interface')) g_in_abstract = .true.
+      if (starts(t, 'end interface')) g_in_abstract = .false.
+      if (starts(t, 'use ') .or. starts(t, 'end ') .or. starts(t, 'public') .or. &
+          starts(t, 'implicit') .or. starts(t, 'contains') .or. starts(t, 'abstract') .or. &
+          starts(t, 'interface')) return
+      if (starts(t, 'private')) then
+         p = index(t, '::')
+         if (p == 0) return
+         t = t(p + 2:)
+         do
+            call ident_at(t, 1, p, q)
+            if (q < p) exit
+            call ns_add(g_priv, t(p:q))
+            t = adjustl(t(q + 1:))
+            if (len(t) == 0) exit
+            if (t(1:1) /= ',') exit
+            t = adjustl(t(2:))
+         end do
+         return
+      end if
+      p = index(t, '::')
+      if (p > 0) then
+         call ident_at(t, p + 2, p, q)
+         if (q >= p) call declare_name(t(p:q), .false.)
+         return
+      end if
+      p = index(t, 'function ')
+      if (p > 0) then
+         if (p == 1) then
+            call ident_at(t, p + 9, p, q)
+         else if (t(p - 1:p - 1) == ' ') then
+            call ident_at(t, p + 9, p, q)
+         else
+            q = 0
+            p = 1
+         end if
+         if (q >= p) call declare_name(t(p:q), .true.)
+         return
+      end if
+      p = index(t, 'subroutine ')
+      if (p > 0) then
+         call ident_at(t, p + 11, p, q)
+         if (q >= p) call declare_name(t(p:q), .true.)
+      end if
+   end subroutine note_decl
+
+   pure function starts(s, pre) result(yes)
+      character(len=*), intent(in) :: s, pre
+      logical :: yes
+      yes = len(s) >= len(pre)
+      if (yes) yes = s(1:len(pre)) == pre
+   end function starts
+
+   !> Bounds of the identifier that starts at or after position from
+   !> (blanks skipped); q < p when there is none.
+   pure subroutine ident_at(t, from, p, q)
+      character(len=*), intent(in) :: t
+      integer, intent(in) :: from
+      integer, intent(out) :: p, q
+      p = from
+      do while (p <= len(t))
+         if (t(p:p) /= ' ') exit
+         p = p + 1
+      end do
+      q = p - 1
+      do while (q + 1 <= len(t))
+         if (.not. ((t(q + 1:q + 1) >= 'a' .and. t(q + 1:q + 1) <= 'z') .or. &
+                    (t(q + 1:q + 1) >= '0' .and. t(q + 1:q + 1) <= '9') .or. &
+                    t(q + 1:q + 1) == '_')) exit
+         q = q + 1
+      end do
+   end subroutine ident_at
 
    ! --- enums / consts ---------------------------------------------------------
 
@@ -988,6 +1880,7 @@ contains
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(idx)%p, st, err)
          if (err /= CAPNP_OK) return
+         call ref_stem(idx, st)
          lhs = 'o%p'
       end if
       dobj = value_pointer(v, err)
@@ -1323,10 +2216,10 @@ contains
       select case (akind)
       case (ANYPTR_KIND_STRUCT)
          g_need_any_struct = .true.
-         call emit_wrapped_ptr(an, ht, pidx, 'any_struct_t', gset)
+         call emit_wrapped_ptr(an, ht, pidx, trim(g_anystruct), gset)
       case (ANYPTR_KIND_LIST)
          g_need_any_list = .true.
-         call emit_wrapped_ptr(an, ht, pidx, 'any_list_t', gset)
+         call emit_wrapped_ptr(an, ht, pidx, trim(g_anylist), gset)
       case (ANYPTR_KIND_CAPABILITY)
          ! Use a local client. The three-party schema is used by capnp_rpc,
          ! so this module must not use capnp_rpc in return.
@@ -1388,7 +2281,7 @@ contains
       call w('      if (err /= CAPNP_OK) return')
       call w('      if (q%kind /= CAPNP_PK_CAP) return')
       call w('      if (present(ctab)) then')
-      call w('         call cap_resolve(ctab, q%capidx, c%cap, err)')
+      call w('         call '//trim(g_cap_resolve)//'(ctab, q%capidx, c%cap, err)')
       call w('      else')
       call w('         c%cap%kind = RPC_CAP_IMPORT')
       call w('         c%cap%id = q%capidx')
@@ -1419,7 +2312,7 @@ contains
       call w('   function '//an//'_get(h, err, ctab) result(c)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
-      call w('      type(capability_client_t) :: c')
+      call w('      type('//trim(g_capcli)//') :: c')
       call w('      type(capnp_ptr_t), intent(in), optional :: ctab')
       call w('      type(capnp_ptr_t) :: q')
       call w('      c%kind = 0')
@@ -1428,7 +2321,7 @@ contains
       call w('      if (err /= CAPNP_OK) return')
       call w('      if (q%kind /= CAPNP_PK_CAP) return')
       call w('      if (present(ctab)) then')
-      call w('         call cap_resolve_id(ctab, q%capidx, c%kind, c%id, err)')
+      call w('         call '//trim(g_cap_resolve_id)//'(ctab, q%capidx, c%kind, c%id, err)')
       call w('      else')
       call w('         c%kind = 1')
       call w('         c%id = q%capidx')
@@ -1465,6 +2358,7 @@ contains
       if (err /= CAPNP_OK) return
       call node_fname(g_nodes(idx)%p, st, err)
       if (err /= CAPNP_OK) return
+      call ref_stem(idx, st)
       call inst_name_for(t, idx, iname, err)
       if (err /= CAPNP_OK) return
       if (len(iname) > 0) st = iname
@@ -1705,6 +2599,7 @@ contains
       if (err /= CAPNP_OK) return
       call node_fname(g_nodes(idx)%p, st, err)
       if (err /= CAPNP_OK) return
+      call ref_stem(idx, st)
       ! A branded generic use gets the instantiation's handle type.
       call inst_name_for(t, idx, iname, err)
       if (err /= CAPNP_OK) return
@@ -1792,6 +2687,7 @@ contains
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(idx)%p, st, err)
          if (err /= CAPNP_OK) return
+         call ref_stem(idx, st)
          ! A branded generic element gets the instantiation's handle type.
          call inst_name_for(et, idx, iname, err)
          if (err /= CAPNP_OK) return
@@ -2429,7 +3325,7 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call note_import(idx, err)
+         call note_import(idx, err, .true.)
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(idx)%p, part, err)
          if (err /= CAPNP_OK) return
@@ -2566,8 +3462,10 @@ contains
       if (err /= CAPNP_OK) return
       call node_fname(g_nodes(pidx)%p, pn, err)
       if (err /= CAPNP_OK) return
+      call ref_stem(pidx, pn)
       call node_fname(g_nodes(ridx)%p, rn, err)
       if (err /= CAPNP_OK) return
+      call ref_stem(ridx, rn)
       ! A branded interface instantiation substitutes paramBrand and
       ! resultBrand, so GenIface(Text) methods see Text rather than the
       ! unbound parameter. capnpc-c++.c++ templates do the same substitution.
@@ -2635,9 +3533,11 @@ contains
          nsuper = 0
          return
       end if
-      call note_import(sidx, err)
+      call note_import(sidx, err, .true.)
       if (err /= CAPNP_OK) return
       call node_fname(g_nodes(sidx)%p, pname, err)
+      if (err /= CAPNP_OK) return
+      call ref_stem(sidx, pname)
    end subroutine iface_parent
 
    !> Interface declarations: the interface id, a client handle type, an
@@ -2741,13 +3641,13 @@ contains
          call w('      type('//pn//'_t), intent(out) :: params')
          call w('      integer(int64), intent(out) :: qid')
          call w('      integer, intent(out) :: err')
-         call w('      type(payload_t) :: pl')
+         call w('      type('//rpcn('payload_t')//') :: pl')
          call w('      call rpc_call_begin(conn, client%cap, '//upcase(tn)// &
                 '_INTERFACE_ID, '//itoa(i)//', m, pl, qid, err)')
          call w('      if (err /= CAPNP_OK) return')
          call w('      params%p = capnp_new_struct(m, '//upcase(pn)//'_DWORDS, '// &
                 upcase(pn)//'_PWORDS, err)')
-         call w('      if (err == CAPNP_OK) call payload_content_set(pl, params%p, err)')
+         call w('      if (err == CAPNP_OK) call '//rpcn('payload_content_set')//'(pl, params%p, err)')
          call w('   end subroutine '//ident_fit(tn//'_'//mn//'_begin'))
          call w('')
          call w('   subroutine '//ident_fit(tn//'_'//mn//'_wait')//'(conn, qid, results, err)')
@@ -2812,7 +3712,7 @@ contains
                 '_DWORDS, '//upcase(rn)//'_PWORDS, err)')
          call w('            if (err /= CAPNP_OK) return')
          call w('            call self%'//bn//'(ctx, params, results, err)')
-         call w('            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)')
+         call w('            if (err == CAPNP_OK) call '//rpcn('payload_content_set')//'(ctx%results, results%p, err)')
          call w('         end block')
       end do
       call w('      case default')
@@ -2882,6 +3782,7 @@ contains
          if (err /= CAPNP_OK) return
          call node_fname(g_nodes(sidx)%p, sn, err)
          if (err /= CAPNP_OK) return
+         call ref_stem(sidx, sn)
          ml = node_interface_methods(g_nodes(sidx)%p, err)
          if (err /= CAPNP_OK) return
          if (mode == 'c') then
@@ -2911,7 +3812,7 @@ contains
                call w('               if (err /= CAPNP_OK) return')
                call w('               call self%'//bn//'(ctx, params, results, err)')
                call w('               if (err == CAPNP_OK) &')
-               call w('                  call payload_content_set(ctx%results, results%p, err)')
+               call w('                  call '//rpcn('payload_content_set')//'(ctx%results, results%p, err)')
                call w('            end block')
             end select
          end do
@@ -2945,6 +3846,7 @@ contains
       type(nameset_t), intent(inout) :: set
       character(len=*), intent(in) :: name
       character(len=64), allocatable :: tmp(:)
+      if (ns_has(set, name)) return
       if (.not. allocated(set%v)) allocate (set%v(64))
       if (set%n == size(set%v)) then
          allocate (tmp(2*size(set%v)))
@@ -3144,26 +4046,14 @@ contains
       idx = find_node(superclass_id(sc))
    end function find_first_super
 
+   !> The any-pointer wrapper types live in the runtime, so schemas that
+   !> import each other never declare them twice. The resolver helpers stay
+   !> private for the same reason.
    subroutine emit_any_decls()
-      if (g_need_any_struct) then
-         call w('   type :: any_struct_t')
-         call w('      type(capnp_ptr_t) :: p')
-         call w('   end type any_struct_t')
-         call w('')
-      end if
-      if (g_need_any_list) then
-         call w('   type :: any_list_t')
-         call w('      type(capnp_ptr_t) :: p')
-         call w('   end type any_list_t')
-         call w('')
-      end if
-      if (g_need_capability) then
-         call w('   type :: capability_client_t')
-         call w('      integer :: kind')
-         call w('      integer(int64) :: id')
-         call w('   end type capability_client_t')
-         call w('')
-      end if
+      if (g_has_iface .and. .not. g_probe) call w('   private :: '//trim(g_cap_resolve))
+      if (g_need_capability .and. .not. g_probe) call w('   private :: '//trim(g_cap_resolve_id))
+      if (.not. g_probe) call emit_rpc_private()
+      if ((g_has_iface .or. g_need_capability) .and. .not. g_probe) call w('')
    end subroutine emit_any_decls
 
    subroutine emit_annotation_surface(modname, fidx, err)
@@ -3291,12 +4181,12 @@ contains
    !> layout.c++ setCapabilityPointer stores the table index; the
    !> descriptor id is what a caller addresses.
    subroutine emit_cap_resolve()
-      call w('   subroutine cap_resolve(ctab, idx, cap, err)')
+      call w('   subroutine '//trim(g_cap_resolve)//'(ctab, idx, cap, err)')
       call w('      type(capnp_ptr_t), intent(in) :: ctab')
       call w('      integer(int64), intent(in) :: idx')
       call w('      type(rpc_cap_t), intent(out) :: cap')
       call w('      integer, intent(out) :: err')
-      call w('      type(cap_descriptor_t) :: cd')
+      call w('      type('//rpcn('cap_descriptor_t')//') :: cd')
       call w('      cap%kind = RPC_CAP_NONE')
       call w('      cap%id = 0_int64')
       call w('      err = CAPNP_OK')
@@ -3306,35 +4196,35 @@ contains
       call w('      end if')
       call w('      cd%p = capnp_list_get_struct(ctab, int(idx), err)')
       call w('      if (err /= CAPNP_OK) return')
-      call w('      select case (cap_descriptor_which(cd))')
-      call w('      case (cap_descriptor_none_tag)')
+      call w('      select case ('//rpcn('cap_descriptor_which')//'(cd))')
+      call w('      case ('//rpcn('cap_descriptor_none_tag')//')')
       call w('         cap%kind = RPC_CAP_NONE')
-      call w('      case (cap_descriptor_sender_hosted_tag)')
+      call w('      case ('//rpcn('cap_descriptor_sender_hosted_tag')//')')
       call w('         cap%kind = RPC_CAP_IMPORT')
-      call w('         cap%id = cap_descriptor_sender_hosted_get(cd)')
-      call w('      case (cap_descriptor_sender_promise_tag)')
+      call w('         cap%id = '//rpcn('cap_descriptor_sender_hosted_get')//'(cd)')
+      call w('      case ('//rpcn('cap_descriptor_sender_promise_tag')//')')
       call w('         cap%kind = RPC_CAP_IMPORT')
-      call w('         cap%id = cap_descriptor_sender_promise_get(cd)')
-      call w('      case (cap_descriptor_receiver_hosted_tag)')
+      call w('         cap%id = '//rpcn('cap_descriptor_sender_promise_get')//'(cd)')
+      call w('      case ('//rpcn('cap_descriptor_receiver_hosted_tag')//')')
       call w('         cap%kind = RPC_CAP_IMPORT')
-      call w('         cap%id = cap_descriptor_receiver_hosted_get(cd)')
+      call w('         cap%id = '//rpcn('cap_descriptor_receiver_hosted_get')//'(cd)')
       call w('      case default')
       call w('         err = CAPNP_ERR_KIND')
       call w('      end select')
-      call w('   end subroutine cap_resolve')
+      call w('   end subroutine '//trim(g_cap_resolve))
       call w('')
    end subroutine emit_cap_resolve
 
    !> Same table walk as cap_resolve, writing kind and id without rpc_cap_t.
    !> kind 0 is none and kind 1 is an import (RPC_CAP_NONE / RPC_CAP_IMPORT).
    subroutine emit_cap_resolve_id()
-      call w('   subroutine cap_resolve_id(ctab, idx, kind, id, err)')
+      call w('   subroutine '//trim(g_cap_resolve_id)//'(ctab, idx, kind, id, err)')
       call w('      type(capnp_ptr_t), intent(in) :: ctab')
       call w('      integer(int64), intent(in) :: idx')
       call w('      integer, intent(out) :: kind')
       call w('      integer(int64), intent(out) :: id')
       call w('      integer, intent(out) :: err')
-      call w('      type(cap_descriptor_t) :: cd')
+      call w('      type('//rpcn('cap_descriptor_t')//') :: cd')
       call w('      kind = 0')
       call w('      id = 0_int64')
       call w('      err = CAPNP_OK')
@@ -3344,22 +4234,22 @@ contains
       call w('      end if')
       call w('      cd%p = capnp_list_get_struct(ctab, int(idx), err)')
       call w('      if (err /= CAPNP_OK) return')
-      call w('      select case (cap_descriptor_which(cd))')
-      call w('      case (cap_descriptor_none_tag)')
+      call w('      select case ('//rpcn('cap_descriptor_which')//'(cd))')
+      call w('      case ('//rpcn('cap_descriptor_none_tag')//')')
       call w('         kind = 0')
-      call w('      case (cap_descriptor_sender_hosted_tag)')
+      call w('      case ('//rpcn('cap_descriptor_sender_hosted_tag')//')')
       call w('         kind = 1')
-      call w('         id = cap_descriptor_sender_hosted_get(cd)')
-      call w('      case (cap_descriptor_sender_promise_tag)')
+      call w('         id = '//rpcn('cap_descriptor_sender_hosted_get')//'(cd)')
+      call w('      case ('//rpcn('cap_descriptor_sender_promise_tag')//')')
       call w('         kind = 1')
-      call w('         id = cap_descriptor_sender_promise_get(cd)')
-      call w('      case (cap_descriptor_receiver_hosted_tag)')
+      call w('         id = '//rpcn('cap_descriptor_sender_promise_get')//'(cd)')
+      call w('      case ('//rpcn('cap_descriptor_receiver_hosted_tag')//')')
       call w('         kind = 1')
-      call w('         id = cap_descriptor_receiver_hosted_get(cd)')
+      call w('         id = '//rpcn('cap_descriptor_receiver_hosted_get')//'(cd)')
       call w('      case default')
       call w('         err = CAPNP_ERR_KIND')
       call w('      end select')
-      call w('   end subroutine cap_resolve_id')
+      call w('   end subroutine '//trim(g_cap_resolve_id))
       call w('')
    end subroutine emit_cap_resolve_id
 

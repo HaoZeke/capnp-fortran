@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g11|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g11|g12|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -688,6 +688,7 @@ EOF
   cat > drv.f90 << 'EOF'
 program drv
    use capnp
+   use capnp_any
    use surf_capnp
    implicit none
    type(capnp_message_t), target :: m
@@ -904,6 +905,42 @@ EOF
   echo "g11 ok"
 }
 
+g12() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOF'
+@0x8444444444444401;
+interface IA { ping @0 () -> (); }
+struct SA { any @0 :AnyStruct; lst @1 :AnyList; cap @2 :Capability; }
+EOF
+  cat > b.capnp << 'EOF'
+@0x8444444444444402;
+using A = import "a.capnp";
+interface IB { pong @0 (a :A.IA) -> (); }
+struct SB { any @0 :AnyStruct; lst @1 :AnyList; cap @2 :Capability; a @3 :A.SA; }
+EOF
+  capnp compile "${CAPNP_INC[@]}" -oc++ a.capnp b.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use capnp
+   use capnp_any
+   use a_capnp
+   use b_capnp
+   implicit none
+   type(any_struct_t) :: s
+   type(any_list_t) :: l
+   type(capability_client_t) :: c
+   print '(a)', 'ok'
+end program drv
+EOF
+  fc a_capnp.f90 b_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "ok"
+  echo "g12 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -916,11 +953,12 @@ case "$CASE" in
   g9) g9 ;;
   g10) g10 ;;
   g11) g11 ;;
+  g12) g12 ;;
   all)
-    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11
+    g1; g2; g34 g3; g34 g4; g5; g6; g7; g8; g9; g10; g11; g12
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|all" >&2
     exit 2
     ;;
 esac

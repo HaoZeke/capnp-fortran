@@ -5,6 +5,7 @@ module test_rpc
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use iso_c_binding, only: c_int, c_funptr, c_funloc
    use capnp
+   use capnp_any, only: capability_client_t
    use rpc_capnp
    ! The vat speaks the three-party network layer, which names a third
    ! vat and carries the join keys; see capnp_rpc.

@@ -2,13 +2,15 @@
 module schema__streamer_capnp
    use capnp
    use capnp_rpc
-   use rpc_capnp, only: payload_t, payload_content_set, &
-      cap_descriptor_t, cap_descriptor_which, &
-      cap_descriptor_sender_hosted_get, &
-      cap_descriptor_sender_promise_get, &
-      cap_descriptor_receiver_hosted_get, &
-      cap_descriptor_none_tag, cap_descriptor_sender_hosted_tag, &
-      cap_descriptor_sender_promise_tag, cap_descriptor_receiver_hosted_tag
+   use rpc_capnp, only: payload_t, payload_content_set, rpc_capnp_cap_descriptor_t => cap_descriptor_t
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_which => cap_descriptor_which
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_sender_hosted_get => cap_descriptor_sender_hosted_get
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_sender_promise_get => cap_descriptor_sender_promise_get
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_receiver_hosted_get => cap_descriptor_receiver_hosted_get
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_none_tag => cap_descriptor_none_tag
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_sender_hosted_tag => cap_descriptor_sender_hosted_tag
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_sender_promise_tag => cap_descriptor_sender_promise_tag
+   use rpc_capnp, only: rpc_capnp_cap_descriptor_receiver_hosted_tag => cap_descriptor_receiver_hosted_tag
    use stream_capnp
    implicit none
    public
@@ -30,6 +32,15 @@ module schema__streamer_capnp
    type :: writer_done_results_t
       type(capnp_ptr_t) :: p
    end type writer_done_results_t
+
+   private :: cap_resolve
+   private :: rpc_capnp_cap_descriptor_t, rpc_capnp_cap_descriptor_which
+   private :: rpc_capnp_cap_descriptor_sender_hosted_get
+   private :: rpc_capnp_cap_descriptor_sender_promise_get
+   private :: rpc_capnp_cap_descriptor_receiver_hosted_get, rpc_capnp_cap_descriptor_none_tag
+   private :: rpc_capnp_cap_descriptor_sender_hosted_tag
+   private :: rpc_capnp_cap_descriptor_sender_promise_tag
+   private :: rpc_capnp_cap_descriptor_receiver_hosted_tag
 
    integer(int64), parameter :: WRITER_INTERFACE_ID = -4492425480129673704_int64
    type :: writer_client_t
@@ -258,7 +269,7 @@ contains
       integer(int64), intent(in) :: idx
       type(rpc_cap_t), intent(out) :: cap
       integer, intent(out) :: err
-      type(cap_descriptor_t) :: cd
+      type(rpc_capnp_cap_descriptor_t) :: cd
       cap%kind = RPC_CAP_NONE
       cap%id = 0_int64
       err = CAPNP_OK
@@ -268,18 +279,18 @@ contains
       end if
       cd%p = capnp_list_get_struct(ctab, int(idx), err)
       if (err /= CAPNP_OK) return
-      select case (cap_descriptor_which(cd))
-      case (cap_descriptor_none_tag)
+      select case (rpc_capnp_cap_descriptor_which(cd))
+      case (rpc_capnp_cap_descriptor_none_tag)
          cap%kind = RPC_CAP_NONE
-      case (cap_descriptor_sender_hosted_tag)
+      case (rpc_capnp_cap_descriptor_sender_hosted_tag)
          cap%kind = RPC_CAP_IMPORT
-         cap%id = cap_descriptor_sender_hosted_get(cd)
-      case (cap_descriptor_sender_promise_tag)
+         cap%id = rpc_capnp_cap_descriptor_sender_hosted_get(cd)
+      case (rpc_capnp_cap_descriptor_sender_promise_tag)
          cap%kind = RPC_CAP_IMPORT
-         cap%id = cap_descriptor_sender_promise_get(cd)
-      case (cap_descriptor_receiver_hosted_tag)
+         cap%id = rpc_capnp_cap_descriptor_sender_promise_get(cd)
+      case (rpc_capnp_cap_descriptor_receiver_hosted_tag)
          cap%kind = RPC_CAP_IMPORT
-         cap%id = cap_descriptor_receiver_hosted_get(cd)
+         cap%id = rpc_capnp_cap_descriptor_receiver_hosted_get(cd)
       case default
          err = CAPNP_ERR_KIND
       end select
