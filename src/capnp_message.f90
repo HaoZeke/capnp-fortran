@@ -335,7 +335,11 @@ contains
       p = capnp_ptr_t()
       p%msg => msg
       ! An out-of-range root is not charged (arena.h:430 short-circuits).
-      if (msg%nsegs < 1 .or. msg%segs(1)%len < 8_int64) then
+      if (msg%nsegs < 1) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (msg%segs(1)%len < 8_int64) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
