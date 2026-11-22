@@ -610,6 +610,7 @@ contains
       integer, intent(out) :: err
       integer(int64) :: n
       type(capnp_ptr_t) :: l
+      n = 0_int64
       l = capnp_getp(p, 4, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
