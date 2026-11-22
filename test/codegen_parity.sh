@@ -16,9 +16,79 @@ if [[ -n "$BUILD_DIR" && "$BUILD_DIR" != /* ]]; then
   BUILD_DIR=$START/$BUILD_DIR
 fi
 
+FC=${FC:-gfortran}
+CXX=${CXX:-g++}
+
 die() {
   echo "codegen parity: $*" >&2
   exit 1
+}
+
+for tool in capnp "$FC" "$CXX" pkg-config python3; do
+  command -v "$tool" > /dev/null || die "$tool not found on PATH (Cap'n Proto 1.4.0 and a Fortran and C++ compiler are required)"
+done
+
+TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/codegen-parity.XXXXXX")
+trap 'rm -rf "$TMP_ROOT"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+join_path() {
+  local IFS=:
+  echo "$*"
+}
+
+# A prefixed install (a conda or pixi environment) keeps the standard schemas,
+# C++ headers and capnp.pc under its own prefix, which neither `capnp` nor the
+# system `pkg-config` search by default. Some layouts use lib64.
+if [[ -z "${CAPNP_PREFIX:-}" ]]; then
+  CAPNP_PREFIX=$(cd "$(dirname "$(command -v capnp)")/.." && pwd)
+fi
+CAPNP_INC=()
+if [[ -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
+  CAPNP_INC=(-I "$CAPNP_PREFIX/include")
+fi
+PC_DIRS=()
+LIB_DIRS=()
+PC_DEFS=()
+for sub in lib lib64; do
+  [[ -d "$CAPNP_PREFIX/$sub" ]] && LIB_DIRS+=("$CAPNP_PREFIX/$sub")
+  if [[ -d "$CAPNP_PREFIX/$sub/pkgconfig" ]]; then
+    PC_DIRS+=("$CAPNP_PREFIX/$sub/pkgconfig")
+    if [[ -f "$CAPNP_PREFIX/$sub/pkgconfig/capnp.pc" ]]; then
+      PC_DEFS=(--define-variable=prefix="$CAPNP_PREFIX")
+    fi
+  fi
+done
+if ((${#PC_DIRS[@]})); then
+  PKG_CONFIG_PATH="$(join_path "${PC_DIRS[@]}")${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  export PKG_CONFIG_PATH
+fi
+if ((${#LIB_DIRS[@]})); then
+  LD_LIBRARY_PATH="$(join_path "${LIB_DIRS[@]}")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export LD_LIBRARY_PATH
+fi
+
+# The C++ side of a case links against libcapnp. pkg-config does not quote a
+# prefix containing spaces in --cflags or --libs, so the two directories come
+# from variables, and only -l, -D and -pthread words are kept from the rest.
+CAPNP_PC=()
+capnp_cxx_flags() {
+  local inc lib others word
+  if ((${#CAPNP_PC[@]})); then
+    return 0
+  fi
+  pkg-config "${PC_DEFS[@]}" --exists capnp \
+    || die "pkg-config cannot find capnp.pc; install the Cap'n Proto development files or set CAPNP_PREFIX"
+  inc=$(pkg-config "${PC_DEFS[@]}" --variable=includedir capnp)
+  lib=$(pkg-config "${PC_DEFS[@]}" --variable=libdir capnp)
+  others=$(pkg-config "${PC_DEFS[@]}" --cflags-only-other --libs-only-l --libs-only-other capnp)
+  CAPNP_PC=(-I"$inc" -L"$lib")
+  for word in $others; do
+    case "$word" in
+      -l* | -D* | -pthread) CAPNP_PC+=("$word") ;;
+    esac
+  done
 }
 
 # Modules a generated schema and its driver need.
@@ -127,8 +197,6 @@ if [[ "$LIB" == *.so ]]; then
   LIBARGS=(-L"$(dirname "$LIB")" -lcapnp_fortran -Wl,-rpath,"$(dirname "$LIB")")
 fi
 
-FC=${FC:-gfortran}
-CXX=${CXX:-g++}
 # The library says what its drivers need at link time: the gcov runtime for
 # an instrumented one, the sanitizer runtimes for a sanitized one.
 NM_FLAG=-g
@@ -152,23 +220,9 @@ COV=()
 if has_sym __gcov_init; then
   COV=(--coverage)
 fi
-export LD_LIBRARY_PATH=/usr/local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
-
-# A prefixed install (a conda or pixi environment) keeps the standard schemas,
-# C++ headers and capnp.pc under its own prefix, which neither `capnp` nor the
-# system `pkg-config` search by default.
-CAPNP_PREFIX=$(cd "$(dirname "$(command -v capnp)")/.." && pwd)
-CAPNP_INC=()
-if [[ -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
-  CAPNP_INC=(-I "$CAPNP_PREFIX/include")
-fi
-export PKG_CONFIG_PATH=$CAPNP_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
-export LD_LIBRARY_PATH=$CAPNP_PREFIX/lib:$LD_LIBRARY_PATH
 
 work() {
-  local d
-  d=$(mktemp -d /tmp/codegen-parity.XXXXXX)
-  echo "$d"
+  mktemp -d "$TMP_ROOT/case.XXXXXX"
 }
 
 fc() {
@@ -249,7 +303,8 @@ int main() {
     (long long)r.getI64(), (long long)MIN_I64, bits);
 }
 EOF
-  "$CXX" -std=c++17 cpp.cpp minmax.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
+  capnp_cxx_flags
+  "$CXX" -std=c++17 cpp.cpp minmax.capnp.c++ "${CAPNP_PC[@]}" -o cppdrv
   local f c
   run_drv
   f=$(tr 'A-F' 'a-f' <<< "$DRV_OUT")
@@ -349,7 +404,8 @@ int main() {
   std::printf("%d %s %d\n", d2.getNums()[0], t.cStr(), d2.getElems()[0].getV());
 }
 EOF
-  "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ $(pkg-config --cflags --libs capnp) -o cppdrv
+  capnp_cxx_flags
+  "$CXX" -std=c++17 cpp.cpp deflists.capnp.c++ "${CAPNP_PC[@]}" -o cppdrv
   local f c
   run_drv
   f=$DRV_OUT
