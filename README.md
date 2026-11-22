@@ -39,9 +39,11 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
   wire bytes (see `interop/README.md`).
 - RPC level 1: two-party vat over a POSIX socket transport
-  (`capnp_rpc`, `capnp_posix`, `capnp_rpc_transport`), cap tables,
+  and pluggable byte streams (`capnp_rpc`, `capnp_posix`,
+  `capnp_rpc_transport`), cap tables,
   promise pipelining, embargo echo (same-process fpm suite), and level 2
-  persistence hooks; bootstrap and pipelined/settled calls are also
+  `Persistent<SturdyRef, Owner>.save` calls; bootstrap and
+  pipelined/settled calls are also
   protocol-tested against a live capnp-C++ peer when that interop tier is built.
 - RPC level 4: `Join`, answering whether a set of capabilities names one
   object, per the two-party rules in `rpc-twoparty.capnp`.
@@ -55,7 +57,7 @@ and capnp-C++:
 | Feature | capnp-c | capnp-C++ | capnp-fortran |
 |---------|---------|-----------|---------------|
 | Wire format read/write (all pointer kinds) | yes | yes | yes |
-| Stream framing | yes | yes | yes |
+| Stream framing | yes | yes | yes (pluggable byte stream, fd and socketpair adapters) |
 | Packed codec | yes | yes | yes, plus incremental pack/unpack |
 | Zero-copy reads from a caller buffer | yes | yes | yes (`capnp_deserialize_view`, `capnp_get_data_view`) |
 | Traversal and depth limits | yes (0.2+) | yes | yes |
@@ -68,10 +70,11 @@ and capnp-C++:
 | Generated annotations and reflection metadata | no | yes | partial (annotation constants only) |
 | Capability pointers on the wire | yes | yes | yes |
 | RPC level 1 (calls, cap tables, promise pipelining, embargo echo) | no | yes | yes (`capnp_rpc`, two-party) |
-| RPC level 2 (persistence hooks) | no | partial | hooks (`RPC_PERSISTENT_IFACE`, app-defined SturdyRefs) |
-| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | yes (post-1.4.0) | partial (project-specific network layer; both halves and three-vat tests) |
-| RPC level 4 (`Join`, reference equality) | no | no | yes (two-party Join; C++ replies unimplemented) |
-| `-> stream` flow control | no | yes | yes (`rpc_stream_t`, windowed) |
+| RPC level 2 (`Persistent.save`) | no | partial | yes (`rpc_persistent_save_begin` / `_wait`, app-defined SturdyRef and Owner) |
+| RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
+| RPC level 4 (`Join`, reference equality) | no | no | yes (two-party sender and receiver; C++ replies unimplemented) |
+| `-> stream` flow control and cancellation | no | yes | yes (`rpc_stream_t`, windowed, Finish cancellation) |
+| Capability membranes | no | yes | partial (call checks, shared revocation, recursive result caps, unwrap on return) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
 | Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
@@ -79,6 +82,22 @@ and capnp-C++:
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`
 over TCP and calls it, pipelined and settled.
+
+`rpc_byte_stream_t` is the transport boundary used by RPC connections.
+Applications can implement its exact-read, exact-write, readiness, and
+close bindings for another stream. `rpc_fd_stream_t` adapts an existing
+descriptor, and `rpc_socketpair_streams` creates an owned loopback pair.
+TCP remains an adapter choice rather than a requirement of the RPC
+core. TLS can be supplied by a stream implementation; the library does
+not impose a TLS stack or certificate policy.
+
+Level 2 follows `capnp/persistent.capnp`: `rpc_persistent_save_begin`
+sends `Persistent<AnyPointer, AnyPointer>.save`, including the optional
+`SaveParams.sealFor` owner, and `rpc_persistent_save_wait` returns
+`SaveResults.sturdyRef`. Both values are realm-defined. Capnp-C++ does
+not define a universal restoration protocol or token format, so
+restoring a SturdyRef remains an application service rather than an RPC
+runtime operation in both implementations.
 
 Level 3 is three-party introduction. `rpc.capnp` leaves `ProvisionId`,
 `RecipientId` and `ThirdPartyCapId` as `AnyPointer` for the network layer
@@ -110,9 +129,11 @@ payload can name a capability that lives in a third vat and hand over a
 vine, an ordinary import through the introducer, so calls work before
 the pickup ever happens. That is the fallback the spec gives receivers
 that cannot reach a third party, and it is why the vine must not be
-released until the pickup succeeds. Dialling the third vat belongs to
-the network layer, so `rpc_pending_introductions` hands the arrangement
-over and `rpc_introduction_done` releases the vine once it is finished.
+released until the pickup succeeds. `rpc_pending_introductions` exposes
+the network-layer VatId, `rpc_introduction_dial` opens its numeric IPv4
+address, and `rpc_introduction_done` releases the vine after a successful
+`Accept`. Applications using DNS or a directory can resolve the VatId
+before supplying their own connection adapter.
 
 `Accept.embargo` is honoured: an embargoed Accept claims the capability
 but is not answered until the introducer sends `Disembargo` with
@@ -126,23 +147,49 @@ The level 3 tests decode frames the reference `capnp` CLI encoded
 layout the vat shares with its own builder but the wire format does not
 would pass every self-built test.
 
-Upstream added level 3 after 1.4.0; `capnp` 1.4.0 has no `Provide` /
-`Accept` handling at all, and main (4bfab51) has it.
+Capnp-C++ 1.4.0 implements `TwoPartyVatNetwork`, whose
+`rpc-twoparty.capnp` IDs intentionally cannot name a third party. It has
+no `Provide` or `Accept` handling, so no live 1.4.0 level 3 peer test is
+possible. Upstream added level 3 later. This project's
+`rpc-threeparty.capnp` is a separate network parameterization rather
+than a claim that it interoperates with C++ 1.4.0 three-party routing.
 
 Level 4 is `Join`: asking whether several capabilities are one object.
 The two-party network defines this fully, and it is implemented here.
 Parts accumulate against their `joinId`, and every part is answered only
 once the whole set has arrived, since no single part is answerable
 alone; equal export ids then mean the same object, and exactly one
-`JoinResult` carries the joined capability. Upstream C++ has no `Join`
-case at all -- it falls through to the default branch and replies
-`unimplemented` -- so this is the one place the family is ahead of the
-reference implementation rather than catching up to it. Generics are
-generated as brand-resolved instantiations, and reflection is the
-dynamic API; the generated reflection metadata is annotation constants
-only. capnpc-c generates neither. The wire format carries generic types
-either way, so messages produced by C++ users of those features still
-read correctly here.
+`JoinResult` carries the joined capability. `rpc_join_send` emits the
+complete set before `rpc_join_wait` collects and settles that one
+capability, so equality checks can cross a two-party connection rather
+than being limited to local export ids. Capnp-C++ 1.4.0 has no `Join`
+case at all and replies `unimplemented`, so no live C++ Join interop
+test exists. Generics are generated as brand-resolved instantiations,
+and reflection is the dynamic API; the generated reflection metadata is
+annotation constants only. capnpc-c generates neither. The wire format
+carries generic types either way, so messages produced by C++ users of
+those features still read correctly here.
+
+Cancellation uses `Finish` with
+`requireEarlyCancellationWorkaround = false`, matching Cap'n Proto 1.0
+and newer. `rpc_request_cancellation` abandons one question and
+`rpc_stream_cancel` applies the same request to every outstanding stream
+call. A callee may still run application code to completion unless its
+method opts into cancellation, matching C++'s `allowCancellation`
+annotation. The live C++ interop peer includes an opted-in method whose
+never-ending promise is dropped by the Fortran cancellation request.
+
+Membranes cover part of `capnp/membrane.h`. A policy can allow or reject
+an inbound or outbound call. Wrappers that share a policy share one
+revocation flag. Result capabilities are wrapped recursively, and a
+wrapper that crosses back through the same policy is unwrapped.
+`rpc_membrane_cap` wraps an imported client capability and
+`rpc_membrane_server_t` wraps a local server. Redirecting to another
+capability, an onRevoked promise that cancels in-flight calls, addRef
+policy ownership, parameter-capability membranes, and
+shouldResolveBeforeRedirecting are not implemented. Membranes are local
+capability machinery, not an RPC wire extension, so their tests run
+between Fortran vats rather than against a C++ peer.
 
 ## Changelog
 

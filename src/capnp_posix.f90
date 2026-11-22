@@ -10,7 +10,8 @@ module capnp_posix
 
    public :: px_socketpair, px_close, px_shutdown_wr
    public :: px_send_all, px_recv_all, px_recv_some
-   public :: px_tcp_listen, px_tcp_accept, px_tcp_connect
+   public :: px_tcp_listen, px_tcp_accept, px_tcp_connect, px_tcp_connect_host
+   public :: px_tcp_bound_port
    public :: px_poll_in
 
    integer, parameter, public :: PX_BAD_FD = -1
@@ -23,6 +24,12 @@ module capnp_posix
    integer(c_int), parameter :: SOL_SOCKET = 1
    integer(c_int), parameter :: SO_REUSEADDR = 2
    integer(c_short), parameter :: POLLIN = 1_c_short
+   integer(c_short), parameter :: POLLOUT = 4_c_short
+   integer(c_short), parameter :: POLLERR = 8_c_short
+   integer(c_int), parameter :: F_GETFL = 3_c_int
+   integer(c_int), parameter :: F_SETFL = 4_c_int
+   integer(c_int), parameter :: O_NONBLOCK = 2048_c_int
+   integer(c_int), parameter :: SO_ERROR = 4_c_int
 
    type, bind(c) :: c_pollfd
       integer(c_int) :: fd
@@ -109,6 +116,20 @@ module capnp_posix
          integer(c_int) :: rc
       end function c_connect
 
+      function c_getsockname(fd, addr, addrlen) bind(c, name='getsockname') result(rc)
+         import :: c_int, c_ptr
+         integer(c_int), value :: fd
+         type(c_ptr), value :: addr, addrlen
+         integer(c_int) :: rc
+      end function c_getsockname
+
+      function c_inet_pton(af, src, dst) bind(c, name='inet_pton') result(rc)
+         import :: c_int, c_ptr
+         integer(c_int), value :: af
+         type(c_ptr), value :: src, dst
+         integer(c_int) :: rc
+      end function c_inet_pton
+
       function c_setsockopt(fd, level, optname, optval, optlen) &
          bind(c, name='setsockopt') result(rc)
          import :: c_int, c_ptr
@@ -125,6 +146,20 @@ module capnp_posix
          integer(c_int), value :: timeout_ms
          integer(c_int) :: nready
       end function c_poll
+
+      function c_fcntl(fd, cmd, arg) bind(c, name='fcntl') result(rc)
+         import :: c_int
+         integer(c_int), value :: fd, cmd, arg
+         integer(c_int) :: rc
+      end function c_fcntl
+
+      function c_getsockopt(fd, level, optname, optval, optlen) &
+         bind(c, name='getsockopt') result(rc)
+         import :: c_int, c_ptr
+         integer(c_int), value :: fd, level, optname
+         type(c_ptr), value :: optval, optlen
+         integer(c_int) :: rc
+      end function c_getsockopt
    end interface
 
 contains
@@ -269,10 +304,31 @@ contains
    subroutine px_tcp_connect(port, fd, err)
       integer, intent(in) :: port
       integer, intent(out) :: fd, err
+      call px_tcp_connect_host('127.0.0.1', port, fd, err)
+   end subroutine px_tcp_connect
+
+   !> Connect to a numeric IPv4 address. Vat identifiers remain
+   !> network-layer data; DNS or directory lookup can be performed by the
+   !> application before calling this adapter.
+   subroutine px_tcp_connect_host(host, port, fd, err, timeout_ms)
+      character(len=*), intent(in) :: host
+      integer, intent(in) :: port
+      integer, intent(out) :: fd, err
+      integer, intent(in), optional :: timeout_ms
       type(c_sockaddr_in), target :: sa
-      integer(c_int) :: sfd
+      type(c_pollfd), target :: pfd
+      integer(c_int) :: sfd, flags
+      integer(c_int), target :: soerr, optlen
+      character(kind=c_char), allocatable, target :: hostz(:)
+      integer :: i, n
       err = CAPNP_OK
       fd = PX_BAD_FD
+      n = len_trim(host)
+      allocate (hostz(0:n))
+      do i = 1, n
+         hostz(i - 1) = host(i:i)
+      end do
+      hostz(n) = c_null_char
       sfd = c_socket(AF_INET, SOCK_STREAM, 0_c_int)
       if (sfd < 0_c_int) then
          err = CAPNP_ERR_IO
@@ -280,15 +336,69 @@ contains
       end if
       sa%sin_family = int(AF_INET, c_short)
       sa%sin_port = htons16(port)
-      sa%sin_addr = htonl_loopback()
+      if (c_inet_pton(AF_INET, c_loc(hostz(0)), c_loc(sa%sin_addr)) /= 1_c_int) then
+         err = CAPNP_ERR_IO
+         call px_close(int(sfd))
+         return
+      end if
       sa%sin_zero = 0_c_int8_t
+      if (.not. present(timeout_ms)) then
+         if (c_connect(sfd, c_loc(sa), 16_c_int) /= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+         fd = int(sfd)
+         return
+      end if
+      flags = c_fcntl(sfd, F_GETFL, 0_c_int)
+      if (flags < 0_c_int .or. &
+          c_fcntl(sfd, F_SETFL, ior(flags, O_NONBLOCK)) < 0_c_int) then
+         err = CAPNP_ERR_IO
+         call px_close(int(sfd))
+         return
+      end if
       if (c_connect(sfd, c_loc(sa), 16_c_int) /= 0_c_int) then
+         pfd%fd = sfd
+         pfd%events = ior(POLLOUT, POLLERR)
+         pfd%revents = 0_c_short
+         if (c_poll(c_loc(pfd), 1_c_long, int(timeout_ms, c_int)) <= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+         soerr = 0_c_int
+         optlen = 4_c_int
+         if (c_getsockopt(sfd, SOL_SOCKET, SO_ERROR, c_loc(soerr), c_loc(optlen)) /= 0_c_int &
+             .or. soerr /= 0_c_int) then
+            err = CAPNP_ERR_IO
+            call px_close(int(sfd))
+            return
+         end if
+      end if
+      if (c_fcntl(sfd, F_SETFL, flags) < 0_c_int) then
          err = CAPNP_ERR_IO
          call px_close(int(sfd))
          return
       end if
       fd = int(sfd)
-   end subroutine px_tcp_connect
+   end subroutine px_tcp_connect_host
+
+   !> Return the local TCP port of a bound or connected IPv4 socket.
+   subroutine px_tcp_bound_port(fd, port, err)
+      integer, intent(in) :: fd
+      integer, intent(out) :: port, err
+      type(c_sockaddr_in), target :: sa
+      integer(c_int), target :: addrlen
+      err = CAPNP_OK
+      port = 0
+      addrlen = 16_c_int
+      if (c_getsockname(int(fd, c_int), c_loc(sa), c_loc(addrlen)) /= 0_c_int) then
+         err = CAPNP_ERR_IO
+         return
+      end if
+      port = ntohs16(sa%sin_port)
+   end subroutine px_tcp_bound_port
 
    !> Block until fd is readable or timeout_ms elapses; readable out.
    subroutine px_poll_in(fd, timeout_ms, readable, err)
@@ -321,6 +431,16 @@ contains
       if (u > 32767) u = u - 65536
       v = int(u, c_int16_t)
    end function htons16
+
+   pure function ntohs16(v) result(port)
+      integer(c_int16_t), intent(in) :: v
+      integer :: port, u, hi, lo
+      u = int(v)
+      if (u < 0) u = u + 65536
+      hi = iand(u/256, 255)
+      lo = iand(u, 255)
+      port = lo*256 + hi
+   end function ntohs16
 
    !> 127.0.0.1 in network byte order.
    pure function htonl_loopback() result(v)
