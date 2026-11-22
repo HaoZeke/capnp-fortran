@@ -3,19 +3,129 @@
 # emitter and matches Cap'n Proto C++ 1.4.0 after the fix.
 set -euo pipefail
 
+START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-BIN=$(find build -name capnpc-fortran -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
-MOD=$(find build -name capnp.mod -printf '%T@ %h\n' | sort -n | tail -1 | cut -d' ' -f2-)
-LIB=$(find build -name libcapnp.a -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
-if [[ -z "${BIN}" || -z "${MOD}" || -z "${LIB}" ]]; then
-  echo "codegen parity: build capnpc-fortran first" >&2
+# Usage: codegen_parity.sh [g1..g11|all] [build-dir]
+# The build directory may also come from CAPNP_BUILD_DIR and must contain one
+# complete build. Without one, fpm builds into build-codegen-parity.
+CASE=${1:-all}
+BUILD_DIR=${2:-${CAPNP_BUILD_DIR:-}}
+if [[ -n "$BUILD_DIR" && "$BUILD_DIR" != /* ]]; then
+  BUILD_DIR=$START/$BUILD_DIR
+fi
+
+die() {
+  echo "codegen parity: $*" >&2
   exit 1
+}
+
+# Modules a generated schema and its driver need.
+REQUIRED_MODS=(capnp capnp_rpc capnp_posix stream_capnp)
+
+# Every artifact comes from one build. A directory given by the caller must
+# contain exactly one plugin, one library and one module directory; with several
+# (two fpm profiles, a static and a shared Meson build) they could come from
+# different builds. Without a directory, the script builds into a tree it owns.
+# fpm gets the relative name: it runs from $ROOT, and fpm does not quote an
+# absolute --build-dir when it hands the path to git, so spaces in $ROOT break it.
+PRIVATE_BUILD_NAME=build-codegen-parity
+PRIVATE_BUILD=$ROOT/$PRIVATE_BUILD_NAME
+DISCOVER_ERR=
+
+sole() {
+  local what=$1 root=$2
+  shift 2
+  local found
+  mapfile -t found < <(find "$root" "$@" 2> /dev/null | sort)
+  if ((${#found[@]} != 1)); then
+    DISCOVER_ERR="found ${#found[@]} $what under $root, expected one"
+    return 1
+  fi
+  SOLE=${found[0]}
+}
+
+# A library built for capnpc-fortran alone has no RPC or POSIX objects.
+lib_complete() {
+  local lib=$1 flag=-g syms m
+  command -v nm > /dev/null || return 0
+  [[ "$lib" == *.so ]] && flag=-D
+  syms=$(nm "$flag" --defined-only "$lib" 2> /dev/null) || return 1
+  for m in capnp_rpc capnp_posix; do
+    grep "__${m}_MOD_" <<< "$syms" > /dev/null || return 1
+  done
+}
+
+discover() {
+  local root=$1 bin lib mod m
+  DISCOVER_ERR=
+  [[ -d "$root" ]] || {
+    DISCOVER_ERR="$root is not a directory"
+    return 1
+  }
+  sole "capnpc-fortran executables" "$root" -name capnpc-fortran -type f || return 1
+  bin=$SOLE
+  sole "libraries" "$root" \( -type f -o -type l \) \
+    \( -name libcapnp.a -o -name libcapnp_fortran.a -o -name libcapnp_fortran.so \) || return 1
+  lib=$SOLE
+  sole "module directories (capnp.mod)" "$root" -name capnp.mod || return 1
+  mod=$(dirname "$SOLE")
+  for m in "${REQUIRED_MODS[@]}"; do
+    [[ -f "$mod/$m.mod" ]] || {
+      DISCOVER_ERR="$mod has no $m.mod"
+      return 1
+    }
+  done
+  lib_complete "$lib" || {
+    DISCOVER_ERR="$lib lacks the capnp_rpc and capnp_posix objects"
+    return 1
+  }
+  BIN=$bin LIB=$lib MOD=$mod
+}
+
+# --build-dir needs fpm 0.13. Older releases print an unknown-keyword message
+# and exit 0 without building, so the directory is checked after the build.
+# The fpm output stays on disk when the build is unusable.
+build_private() {
+  local attempt log
+  log=$(mktemp "${TMPDIR:-/tmp}/codegen-parity-fpm.XXXXXX")
+  for attempt in 1 2; do
+    # git exports GIT_DIR to rebase exec lines; fpm clones dependencies with git.
+    env -u GIT_DIR -u GIT_WORK_TREE fpm build --no-prune --build-dir "$PRIVATE_BUILD_NAME" \
+      > "$log" 2>&1 || {
+      cat "$log" >&2
+      rm -f "$log"
+      die "fpm build failed in $PRIVATE_BUILD"
+    }
+    if [[ ! -d "$PRIVATE_BUILD" ]]; then
+      DISCOVER_ERR="fpm did not create $PRIVATE_BUILD (--build-dir needs fpm 0.13 or newer); fpm output is in $log"
+      return 1
+    fi
+    if discover "$PRIVATE_BUILD"; then
+      rm -f "$log"
+      return 0
+    fi
+    rm -rf "$PRIVATE_BUILD"
+  done
+  DISCOVER_ERR="$DISCOVER_ERR; fpm output is in $log"
+  return 1
+}
+
+BIN= MOD= LIB=
+if [[ -n "$BUILD_DIR" ]]; then
+  discover "$BUILD_DIR" || die "incomplete build in $BUILD_DIR: $DISCOVER_ERR"
+else
+  command -v fpm > /dev/null || die "fpm not found; pass a build directory or set CAPNP_BUILD_DIR"
+  build_private || die "incomplete build in $PRIVATE_BUILD: $DISCOVER_ERR"
 fi
 BIN=$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")
 MOD=$(cd "$MOD" && pwd)
 LIB=$(cd "$(dirname "$LIB")" && pwd)/$(basename "$LIB")
+LIBARGS=("$LIB")
+if [[ "$LIB" == *.so ]]; then
+  LIBARGS=(-L"$(dirname "$LIB")" -lcapnp_fortran -Wl,-rpath,"$(dirname "$LIB")")
+fi
 
 FC=${FC:-gfortran}
 CXX=${CXX:-g++}
@@ -121,7 +231,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc minmax_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc minmax_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   capnp compile "${CAPNP_INC[@]}" -oc++ minmax.capnp
   cat > cpp.cpp << 'EOF'
 #include "minmax.capnp.h"
@@ -180,7 +290,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc textesc_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc textesc_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" "ok"
   echo "g2 ok"
@@ -223,7 +333,7 @@ program drv
    call capnp_message_free(m2)
 end program drv
 EOF
-  fc deflists_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc deflists_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   capnp compile "${CAPNP_INC[@]}" -oc++ deflists.capnp
   cat > cpp.cpp << 'EOF'
 #include "deflists.capnp.h"
@@ -317,7 +427,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc ifaces_capnp.f90 impl.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc ifaces_capnp.f90 impl.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" "1"
   echo "g5 ok"
@@ -386,7 +496,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc generics_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc generics_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" "ok"
   echo "g6 ok"
@@ -490,7 +600,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc caps_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc caps_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" $'11\n0 7\n0'
   echo "g8 ok"
@@ -557,7 +667,7 @@ program drv
    call capnp_message_free(m)
 end program drv
 EOF
-  fc surf_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc surf_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" "ok"
   echo "g9 ok"
@@ -732,13 +842,13 @@ program drv
    call rpc_conn_close(srv_conn)
 end program drv
 EOF
-  fc supers_capnp.f90 drv.f90 -I "$MOD" -J . "$LIB" -o drv
+  fc supers_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
   run_drv
   cmp_out "$DRV_OUT" "42 beta:hi 1 1 1"
   echo "g11 ok"
 }
 
-case "${1:-all}" in
+case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
   g3) g34 g3 ;;

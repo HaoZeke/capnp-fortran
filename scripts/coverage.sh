@@ -36,6 +36,8 @@ fi
 echo "==> clean build tree"
 rm -rf build
 
+# The parity cases link the instrumented library from this one build tree.
+export CAPNP_BUILD_DIR="$ROOT/build"
 echo "==> fpm test with --coverage (gfortran=$GFORTRAN_BIN gcov=$GCOV_BIN)"
 fpm test --flag "--coverage -O0 -g" --link-flag "--coverage" "$@"
 
