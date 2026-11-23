@@ -1900,7 +1900,7 @@ contains
       integer, intent(in) :: at
       integer :: n
       integer :: i, depth, perr
-      logical :: in_str, in_cmt, item
+      logical :: in_str, in_raw, in_cmt, item
       character(len=1) :: c
       character(len=1), allocatable :: stk(:)
       n = 0
@@ -1912,6 +1912,7 @@ contains
          return
       end if
       in_str = .false.
+      in_raw = .false.
       in_cmt = .false.
       item = .false.
       do while (i <= len(s))
@@ -1922,6 +1923,16 @@ contains
             cycle
          end if
          if (in_str) then
+            if (in_raw) then
+               if (c == achar(13)) then
+                  if (i < len(s)) then
+                     if (s(i + 1:i + 1) == achar(10)) i = i + 1
+                  end if
+               end if
+               if (c == achar(10) .or. c == achar(13)) in_str = .false.
+               i = i + 1
+               cycle
+            end if
             if (c == achar(10)) then
                n = -1
                return
@@ -1935,10 +1946,17 @@ contains
             i = i + 1
             cycle
          end if
+         if (i + 2 <= len(s)) then
+            if (s(i:i + 2) == char(239)//char(187)//char(191)) then
+               i = i + 3
+               cycle
+            end if
+         end if
          if (c == '#') then
             in_cmt = .true.
-         else if (c == '"') then
+         else if (c == '"' .or. c == '`') then
             in_str = .true.
+            in_raw = c == '`'
             item = .true.
          else if (c == '(' .or. c == '[') then
             call push_bracket(stk, depth, c, perr)
@@ -1979,7 +1997,7 @@ contains
       integer, intent(out) :: to
       integer, intent(out) :: err
       integer :: i, depth
-      logical :: in_str, in_cmt
+      logical :: in_str, in_raw, in_cmt
       character(len=1) :: c
       character(len=1), allocatable :: stk(:)
       err = CAPNP_OK
@@ -1987,6 +2005,7 @@ contains
       i = beg
       depth = 0
       in_str = .false.
+      in_raw = .false.
       in_cmt = .false.
       do while (i <= len(text))
          c = text(i:i)
@@ -1996,6 +2015,16 @@ contains
             cycle
          end if
          if (in_str) then
+            if (in_raw) then
+               if (c == achar(13)) then
+                  if (i < len(text)) then
+                     if (text(i + 1:i + 1) == achar(10)) i = i + 1
+                  end if
+               end if
+               if (c == achar(10) .or. c == achar(13)) in_str = .false.
+               i = i + 1
+               cycle
+            end if
             if (c == achar(10)) then
                err = CAPNP_ERR_ARG
                return
@@ -2010,8 +2039,9 @@ contains
          end if
          if (c == '#') then
             in_cmt = .true.
-         else if (c == '"') then
+         else if (c == '"' .or. c == '`') then
             in_str = .true.
+            in_raw = c == '`'
          else if (c == '(' .or. c == '[') then
             call push_bracket(stk, depth, c, err)
             if (err /= CAPNP_OK) return

@@ -193,3 +193,7 @@ struct GroupUnion $Json.discriminator(name = "kind") {
     n @3 :Int32;
   }
 }
+
+struct TextList {
+  values @0 :List(Text);
+}

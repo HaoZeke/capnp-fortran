@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(16))
+      allocate (testsuite(18))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -61,6 +61,8 @@ contains
       testsuite(14) = new_unittest("json-multimsg-growth", run_json_multimsg_growth)
       testsuite(15) = new_unittest("text-comments-bom", run_text_comments_bom)
       testsuite(16) = new_unittest("text-backtick-lines", run_text_backtick_lines)
+      testsuite(17) = new_unittest("text-backtick-delimiters", run_text_backtick_delimiters)
+      testsuite(18) = new_unittest("text-list-bom", run_text_list_bom)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -768,6 +770,52 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_backtick_lines
+
+   subroutine run_text_backtick_delimiters(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      character(len=:), allocatable :: input
+      integer :: err, idx, beg, last
+      input = '(values=[`x,])'//achar(10)//'])'
+      call capnp_text_span(input, 1, beg, last, err)
+      call check_(error, err == CAPNP_OK .and. last == len(input), &
+                  'text backtick delimiters: span')
+      if (allocated(error)) return
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'TextList', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'text backtick delimiters: schema')
+      if (allocated(error)) return
+      call capnp_text_decode(schema, idx, input, msg, err)
+      call check_(error, err == CAPNP_OK, 'text backtick delimiters: list')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_backtick_delimiters
+
+   subroutine run_text_list_bom(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, values
+      character(len=:), allocatable :: bom
+      integer :: err, idx
+      bom = achar(239)//achar(187)//achar(191)
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'TextList', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'text list BOM: schema')
+      if (allocated(error)) return
+      call capnp_text_decode(schema, idx, '(values=['//bom//'])', msg, err)
+      call check_(error, err == CAPNP_OK, 'text list BOM: decode')
+      if (.not. allocated(error)) then
+         root = capnp_root(msg, err)
+         values = capnp_getp(root, 0, err)
+         call check_(error, err == CAPNP_OK .and. capnp_list_len(values) == 0, 'text list BOM: empty')
+      end if
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_list_bom
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
