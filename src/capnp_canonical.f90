@@ -15,22 +15,26 @@ module capnp_canonical
 
    public :: capnp_canonicalize, capnp_is_canonical
 
-   !> Objects entered by the current canonical walk. A path, so a DAG
-   !> is visited twice and a cycle stops with an error.
-   integer, save :: walk_n = 0
-   integer, allocatable, save :: walk_seg(:)
-   integer(int64), allocatable, save :: walk_off(:)
-   !> Copy a capability as null and note it. A trailing capability still
-   !> counts when the pointer section is truncated, as in layout.c++.
-   logical, save :: caps_null = .false.
-   logical, save :: caps_seen = .false.
+   !> State of one canonicalize call, so concurrent calls share nothing.
+   type :: canon_walk_t
+      !> Objects entered by the current walk. A path, so a DAG is visited
+      !> twice and a cycle stops with an error.
+      integer :: n = 0
+      integer, allocatable :: seg(:)
+      integer(int64), allocatable :: off(:)
+      !> Copy a capability as null and note it. A trailing capability still
+      !> counts when the pointer section is truncated, as in layout.c++.
+      logical :: caps_null = .false.
+      logical :: caps_seen = .false.
+   end type canon_walk_t
 
 contains
 
-   subroutine release_walk()
-      walk_n = 0
-      if (allocated(walk_seg)) deallocate (walk_seg)
-      if (allocated(walk_off)) deallocate (walk_off)
+   subroutine release_walk(wk)
+      type(canon_walk_t), intent(inout) :: wk
+      wk%n = 0
+      if (allocated(wk%seg)) deallocate (wk%seg)
+      if (allocated(wk%off)) deallocate (wk%off)
    end subroutine release_walk
 
    !> Canonical bytes of a message's root object: one raw segment starting
@@ -44,15 +48,15 @@ contains
       !> after it reports one, and set saw_cap.
       logical, intent(in), optional :: null_caps
       logical, intent(out), optional :: saw_cap
-      caps_null = .false.
-      if (present(null_caps)) caps_null = null_caps
-      caps_seen = .false.
-      call canonicalize_root(msg, bytes, err)
-      if (present(saw_cap)) saw_cap = caps_seen
-      caps_null = .false.
+      type(canon_walk_t) :: wk
+      if (present(null_caps)) wk%caps_null = null_caps
+      call canonicalize_root(wk, msg, bytes, err)
+      if (present(saw_cap)) saw_cap = wk%caps_seen
+      call release_walk(wk)
    end subroutine capnp_canonicalize
 
-   subroutine canonicalize_root(msg, bytes, err)
+   subroutine canonicalize_root(wk, msg, bytes, err)
+      type(canon_walk_t), intent(inout) :: wk
       type(capnp_message_t), intent(inout), target :: msg
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
@@ -85,9 +89,9 @@ contains
 
       ! Measure with the live traversal budget so amplified DAGs abort immediately.
       remaining = msg%traversal_words
-      call release_walk()
-      need = 1_int64 + measure(root, 0, err) ! + root pointer word
-      call release_walk()
+      call release_walk(wk)
+      need = 1_int64 + measure(wk, root, 0, err) ! + root pointer word
+      call release_walk(wk)
       if (err /= CAPNP_OK) return
       after = msg%traversal_words
       msg%traversal_words = remaining
@@ -98,9 +102,9 @@ contains
          msg%traversal_words = after
          return
       end if
-      call release_walk()
-      croot = canon_copy(canon, root, 0, err)
-      call release_walk()
+      call release_walk(wk)
+      croot = canon_copy(wk, canon, root, 0, err)
+      call release_walk(wk)
       if (err /= CAPNP_OK) then
          call capnp_message_free(canon)
          msg%traversal_words = after
@@ -503,7 +507,8 @@ contains
 
    !> Canonical word count of an object (its own storage plus everything it
    !> references, tags and landing-free).
-   recursive function measure(p, depth, err) result(words)
+   recursive function measure(wk, p, depth, err) result(words)
+      type(canon_walk_t), intent(inout) :: wk
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: depth
       integer, intent(out) :: err
@@ -519,7 +524,7 @@ contains
       case (CAPNP_PK_NULL)
          return
       case (CAPNP_PK_CAP)
-         if (.not. caps_null) err = CAPNP_ERR_KIND
+         if (.not. wk%caps_null) err = CAPNP_ERR_KIND
          return
       end select
       if (depth >= p%msg%depth_limit) then
@@ -530,11 +535,11 @@ contains
       ! the segment starts at the same offset, so tracking it looks like
       ! a cycle. It also has no pointer to follow.
       if (walk_body(p)) then
-         if (walk_on(p)) then
+         if (walk_on(wk, p)) then
             err = CAPNP_ERR_DEPTH
             return
          end if
-         call walk_push(p, err)
+         call walk_push(wk, p, err)
          if (err /= CAPNP_OK) return
          tracked = .true.
       end if
@@ -548,7 +553,7 @@ contains
          do k = 0, np - 1
             q = capnp_getp(p, k, err)
             if (err /= CAPNP_OK) exit meas
-            words = words + measure(q, depth + 1, err)
+            words = words + measure(wk, q, depth + 1, err)
             if (err /= CAPNP_OK) exit meas
          end do
       case (CAPNP_PK_LIST)
@@ -574,7 +579,7 @@ contains
                      type(capnp_ptr_t) :: r
                      r = capnp_getp(q, k, err)
                      if (err /= CAPNP_OK) exit meas
-                     words = words + measure(r, depth + 1, err)
+                     words = words + measure(wk, r, depth + 1, err)
                      if (err /= CAPNP_OK) exit meas
                   end block
                end do
@@ -584,7 +589,7 @@ contains
             do i = 0_int64, p%nelem - 1_int64
                q = capnp_getp(p, int(i), err)
                if (err /= CAPNP_OK) exit meas
-               words = words + measure(q, depth + 1, err)
+               words = words + measure(wk, q, depth + 1, err)
                if (err /= CAPNP_OK) exit meas
             end do
          case default
@@ -592,7 +597,7 @@ contains
          end select
       end select
       end block meas
-      if (tracked) call walk_pop()
+      if (tracked) call walk_pop(wk)
    end function measure
 
    ! --- canonical copy ------------------------------------------------------
@@ -600,7 +605,8 @@ contains
    !> Copy p into the canonical arena with truncation; allocation order is
    !> preorder because children are allocated in slot order right after
    !> their parent.
-   recursive function canon_copy(canon, p, depth, err) result(q)
+   recursive function canon_copy(wk, canon, p, depth, err) result(q)
+      type(canon_walk_t), intent(inout) :: wk
       type(capnp_message_t), intent(inout), target :: canon
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: depth
@@ -618,8 +624,8 @@ contains
          return
       case (CAPNP_PK_CAP)
          ! Capabilities have no canonical form in a data message.
-         if (caps_null) then
-            caps_seen = .true.
+         if (wk%caps_null) then
+            wk%caps_seen = .true.
          else
             err = CAPNP_ERR_KIND
          end if
@@ -630,11 +636,11 @@ contains
          return
       end if
       if (walk_body(p)) then
-         if (walk_on(p)) then
+         if (walk_on(wk, p)) then
             err = CAPNP_ERR_DEPTH
             return
          end if
-         call walk_push(p, err)
+         call walk_push(wk, p, err)
          if (err /= CAPNP_OK) return
          tracked = .true.
       end if
@@ -653,7 +659,7 @@ contains
             r = capnp_getp(p, k, err)
             if (err /= CAPNP_OK) exit copyc
             if (r%kind == CAPNP_PK_NULL) cycle
-            c = canon_copy(canon, r, depth + 1, err)
+            c = canon_copy(wk, canon, r, depth + 1, err)
             if (err /= CAPNP_OK) exit copyc
             call capnp_setp(q, k, c, err)
             if (err /= CAPNP_OK) exit copyc
@@ -683,7 +689,7 @@ contains
                   r = capnp_getp(sel, k, err)
                   if (err /= CAPNP_OK) exit copyc
                   if (r%kind == CAPNP_PK_NULL) cycle
-                  c = canon_copy(canon, r, depth + 1, err)
+                  c = canon_copy(wk, canon, r, depth + 1, err)
                   if (err /= CAPNP_OK) exit copyc
                   call capnp_setp(del, k, c, err)
                   if (err /= CAPNP_OK) exit copyc
@@ -696,7 +702,7 @@ contains
                r = capnp_getp(p, int(i), err)
                if (err /= CAPNP_OK) exit copyc
                if (r%kind == CAPNP_PK_NULL) cycle
-               c = canon_copy(canon, r, depth + 1, err)
+               c = canon_copy(wk, canon, r, depth + 1, err)
                if (err /= CAPNP_OK) exit copyc
                call capnp_setp(q, int(i), c, err)
                if (err /= CAPNP_OK) exit copyc
@@ -715,7 +721,7 @@ contains
          end select
       end select
       end block copyc
-      if (tracked) call walk_pop()
+      if (tracked) call walk_pop(wk)
    end function canon_copy
 
    subroutine walk_key(p, seg, off)
@@ -746,21 +752,23 @@ contains
       end select
    end function walk_body
 
-   logical function walk_on(p)
+   logical function walk_on(wk, p)
+      type(canon_walk_t), intent(in) :: wk
       type(capnp_ptr_t), intent(in) :: p
       integer :: i, seg
       integer(int64) :: off
       call walk_key(p, seg, off)
       walk_on = .false.
-      do i = 1, walk_n
-         if (walk_seg(i) == seg .and. walk_off(i) == off) then
+      do i = 1, wk%n
+         if (wk%seg(i) == seg .and. wk%off(i) == off) then
             walk_on = .true.
             return
          end if
       end do
    end function walk_on
 
-   subroutine walk_push(p, err)
+   subroutine walk_push(wk, p, err)
+      type(canon_walk_t), intent(inout) :: wk
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(out) :: err
       integer, allocatable :: grown_seg(:)
@@ -768,33 +776,34 @@ contains
       integer :: n, stat, seg
       integer(int64) :: off
       err = CAPNP_OK
-      if (.not. allocated(walk_seg)) then
-         allocate (walk_seg(64), walk_off(64), stat=stat)
+      if (.not. allocated(wk%seg)) then
+         allocate (wk%seg(64), wk%off(64), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
       end if
-      if (walk_n >= size(walk_seg)) then
-         n = size(walk_seg)*2
+      if (wk%n >= size(wk%seg)) then
+         n = size(wk%seg)*2
          allocate (grown_seg(n), grown_off(n), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
-         grown_seg(1:walk_n) = walk_seg(1:walk_n)
-         grown_off(1:walk_n) = walk_off(1:walk_n)
-         call move_alloc(grown_seg, walk_seg)
-         call move_alloc(grown_off, walk_off)
+         grown_seg(1:wk%n) = wk%seg(1:wk%n)
+         grown_off(1:wk%n) = wk%off(1:wk%n)
+         call move_alloc(grown_seg, wk%seg)
+         call move_alloc(grown_off, wk%off)
       end if
       call walk_key(p, seg, off)
-      walk_n = walk_n + 1
-      walk_seg(walk_n) = seg
-      walk_off(walk_n) = off
+      wk%n = wk%n + 1
+      wk%seg(wk%n) = seg
+      wk%off(wk%n) = off
    end subroutine walk_push
 
-   subroutine walk_pop()
-      if (walk_n > 0) walk_n = walk_n - 1
+   subroutine walk_pop(wk)
+      type(canon_walk_t), intent(inout) :: wk
+      if (wk%n > 0) wk%n = wk%n - 1
    end subroutine walk_pop
 
    pure function data_bits_of(p) result(b)
