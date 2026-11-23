@@ -68,7 +68,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(23))
+      allocate (testsuite(24))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -92,6 +92,7 @@ contains
       testsuite(21) = new_unittest("json-empty-numbers", run_json_empty_numbers)
       testsuite(22) = new_unittest("float-parse-strtod", run_float_parse_strtod)
       testsuite(23) = new_unittest("float-comma-locale", run_float_comma_locale)
+      testsuite(24) = new_unittest("json-raw-controls", run_json_raw_controls)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -599,6 +600,63 @@ contains
       call json_soft_case(error, schema, idx, '{"ubig":" "}', 'uint64 blank')
       call capnp_dyn_free(schema)
    end subroutine run_json_empty_numbers
+
+   !> capnp 1.4.0 keeps raw control bytes inside a JSON string and prints
+   !> them back escaped. A raw NUL ends its input, so that message fails.
+   subroutine run_json_raw_controls(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: got(:), exp(:)
+      character(len=:), allocatable :: js, text
+      character(len=8) :: label
+      integer :: idx, err, b
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      do b = 0, 32
+         if (allocated(error)) exit
+         if (b == 32) then
+            js = '{"display_name":"a'//achar(127)//'b"}'
+         else
+            js = '{"display_name":"a'//achar(b)//'b"}'
+         end if
+         write (label, '(a,z2.2)') 'raw 0x', merge(127, b, b == 32)
+         call spit(tmp//'/raw.json', js, err)
+         call capnp_json_decode(schema, idx, js, decoded, err)
+         if (b == 0) then
+            call check_(error, err /= CAPNP_OK, label//': decode fails')
+            call check_(error, .not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+               //' && capnp convert -I"$INC" json:binary schema/codec.capnp Sample < ' &
+               //tmp//'/raw.json > /dev/null 2>&1'), label//': capnp fails')
+            call capnp_message_free(decoded)
+            cycle
+         end if
+         call check_(error, err == CAPNP_OK, label//': decode')
+         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && capnp convert -I"$INC" json:binary schema/codec.capnp Sample < ' &
+            //tmp//'/raw.json > '//tmp//'/raw.bin' &
+            //' && capnp convert -I"$INC" binary:json schema/codec.capnp Sample < ' &
+            //tmp//'/raw.bin > '//tmp//'/raw.out')) then
+            call test_failed(error, label//': capnp convert')
+            exit
+         end if
+         call capnp_serialize_bytes(decoded, got, err)
+         call capnp_read_file(tmp//'/raw.bin', exp, err)
+         call check_bytes(error, got, exp, label//': message bytes')
+         root = capnp_root(decoded, err)
+         call capnp_json_encode(schema, idx, root, text, err)
+         call check_(error, err == CAPNP_OK, label//': encode')
+         call check_file(error, text, tmp//'/raw.out', label//': escaped output')
+         call capnp_message_free(decoded)
+      end do
+      call capnp_dyn_free(schema)
+   end subroutine run_json_raw_controls
 
    subroutine json_soft_case(error, schema, idx, js, label)
       type(error_type), allocatable, intent(inout) :: error
