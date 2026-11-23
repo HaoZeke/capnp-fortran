@@ -18,6 +18,9 @@ jobs:
       - uses: prefix-dev/setup-pixi@19eac09b398e3d0c747adc7921926a6d802df4da # v0.8.8
         with:
           environments: default
+      # float-comma-locale needs a locale whose radix is a comma.
+      - name: generate de_DE.UTF-8
+        run: sudo locale-gen de_DE.UTF-8
       - name: fypp templates are in sync
         run: |
           pixi run gen
