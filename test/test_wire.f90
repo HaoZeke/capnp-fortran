@@ -11,7 +11,7 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(57))
+      allocate (testsuite(58))
       testsuite(1)%name = "endian"
       testsuite(1)%test => test_endian
       testsuite(2)%name = "pointer-words"
@@ -126,6 +126,8 @@ contains
       testsuite(56)%test => test_root_uninit
       testsuite(57)%name = "wide-list-get-all"
       testsuite(57)%test => test_wide_list_get_all
+      testsuite(58)%name = "copy-empty-first-pointer"
+      testsuite(58)%test => test_copy_empty_first_pointer
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2242,6 +2244,44 @@ contains
       end if
       call capnp_message_free(msg)
    end subroutine test_wide_list_get_all
+
+   !> An empty struct at offset -1 in the first pointer of a struct with no
+   !> data section has the parent's address. That is not a cycle, so the
+   !> copy and the size walk both accept it.
+   subroutine test_copy_empty_first_pointer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: src, dst
+      type(capnp_ptr_t) :: parent, empty, copied, child
+      integer(int64) :: words
+      integer :: err
+      call capnp_message_init_builder(src, err)
+      call capnp_message_init_builder(dst, err)
+      parent = capnp_new_struct(src, 0, 1, err)
+      empty = capnp_new_struct(src, 0, 0, err)
+      call capnp_setp(parent, 0, empty, err)
+      child = capnp_getp(parent, 0, err)
+      call check(error, err == CAPNP_OK .and. child%kind == CAPNP_PK_STRUCT .and. &
+                 child%seg == parent%seg .and. child%off == parent%off, &
+                 'empty first pointer: shares the parent address')
+      if (.not. allocated(error)) then
+         words = capnp_total_size(parent, err)
+         call check(error, err == CAPNP_OK .and. words == 1_int64, &
+                    'empty first pointer: size walk')
+      end if
+      if (.not. allocated(error)) then
+         copied = capnp_copy(dst, parent, err)
+         call check(error, err == CAPNP_OK .and. copied%kind == CAPNP_PK_STRUCT, &
+                    'empty first pointer: copy is not a cycle')
+      end if
+      if (.not. allocated(error)) then
+         child = capnp_getp(copied, 0, err)
+         call check(error, err == CAPNP_OK .and. child%kind == CAPNP_PK_STRUCT .and. &
+                    child%dwords == 0 .and. child%pwords == 0, &
+                    'empty first pointer: copied child is an empty struct')
+      end if
+      call capnp_message_free(src)
+      call capnp_message_free(dst)
+   end subroutine test_copy_empty_first_pointer
 
    subroutine void_list_case(error, count, budget, expect)
       type(error_type), allocatable, intent(inout) :: error
