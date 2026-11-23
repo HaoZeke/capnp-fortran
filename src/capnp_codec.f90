@@ -6,8 +6,6 @@
 !> text is plain decimal, hex, or (for Cap'n Proto text literals) octal.
 !> Data and Text escapes match kj::encodeCEscape / kj::decodeCEscape.
 module capnp_codec
-   use, intrinsic :: iso_c_binding, only: c_char, c_double, c_float, &
-      c_loc, c_null_char, c_ptr, c_associated
    use, intrinsic :: ieee_arithmetic, only: ieee_is_nan, ieee_is_finite, &
       ieee_quiet_nan, ieee_value
    use capnp
@@ -47,20 +45,14 @@ module capnp_codec
       type(brand_scope_t), allocatable :: scopes(:)
    end type capnp_brand_env_t
 
-   interface
-      function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
-         import c_double, c_ptr, c_char
-         character(kind=c_char), intent(in) :: nptr(*)
-         type(c_ptr), intent(out) :: endptr
-         real(c_double) :: v
-      end function c_strtod
-      function c_strtof(nptr, endptr) bind(c, name="strtof") result(v)
-         import c_float, c_ptr, c_char
-         character(kind=c_char), intent(in) :: nptr(*)
-         type(c_ptr), intent(out) :: endptr
-         real(c_float) :: v
-      end function c_strtof
-   end interface
+   integer, parameter :: FLT_BAD = 0, FLT_DEC = 1, FLT_HEX = 2, FLT_INF = 3, FLT_NAN = 4
+
+   !> IEEE binary64 and binary32 layouts for the hex and NaN paths.
+   type :: float_fmt_t
+      integer :: prec, emin, emax, mbits
+   end type float_fmt_t
+   type(float_fmt_t), parameter :: FMT64 = float_fmt_t(53, -1022, 1023, 52)
+   type(float_fmt_t), parameter :: FMT32 = float_fmt_t(24, -126, 127, 23)
 
 contains
 
@@ -160,55 +152,336 @@ contains
       end do
    end subroutine capnp_fmt_u64
 
+   !> The whole token as C-locale strtod reads it, which is what KJ's
+   !> NoLocaleStrtod gives: the radix is '.' whatever the process locale.
+   !> A decimal goes through Fortran list input, which never follows the
+   !> C locale and rounds as the C library does.
    subroutine capnp_parse_f64(tok, x, err)
       character(len=*), intent(in) :: tok
       real(real64), intent(out) :: x
       integer, intent(out) :: err
-      character(kind=c_char), allocatable, target :: cs(:)
-      type(c_ptr) :: endp
-      real(c_double) :: y
-      integer :: i, n
+      integer :: form, a, c, ios
+      logical :: neg
+      integer(int64) :: bits
       err = CAPNP_OK
       x = 0.0_real64
-      n = len(tok)
-      if (n == 0) then
+      call scan_c_float(tok, form, neg, a, c)
+      select case (form)
+      case (FLT_DEC)
+         read (tok(a:), *, iostat=ios) x
+         if (ios /= 0) then
+            x = 0.0_real64
+            err = CAPNP_ERR_ARG
+         end if
+         return
+      case (FLT_HEX)
+         bits = hex_float_bits(tok(c:), FMT64)
+      case (FLT_INF)
+         bits = inf_bits(FMT64)
+      case (FLT_NAN)
+         bits = nan_bits(tok(c:), FMT64)
+      case default
          err = CAPNP_ERR_ARG
          return
-      end if
-      allocate (cs(n + 1))
-      do i = 1, n
-         cs(i) = tok(i:i)
-      end do
-      cs(n + 1) = c_null_char
-      y = c_strtod(cs, endp)
-      x = real(y, real64)
-      if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
+      end select
+      if (neg) bits = ibset(bits, 63)
+      x = transfer(bits, x)
    end subroutine capnp_parse_f64
 
+   !> capnp_parse_f64 rounded once to binary32, as strtof does.
    subroutine capnp_parse_f32(tok, x, err)
       character(len=*), intent(in) :: tok
       real(real32), intent(out) :: x
       integer, intent(out) :: err
-      character(kind=c_char), allocatable, target :: cs(:)
-      type(c_ptr) :: endp
-      real(c_float) :: y
-      integer :: i, n
+      integer :: form, a, c, ios
+      logical :: neg
+      integer(int64) :: bits
+      integer(int32) :: b32
       err = CAPNP_OK
       x = 0.0_real32
-      n = len(tok)
-      if (n == 0) then
+      call scan_c_float(tok, form, neg, a, c)
+      select case (form)
+      case (FLT_DEC)
+         read (tok(a:), *, iostat=ios) x
+         if (ios /= 0) then
+            x = 0.0_real32
+            err = CAPNP_ERR_ARG
+         end if
+         return
+      case (FLT_HEX)
+         bits = hex_float_bits(tok(c:), FMT32)
+      case (FLT_INF)
+         bits = inf_bits(FMT32)
+      case (FLT_NAN)
+         bits = nan_bits(tok(c:), FMT32)
+      case default
          err = CAPNP_ERR_ARG
          return
-      end if
-      allocate (cs(n + 1))
-      do i = 1, n
-         cs(i) = tok(i:i)
-      end do
-      cs(n + 1) = c_null_char
-      y = c_strtof(cs, endp)
-      x = real(y, real32)
-      if (.not. c_associated(endp, c_loc(cs(n + 1)))) err = CAPNP_ERR_ARG
+      end select
+      b32 = int(bits, int32)
+      if (neg) b32 = ibset(b32, 31)
+      x = transfer(b32, x)
    end subroutine capnp_parse_f32
+
+   !> Classify tok by the C-locale strtod grammar. a is the first byte
+   !> after leading C whitespace, c the first byte after the sign.
+   pure subroutine scan_c_float(tok, form, neg, a, c)
+      character(len=*), intent(in) :: tok
+      integer, intent(out) :: form, a, c
+      logical, intent(out) :: neg
+      integer :: i, n
+      form = FLT_BAD
+      neg = .false.
+      n = len(tok)
+      i = 1
+      do while (i <= n)
+         if (index(' '//achar(9)//achar(10)//achar(11)//achar(12)//achar(13), tok(i:i)) == 0) exit
+         i = i + 1
+      end do
+      a = i
+      c = i
+      if (i > n) return
+      if (tok(i:i) == '+' .or. tok(i:i) == '-') then
+         neg = tok(i:i) == '-'
+         i = i + 1
+      end if
+      c = i
+      if (i > n) return
+      if (ascii_ieq(tok(i:), 'inf') .or. ascii_ieq(tok(i:), 'infinity')) then
+         form = FLT_INF
+      else if (n - i >= 2) then
+         if (ascii_ieq(tok(i:i + 2), 'nan')) then
+            if (nan_tail_ok(tok(i + 3:))) form = FLT_NAN
+            return
+         end if
+      end if
+      if (form /= FLT_BAD) return
+      if (n - i >= 1) then
+         if (tok(i:i) == '0' .and. (tok(i + 1:i + 1) == 'x' .or. tok(i + 1:i + 1) == 'X')) then
+            if (digits_ok(tok(i + 2:), .true.)) form = FLT_HEX
+            return
+         end if
+      end if
+      if (digits_ok(tok(i:), .false.)) form = FLT_DEC
+   end subroutine scan_c_float
+
+   !> Empty, or "(" n-char-sequence ")" with the sequence in [0-9A-Za-z_].
+   pure function nan_tail_ok(s) result(ok)
+      character(len=*), intent(in) :: s
+      logical :: ok
+      integer :: i
+      ok = len(s) == 0
+      if (ok) return
+      if (len(s) < 2) return
+      if (s(1:1) /= '(' .or. s(len(s):len(s)) /= ')') return
+      do i = 2, len(s) - 1
+         if (.not. nchar(s(i:i))) return
+      end do
+      ok = .true.
+   end function nan_tail_ok
+
+   pure function nchar(ch) result(y)
+      character(len=1), intent(in) :: ch
+      logical :: y
+      y = (ch >= '0' .and. ch <= '9') .or. (ch >= 'a' .and. ch <= 'z') .or. &
+          (ch >= 'A' .and. ch <= 'Z') .or. ch == '_'
+   end function nchar
+
+   !> One or more digits with at most one '.', then an optional exponent
+   !> with at least one decimal digit: e for decimal, p for hex.
+   pure function digits_ok(s, hex) result(ok)
+      character(len=*), intent(in) :: s
+      logical, intent(in) :: hex
+      logical :: ok
+      integer :: i, n, nd
+      logical :: dot
+      ok = .false.
+      n = len(s)
+      i = 1
+      nd = 0
+      dot = .false.
+      do while (i <= n)
+         if (s(i:i) == '.') then
+            if (dot) return
+            dot = .true.
+         else if (hex .and. capnp_hex_digit(s(i:i)) >= 0) then
+            nd = nd + 1
+         else if (.not. hex .and. capnp_dec_digit(s(i:i)) >= 0) then
+            nd = nd + 1
+         else
+            exit
+         end if
+         i = i + 1
+      end do
+      if (nd == 0) return
+      if (i > n) then
+         ok = .true.
+         return
+      end if
+      if (hex) then
+         if (s(i:i) /= 'p' .and. s(i:i) /= 'P') return
+      else
+         if (s(i:i) /= 'e' .and. s(i:i) /= 'E') return
+      end if
+      i = i + 1
+      if (i > n) return
+      if (s(i:i) == '+' .or. s(i:i) == '-') i = i + 1
+      if (i > n) return
+      do while (i <= n)
+         if (capnp_dec_digit(s(i:i)) < 0) return
+         i = i + 1
+      end do
+      ok = .true.
+   end function digits_ok
+
+   pure function ascii_ieq(s, lower) result(y)
+      character(len=*), intent(in) :: s, lower
+      logical :: y
+      integer :: i, c
+      y = .false.
+      if (len(s) /= len(lower)) return
+      do i = 1, len(s)
+         c = iachar(s(i:i))
+         if (c >= iachar('A') .and. c <= iachar('Z')) c = c + 32
+         if (c /= iachar(lower(i:i))) return
+      end do
+      y = .true.
+   end function ascii_ieq
+
+   pure function inf_bits(f) result(bits)
+      type(float_fmt_t), intent(in) :: f
+      integer(int64) :: bits
+      bits = shiftl(int(2*f%emax + 1, int64), f%mbits)
+   end function inf_bits
+
+   !> A quiet NaN. glibc puts the number in "nan(n)" into the low mantissa
+   !> bits when the whole sequence reads as one strtoull base-0 integer.
+   pure function nan_bits(s, f) result(bits)
+      character(len=*), intent(in) :: s
+      type(float_fmt_t), intent(in) :: f
+      integer(int64) :: bits, hi, lo, mant
+      integer :: i, n, base, d
+      bits = ibset(inf_bits(f), f%mbits - 1)
+      n = len(s) - 1
+      if (n < 4) return
+      i = 5
+      base = 10
+      if (s(i:i) == '0') then
+         base = 8
+         if (i + 1 <= n) then
+            if (s(i + 1:i + 1) == 'x' .or. s(i + 1:i + 1) == 'X') then
+               if (i + 2 > n) return
+               if (capnp_hex_digit(s(i + 2:i + 2)) < 0) return
+               base = 16
+               i = i + 2
+            end if
+         end if
+      end if
+      hi = 0_int64
+      lo = 0_int64
+      do while (i <= n)
+         d = capnp_hex_digit(s(i:i))
+         if (d < 0 .or. d >= base) return
+         lo = lo*base + d
+         hi = hi*base + shiftr(lo, 32)
+         lo = iand(lo, 4294967295_int64)
+         if (hi > 4294967295_int64) hi = 2_int64**40
+         i = i + 1
+      end do
+      if (hi > 4294967295_int64) then
+         mant = -1_int64
+      else
+         mant = ior(shiftl(hi, 32), lo)
+      end if
+      bits = ior(bits, iand(mant, shiftl(1_int64, f%mbits - 1) - 1_int64))
+   end function nan_bits
+
+   !> Magnitude bits of a hex float "0x..." already checked by digits_ok,
+   !> rounded to nearest even. The first 15 significant hex digits are
+   !> kept; the rest only decide a tie.
+   pure function hex_float_bits(s, f) result(bits)
+      character(len=*), intent(in) :: s
+      type(float_fmt_t), intent(in) :: f
+      integer(int64) :: bits, mant, e2, pexp, shift, m, rem, half, eres, q
+      integer :: i, n, d, nd, b
+      logical :: frac, sticky, eneg
+      n = len(s)
+      mant = 0_int64
+      e2 = 0_int64
+      nd = 0
+      frac = .false.
+      sticky = .false.
+      i = 3
+      do while (i <= n)
+         if (s(i:i) == '.') then
+            frac = .true.
+            i = i + 1
+            cycle
+         end if
+         d = capnp_hex_digit(s(i:i))
+         if (d < 0) exit
+         if (nd == 0 .and. d == 0) then
+            if (frac) e2 = e2 - 4_int64
+         else if (nd < 15) then
+            mant = mant*16_int64 + int(d, int64)
+            nd = nd + 1
+            if (frac) e2 = e2 - 4_int64
+         else
+            if (d /= 0) sticky = .true.
+            if (.not. frac) e2 = e2 + 4_int64
+         end if
+         i = i + 1
+      end do
+      pexp = 0_int64
+      eneg = .false.
+      if (i <= n) then
+         i = i + 1
+         if (s(i:i) == '+' .or. s(i:i) == '-') then
+            eneg = s(i:i) == '-'
+            i = i + 1
+         end if
+         do while (i <= n)
+            if (pexp < 1000000000000_int64) pexp = pexp*10_int64 + int(capnp_dec_digit(s(i:i)), int64)
+            i = i + 1
+         end do
+         if (eneg) pexp = -pexp
+      end if
+      bits = 0_int64
+      if (mant == 0_int64) return
+      e2 = e2 + pexp
+      b = 63 - leadz(mant)
+      if (b + e2 > f%emax) then
+         bits = inf_bits(f)
+         return
+      end if
+      q = int(f%emin - (f%prec - 1), int64)
+      shift = max(int(b - (f%prec - 1), int64), q - e2)
+      if (shift <= 0_int64) then
+         m = shiftl(mant, int(-shift))
+      else if (shift > 62_int64) then
+         return
+      else
+         m = shiftr(mant, int(shift))
+         rem = mant - shiftl(m, int(shift))
+         half = shiftl(1_int64, int(shift) - 1)
+         if (rem > half .or. (rem == half .and. (sticky .or. btest(m, 0)))) m = m + 1_int64
+      end if
+      eres = e2 + shift
+      if (m == shiftl(1_int64, f%prec)) then
+         m = shiftr(m, 1)
+         eres = eres + 1_int64
+      end if
+      if (m < shiftl(1_int64, f%prec - 1)) then
+         bits = m
+         return
+      end if
+      if (eres + f%prec - 1 > f%emax) then
+         bits = inf_bits(f)
+         return
+      end if
+      bits = ior(shiftl(eres + int(f%prec - 1 + f%emax, int64), f%mbits), &
+                 m - shiftl(1_int64, f%prec - 1))
+   end function hex_float_bits
 
    subroutine capnp_parse_i64(tok, v, err, allow_octal)
       character(len=*), intent(in) :: tok

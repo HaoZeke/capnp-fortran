@@ -2,23 +2,47 @@
 module test_codecs
    use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
    use capnp
-   use capnp_codec, only: capnp_u_of_i8
+   use capnp_codec, only: capnp_u_of_i8, capnp_parse_f64, capnp_parse_f32, &
+      capnp_fmt_f64, capnp_fmt_f32
    use capnp_dynamic
    use capnp_text
    use capnp_json
    use cli_path, only: capnpf_setup
-   use, intrinsic :: iso_c_binding, only: c_int
+   use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_double, c_float, &
+      c_null_char, c_loc, c_associated
    implicit none
    private
    public :: collect_codecs, release_codecs_tmp
 
    character(len=:), allocatable :: tmp
 
+   !> glibc's LC_ALL. Elsewhere the probe below finds no comma radix and
+   !> the locale case is skipped.
+   integer(c_int), parameter :: GLIBC_LC_ALL = 6_c_int
+
    interface
       function c_getpid() bind(c, name="getpid") result(pid)
          import :: c_int
          integer(c_int) :: pid
       end function c_getpid
+      function c_setlocale(cat, name) bind(c, name="setlocale") result(p)
+         import :: c_int, c_char, c_ptr
+         integer(c_int), value :: cat
+         character(kind=c_char), intent(in) :: name(*)
+         type(c_ptr) :: p
+      end function c_setlocale
+      function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
+         import :: c_char, c_ptr, c_double
+         character(kind=c_char), intent(in) :: nptr(*)
+         type(c_ptr), intent(out) :: endptr
+         real(c_double) :: v
+      end function c_strtod
+      function c_strtof(nptr, endptr) bind(c, name="strtof") result(v)
+         import :: c_char, c_ptr, c_float
+         character(kind=c_char), intent(in) :: nptr(*)
+         type(c_ptr), intent(out) :: endptr
+         real(c_float) :: v
+      end function c_strtof
    end interface
 
 contains
@@ -44,7 +68,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(21))
+      allocate (testsuite(23))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -66,6 +90,8 @@ contains
       testsuite(19) = new_unittest("text-list-depth-growth", run_text_list_depth_growth)
       testsuite(20) = new_unittest("json-nest-depth-growth", run_json_nest_depth_growth)
       testsuite(21) = new_unittest("json-empty-numbers", run_json_empty_numbers)
+      testsuite(22) = new_unittest("float-parse-strtod", run_float_parse_strtod)
+      testsuite(23) = new_unittest("float-comma-locale", run_float_comma_locale)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -600,6 +626,241 @@ contains
       call check_file(error, text, tmp//'/soft.txt', label//': message kept')
       call capnp_message_free(decoded)
    end subroutine json_soft_case
+
+   !> capnp_parse_f64 and capnp_parse_f32 match strtod and strtof in the C
+   !> locale: the same rejections and the same bits, NaN payloads included.
+   subroutine run_float_parse_strtod(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: fixed(*) = [character(len=40) :: &
+         '1.5', '-0', '+0.0', '.5', '5.', '1e5', '1E-5', '1e+400', '1e-400', &
+         '4.9406564584124654e-324', '2.4703282292062327e-324', '2.4703282292062328e-324', &
+         '1.7976931348623157e308', '1.7976931348623159e308', '0.1', '3.4028235e38', &
+         '3.4028236e38', '1.4e-45', '7e-46', '7.1e-46', '1e99999999999999999999', &
+         '0x1p3', '0X1.8P+1', '0x.8p0', '0x1.fffffffffffffp1023', &
+         '0x1.fffffffffffff8p1023', '0x1p-1074', '0x1p-1075', '0x1.0000000000001p-1075', &
+         '0x3p-1076', '0x1.00000000000008p0', '0x1.000000000000081p0', &
+         '0x1.00000000000018p0', '0x1p-149', '0x1p-150', '0x1.000002p-150', &
+         '0x1.fffffep127', '0x1.ffffffp127', '0x123456789abcdef0123p-20', &
+         '0x0.0000000000000000001p0', '0x1', '0x1.', '-0x0p0', '0x1p-99999999999', &
+         '0x1p99999999999', '0xp1', '0x', '0x.p1', '0x1p', '0x1p+', '0x1g', &
+         'inf', '-INF', '+Inf', 'Infinity', '-infinity', 'infinit', 'infx', &
+         'nan', '-NaN', '+nan', 'nan()', 'nan(123)', 'nan(0x7)', 'nan(0X7fffffffffffff)', &
+         'nan(017)', 'nan(08)', 'nan(abc_9)', 'nan(0xffffffffffffffffffff)', &
+         'nan(', 'nan(1', 'nan(-1)', 'nan( 1)', 'nanx', &
+         ' 1.5', '  -2', '1.5 ', '1,5', ' ', '+', '-', '.', 'e5', '1e', &
+         '1e+', '1.5x', '--1', '1..2', '+-1', '1e5.5', '0..', '00012.500']
+      integer :: i, nbad
+      integer :: seed
+      nbad = 0
+      do i = 1, size(fixed)
+         call strtod_case(trim(fixed(i)), nbad)
+      end do
+      call strtod_case('', nbad)
+      call strtod_case(achar(9)//'7', nbad)
+      call strtod_case(achar(10)//achar(11)//achar(12)//achar(13)//'-0x1p1', nbad)
+      call strtod_case(repeat('9', 400)//'.5e-100', nbad)
+      call strtod_case('0.'//repeat('0', 340)//'49406564584124654', nbad)
+      call strtod_case('0x'//repeat('f', 300)//'p-2000', nbad)
+      seed = 20261123
+      do i = 1, 4000
+         call strtod_case(random_decimal(seed), nbad)
+         call strtod_case(random_hex(seed), nbad)
+      end do
+      call check_(error, nbad == 0, 'float parse: matches strtod in the C locale')
+   contains
+      function next_rand(s, n) result(r)
+         integer, intent(inout) :: s
+         integer, intent(in) :: n
+         integer :: r
+         s = int(mod(int(s, int64)*48271_int64, 2147483647_int64))
+         r = mod(s, n)
+      end function next_rand
+
+      function random_decimal(s) result(t)
+         integer, intent(inout) :: s
+         character(len=:), allocatable :: t
+         integer :: k, nd, dot
+         character(len=8) :: ebuf
+         t = ''
+         if (next_rand(s, 2) == 1) t = '-'
+         nd = 1 + next_rand(s, 24)
+         dot = next_rand(s, nd + 1)
+         do k = 1, nd
+            if (k - 1 == dot) t = t//'.'
+            t = t//achar(iachar('0') + next_rand(s, 10))
+         end do
+         write (ebuf, '(i0)') next_rand(s, 700) - 360
+         t = t//'e'//trim(ebuf)
+      end function random_decimal
+
+      function random_hex(s) result(t)
+         integer, intent(inout) :: s
+         character(len=:), allocatable :: t
+         character(len=*), parameter :: hx = '0123456789abcdefABCDEF'
+         integer :: k, nd, dot, c
+         character(len=8) :: ebuf
+         t = ''
+         if (next_rand(s, 2) == 1) t = '-'
+         t = t//'0x'
+         nd = 1 + next_rand(s, 20)
+         dot = next_rand(s, nd + 1)
+         do k = 1, nd
+            if (k - 1 == dot) t = t//'.'
+            c = 1 + next_rand(s, len(hx))
+            t = t//hx(c:c)
+         end do
+         write (ebuf, '(i0)') next_rand(s, 2300) - 1150
+         t = t//'p'//trim(ebuf)
+      end function random_hex
+   end subroutine run_float_parse_strtod
+
+   subroutine strtod_case(s, nbad)
+      character(len=*), intent(in) :: s
+      integer, intent(inout) :: nbad
+      character(kind=c_char), allocatable, target :: cs(:)
+      type(c_ptr) :: endp
+      real(c_double) :: cd
+      real(c_float) :: cf
+      real(real64) :: x
+      real(real32) :: y
+      integer :: i, n, err64, err32
+      logical :: ok_c64, ok_c32
+      n = len(s)
+      allocate (cs(n + 1))
+      do i = 1, n
+         cs(i) = s(i:i)
+      end do
+      cs(n + 1) = c_null_char
+      cd = c_strtod(cs, endp)
+      ok_c64 = n > 0 .and. c_associated(endp, c_loc(cs(n + 1)))
+      cf = c_strtof(cs, endp)
+      ok_c32 = n > 0 .and. c_associated(endp, c_loc(cs(n + 1)))
+      call capnp_parse_f64(s, x, err64)
+      call capnp_parse_f32(s, y, err32)
+      if ((err64 == CAPNP_OK) .neqv. ok_c64) then
+         call strtod_miss('f64 accept', s)
+      else if (ok_c64) then
+         if (transfer(x, 0_int64) /= transfer(real(cd, real64), 0_int64)) &
+            call strtod_miss('f64 bits', s)
+      end if
+      if ((err32 == CAPNP_OK) .neqv. ok_c32) then
+         call strtod_miss('f32 accept', s)
+      else if (ok_c32) then
+         if (transfer(y, 0_int32) /= transfer(real(cf, real32), 0_int32)) &
+            call strtod_miss('f32 bits', s)
+      end if
+   contains
+      subroutine strtod_miss(what, s)
+         character(len=*), intent(in) :: what, s
+         nbad = nbad + 1
+         if (nbad <= 10) print '(a)', 'strtod mismatch ('//what//'): "'//s(1:min(len(s), 80))//'"'
+      end subroutine strtod_miss
+   end subroutine strtod_case
+
+   !> Floats read and print with a '.' radix while the C locale uses ','.
+   !> The codecs give the same bytes and text as in the C locale.
+   subroutine run_float_comma_locale(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: s, ref_txt, ref_json, got_txt, got_json
+      character(len=*), parameter :: js = '{"wide":1.25,"tiny":"2.5","big":"-3"}'
+      character(len=*), parameter :: txt = '(wide = 0.1, tiny = 1e-7, scores = [1, -2])'
+      real(real64) :: x
+      real(real32) :: y
+      integer :: err, idx
+      type(c_ptr) :: prev
+      logical :: codecs
+      codecs = have_capnp()
+      if (codecs) then
+         call compile_codec_schema(error, schema)
+         if (allocated(error)) return
+         idx = capnp_dyn_find(schema, 'Sample', err)
+         call locale_round_trip(schema, idx, js, txt, ref_txt, ref_json, err)
+         call check_(error, err == CAPNP_OK, 'comma locale: C reference')
+         if (allocated(error)) return
+      end if
+      if (.not. comma_locale()) then
+         prev = c_setlocale(GLIBC_LC_ALL, 'C'//c_null_char)
+         if (codecs) call capnp_dyn_free(schema)
+         call skip_test(error, 'no locale with a comma radix')
+         return
+      end if
+      call capnp_parse_f64('1.5', x, err)
+      call check_(error, err == CAPNP_OK .and. x == 1.5_real64, 'comma locale: parse 1.5')
+      call capnp_parse_f64('1,5', x, err)
+      call check_(error, err /= CAPNP_OK, 'comma locale: reject 1,5')
+      call capnp_parse_f32('0.1', y, err)
+      call check_(error, err == CAPNP_OK .and. y == 0.1_real32, 'comma locale: parse f32')
+      call capnp_parse_f64('0x1.8p1', x, err)
+      call check_(error, err == CAPNP_OK .and. x == 3.0_real64, 'comma locale: parse hex')
+      call capnp_fmt_f64(0.1_real64, s)
+      call check_(error, s == '0.1', 'comma locale: print 0.1')
+      call capnp_fmt_f64(1.0e-7_real64, s)
+      call check_(error, s == '1e-07', 'comma locale: print 1e-07')
+      call capnp_fmt_f32(0.1_real32, s)
+      call check_(error, s == '0.1', 'comma locale: print f32 0.1')
+      if (codecs) then
+         call locale_round_trip(schema, idx, js, txt, got_txt, got_json, err)
+         call check_(error, err == CAPNP_OK, 'comma locale: codecs')
+         if (err == CAPNP_OK) then
+            call check_(error, got_txt == ref_txt, 'comma locale: json to text')
+            call check_(error, got_json == ref_json, 'comma locale: text to json')
+         end if
+         call capnp_dyn_free(schema)
+      end if
+      prev = c_setlocale(GLIBC_LC_ALL, 'C'//c_null_char)
+   contains
+      subroutine locale_round_trip(schema, idx, js, txt, out_txt, out_json, err)
+         type(capnp_dyn_schema_t), intent(in) :: schema
+         integer, intent(in) :: idx
+         character(len=*), intent(in) :: js, txt
+         character(len=:), allocatable, intent(out) :: out_txt, out_json
+         integer, intent(out) :: err
+         call capnp_json_decode(schema, idx, js, decoded, err)
+         if (err /= CAPNP_OK) return
+         root = capnp_root(decoded, err)
+         if (err /= CAPNP_OK) return
+         call capnp_text_encode(schema, idx, root, out_txt, err, pretty=.false.)
+         if (err /= CAPNP_OK) return
+         call capnp_text_decode(schema, idx, txt, decoded, err)
+         if (err /= CAPNP_OK) return
+         root = capnp_root(decoded, err)
+         if (err /= CAPNP_OK) return
+         call capnp_json_encode(schema, idx, root, out_json, err, pretty=.false.)
+         call capnp_message_free(decoded)
+      end subroutine locale_round_trip
+   end subroutine run_float_comma_locale
+
+   !> Switch to a locale whose radix is ','. The environment comes first,
+   !> so LC_NUMERIC=de_DE.UTF-8 selects it; then a few German names.
+   function comma_locale() result(ok)
+      logical :: ok
+      character(len=*), parameter :: names(*) = [character(len=12) :: &
+         '', 'de_DE.UTF-8', 'de_DE.utf8', 'de_DE']
+      type(c_ptr) :: p
+      integer :: i
+      ok = .false.
+      do i = 1, size(names)
+         p = c_setlocale(GLIBC_LC_ALL, trim(names(i))//c_null_char)
+         if (.not. c_associated(p)) cycle
+         if (radix_is_comma()) then
+            ok = .true.
+            return
+         end if
+      end do
+   end function comma_locale
+
+   function radix_is_comma() result(y)
+      logical :: y
+      character(kind=c_char), target :: cs(4)
+      type(c_ptr) :: endp
+      real(c_double) :: v
+      cs = [character(kind=c_char) :: '1', ',', '5', c_null_char]
+      v = c_strtod(cs, endp)
+      y = v == 1.5_c_double .and. c_associated(endp, c_loc(cs(4)))
+   end function radix_is_comma
 
    subroutine run_json_flatten_disc(error)
       type(error_type), allocatable, intent(out) :: error
