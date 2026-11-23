@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(19))
+      allocate (testsuite(20))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -64,6 +64,7 @@ contains
       testsuite(17) = new_unittest("text-backtick-delimiters", run_text_backtick_delimiters)
       testsuite(18) = new_unittest("text-list-bom", run_text_list_bom)
       testsuite(19) = new_unittest("text-list-depth-growth", run_text_list_depth_growth)
+      testsuite(20) = new_unittest("json-nest-depth-growth", run_json_nest_depth_growth)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -863,6 +864,78 @@ contains
          end do
       end subroutine decode_n
    end subroutine run_text_list_depth_growth
+
+   subroutine run_json_nest_depth_growth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer :: err, idx
+      integer(int64) :: tsmall, tlarge
+      integer :: bsmall, blarge
+      real :: bytes_ratio, time_ratio
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Chain', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'json nest: schema')
+      if (allocated(error)) return
+      call capnp_message_init_builder(msg, err)
+      msg%depth_limit = 10000
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call fill_chain(root, 8)
+      call check_(error, err == CAPNP_OK, 'json nest: build')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+      call render_n(400, tsmall, bsmall)
+      if (allocated(error)) return
+      call render_n(1600, tlarge, blarge)
+      if (allocated(error)) return
+      bytes_ratio = real(blarge)/real(max(1, bsmall))
+      time_ratio = real(tlarge)/real(max(1_int64, tsmall))
+      write (*, '(a,3(1x,f0.3))') 'json-nest-depth ratios bytes time normalized', &
+         bytes_ratio, time_ratio, time_ratio/bytes_ratio
+      write (*, '(a)') 'json nest: pretty indent makes output quadratic in depth'
+      call check_(error, tsmall > 0_int64 .and. time_ratio/bytes_ratio < 2.0, &
+                  'json nest: linear growth')
+      call capnp_dyn_free(schema)
+   contains
+      recursive subroutine fill_chain(p, left)
+         type(capnp_ptr_t), intent(in) :: p
+         integer, intent(in) :: left
+         type(capnp_ptr_t) :: child
+         call capnp_set_i32(p, 0_int64, 1_int32, err)
+         if (err /= CAPNP_OK .or. left <= 0) return
+         child = capnp_new_struct(msg, 1, 1, err)
+         if (err /= CAPNP_OK) return
+         call capnp_setp(p, 0, child, err)
+         if (err /= CAPNP_OK) return
+         call fill_chain(child, left - 1)
+      end subroutine fill_chain
+      subroutine render_n(depth, elapsed, bytes)
+         integer, intent(in) :: depth
+         integer(int64), intent(out) :: elapsed
+         integer, intent(out) :: bytes
+         character(len=:), allocatable :: rendered
+         integer :: i, c0, c1, rate
+         call capnp_message_init_builder(msg, err)
+         msg%depth_limit = depth + 10
+         root = capnp_dyn_new_root(schema, idx, msg, err)
+         call fill_chain(root, depth)
+         call check_(error, err == CAPNP_OK, 'json nest: chain')
+         if (allocated(error)) return
+         elapsed = 0_int64
+         do i = 1, 2
+            call system_clock(c0, rate)
+            call capnp_json_encode(schema, idx, root, rendered, err, pretty=.true.)
+            call system_clock(c1)
+            elapsed = elapsed + int(c1 - c0, int64)
+            call check_(error, err == CAPNP_OK, 'json nest: render')
+            if (allocated(error)) return
+         end do
+         bytes = len(rendered)
+         call capnp_message_free(msg)
+      end subroutine render_n
+   end subroutine run_json_nest_depth_growth
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error

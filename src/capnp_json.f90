@@ -59,11 +59,6 @@ module capnp_json
    character(len=*), parameter :: B64 = &
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
 
-   type :: piece_t
-      character(len=:), allocatable :: s
-      logical :: multi = .false.
-   end type piece_t
-
    type :: buf_t
       character(len=:), allocatable :: s
       integer :: n = 0
@@ -93,6 +88,8 @@ module capnp_json
       !> A void list is that shape, and storing one value per element
       !> doubles the memory of a long list.
       integer(int64) :: nrepeat = 0
+      integer :: rend_n = 0
+      logical :: rend_multi = .false.
    end type jval
 
    type :: scan_t
@@ -113,6 +110,8 @@ contains
       dst%b = src%b
       dst%num = src%num
       dst%nrepeat = src%nrepeat
+      dst%rend_n = src%rend_n
+      dst%rend_multi = src%rend_multi
       if (allocated(src%str)) dst%str = src%str
       if (allocated(src%key)) dst%key = src%key
       if (.not. allocated(src%kids)) return
@@ -140,7 +139,8 @@ contains
       type(capnp_brand_env_t) :: env
       type(disc_opts_t) :: no_disc
       type(jval) :: root
-      logical :: do_pretty, multi
+      type(buf_t) :: buf
+      logical :: do_pretty
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
@@ -168,8 +168,12 @@ contains
       if (present(brand_env)) env = brand_env
       call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
-      call emit_jval(root, 0, .false., do_pretty, text, multi, err)
-      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
+      call plan_jval(root, 0, .false., do_pretty, err)
+      if (err /= CAPNP_OK) return
+      call write_jval(root, buf, 0, .false., do_pretty, err)
+      if (err /= CAPNP_OK) return
+      call buf_take(buf, text)
+      if (ptr_kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_json_encode
 
    subroutine capnp_json_decode(schema, idx, text, msg, err, brand_env)
@@ -909,100 +913,162 @@ contains
       call capnp_fmt_i64(int(ord, int64), jv%str)
    end subroutine build_enum_jval
 
-   !> `[null,null,...]` for `n` void elements. Pretty output separates
-   !> with a comma and a space. Short output uses a bare comma.
-   subroutine emit_null_list(n, pretty, out, multi, err)
-      integer(int64), intent(in) :: n
-      logical, intent(in) :: pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
-      integer, intent(out) :: err
-      character(len=:), allocatable :: body, token
-      integer(int64) :: total, pos, i, dlen
-      integer :: stat
-      err = CAPNP_OK
-      multi = .false.
-      if (n <= 0_int64) then
-         out = '[]'
-         return
-      end if
-      if (pretty) then
-         token = ', '
-      else
-         token = ','
-      end if
-      dlen = int(len(token), int64)
-      if (n > (huge(0_int64)/5_int64)) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
-      total = 4_int64*n + dlen*(n - 1_int64)
-      if (total > int(huge(0), int64)) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
-      allocate (character(len=int(total)) :: body, stat=stat)
-      if (stat /= 0) then
-         err = CAPNP_ERR_ALLOC
-         return
-      end if
-      body(1:4) = 'null'
-      pos = 4_int64
-      do i = 2_int64, n
-         body(pos + 1_int64:pos + dlen) = token
-         pos = pos + dlen
-         body(pos + 1_int64:pos + 4_int64) = 'null'
-         pos = pos + 4_int64
-      end do
-      out = '['//body//']'
-   end subroutine emit_null_list
-
-   recursive subroutine emit_jval(jv, indent, has_prefix, pretty, out, multi, err)
-      type(jval), intent(in) :: jv
+   recursive subroutine plan_jval(jv, indent, has_prefix, pretty, err)
+      type(jval), intent(inout) :: jv
       integer, intent(in) :: indent
       logical, intent(in) :: has_prefix, pretty
-      character(len=:), allocatable, intent(out) :: out
-      logical, intent(out) :: multi
       integer, intent(out) :: err
-      type(piece_t), allocatable :: items(:)
-      character(len=:), allocatable :: val, body, colon
-      integer :: i, m, n, sub
-      logical :: child_multi
+      integer, allocatable :: lens(:)
+      logical, allocatable :: multis(:)
+      character(len=:), allocatable :: prefix, delim, suffix, key
+      integer :: i, n, sub, mx, colon_n, piece_n, body_n, stat
+      logical :: any_multi, multi
       err = CAPNP_OK
-      multi = .false.
+      jv%rend_multi = .false.
       select case (jv%k)
       case (JK_NULL)
-         out = 'null'
+         jv%rend_n = 4
       case (JK_BOOL)
          if (jv%b) then
-            out = 'true'
+            jv%rend_n = 4
          else
-            out = 'false'
+            jv%rend_n = 5
          end if
-      case (JK_NUM)
-         out = jv%str
+      case (JK_NUM, JK_RAW)
+         jv%rend_n = 0
+         if (allocated(jv%str)) jv%rend_n = len(jv%str)
       case (JK_STR)
-         call json_quote(jv%str, out, err)
-         if (err /= CAPNP_OK) return
+         jv%rend_n = quote_len(jv%str)
       case (JK_ARR)
          if (jv%nrepeat > 0_int64) then
-            call emit_null_list(jv%nrepeat, pretty, out, multi, err)
+            call null_list_len(jv%nrepeat, pretty, jv%rend_n, err)
             return
          end if
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
          sub = indent
          if (n > 1) sub = indent + 1
-         m = 0
          do i = 1, n
-            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi, err)
-            if (err /= CAPNP_OK) return
-            call push(items, m, val, child_multi, err)
+            call plan_jval(jv%kids(i), sub, .false., pretty, err)
             if (err /= CAPNP_OK) return
          end do
-         call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
+         call plan_pieces(n, .false., 0, lens, multis, mx, any_multi, jv, err)
          if (err /= CAPNP_OK) return
-         out = '['//body//']'
+         call finish_group(jv, n, lens, mx, any_multi, indent, has_prefix, pretty)
+      case (JK_OBJ)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         if (pretty) then
+            colon_n = 2
+         else
+            colon_n = 1
+         end if
+         do i = 1, n
+            call plan_jval(jv%kids(i), sub, .true., pretty, err)
+            if (err /= CAPNP_OK) return
+         end do
+         allocate (lens(max(n, 1)), multis(max(n, 1)), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         mx = 0
+         any_multi = .false.
+         do i = 1, n
+            if (allocated(jv%kids(i)%key)) then
+               key = jv%kids(i)%key
+            else
+               key = ''
+            end if
+            piece_n = quote_len(key) + colon_n + jv%kids(i)%rend_n
+            lens(i) = piece_n
+            multis(i) = jv%kids(i)%rend_multi
+            if (multis(i)) any_multi = .true.
+            mx = max(mx, piece_n)
+         end do
+         call finish_group(jv, n, lens, mx, any_multi, indent, has_prefix, pretty)
+      case (JK_CALL)
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         do i = 1, n
+            call plan_jval(jv%kids(i), sub, .false., pretty, err)
+            if (err /= CAPNP_OK) return
+         end do
+         call plan_pieces(n, .false., 0, lens, multis, mx, any_multi, jv, err)
+         if (err /= CAPNP_OK) return
+         call join_shape(n, mx, any_multi, indent, .true., pretty, multi, prefix, delim, suffix)
+         body_n = len(prefix) + len(suffix)
+         if (n > 0) body_n = body_n + sum(lens(1:n)) + len(delim)*(n - 1)
+         jv%rend_multi = multi
+         jv%rend_n = body_n + 2
+         if (allocated(jv%str)) jv%rend_n = jv%rend_n + len(jv%str)
+      case default
+         jv%rend_n = 4
+      end select
+   end subroutine plan_jval
+
+   recursive subroutine write_jval(jv, buf, indent, has_prefix, pretty, err)
+      type(jval), intent(in) :: jv
+      type(buf_t), intent(inout) :: buf
+      integer, intent(in) :: indent
+      logical, intent(in) :: has_prefix, pretty
+      integer, intent(out) :: err
+      integer, allocatable :: lens(:)
+      logical, allocatable :: multis(:)
+      character(len=:), allocatable :: prefix, delim, suffix, quoted, colon, key
+      integer :: i, n, sub, mx, colon_n, piece_n
+      logical :: any_multi, multi
+      err = CAPNP_OK
+      select case (jv%k)
+      case (JK_NULL)
+         call buf_add(buf, 'null', err)
+      case (JK_BOOL)
+         if (jv%b) then
+            call buf_add(buf, 'true', err)
+         else
+            call buf_add(buf, 'false', err)
+         end if
+      case (JK_NUM, JK_RAW)
+         if (allocated(jv%str)) call buf_add(buf, jv%str, err)
+      case (JK_STR)
+         if (allocated(jv%str)) then
+            call json_quote(jv%str, quoted, err)
+         else
+            call json_quote('', quoted, err)
+         end if
+         if (err /= CAPNP_OK) return
+         call buf_add(buf, quoted, err)
+      case (JK_ARR)
+         if (jv%nrepeat > 0_int64) then
+            call write_null_list(buf, jv%nrepeat, pretty, err)
+            return
+         end if
+         n = 0
+         if (allocated(jv%kids)) n = size(jv%kids)
+         sub = indent
+         if (n > 1) sub = indent + 1
+         call plan_pieces(n, .false., 0, lens, multis, mx, any_multi, jv, err)
+         if (err /= CAPNP_OK) return
+         call join_shape(n, mx, any_multi, indent, has_prefix, pretty, multi, prefix, delim, suffix)
+         call buf_add(buf, '[', err)
+         if (err /= CAPNP_OK) return
+         call buf_add(buf, prefix, err)
+         if (err /= CAPNP_OK) return
+         do i = 1, n
+            if (i > 1) then
+               call buf_add(buf, delim, err)
+               if (err /= CAPNP_OK) return
+            end if
+            call write_jval(jv%kids(i), buf, sub, .false., pretty, err)
+            if (err /= CAPNP_OK) return
+         end do
+         call buf_add(buf, suffix, err)
+         if (err /= CAPNP_OK) return
+         call buf_add(buf, ']', err)
       case (JK_OBJ)
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
@@ -1010,50 +1076,219 @@ contains
          if (n > 1) sub = indent + 1
          if (pretty) then
             colon = ': '
+            colon_n = 2
          else
             colon = ':'
+            colon_n = 1
          end if
-         m = 0
+         allocate (lens(max(n, 1)), multis(max(n, 1)))
+         mx = 0
+         any_multi = .false.
          do i = 1, n
-            call emit_jval(jv%kids(i), sub, .true., pretty, val, child_multi, err)
+            if (allocated(jv%kids(i)%key)) then
+               key = jv%kids(i)%key
+            else
+               key = ''
+            end if
+            piece_n = quote_len(key) + colon_n + jv%kids(i)%rend_n
+            lens(i) = piece_n
+            multis(i) = jv%kids(i)%rend_multi
+            if (multis(i)) any_multi = .true.
+            mx = max(mx, piece_n)
+         end do
+         call join_shape(n, mx, any_multi, indent, has_prefix, pretty, multi, prefix, delim, suffix)
+         call buf_add(buf, '{', err)
+         if (err /= CAPNP_OK) return
+         call buf_add(buf, prefix, err)
+         if (err /= CAPNP_OK) return
+         do i = 1, n
+            if (i > 1) then
+               call buf_add(buf, delim, err)
+               if (err /= CAPNP_OK) return
+            end if
+            if (allocated(jv%kids(i)%key)) then
+               call json_quote(jv%kids(i)%key, quoted, err)
+            else
+               call json_quote('', quoted, err)
+            end if
             if (err /= CAPNP_OK) return
-            call json_quote(jv%kids(i)%key, body, err)
+            call buf_add(buf, quoted//colon, err)
             if (err /= CAPNP_OK) return
-            call push(items, m, body//colon//val, child_multi, err)
+            call write_jval(jv%kids(i), buf, sub, .true., pretty, err)
             if (err /= CAPNP_OK) return
          end do
-         call jjoin(items, m, indent, has_prefix, pretty, multi, body, err)
+         call buf_add(buf, suffix, err)
          if (err /= CAPNP_OK) return
-         out = '{'//body//'}'
-      case (JK_RAW)
-         if (allocated(jv%str)) then
-            out = jv%str
-         else
-            out = ''
-         end if
+         call buf_add(buf, '}', err)
       case (JK_CALL)
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
          sub = indent
          if (n > 1) sub = indent + 1
-         m = 0
-         do i = 1, n
-            call emit_jval(jv%kids(i), sub, .false., pretty, val, child_multi, err)
+         call plan_pieces(n, .false., 0, lens, multis, mx, any_multi, jv, err)
+         if (err /= CAPNP_OK) return
+         call join_shape(n, mx, any_multi, indent, .true., pretty, multi, prefix, delim, suffix)
+         if (allocated(jv%str)) then
+            call buf_add(buf, jv%str, err)
             if (err /= CAPNP_OK) return
-            call push(items, m, val, child_multi, err)
+         end if
+         call buf_add(buf, '(', err)
+         if (err /= CAPNP_OK) return
+         call buf_add(buf, prefix, err)
+         if (err /= CAPNP_OK) return
+         do i = 1, n
+            if (i > 1) then
+               call buf_add(buf, delim, err)
+               if (err /= CAPNP_OK) return
+            end if
+            call write_jval(jv%kids(i), buf, sub, .false., pretty, err)
             if (err /= CAPNP_OK) return
          end do
-         call jjoin(items, m, indent, .true., pretty, multi, body, err)
+         call buf_add(buf, suffix, err)
          if (err /= CAPNP_OK) return
-         if (allocated(jv%str)) then
-            out = jv%str//'('//body//')'
-         else
-            out = '('//body//')'
-         end if
+         call buf_add(buf, ')', err)
       case default
-         out = 'null'
+         call buf_add(buf, 'null', err)
       end select
-   end subroutine emit_jval
+   end subroutine write_jval
+
+   subroutine plan_pieces(n, objects, colon_n, lens, multis, mx, any_multi, jv, err)
+      integer, intent(in) :: n, colon_n
+      logical, intent(in) :: objects
+      integer, allocatable, intent(out) :: lens(:)
+      logical, allocatable, intent(out) :: multis(:)
+      integer, intent(out) :: mx
+      logical, intent(out) :: any_multi
+      type(jval), intent(in) :: jv
+      integer, intent(out) :: err
+      integer :: i, stat
+      err = CAPNP_OK
+      mx = 0
+      any_multi = .false.
+      allocate (lens(max(n, 1)), multis(max(n, 1)), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 1, n
+         lens(i) = jv%kids(i)%rend_n
+         multis(i) = jv%kids(i)%rend_multi
+         if (objects) lens(i) = lens(i) + colon_n
+         if (multis(i)) any_multi = .true.
+         mx = max(mx, lens(i))
+      end do
+   end subroutine plan_pieces
+
+   subroutine finish_group(jv, n, lens, mx, any_multi, indent, has_prefix, pretty)
+      type(jval), intent(inout) :: jv
+      integer, intent(in) :: n, mx, indent
+      integer, intent(in) :: lens(:)
+      logical, intent(in) :: any_multi, has_prefix, pretty
+      character(len=:), allocatable :: prefix, delim, suffix
+      logical :: multi
+      integer :: body_n
+      call join_shape(n, mx, any_multi, indent, has_prefix, pretty, multi, prefix, delim, suffix)
+      body_n = len(prefix) + len(suffix)
+      if (n > 0) body_n = body_n + sum(lens(1:n)) + len(delim)*(n - 1)
+      jv%rend_multi = multi
+      jv%rend_n = body_n + 2
+   end subroutine finish_group
+
+   subroutine null_list_len(n, pretty, out_n, err)
+      integer(int64), intent(in) :: n
+      logical, intent(in) :: pretty
+      integer, intent(out) :: out_n
+      integer, intent(out) :: err
+      integer(int64) :: dlen, total
+      err = CAPNP_OK
+      out_n = 2
+      if (n <= 0_int64) return
+      if (pretty) then
+         dlen = 2_int64
+      else
+         dlen = 1_int64
+      end if
+      total = 2_int64 + 4_int64*n + dlen*(n - 1_int64)
+      if (total > int(huge(out_n), int64)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      out_n = int(total)
+   end subroutine null_list_len
+
+   subroutine write_null_list(buf, n, pretty, err)
+      type(buf_t), intent(inout) :: buf
+      integer(int64), intent(in) :: n
+      logical, intent(in) :: pretty
+      integer, intent(out) :: err
+      character(len=:), allocatable :: token
+      integer(int64) :: i
+      err = CAPNP_OK
+      if (n <= 0_int64) then
+         call buf_add(buf, '[]', err)
+         return
+      end if
+      if (pretty) then
+         token = ', '
+      else
+         token = ','
+      end if
+      call buf_add(buf, '[null', err)
+      if (err /= CAPNP_OK) return
+      do i = 2_int64, n
+         call buf_add(buf, token//'null', err)
+         if (err /= CAPNP_OK) return
+      end do
+      call buf_add(buf, ']', err)
+   end subroutine write_null_list
+
+   subroutine join_shape(n, mx, any_multi, indent, has_prefix, pretty, multi, prefix, delim, suffix)
+      integer, intent(in) :: n, mx, indent
+      logical, intent(in) :: any_multi, has_prefix, pretty
+      logical, intent(out) :: multi
+      character(len=:), allocatable, intent(out) :: prefix, delim, suffix
+      character(len=:), allocatable :: sp
+      multi = .false.
+      if (.not. pretty) then
+         delim = ','
+         prefix = ''
+         suffix = ''
+      else if (n > 1 .and. (any_multi .or. mx > 50)) then
+         sp = repeat(' ', (indent + 1)*2)
+         delim = ','//achar(10)//sp
+         multi = .true.
+         if (has_prefix) then
+            prefix = achar(10)//sp
+         else
+            prefix = ' '
+         end if
+         suffix = ' '
+      else
+         delim = ', '
+         prefix = ''
+         suffix = ''
+      end if
+   end subroutine join_shape
+
+   pure function quote_len(s) result(n)
+      character(len=*), intent(in) :: s
+      integer :: n
+      integer :: i, ub
+      n = 2
+      do i = 1, len(s)
+         ub = iachar(s(i:i))
+         select case (ub)
+         case (34, 92, 8, 12, 10, 13, 9)
+            n = n + 2
+         case default
+            if (ub < 32) then
+               n = n + 6
+            else
+               n = n + 1
+            end if
+         end select
+      end do
+   end function quote_len
 
    !> Forget union tags recorded for the decode that is about to start.
    subroutine union_seen_reset()
@@ -3374,43 +3609,17 @@ contains
       end do
    end function find_union_json_field
 
-   subroutine push(items, n, s, multi, err)
-      type(piece_t), allocatable, intent(inout) :: items(:)
-      integer, intent(inout) :: n
-      character(len=*), intent(in) :: s
-      logical, intent(in) :: multi
-      integer, intent(out) :: err
-      type(piece_t), allocatable :: tmp(:)
-      integer :: stat
-      err = CAPNP_OK
-      if (.not. allocated(items)) then
-         allocate (items(8), stat=stat)
-         if (stat /= 0) then
-            err = CAPNP_ERR_ALLOC
-            return
-         end if
-      end if
-      if (n >= size(items)) then
-         allocate (tmp(size(items)*2), stat=stat)
-         if (stat /= 0) then
-            err = CAPNP_ERR_ALLOC
-            return
-         end if
-         if (n > 0) tmp(1:n) = items(1:n)
-         call move_alloc(tmp, items)
-      end if
-      n = n + 1
-      items(n)%s = s
-      items(n)%multi = multi
-   end subroutine push
-
    subroutine take_jval(dst, src)
       type(jval), intent(inout) :: dst, src
       dst%k = src%k
       dst%b = src%b
       dst%num = src%num
       dst%nrepeat = src%nrepeat
+      dst%rend_n = src%rend_n
+      dst%rend_multi = src%rend_multi
       src%nrepeat = 0
+      src%rend_n = 0
+      src%rend_multi = .false.
       if (allocated(src%str)) call move_alloc(src%str, dst%str)
       if (allocated(src%key)) call move_alloc(src%key, dst%key)
       if (allocated(src%kids)) call move_alloc(src%kids, dst%kids)
@@ -3447,7 +3656,6 @@ contains
       n = n + 1
       call take_jval(kids(n), src)
    end subroutine append_kid
-
    subroutine trim_kids(kids, n, err)
       type(jval), allocatable, intent(inout) :: kids(:)
       integer, intent(in) :: n
@@ -3469,61 +3677,6 @@ contains
       end do
       call move_alloc(tmp, kids)
    end subroutine trim_kids
-
-   subroutine jjoin(items, n, indent, has_prefix, pretty, multi, out, err)
-      type(piece_t), allocatable, intent(in) :: items(:)
-      integer, intent(in) :: n, indent
-      logical, intent(in) :: has_prefix, pretty
-      logical, intent(inout) :: multi
-      character(len=:), allocatable, intent(out) :: out
-      integer, intent(out) :: err
-      integer :: i, mx
-      logical :: any_multi
-      character(len=:), allocatable :: delim, prefix, suffix, sp
-      type(buf_t) :: buf
-      err = CAPNP_OK
-      out = ''
-      any_multi = .false.
-      mx = 0
-      if (allocated(items)) then
-         do i = 1, n
-            if (items(i)%multi) any_multi = .true.
-            mx = max(mx, len(items(i)%s))
-         end do
-      end if
-      if (.not. pretty) then
-         delim = ','
-         prefix = ''
-         suffix = ''
-      else if (n > 1 .and. (any_multi .or. mx > 50)) then
-         sp = repeat(' ', (indent + 1)*2)
-         delim = ','//achar(10)//sp
-         multi = .true.
-         if (has_prefix) then
-            prefix = achar(10)//sp
-         else
-            prefix = ' '
-         end if
-         suffix = ' '
-      else
-         delim = ', '
-         prefix = ''
-         suffix = ''
-      end if
-      if (n <= 0) then
-         out = prefix//suffix
-         return
-      end if
-      call buf_add(buf, prefix//items(1)%s, err)
-      if (err /= CAPNP_OK) return
-      do i = 2, n
-         call buf_add(buf, delim//items(i)%s, err)
-         if (err /= CAPNP_OK) return
-      end do
-      call buf_add(buf, suffix, err)
-      if (err /= CAPNP_OK) return
-      call buf_take(buf, out)
-   end subroutine jjoin
 
    subroutine jskip(sc)
       type(scan_t), intent(inout) :: sc

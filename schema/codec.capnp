@@ -201,3 +201,8 @@ struct TextList {
 struct ListNest {
   sub @0 :List(ListNest);
 }
+
+struct Chain {
+  v @0 :Int32;
+  next @1 :Chain;
+}
