@@ -1712,11 +1712,13 @@ contains
       integer, intent(out) :: err
       character(len=:), allocatable :: piece, raw
       type(buf_t) :: acc
+      character(len=1) :: quote
       integer :: a
       err = CAPNP_OK
       out = ''
       call skip_ws(sc)
-      if (peek(sc) /= '"') then
+      quote = peek(sc)
+      if (quote /= '"' .and. quote /= '`') then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1728,11 +1730,13 @@ contains
                err = CAPNP_ERR_ARG
                return
             end if
-            if (sc%s(sc%i:sc%i) == achar(10)) then
+            if (quote == '`' .and. (sc%s(sc%i:sc%i) == achar(10) .or. &
+                                     sc%s(sc%i:sc%i) == achar(13))) exit
+            if (quote == '"' .and. sc%s(sc%i:sc%i) == achar(10)) then
                err = CAPNP_ERR_ARG
                return
             end if
-            if (sc%s(sc%i:sc%i) == '\') then
+            if (quote == '"' .and. sc%s(sc%i:sc%i) == '\') then
                if (sc%i + 1 > sc%n) then
                   err = CAPNP_ERR_ARG
                   return
@@ -1744,7 +1748,7 @@ contains
                sc%i = sc%i + 2
                cycle
             end if
-            if (sc%s(sc%i:sc%i) == '"') exit
+            if (quote == '"' .and. sc%s(sc%i:sc%i) == '"') exit
             sc%i = sc%i + 1
          end do
          if (sc%i > a) then
@@ -1752,13 +1756,24 @@ contains
          else
             raw = ''
          end if
-         sc%i = sc%i + 1
-         call capnp_cunescape(raw, piece, err)
-         if (err /= CAPNP_OK) return
+         if (quote == '`') then
+            if (sc%s(sc%i:sc%i) == achar(13)) then
+               if (sc%i < sc%n) then
+                  if (sc%s(sc%i + 1:sc%i + 1) == achar(10)) sc%i = sc%i + 1
+               end if
+            end if
+            sc%i = sc%i + 1
+            piece = raw//achar(10)
+         else
+            sc%i = sc%i + 1
+            call capnp_cunescape(raw, piece, err)
+            if (err /= CAPNP_OK) return
+         end if
          call buf_add(acc, piece, err)
          if (err /= CAPNP_OK) return
          call skip_ws(sc)
-         if (peek(sc) /= '"') then
+         quote = peek(sc)
+         if (quote /= '"' .and. quote /= '`') then
             call buf_take(acc, out)
             return
          end if

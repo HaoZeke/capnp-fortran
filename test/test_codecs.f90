@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(15))
+      allocate (testsuite(16))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -60,6 +60,7 @@ contains
       testsuite(13) = new_unittest("text-multimsg-growth", run_text_multimsg_growth)
       testsuite(14) = new_unittest("json-multimsg-growth", run_json_multimsg_growth)
       testsuite(15) = new_unittest("text-comments-bom", run_text_comments_bom)
+      testsuite(16) = new_unittest("text-backtick-lines", run_text_backtick_lines)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -737,6 +738,36 @@ contains
       call check_(error, err == CAPNP_OK .and. input(beg:last) == '(big=2)', &
                   'text comments: BOM between messages')
    end subroutine run_text_comments_bom
+
+   subroutine run_text_backtick_lines(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: got
+      integer :: err, idx
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'text backtick: schema')
+      if (allocated(error)) return
+      call capnp_text_decode(schema, idx, '(title=`raw'//achar(10)//')', msg, err)
+      call check_(error, err == CAPNP_OK, 'text backtick: LF decode')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call capnp_get_text(root, 0, got, err)
+      call check_(error, err == CAPNP_OK .and. got == 'raw'//achar(10), 'text backtick: LF value')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+      call capnp_text_decode(schema, idx, '(title=`raw'//achar(13)//achar(10)//')', msg, err)
+      call check_(error, err == CAPNP_OK, 'text backtick: CRLF decode')
+      if (allocated(error)) return
+      root = capnp_root(msg, err)
+      call capnp_get_text(root, 0, got, err)
+      call check_(error, err == CAPNP_OK .and. got == 'raw'//achar(10), 'text backtick: CRLF value')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_backtick_lines
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
