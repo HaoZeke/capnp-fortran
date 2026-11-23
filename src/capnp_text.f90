@@ -32,7 +32,7 @@ module capnp_text
    end type buf_t
 
    type :: scan_t
-      character(len=:), allocatable :: s
+      character(len=:), pointer :: s => null()
       integer :: i = 1
       integer :: n = 0
    end type scan_t
@@ -130,7 +130,7 @@ contains
    subroutine capnp_text_decode(schema, idx, text, msg, err, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
-      character(len=*), intent(in) :: text
+      character(len=*), intent(in), target :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_brand_env_t), intent(in), optional :: brand_env
@@ -161,7 +161,7 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_set_root(msg, root, err)
       if (err /= CAPNP_OK) return
-      sc%s = text
+      sc%s => text
       sc%n = len(text)
       sc%i = 1
       if (present(brand_env)) env = brand_env
@@ -286,7 +286,7 @@ contains
 
    !> Locate one top-level text value. beg = 0 and err = 0 means no more input.
    subroutine capnp_text_span(text, from, beg, to, err)
-      character(len=*), intent(in) :: text
+      character(len=*), intent(in), target :: text
       integer, intent(in) :: from
       integer, intent(out) :: beg, to
       integer, intent(out) :: err
@@ -296,7 +296,7 @@ contains
       err = CAPNP_OK
       beg = 0
       to = 0
-      sc%s = text
+      sc%s => text
       sc%n = len(text)
       sc%i = max(from, 1)
       call skip_ws(sc)

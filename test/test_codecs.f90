@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(12))
+      allocate (testsuite(13))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -57,6 +57,7 @@ contains
       testsuite(10) = new_unittest("cli", run_cli)
       testsuite(11) = new_unittest("cli-extended", run_cli_extended)
       testsuite(12) = new_unittest("codec-tmp", run_codec_tmp)
+      testsuite(13) = new_unittest("text-multimsg-growth", run_text_multimsg_growth)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -641,6 +642,45 @@ contains
       call capnp_message_free(msg)
       call capnp_message_free(decoded)
    end subroutine verify_json_case
+
+   subroutine run_text_multimsg_growth(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int64) :: tsmall, tlarge
+      real :: bytes_ratio, time_ratio
+      call span_n(4000, tsmall)
+      if (allocated(error)) return
+      call span_n(16000, tlarge)
+      if (allocated(error)) return
+      bytes_ratio = 4.0
+      time_ratio = real(tlarge)/real(max(1_int64, tsmall))
+      write (*, '(a,3(1x,f0.3))') 'text-multimsg ratios bytes time normalized', &
+         bytes_ratio, time_ratio, time_ratio/bytes_ratio
+      call check_(error, tsmall > 0_int64 .and. time_ratio/bytes_ratio < 3.0, &
+                  'text multimsg: linear growth')
+   contains
+      subroutine span_n(n, elapsed)
+         integer, intent(in) :: n
+         integer(int64), intent(out) :: elapsed
+         character(len=:), allocatable :: text
+         integer :: i, p, beg, last, err, c0, c1, rate, rep
+         text = repeat('(big=1)'//achar(10), n)
+         elapsed = 0_int64
+         do rep = 1, 10
+            p = 1
+            call system_clock(c0, rate)
+            do i = 1, n
+               call capnp_text_span(text, p, beg, last, err)
+               if (err /= CAPNP_OK .or. beg == 0) then
+                  call test_failed(error, 'text multimsg: span')
+                  return
+               end if
+               p = last + 1
+            end do
+            call system_clock(c1)
+            elapsed = elapsed + int(c1 - c0, int64)
+         end do
+      end subroutine span_n
+   end subroutine run_text_multimsg_growth
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
