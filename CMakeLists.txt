@@ -22,7 +22,7 @@ project(
   capnp_fortran
   VERSION 0.4.0
   DESCRIPTION "Native modern-Fortran Cap'n Proto (wire, packed, canonical, RPC, capnpc-fortran)"
-  LANGUAGES Fortran
+  LANGUAGES Fortran C
 )
 
 include(GNUInstallDirs)
@@ -56,6 +56,7 @@ set(CAPNP_FORTRAN_SOURCES
   src/capnp.f90
   src/capnp_cabi.f90
   src/capnp_posix.f90
+  src/capnp_posix_os.c
   src/capnp_rpc_transport.f90
   src/rpc_capnp.f90
   src/rpc_twoparty_capnp.f90
@@ -91,7 +92,9 @@ target_include_directories(capnp_fortran
 
 # Free-form F2018; gfortran and typical flang accept these.
 if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU|LLVMFlang|Flang")
-  target_compile_options(capnp_fortran PRIVATE -std=f2018 -ffree-line-length-none)
+  target_compile_options(capnp_fortran PRIVATE
+    $<$<COMPILE_LANGUAGE:Fortran>:-std=f2018>
+    $<$<COMPILE_LANGUAGE:Fortran>:-ffree-line-length-none>)
 endif()
 
 if(CAPNP_FORTRAN_BUILD_PLUGIN)
