@@ -1043,12 +1043,15 @@ contains
          integer, intent(in) :: n
          integer(int64), intent(out) :: elapsed
          character(len=:), allocatable :: text
-         integer :: i, p, beg, last, err, c0, c1, rate, rep
+         integer :: i, p, beg, last, err, rep
+         double precision :: t0, t1
          text = repeat('(big=1)'//achar(10), n)
-         elapsed = 0_int64
+         ! Fastest repetition in process CPU time, so time spent descheduled
+         ! on a busy machine does not count.
+         elapsed = huge(1_int64)
          do rep = 1, 10
             p = 1
-            call system_clock(c0, rate)
+            call cpu_time(t0)
             do i = 1, n
                call capnp_text_span(text, p, beg, last, err)
                if (err /= CAPNP_OK .or. beg == 0) then
@@ -1057,8 +1060,8 @@ contains
                end if
                p = last + 1
             end do
-            call system_clock(c1)
-            elapsed = elapsed + int(c1 - c0, int64)
+            call cpu_time(t1)
+            elapsed = min(elapsed, int((t1 - t0)*1.0d9, int64))
          end do
       end subroutine span_n
    end subroutine run_text_multimsg_growth
@@ -1082,12 +1085,15 @@ contains
          integer, intent(in) :: n
          integer(int64), intent(out) :: elapsed
          character(len=:), allocatable :: text
-         integer :: i, p, beg, last, err, c0, c1, rate, rep
+         integer :: i, p, beg, last, err, rep
+         double precision :: t0, t1
          text = repeat('{}'//achar(10), n)
-         elapsed = 0_int64
+         ! Fastest repetition in process CPU time, so time spent descheduled
+         ! on a busy machine does not count.
+         elapsed = huge(1_int64)
          do rep = 1, 10
             p = 1
-            call system_clock(c0, rate)
+            call cpu_time(t0)
             do i = 1, n
                call capnp_json_span(text, p, beg, last, err)
                if (err /= CAPNP_OK .or. beg == 0) then
@@ -1096,8 +1102,8 @@ contains
                end if
                p = last + 1
             end do
-            call system_clock(c1)
-            elapsed = elapsed + int(c1 - c0, int64)
+            call cpu_time(t1)
+            elapsed = min(elapsed, int((t1 - t0)*1.0d9, int64))
          end do
       end subroutine span_n
    end subroutine run_json_multimsg_growth
@@ -1223,15 +1229,18 @@ contains
          integer, intent(out) :: bytes
          type(capnp_message_t), target :: msg
          character(len=:), allocatable :: text
-         integer :: i, c0, c1, rate
+         integer :: i
+         double precision :: t0, t1
          text = repeat('(sub=[', depth)//'()'//repeat('])', depth)
          bytes = len(text)
-         elapsed = 0_int64
-         do i = 1, 4
-            call system_clock(c0, rate)
+         ! Fastest repetition in process CPU time, so time spent descheduled
+         ! on a busy machine does not count.
+         elapsed = huge(1_int64)
+         do i = 1, 8
+            call cpu_time(t0)
             call capnp_text_decode(schema, idx, text, msg, err)
-            call system_clock(c1)
-            elapsed = elapsed + int(c1 - c0, int64)
+            call cpu_time(t1)
+            elapsed = min(elapsed, int((t1 - t0)*1.0d9, int64))
             call check_(error, err == CAPNP_OK, 'text list depth: decode')
             call capnp_message_free(msg)
             if (allocated(error)) return
@@ -1290,19 +1299,22 @@ contains
          integer(int64), intent(out) :: elapsed
          integer, intent(out) :: bytes
          character(len=:), allocatable :: rendered
-         integer :: i, c0, c1, rate
+         integer :: i
+         double precision :: t0, t1
          call capnp_message_init_builder(msg, err)
          msg%depth_limit = depth + 10
          root = capnp_dyn_new_root(schema, idx, msg, err)
          call fill_chain(root, depth)
          call check_(error, err == CAPNP_OK, 'json nest: chain')
          if (allocated(error)) return
-         elapsed = 0_int64
-         do i = 1, 2
-            call system_clock(c0, rate)
+         ! Fastest repetition in process CPU time, so time spent descheduled
+         ! on a busy machine does not count.
+         elapsed = huge(1_int64)
+         do i = 1, 5
+            call cpu_time(t0)
             call capnp_json_encode(schema, idx, root, rendered, err, pretty=.true.)
-            call system_clock(c1)
-            elapsed = elapsed + int(c1 - c0, int64)
+            call cpu_time(t1)
+            elapsed = min(elapsed, int((t1 - t0)*1.0d9, int64))
             call check_(error, err == CAPNP_OK, 'json nest: render')
             if (allocated(error)) return
          end do
@@ -1493,11 +1505,22 @@ contains
       end if
    end subroutine run_codec_tmp
 
+   !> Without the capnp tool (emulated big-endian CI) the checked-in
+   !> fixture stands in. With it, the fixture must match a fresh compile.
    subroutine compile_codec_schema(error, schema)
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_dyn_schema_t), intent(inout), target :: schema
-      integer(int8), allocatable :: bytes(:)
+      character(len=*), parameter :: fixture = 'test/fixtures/codec.cgr.hex'
+      integer(int8), allocatable :: bytes(:), kept(:)
       integer :: err
+      if (.not. have_capnp()) then
+         call read_hex_file(fixture, bytes, err)
+         call check_(error, err == CAPNP_OK, 'read '//fixture)
+         if (allocated(error)) return
+         call capnp_dyn_load(schema, bytes, err)
+         call check_(error, err == CAPNP_OK, 'load '//fixture)
+         return
+      end if
       if (.not. sh('mkdir -p '//tmp// &
          ' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
          //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
@@ -1505,9 +1528,58 @@ contains
          return
       end if
       call capnp_read_file(tmp//'/codec.cgr', bytes, err)
+      call read_hex_file(fixture, kept, err)
+      call check_(error, err == CAPNP_OK, 'read '//fixture)
+      if (allocated(error)) return
+      call check_bytes(error, bytes, kept, fixture//' matches schema/codec.capnp')
+      if (allocated(error)) return
       call capnp_dyn_load(schema, bytes, err)
       call check_(error, err == CAPNP_OK, 'load codec.cgr')
    end subroutine compile_codec_schema
+
+   !> Read lowercase hex digit pairs (as `od -An -tx1 -v` prints them),
+   !> skipping whitespace and line breaks.
+   subroutine read_hex_file(path, bytes, err)
+      character(len=*), intent(in) :: path
+      integer(int8), allocatable, intent(out) :: bytes(:)
+      integer, intent(out) :: err
+      character(len=*), parameter :: digits = '0123456789abcdef'
+      character(len=1024) :: line
+      integer(int8), allocatable :: buf(:)
+      integer :: u, ios, i, d, hi, n
+      err = CAPNP_ERR_IO
+      open (newunit=u, file=path, status='old', action='read', iostat=ios)
+      if (ios /= 0) return
+      allocate (buf(4096))
+      n = 0
+      hi = -1
+      do
+         read (u, '(a)', iostat=ios) line
+         if (ios /= 0) exit
+         do i = 1, len_trim(line)
+            if (line(i:i) == ' ') cycle
+            d = index(digits, line(i:i)) - 1
+            if (d < 0) then
+               close (u)
+               return
+            end if
+            if (hi < 0) then
+               hi = d
+               cycle
+            end if
+            if (n == size(buf)) buf = [buf, buf]
+            n = n + 1
+            d = 16*hi + d
+            if (d > 127) d = d - 256
+            buf(n) = int(d, int8)
+            hi = -1
+         end do
+      end do
+      close (u)
+      if (.not. is_iostat_end(ios) .or. hi >= 0) return
+      bytes = buf(:n)
+      err = CAPNP_OK
+   end subroutine read_hex_file
 
    function kitchen_text() result(src)
       character(len=:), allocatable :: src
