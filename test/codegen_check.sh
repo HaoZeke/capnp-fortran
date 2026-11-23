@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
-#   multifile | suffix | annot | fresh
+#   multifile | suffix | annot | longann | fresh
 # The plugin and the module directory come from the environment, set by
 # the unit test to the binary it is running. Searching the build tree
 # would accept a stale profile.
@@ -75,6 +75,20 @@ for k in kinds:
         sys.exit("stem split: %s" % k)
 PY
   ;;
+longann)
+  (cd "$root" && capnp compile -o- schema/longann.capnp) > "$out/t.cgr"
+  "$bin" "$out/t.cgr"
+  f=$(find "$out" -name longann_capnp.f90 | head -1)
+  test -n "$f"
+  python3 - "$f" <<'PY'
+import sys
+text = open(sys.argv[1]).read()
+wide = [n for n, l in enumerate(text.splitlines(), 1) if len(l) > 132]
+if wide:
+    sys.exit("lines over 132 columns: %s" % wide[:10])
+PY
+  (cd "$out" && gfortran -c -I"$moddir" "$f")
+  ;;
 fresh)
   "$bin" "$root/test/fixtures/dynamic.cgr.bin"
   diff -q "$out/schema/dynamic_capnp.f90" "$root/test/generated/dynamic_capnp.f90"
@@ -82,7 +96,7 @@ fresh)
   diff -q "$out/schema/adder_capnp.f90" "$root/test/generated/adder_capnp.f90"
   ;;
 *)
-  echo "usage: codegen_check.sh multifile|suffix|annot|fresh" >&2
+  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh" >&2
   exit 2
   ;;
 esac

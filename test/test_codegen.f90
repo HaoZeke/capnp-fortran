@@ -10,7 +10,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(6))
+      allocate (testsuite(7))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -23,6 +23,8 @@ contains
       testsuite(5)%test => run_named_plugin
       testsuite(6)%name = "codegen-helper-starts"
       testsuite(6)%test => run_helper_starts
+      testsuite(7)%name = "codegen-long-annotation-text"
+      testsuite(7)%test => run_longann
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -39,6 +41,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_mode(error, 'annot', 'codegen: annotation stem')
    end subroutine run_annot
+
+   subroutine run_longann(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_mode(error, 'longann', 'codegen: long Text annotations fit 132 columns')
+   end subroutine run_longann
 
    subroutine run_fresh(error)
       type(error_type), allocatable, intent(out) :: error
