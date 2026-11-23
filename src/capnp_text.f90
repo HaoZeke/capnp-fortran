@@ -1532,6 +1532,12 @@ contains
                if (sc%i > sc%n) return
                if (sc%s(sc%i:sc%i) == achar(10)) exit
             end do
+         else if (sc%i + 2 <= sc%n) then
+            if (sc%s(sc%i:sc%i + 2) == char(239)//char(187)//char(191)) then
+               sc%i = sc%i + 3
+            else
+               return
+            end if
          else
             return
          end if

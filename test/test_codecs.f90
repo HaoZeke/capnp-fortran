@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(14))
+      allocate (testsuite(15))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -59,6 +59,7 @@ contains
       testsuite(12) = new_unittest("codec-tmp", run_codec_tmp)
       testsuite(13) = new_unittest("text-multimsg-growth", run_text_multimsg_growth)
       testsuite(14) = new_unittest("json-multimsg-growth", run_json_multimsg_growth)
+      testsuite(15) = new_unittest("text-comments-bom", run_text_comments_bom)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -721,6 +722,21 @@ contains
          end do
       end subroutine span_n
    end subroutine run_json_multimsg_growth
+
+   subroutine run_text_comments_bom(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: input, bom
+      integer :: beg, last, err
+      bom = achar(239)//achar(187)//achar(191)
+      input = '# lead'//achar(10)//'(big=1) # tail'//achar(10)//bom//'(big=2)'
+      call capnp_text_span(input, 1, beg, last, err)
+      call check_(error, err == CAPNP_OK .and. input(beg:last) == '(big=1)', &
+                  'text comments: leading and trailing')
+      if (allocated(error)) return
+      call capnp_text_span(input, last + 1, beg, last, err)
+      call check_(error, err == CAPNP_OK .and. input(beg:last) == '(big=2)', &
+                  'text comments: BOM between messages')
+   end subroutine run_text_comments_bom
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
