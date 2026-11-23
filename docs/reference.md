@@ -70,9 +70,14 @@ does.
 | `capnp_list_len` | `(l) result(int64)` | |
 | `capnp_list_getp` | `(l, i, err) result(q)` | element of a PTR list |
 | `capnp_list_get_struct` | `(l, i, err) result(q)` | composite element; upgrades primitive lists to struct views |
-| `capnp_copy` | `(dstmsg, src, err) result(q)` | recursive deep copy into another message |
+| `capnp_copy` | `(dstmsg, src, err [, caps, from_seg]) result(q)` | recursive deep copy into another message |
 | `capnp_disown` | `(p, i, err) result(q)` | orphan: zero the slot, return the object; re-link with `capnp_setp` |
 | `capnp_total_size` | `(p, err) result(int64)` | words reachable from `p` (C++ `totalSize()`); the size a deep copy occupies |
+
+`capnp_copy` optional arguments:
+
+- `caps` (`integer(int64), allocatable, intent(inout)`): each capability pointer copied gets the next index of a new cap table, and `caps` lists the source cap index of each entry in order, as C++ `injectCap` numbers them.
+- `from_seg` (`integer`, default 1): segment of the pointer that will hold the copy; objects go there first, otherwise into the latest or a new segment behind a landing-pad word, as `MallocMessageBuilder` places them.
 
 ## Field accessors (`capnp_message`)
 
@@ -123,12 +128,19 @@ as primitive via field `@0`).
 | `capnp_serialize_bytes` | `(msg, bytes, err)` | segment table + segments |
 | `capnp_deserialize_bytes` | `(bytes, msg, err [, traversal_words, depth_limit, options])` | copies segments; frees `msg` first. `options` is `capnp_reader_options_t`; explicit limits override it |
 | `capnp_deserialize_view` | `(bytes, msg, err [, ...])` | zero-copy: segments alias the caller's `target` buffer |
-| `capnp_serialize_packed_bytes` / `capnp_deserialize_packed_bytes` | as above | packed framing |
+| `capnp_serialize_packed_bytes` | `(msg, bytes, err)` | packed framing |
+| `capnp_deserialize_packed_bytes` | `(bytes, msg, err [, traversal_words, depth_limit, options])` | packed framing |
 | `capnp_write_file` / `capnp_read_file` | `(path, bytes, err)` | raw byte I/O |
-| `capnp_write_message` / `capnp_read_message` | `(path, msg, err)` | framed message file I/O |
-| `capnp_write_message_packed` / `capnp_read_message_packed` | `(path, msg, err)` | |
-| `capnp_read_message_unit` | `(unit, msg, err [, options])` | one framed message from an open stream unit; the segment table is bounded by the reader traversal budget |
-| `capnp_read_message_packed_unit` | `(unit, msg, err [, options])` | same for packed streams (C++ `PackedMessageReader`) |
+| `capnp_write_message` | `(path, msg, err)` | framed message file I/O |
+| `capnp_read_message` | `(path, msg, err [, traversal_words, depth_limit, options])` | |
+| `capnp_write_message_packed` | `(path, msg, err)` | |
+| `capnp_read_message_packed` | `(path, msg, err [, traversal_words, depth_limit, options])` | |
+| `capnp_read_message_unit` | `(unit, msg, err [, traversal_words, depth_limit, options])` | one framed message from an open stream unit; the segment table is bounded by the reader traversal budget |
+| `capnp_read_message_packed_unit` | `(unit, msg, err [, traversal_words, depth_limit, options])` | same for packed streams (C++ `PackedMessageReader`) |
+
+The reader limits are optional and positional in that order, so pass
+`options` by keyword (`options=opts`). An explicit `traversal_words` or
+`depth_limit` overrides the field in `options`.
 
 ## Packed codec (`capnp_packed`)
 
@@ -138,11 +150,38 @@ as primitive via field `@0`).
 | `capnp_unpacker_t` + `capnp_unpack_push` | `(u, chunk, out, outn, err)` | incremental; chunks may split anywhere |
 | `capnp_packer_t` + `capnp_pack_push` / `capnp_pack_finish` | `(pk, chunk, out, outn, err)` | incremental; byte-identical to `capnp_pack` |
 
+## Concurrency
+
+Copy, total size, canonicalization, and the text and JSON codecs keep
+their working state in locals, so they can run on several threads at once.
+Each concurrent call needs its own messages and its own loaded schema: a
+read bills the reader message's traversal budget, and a schema is a reader
+message. `test/reentrancy.f90` checks this under OpenMP.
+
 ## Text format (`capnp_text`)
 
 `use capnp_text`. This is the struct-literal format `capnp decode` prints and
-`capnp encode` reads. `capnp_text_encode(schema, idx, p, text, err [, pretty])`
-writes a struct. Pretty output (the default) follows the C++ text codec:
+`capnp encode` reads. `schema` is a loaded `capnp_dyn_schema_t`, `idx` its
+node index (`capnp_dyn_find`), and `text` an allocatable deferred-length
+string.
+
+| Procedure | Signature | Notes |
+|-----------|-----------|-------|
+| `capnp_text_encode` | `(schema, idx, p, text, err [, pretty, brand_env, traversal_words, saw_cap])` | one struct; `CAPNP_ERR_KIND` keeps the partial text |
+| `capnp_text_encode_list` | `(schema, et, lst, env, text, err [, pretty, traversal_words, saw_cap])` | a list of element type `et` |
+| `capnp_text_encode_value` | `(schema, typ, val, text, err [, pretty, saw_cap])` | a schema `Value` |
+| `capnp_text_encode_enum` | `(schema, tid, ord, text, err)` | enumerant name, or `(ord)` when it is unknown |
+| `capnp_text_decode` | `(schema, idx, text, msg, err [, brand_env, hard_failed])` | frees `msg`, then builds the struct |
+| `capnp_text_span` | `(text, from, beg, to, err)` | next top-level value; `beg = 0` at the end |
+| `capnp_text_saw_capability` | `() result(logical)` | `saw_cap` of the last encode on this thread |
+| `capnp_text_hard_failed` | `() result(logical)` | `hard_failed` of the last decode on this thread |
+
+`saw_cap` is true when the output contains `<external capability>`.
+`hard_failed` is true when capnp 1.4.0 would throw before printing the
+recovered message. The two query functions read a per-thread copy only in
+an OpenMP build; elsewhere pass the optional arguments.
+
+`capnp_text_encode` writes a struct. Pretty output (the default) follows the C++ text codec:
 primitives are always shown, null pointers are omitted, and only the active
 union member is shown. `pretty=.false.` is the one-line form of `capnp decode
 --short`. Floats use the same shortest round-trip spelling as KJ (`nan`,
@@ -164,7 +203,21 @@ rejects them as well (`External constants not allowed.`,
 
 ## JSON (`capnp_json`)
 
-`use capnp_json`. `capnp_json_encode` and `capnp_json_decode` follow the
+`use capnp_json`.
+
+| Procedure | Signature | Notes |
+|-----------|-----------|-------|
+| `capnp_json_encode` | `(schema, idx, p, text, err [, pretty, brand_env, traversal_words])` | one struct; `CAPNP_ERR_KIND` keeps the partial text |
+| `capnp_json_decode` | `(schema, idx, text, msg, err [, brand_env, number_failed])` | frees `msg`, then builds the struct; a NUL ends the input |
+| `capnp_json_span` | `(text, from, beg, to, err)` | next top-level value; `beg = 0` at the end |
+| `capnp_json_number_failed` | `() result(logical)` | `number_failed` of the last decode on this thread |
+
+`number_failed` is true when `err` is `CAPNP_ERR_ARG` only because a number
+was stored as zero, truncated, or saturated; the message is complete and
+capnp 1.4.0 still prints it. The query function reads a per-thread copy
+only in an OpenMP build; elsewhere pass the optional argument.
+
+`capnp_json_encode` and `capnp_json_decode` follow the
 defaults and annotations in `capnp/compat/json.h`. Field, group, union, and
 enumerant names are the schema names unless `$Json.name` renames them.
 `$Json.flatten` inlines sub-structs, groups, and discriminated union
@@ -189,7 +242,11 @@ value itself: an array, a string, null, a number, a boolean, an object,
 or a raw text value. A non-string discriminator is rejected. Unknown JSON fields
 are ignored on decode. Every occurrence of a key is decoded. A string
 that is not a number becomes zero, later keys still apply, and the
-decode fails.
+decode fails. Raw control bytes inside a string are kept, as in capnp
+1.4.0, and the encoder writes them back escaped (`\b`, `\f`, `\n`, `\r`, `\t`,
+else `\u00XX`). Float strings
+are read the way C `strtod` reads them in the C locale whatever the process
+locale is, including hex floats, `inf`, `infinity`, and `nan(...)`.
 Pretty output matches `capnp convert binary:json`; pass `pretty=.false.` for
 `--short`, and use `capnp_json_span` to step through multi-value JSON streams.
 The span routine recognizes strings, so braces, `#`, and `//` inside a string
@@ -241,10 +298,13 @@ selected decoder runs.
 
 ## Canonical form (`capnp_canonical`)
 
-`capnp_canonicalize (msg, bytes, err)` produces the canonical single
-segment (no segment table): preorder layout, trailing-zero truncation of
-data sections, uniform composite-element trimming. Byte-compatible with
-`capnp convert binary:canonical`.
+`capnp_canonicalize (msg, bytes, err [, null_caps, saw_cap])` produces the
+canonical single segment (no segment table): preorder layout, trailing-zero
+truncation of data sections, uniform composite-element trimming.
+Byte-compatible with `capnp convert binary:canonical`. A capability pointer
+is `CAPNP_ERR_KIND` unless `null_caps=.true.`, which writes it as null and
+sets `saw_cap`. `capnp_is_canonical (msg, err) result(logical)` checks a
+single-segment message without copying it.
 
 ## Wire-level helpers (`capnp_endian`, `capnp_pointer`)
 
