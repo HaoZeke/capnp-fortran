@@ -96,7 +96,7 @@ module capnp_json
    end type jval
 
    type :: scan_t
-      character(len=:), allocatable :: s
+      character(len=:), pointer :: s => null()
       integer :: i = 1
       integer :: n = 0
    end type scan_t
@@ -175,7 +175,7 @@ contains
    subroutine capnp_json_decode(schema, idx, text, msg, err, brand_env)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
-      character(len=*), intent(in) :: text
+      character(len=*), intent(in), target :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_brand_env_t), intent(in), optional :: brand_env
@@ -202,7 +202,7 @@ contains
       end if
       number_bad = .false.
       value_bad = .false.
-      sc%s = text
+      sc%s => text
       nul = index(text, achar(0))
       if (nul > 0) then
          sc%n = nul - 1
@@ -248,7 +248,7 @@ contains
 
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
    subroutine capnp_json_span(text, from, beg, to, err)
-      character(len=*), intent(in) :: text
+      character(len=*), intent(in), target :: text
       integer, intent(in) :: from
       integer, intent(out) :: beg, to
       integer, intent(out) :: err
@@ -257,7 +257,7 @@ contains
       err = CAPNP_OK
       beg = 0
       to = 0
-      sc%s = text
+      sc%s => text
       sc%i = max(from, 1)
       sc%n = len(text)
       call jskip(sc)
