@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(20))
+      allocate (testsuite(21))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -65,6 +65,7 @@ contains
       testsuite(18) = new_unittest("text-list-bom", run_text_list_bom)
       testsuite(19) = new_unittest("text-list-depth-growth", run_text_list_depth_growth)
       testsuite(20) = new_unittest("json-nest-depth-growth", run_json_nest_depth_growth)
+      testsuite(21) = new_unittest("json-empty-numbers", run_json_empty_numbers)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -547,6 +548,58 @@ contains
       call capnp_message_free(decoded)
       call capnp_dyn_free(schema)
    end subroutine run_json_edges
+
+   !> A quoted number that is empty, blank, or a bare sign. capnp 1.4.0
+   !> stores zero, prints the message, and exits 1.
+   subroutine run_json_empty_numbers(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: idx, err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'Sample', err)
+      call json_soft_case(error, schema, idx, '{"ubig":""}', 'uint64 empty')
+      call json_soft_case(error, schema, idx, '{"big":""}', 'int64 empty')
+      call json_soft_case(error, schema, idx, '{"where":{"zip":""}}', 'uint16 empty')
+      call json_soft_case(error, schema, idx, '{"scores":["", "7"]}', 'int64 list empty')
+      call json_soft_case(error, schema, idx, '{"wide":""}', 'float64 empty')
+      call json_soft_case(error, schema, idx, '{"tiny":""}', 'float32 empty')
+      call json_soft_case(error, schema, idx, '{"ubig":"-"}', 'uint64 bare minus')
+      call json_soft_case(error, schema, idx, '{"ubig":"+"}', 'uint64 bare plus')
+      call json_soft_case(error, schema, idx, '{"ubig":" "}', 'uint64 blank')
+      call capnp_dyn_free(schema)
+   end subroutine run_json_empty_numbers
+
+   subroutine json_soft_case(error, schema, idx, js, label)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      character(len=*), intent(in) :: js, label
+      type(capnp_message_t), target :: decoded
+      type(capnp_ptr_t) :: root
+      character(len=:), allocatable :: text
+      integer :: err
+      if (allocated(error)) return
+      call spit(tmp//'/soft.json', js, err)
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && ! capnp convert -I"$INC" json:text schema/codec.capnp Sample < ' &
+         //tmp//'/soft.json > '//tmp//'/soft.txt 2>/dev/null')) then
+         call test_failed(error, label//': capnp did not report the number')
+         return
+      end if
+      call capnp_json_decode(schema, idx, js, decoded, err)
+      call check_(error, err == CAPNP_ERR_ARG, label//': decode error')
+      call check_(error, capnp_json_number_failed(), label//': recoverable')
+      root = capnp_root(decoded, err)
+      call capnp_text_encode(schema, idx, root, text, err, pretty=.true.)
+      call check_(error, err == CAPNP_OK, label//': encode')
+      call check_file(error, text, tmp//'/soft.txt', label//': message kept')
+      call capnp_message_free(decoded)
+   end subroutine json_soft_case
 
    subroutine run_json_flatten_disc(error)
       type(error_type), allocatable, intent(out) :: error
