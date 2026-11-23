@@ -34,6 +34,8 @@ Local docs: `pixi run -e docs docs`. Contributing: [CONTRIBUTING.md](CONTRIBUTIN
   defaults embedded as blobs, enums, constants, unions and groups,
   cross-file imports, schema annotations, `List(Text)`/`List(Data)` element
   helpers, anyPointer.
+- Text format and JSON codecs (`capnp_text`, `capnp_json`) and `capnpf`
+  for encode, decode, convert, and eval.
 - A `bind(c)` shim (`capnp_cabi`) and a cmocka golden-master tier that
   builds identical messages with this runtime and with
   [c-capnproto](https://github.com/HaoZeke/c-capnproto), comparing
@@ -78,6 +80,9 @@ and capnp-C++:
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
 | Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
+| Text format (`capnp decode` / `encode`) | no | yes | yes (`capnp_text`) |
+| JSON codec (`capnp/compat/json.h` defaults) | no | yes | yes (`capnp_json`, `$Json.name` / flatten / discriminator / base64 / hex) |
+| `capnp` encode, decode, convert, eval | no | yes | yes (`capnpf`) |
 
 The RPC tier is protocol-tested against a live capnp-C++ (`libcapnp-rpc`)
 peer in the interop suite: the Fortran vat bootstraps an `EzRpcServer`

@@ -6,6 +6,7 @@ program tester
    use test_wire, only: collect_wire
    use test_addressbook, only: collect_addressbook
    use test_canonical, only: collect_canonical
+   use test_codecs, only: collect_codecs
    use test_dynamic, only: collect_dynamic
    use test_annotated, only: collect_annotated
    use test_generated, only: collect_generated
@@ -19,6 +20,7 @@ program tester
    use test_rpc_typed, only: collect_rpc_typed
    use test_stream, only: collect_stream
    use test_idents, only: collect_idents
+   use test_regress, only: collect_regress
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -30,6 +32,7 @@ program tester
         new_testsuite("wire", collect_wire), &
         new_testsuite("addressbook", collect_addressbook), &
         new_testsuite("canonical", collect_canonical), &
+        new_testsuite("codecs", collect_codecs), &
         new_testsuite("dynamic", collect_dynamic), &
         new_testsuite("annotated", collect_annotated), &
         new_testsuite("generated", collect_generated), &
@@ -42,7 +45,8 @@ program tester
         new_testsuite("rpc_handoff", collect_rpc_handoff), &
         new_testsuite("rpc_typed", collect_rpc_typed), &
         new_testsuite("stream", collect_stream), &
-        new_testsuite("idents", collect_idents) &
+        new_testsuite("idents", collect_idents), &
+        new_testsuite("regress", collect_regress) &
         ]
 
    call get_argument(1, suite_name)
