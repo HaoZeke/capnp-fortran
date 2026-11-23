@@ -18,6 +18,7 @@ set -euo pipefail
 
 FC=${FC:-gfortran}
 CC=${CC:-gcc}
+AR=${AR:-ar}
 # Prefer -O0 under emulation; callers may override FFLAGS.
 FFLAGS=${FFLAGS:--O0 -g}
 OUT=build/nofpm
@@ -106,6 +107,10 @@ TEST_MODULES=(
   test/test_regress.f90
   test/test_edges.f90
   test/test_limits.f90
+  test/test_codegen.f90
+  test/test_net.f90
+  test/test_rpc_lifetime.f90
+  test/test_rpc_peer.f90
 )
 
 # Standalone test programs, run after the suites.
@@ -153,6 +158,14 @@ for f in "${LIB_SOURCES[@]}"; do
   compile_unit "$f" "$o"
   LIB_OBJS+=("$o")
 done
+# capnp_posix binds to these C helpers for socket calls and errno values.
+echo "compile: src/capnp_posix_os.c"
+with_retries "$CC" -O0 -g -c src/capnp_posix_os.c -o "$OUT/capnp_posix_os.o"
+LIB_OBJS+=("$OUT/capnp_posix_os.o")
+# The regress guard tests link helpers against build/**/libcapnp.a.
+echo "archive: $OUT/libcapnp.a"
+rm -f "$OUT/libcapnp.a"
+"$AR" rcs "$OUT/libcapnp.a" "${LIB_OBJS[@]}"
 
 echo "compile: app/os_errno.c"
 with_retries "$CC" -O0 -g -c app/os_errno.c -o "$OUT/os_errno_c.o"
