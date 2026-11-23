@@ -35,6 +35,10 @@ module capnp_text
       character(len=:), pointer :: s => null()
       integer :: i = 1
       integer :: n = 0
+      integer, allocatable :: list_at(:)
+      integer, allocatable :: list_count(:)
+      integer :: list_n = 0
+      integer :: list_next = 1
    end type scan_t
 
 contains
@@ -164,6 +168,8 @@ contains
       sc%s => text
       sc%n = len(text)
       sc%i = 1
+      call index_lists(sc, err)
+      if (err /= CAPNP_OK) return
       if (present(brand_env)) env = brand_env
       call parse_struct(schema, idx, root, env, sc, 0, err, .false.)
       if (err /= CAPNP_OK) return
@@ -997,11 +1003,8 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      n = count_items(sc%s, sc%i)
-      if (n < 0) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
+      call next_list_count(sc, n, err)
+      if (err /= CAPNP_OK) return
       et = capnp_brand_resolve(env, raw_et)
       lst = capnp_codec_alloc_list(parent, et, n, schema, err, env=env)
       if (err /= CAPNP_OK) return
@@ -1895,28 +1898,32 @@ contains
       stk(depth) = ch
    end subroutine push_bracket
 
-   function count_items(s, at) result(n)
-      character(len=*), intent(in) :: s
-      integer, intent(in) :: at
-      integer :: n
-      integer :: i, depth, perr
-      logical :: in_str, in_raw, in_cmt, item
-      character(len=1) :: c
+   !> Count every list once. Later parses consume those counts in order.
+   subroutine index_lists(sc, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(out) :: err
       character(len=1), allocatable :: stk(:)
-      n = 0
-      i = at + 1
+      integer, allocatable :: counts(:), slots(:)
+      logical, allocatable :: item(:)
+      character(len=1) :: c
+      integer :: i, depth, cap, stat, slot
+      logical :: in_cmt, in_str, in_raw
+      err = CAPNP_OK
+      sc%list_n = 0
+      sc%list_next = 1
+      cap = 16
       depth = 0
-      call push_bracket(stk, depth, '[', perr)
-      if (perr /= CAPNP_OK) then
-         n = -1
+      allocate (stk(cap), counts(cap), slots(cap), item(cap), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
          return
       end if
+      in_cmt = .false.
       in_str = .false.
       in_raw = .false.
-      in_cmt = .false.
-      item = .false.
-      do while (i <= len(s))
-         c = s(i:i)
+      i = 1
+      do while (i <= sc%n)
+         c = sc%s(i:i)
          if (in_cmt) then
             if (c == achar(10)) in_cmt = .false.
             i = i + 1
@@ -1925,8 +1932,8 @@ contains
          if (in_str) then
             if (in_raw) then
                if (c == achar(13)) then
-                  if (i < len(s)) then
-                     if (s(i + 1:i + 1) == achar(10)) i = i + 1
+                  if (i < sc%n) then
+                     if (sc%s(i + 1:i + 1) == achar(10)) i = i + 1
                   end if
                end if
                if (c == achar(10) .or. c == achar(13)) in_str = .false.
@@ -1934,7 +1941,7 @@ contains
                cycle
             end if
             if (c == achar(10)) then
-               n = -1
+               err = CAPNP_ERR_ARG
                return
             else if (c == '\') then
                i = i + 2
@@ -1942,12 +1949,12 @@ contains
             else if (c == '"') then
                in_str = .false.
             end if
-            item = .true.
+            if (depth > 0) item(depth) = .true.
             i = i + 1
             cycle
          end if
-         if (i + 2 <= len(s)) then
-            if (s(i:i + 2) == char(239)//char(187)//char(191)) then
+         if (i + 2 <= sc%n) then
+            if (sc%s(i:i + 2) == char(239)//char(187)//char(191)) then
                i = i + 3
                cycle
             end if
@@ -1957,39 +1964,138 @@ contains
          else if (c == '"' .or. c == '`') then
             in_str = .true.
             in_raw = c == '`'
-            item = .true.
+            if (depth > 0) item(depth) = .true.
          else if (c == '(' .or. c == '[') then
-            call push_bracket(stk, depth, c, perr)
-            if (perr /= CAPNP_OK) then
-               n = -1
+            if (depth > 0) item(depth) = .true.
+            if (depth >= cap) then
+               call grow_list_stacks(stk, counts, slots, item, cap, err)
+               if (err /= CAPNP_OK) return
+            end if
+            depth = depth + 1
+            stk(depth) = c
+            counts(depth) = 0
+            item(depth) = .false.
+            slots(depth) = 0
+            if (c == '[') then
+               call record_list_open(sc, i, slot, err)
+               if (err /= CAPNP_OK) return
+               slots(depth) = slot
+            end if
+         else if (c == ')' .or. c == ']') then
+            if (depth <= 0) then
+               err = CAPNP_ERR_ARG
                return
             end if
-            item = .true.
-         else if (c == ')' .or. c == ']') then
             if ((c == ')' .and. stk(depth) /= '(') .or. (c == ']' .and. stk(depth) /= '[')) then
-               n = -1
+               err = CAPNP_ERR_ARG
                return
+            end if
+            if (stk(depth) == '[') then
+               if (item(depth)) counts(depth) = counts(depth) + 1
+               sc%list_count(slots(depth)) = counts(depth)
             end if
             depth = depth - 1
-            if (depth == 0) then
-               if (item) n = n + 1
-               return
+            if (depth > 0) item(depth) = .true.
+         else if (c == ',' .and. depth > 0) then
+            if (stk(depth) == '[') then
+               if (.not. item(depth)) then
+                  err = CAPNP_ERR_ARG
+                  return
+               end if
+               counts(depth) = counts(depth) + 1
+               item(depth) = .false.
             end if
-            item = .true.
-         else if (c == ',' .and. depth == 1) then
-            if (.not. item) then
-               n = -1
-               return
-            end if
-            n = n + 1
-            item = .false.
-         else if (c /= ' ' .and. c /= achar(9) .and. c /= achar(10) .and. c /= achar(13)) then
-            item = .true.
+         else if (depth > 0 .and. c /= ' ' .and. c /= achar(9) .and. &
+                  c /= achar(10) .and. c /= achar(13)) then
+            item(depth) = .true.
          end if
          i = i + 1
       end do
-      n = -1
-   end function count_items
+      if (depth /= 0) err = CAPNP_ERR_ARG
+   end subroutine index_lists
+
+   subroutine grow_list_stacks(stk, counts, slots, item, cap, err)
+      character(len=1), allocatable, intent(inout) :: stk(:)
+      integer, allocatable, intent(inout) :: counts(:), slots(:)
+      logical, allocatable, intent(inout) :: item(:)
+      integer, intent(inout) :: cap
+      integer, intent(out) :: err
+      character(len=1), allocatable :: nstk(:)
+      integer, allocatable :: ncounts(:), nslots(:)
+      logical, allocatable :: nitem(:)
+      integer :: stat, n
+      err = CAPNP_OK
+      n = cap
+      cap = cap*2
+      allocate (nstk(cap), ncounts(cap), nslots(cap), nitem(cap), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      nstk(1:n) = stk(1:n)
+      ncounts(1:n) = counts(1:n)
+      nslots(1:n) = slots(1:n)
+      nitem(1:n) = item(1:n)
+      call move_alloc(nstk, stk)
+      call move_alloc(ncounts, counts)
+      call move_alloc(nslots, slots)
+      call move_alloc(nitem, item)
+   end subroutine grow_list_stacks
+
+   subroutine record_list_open(sc, at, slot, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(in) :: at
+      integer, intent(out) :: slot
+      integer, intent(out) :: err
+      integer, allocatable :: grown(:)
+      integer :: cap, stat
+      err = CAPNP_OK
+      if (.not. allocated(sc%list_at)) then
+         allocate (sc%list_at(16), sc%list_count(16), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+      else if (sc%list_n >= size(sc%list_at)) then
+         cap = size(sc%list_at)*2
+         allocate (grown(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown(1:sc%list_n) = sc%list_at(1:sc%list_n)
+         call move_alloc(grown, sc%list_at)
+         allocate (grown(cap), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         grown(1:sc%list_n) = sc%list_count(1:sc%list_n)
+         call move_alloc(grown, sc%list_count)
+      end if
+      sc%list_n = sc%list_n + 1
+      slot = sc%list_n
+      sc%list_at(slot) = at
+      sc%list_count(slot) = 0
+   end subroutine record_list_open
+
+   subroutine next_list_count(sc, n, err)
+      type(scan_t), intent(inout) :: sc
+      integer, intent(out) :: n
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      n = 0
+      if (sc%list_next > sc%list_n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (sc%list_at(sc%list_next) /= sc%i) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      n = sc%list_count(sc%list_next)
+      sc%list_next = sc%list_next + 1
+   end subroutine next_list_count
 
    subroutine match_close(text, beg, to, err)
       character(len=*), intent(in) :: text

@@ -44,7 +44,7 @@ contains
       call init_codec_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(18))
+      allocate (testsuite(19))
       testsuite(1) = new_unittest("text-addressbook", run_addressbook)
       testsuite(2) = new_unittest("text-kitchen", run_kitchen)
       testsuite(3) = new_unittest("text-edge-cases", run_text_edges)
@@ -63,6 +63,7 @@ contains
       testsuite(16) = new_unittest("text-backtick-lines", run_text_backtick_lines)
       testsuite(17) = new_unittest("text-backtick-delimiters", run_text_backtick_delimiters)
       testsuite(18) = new_unittest("text-list-bom", run_text_list_bom)
+      testsuite(19) = new_unittest("text-list-depth-growth", run_text_list_depth_growth)
    end subroutine collect_codecs
 
    subroutine check_(error, cond, name)
@@ -816,6 +817,52 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_list_bom
+
+   subroutine run_text_list_depth_growth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      integer :: err, idx
+      integer(int64) :: tsmall, tlarge
+      integer :: bsmall, blarge
+      real :: bytes_ratio, time_ratio
+      call compile_codec_schema(error, schema)
+      if (allocated(error)) return
+      idx = capnp_dyn_find(schema, 'ListNest', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'text list depth: schema')
+      if (allocated(error)) return
+      call decode_n(400, tsmall, bsmall)
+      if (allocated(error)) return
+      call decode_n(1600, tlarge, blarge)
+      if (allocated(error)) return
+      bytes_ratio = real(blarge)/real(bsmall)
+      time_ratio = real(tlarge)/real(max(1_int64, tsmall))
+      write (*, '(a,3(1x,f0.3))') 'text-list-depth ratios bytes time normalized', &
+         bytes_ratio, time_ratio, time_ratio/bytes_ratio
+      call check_(error, tsmall > 0_int64 .and. time_ratio/bytes_ratio < 2.0, &
+                  'text list depth: linear growth')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine decode_n(depth, elapsed, bytes)
+         integer, intent(in) :: depth
+         integer(int64), intent(out) :: elapsed
+         integer, intent(out) :: bytes
+         type(capnp_message_t), target :: msg
+         character(len=:), allocatable :: text
+         integer :: i, c0, c1, rate
+         text = repeat('(sub=[', depth)//'()'//repeat('])', depth)
+         bytes = len(text)
+         elapsed = 0_int64
+         do i = 1, 4
+            call system_clock(c0, rate)
+            call capnp_text_decode(schema, idx, text, msg, err)
+            call system_clock(c1)
+            elapsed = elapsed + int(c1 - c0, int64)
+            call check_(error, err == CAPNP_OK, 'text list depth: decode')
+            call capnp_message_free(msg)
+            if (allocated(error)) return
+         end do
+      end subroutine decode_n
+   end subroutine run_text_list_depth_growth
 
    subroutine run_cli(error)
       type(error_type), allocatable, intent(out) :: error
