@@ -16,11 +16,19 @@ module capnp_text
    integer, parameter :: MODE_BARE = 1
    integer, parameter :: MODE_PREF = 2
    integer, parameter :: MAX_DEPTH = 64
-   logical, save :: ptr_kind_bad = .false.
-   !> An unresolved name throws in capnp before a message is printed.
-   logical, save :: text_hard = .false.
-   !> The last encode printed `<external capability>`.
-   logical, save :: cap_seen = .false.
+   !> Mirrors of the last call's flags for the query functions only. The
+   !> codec never reads them; pass saw_cap or hard_failed to stay reentrant.
+   logical, save :: last_hard = .false.
+   logical, save :: last_cap = .false.
+   !$omp threadprivate(last_hard, last_cap)
+
+   !> Flags one encode raises while it walks the message.
+   type :: enc_flags_t
+      !> A pointer has the wrong kind for its schema type.
+      logical :: kind_bad = .false.
+      !> Output contains `<external capability>`.
+      logical :: cap = .false.
+   end type enc_flags_t
 
    type :: piece_t
       character(len=:), allocatable :: s
@@ -39,12 +47,14 @@ module capnp_text
       integer, allocatable :: list_count(:)
       integer :: list_n = 0
       integer :: list_next = 1
+      !> An unresolved name throws in capnp before a message is printed.
+      logical :: hard = .false.
    end type scan_t
 
 contains
 
    subroutine capnp_text_encode(schema, idx, p, text, err, pretty, brand_env, &
-                                 traversal_words)
+                                 traversal_words, saw_cap)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -53,13 +63,16 @@ contains
       logical, intent(in), optional :: pretty
       type(capnp_brand_env_t), intent(in), optional :: brand_env
       integer(int64), intent(in), optional :: traversal_words
+      !> True when the output contains `<external capability>`.
+      logical, intent(out), optional :: saw_cap
       type(capnp_brand_env_t) :: env
+      type(enc_flags_t) :: flags
       integer :: ind
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
-      ptr_kind_bad = .false.
-      cap_seen = .false.
+      last_cap = .false.
+      if (present(saw_cap)) saw_cap = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -81,12 +94,14 @@ contains
          if (.not. pretty) ind = 0
       end if
       if (present(brand_env)) env = brand_env
-      call enc_struct(schema, idx, p, env, ind, MODE_BARE, 0, 0, text, err)
-      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
+      call enc_struct(flags, schema, idx, p, env, ind, MODE_BARE, 0, 0, text, err)
+      if (err == CAPNP_OK .and. flags%kind_bad) err = CAPNP_ERR_KIND
+      last_cap = flags%cap
+      if (present(saw_cap)) saw_cap = flags%cap
    end subroutine capnp_text_encode
 
    subroutine capnp_text_encode_list(schema, et, lst, env, text, err, pretty, &
-                                      traversal_words)
+                                      traversal_words, saw_cap)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       type(capnp_brand_env_t), intent(in) :: env
@@ -94,12 +109,14 @@ contains
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
       integer(int64), intent(in), optional :: traversal_words
+      logical, intent(out), optional :: saw_cap
+      type(enc_flags_t) :: flags
       integer :: ind
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
-      ptr_kind_bad = .false.
-      cap_seen = .false.
+      last_cap = .false.
+      if (present(saw_cap)) saw_cap = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -112,8 +129,10 @@ contains
       if (present(traversal_words)) limit = traversal_words
       call guard_traversal(lst, limit, err)
       if (err /= CAPNP_OK) return
-      call enc_list(schema, et, lst, env, ind, MODE_BARE, 0, text, err)
-      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
+      call enc_list(flags, schema, et, lst, env, ind, MODE_BARE, 0, text, err)
+      if (err == CAPNP_OK .and. flags%kind_bad) err = CAPNP_ERR_KIND
+      last_cap = flags%cap
+      if (present(saw_cap)) saw_cap = flags%cap
    end subroutine capnp_text_encode_list
 
    subroutine capnp_text_encode_enum(schema, tid, ord, text, err)
@@ -131,19 +150,22 @@ contains
       call enum_text(schema, tid, ord, text, err)
    end subroutine capnp_text_encode_enum
 
-   subroutine capnp_text_decode(schema, idx, text, msg, err, brand_env)
+   subroutine capnp_text_decode(schema, idx, text, msg, err, brand_env, hard_failed)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       character(len=*), intent(in), target :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_brand_env_t), intent(in), optional :: brand_env
+      !> True when capnp would throw before printing any message.
+      logical, intent(out), optional :: hard_failed
       type(capnp_ptr_t) :: root
       type(capnp_brand_env_t) :: env
       type(scan_t) :: sc
       integer :: dw, pw
       err = CAPNP_OK
-      text_hard = .false.
+      last_hard = .false.
+      if (present(hard_failed)) hard_failed = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -172,18 +194,22 @@ contains
       if (err /= CAPNP_OK) return
       if (present(brand_env)) env = brand_env
       call parse_struct(schema, idx, root, env, sc, 0, err, .false.)
+      last_hard = sc%hard
+      if (present(hard_failed)) hard_failed = sc%hard
       if (err /= CAPNP_OK) return
       call skip_ws(sc)
       if (sc%i <= sc%n) err = CAPNP_ERR_ARG
    end subroutine capnp_text_decode
 
    !> Render a schema Value (a const, or a field default) in text form.
-   subroutine capnp_text_encode_value(schema, typ, val, text, err, pretty)
+   subroutine capnp_text_encode_value(schema, typ, val, text, err, pretty, saw_cap)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: typ, val
       character(len=:), allocatable, intent(out) :: text
       integer, intent(out) :: err
       logical, intent(in), optional :: pretty
+      logical, intent(out), optional :: saw_cap
+      type(enc_flags_t) :: flags
       type(capnp_brand_env_t) :: env, cenv
       integer :: ind, tw, ord, idx
       type(capnp_ptr_t) :: q, et
@@ -191,8 +217,8 @@ contains
       character(len=:), allocatable :: body, esc
       err = CAPNP_OK
       text = ''
-      ptr_kind_bad = .false.
-      cap_seen = .false.
+      last_cap = .false.
+      if (present(saw_cap)) saw_cap = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -264,7 +290,7 @@ contains
          end if
          et = type_list_element(typ, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, env, ind, MODE_BARE, 0, text, err)
+         call enc_list(flags, schema, et, q, env, ind, MODE_BARE, 0, text, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (val%kind /= CAPNP_PK_NULL) then
@@ -278,16 +304,18 @@ contains
          end if
          call capnp_brand_enter(env, typ, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, q, cenv, ind, MODE_BARE, 0, 0, text, err)
+         call enc_struct(flags, schema, idx, q, cenv, ind, MODE_BARE, 0, 0, text, err)
       case (TYPE_ANY_POINTER)
          text = '<opaque pointer>'
       case (TYPE_INTERFACE)
          text = '<external capability>'
-         cap_seen = .true.
+         flags%cap = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
-      if (err == CAPNP_OK .and. ptr_kind_bad) err = CAPNP_ERR_KIND
+      if (err == CAPNP_OK .and. flags%kind_bad) err = CAPNP_ERR_KIND
+      last_cap = flags%cap
+      if (present(saw_cap)) saw_cap = flags%cap
    end subroutine capnp_text_encode_value
 
    !> Locate one top-level text value. beg = 0 and err = 0 means no more input.
@@ -320,7 +348,8 @@ contains
       end if
    end subroutine capnp_text_span
 
-   recursive subroutine enc_struct(schema, idx, p, env, indent, mode, depth, gdepth, out, err)
+   recursive subroutine enc_struct(flags, schema, idx, p, env, indent, mode, depth, gdepth, out, err)
+      type(enc_flags_t), intent(inout) :: flags
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, indent, mode, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
@@ -370,7 +399,7 @@ contains
          end if
          call field_name(f, nm, err)
          if (err /= CAPNP_OK) return
-         call enc_field_value(schema, f, p, env, next_ind(indent), MODE_PREF, depth, gdepth, val, err)
+         call enc_field_value(flags, schema, f, p, env, next_ind(indent), MODE_PREF, depth, gdepth, val, err)
          if (err /= CAPNP_OK) return
          call push(items, n, nm//' = '//val, err)
          if (err /= CAPNP_OK) return
@@ -380,7 +409,8 @@ contains
       out = '('//body//')'
    end subroutine enc_struct
 
-   recursive subroutine enc_field_value(schema, f, p, env, indent, mode, depth, gdepth, out, err)
+   recursive subroutine enc_field_value(flags, schema, f, p, env, indent, mode, depth, gdepth, out, err)
+      type(enc_flags_t), intent(inout) :: flags
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
@@ -401,7 +431,7 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call enc_struct(schema, idx, p, env, indent, mode, depth, gdepth + 1, out, err)
+         call enc_struct(flags, schema, idx, p, env, indent, mode, depth, gdepth + 1, out, err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -462,7 +492,7 @@ contains
          else
             call capnp_get_text(p, int(off), s, err)
             if (err == CAPNP_ERR_KIND) then
-               ptr_kind_bad = .true.
+               flags%kind_bad = .true.
                err = CAPNP_OK
                s = ''
             end if
@@ -489,7 +519,7 @@ contains
          else
             call capnp_get_data(p, int(off), raw, err)
             if (err == CAPNP_ERR_KIND) then
-               ptr_kind_bad = .true.
+               flags%kind_bad = .true.
                err = CAPNP_OK
                raw = [integer(int8) ::]
             end if
@@ -503,7 +533,7 @@ contains
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
             if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
-               ptr_kind_bad = .true.
+               flags%kind_bad = .true.
                err = CAPNP_OK
                q = capnp_ptr_t()
             end if
@@ -515,7 +545,7 @@ contains
          end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, et, q, env, indent, mode, depth + 1, out, err)
+         call enc_list(flags, schema, et, q, env, indent, mode, depth + 1, out, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
@@ -527,7 +557,7 @@ contains
             if (err /= CAPNP_OK) return
          end if
          if (q%kind /= CAPNP_PK_NULL .and. q%kind /= CAPNP_PK_STRUCT) then
-            ptr_kind_bad = .true.
+            flags%kind_bad = .true.
             q = capnp_ptr_t()
          end if
          idx = capnp_codec_find_id(schema, type_type_id(t))
@@ -537,18 +567,19 @@ contains
          end if
          call capnp_brand_enter(env, t, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, q, cenv, indent, mode, depth + 1, 0, out, err)
+         call enc_struct(flags, schema, idx, q, cenv, indent, mode, depth + 1, 0, out, err)
       case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
          out = '<external capability>'
-         cap_seen = .true.
+         flags%cap = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine enc_field_value
 
-   recursive subroutine enc_list(schema, raw_et, lst, env, indent, mode, depth, out, err)
+   recursive subroutine enc_list(flags, schema, raw_et, lst, env, indent, mode, depth, out, err)
+      type(enc_flags_t), intent(inout) :: flags
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: raw_et, lst
       type(capnp_brand_env_t), intent(in) :: env
@@ -567,20 +598,20 @@ contains
          return
       end if
       if (lst%kind /= CAPNP_PK_LIST) then
-         if (lst%kind /= CAPNP_PK_NULL) ptr_kind_bad = .true.
+         if (lst%kind /= CAPNP_PK_NULL) flags%kind_bad = .true.
          out = '[]'
          return
       end if
       et = capnp_brand_resolve(env, raw_et)
       if (.not. list_readable(et, lst)) then
-         ptr_kind_bad = .true.
+         flags%kind_bad = .true.
          out = '[]'
          return
       end if
       nlen = capnp_list_len(lst)
       n = 0
       do i = 0_int64, nlen - 1_int64
-         call enc_element(schema, et, lst, i, env, next_ind(indent), MODE_BARE, depth + 1, el, err)
+         call enc_element(flags, schema, et, lst, i, env, next_ind(indent), MODE_BARE, depth + 1, el, err)
          if (err /= CAPNP_OK) return
          call push(items, n, el, err)
          if (err /= CAPNP_OK) return
@@ -590,7 +621,8 @@ contains
       out = '['//body//']'
    end subroutine enc_list
 
-   recursive subroutine enc_element(schema, et, lst, i, env, indent, mode, depth, out, err)
+   recursive subroutine enc_element(flags, schema, et, lst, i, env, indent, mode, depth, out, err)
+      type(enc_flags_t), intent(inout) :: flags
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       integer(int64), intent(in) :: i
@@ -658,7 +690,7 @@ contains
          if (err /= CAPNP_OK) return
          inner = type_list_element(et, err)
          if (err /= CAPNP_OK) return
-         call enc_list(schema, inner, q, env, indent, mode, depth, out, err)
+         call enc_list(flags, schema, inner, q, env, indent, mode, depth, out, err)
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -669,12 +701,12 @@ contains
          end if
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
-         call enc_struct(schema, idx, el, cenv, indent, mode, depth, 0, out, err)
+         call enc_struct(flags, schema, idx, el, cenv, indent, mode, depth, 0, out, err)
       case (TYPE_ANY_POINTER)
          out = '<opaque pointer>'
       case (TYPE_INTERFACE)
          out = '<external capability>'
-         cap_seen = .true.
+         flags%cap = .true.
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -794,7 +826,7 @@ contains
             TYPE_FLOAT64, TYPE_TEXT)
       case (TYPE_ENUM)
          ! A bare name is an external constant. Nothing is printed.
-         if (ident_start(sc)) text_hard = .true.
+         if (ident_start(sc)) sc%hard = .true.
          err = CAPNP_ERR_ARG
          return
       case default
@@ -2247,12 +2279,12 @@ contains
    !> cannot read one without a capability table.
    function capnp_text_saw_capability() result(y)
       logical :: y
-      y = cap_seen
+      y = last_cap
    end function capnp_text_saw_capability
 
    function capnp_text_hard_failed() result(y)
       logical :: y
-      y = text_hard
+      y = last_hard
    end function capnp_text_hard_failed
 
    !> False when the wire list cannot be read as this element type.

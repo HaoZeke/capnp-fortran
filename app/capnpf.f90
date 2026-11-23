@@ -1264,6 +1264,7 @@ contains
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err, nbeg, nto, last
+      logical :: hard
       rc = 0
       from = 1
       count = 0
@@ -1283,11 +1284,12 @@ contains
             call fail('text decode failed', rc)
             return
          end if
-         call capnp_text_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv)
+         call capnp_text_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv, &
+                                hard_failed=hard)
          if (err /= CAPNP_OK) then
             ! A reported error still prints the recovered message. An
             ! unresolved name throws before any output.
-            if (.not. capnp_text_hard_failed()) then
+            if (.not. hard) then
                root = capnp_root(msg, err)
                if (err == CAPNP_OK .and. root_is_struct(root)) then
                   call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)
@@ -1668,11 +1670,12 @@ contains
       character(len=:), allocatable :: text
       integer(int8), allocatable :: outb(:)
       integer :: err, caps
+      logical :: saw_cap
       rc = 0
       if (to == 'text') then
          call capnp_text_encode(sch, idx, root, text, err, pretty=pretty, brand_env=env, &
-                                traversal_words=huge(0_int64))
-         if (capnp_text_saw_capability()) then
+                                traversal_words=huge(0_int64), saw_cap=saw_cap)
+         if (saw_cap) then
             ! capnp 1.4.0 throws on reading a capability and stops.
             call fail('cannot read a capability without a capability table', rc)
             return
