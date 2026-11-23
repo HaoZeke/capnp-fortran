@@ -41,14 +41,10 @@ module capnp_json
    integer(int64), parameter :: ANN_HEX = int(z'F061E22F0AE5C7B5', int64)
    integer, parameter :: MAX_DEPTH = 64
    integer, parameter :: UNION_SEEN_START = 16
-   integer, save :: union_seen_n = 0
-   logical, save :: ptr_kind_bad = .false.
-   logical, save :: number_bad = .false.
-   !> A numeric value was truncated or saturated. The message is kept.
-   logical, save :: value_bad = .false.
-   integer, allocatable, save :: union_seen_seg(:)
-   integer(int64), allocatable, save :: union_seen_off(:)
-   integer, allocatable, save :: union_seen_disc(:)
+   !> Mirror of the last decode's soft failure for capnp_json_number_failed
+   !> only. Pass number_failed to capnp_json_decode to stay reentrant.
+   logical, save :: last_number_failed = .false.
+   !$omp threadprivate(last_number_failed)
    integer, parameter :: JN_TAG = 1, JN_VALUE = 2, JN_NORMAL = 3
    integer, parameter :: JN_FLAT = 4, JN_FLAT_U = 5
    integer, parameter :: JK_NULL = 0, JK_BOOL = 1, JK_NUM = 2, JK_STR = 3
@@ -98,6 +94,25 @@ module capnp_json
       integer :: n = 0
    end type scan_t
 
+   !> Flags one encode raises while it walks the message.
+   type :: json_enc_t
+      !> A pointer has the wrong kind for its schema type.
+      logical :: kind_bad = .false.
+   end type json_enc_t
+
+   !> State of one decode.
+   type :: json_dec_t
+      !> A string that is not a number was stored as zero.
+      logical :: number_bad = .false.
+      !> A numeric value was truncated or saturated. The message is kept.
+      logical :: value_bad = .false.
+      !> Union members already set, by struct address and discriminant.
+      integer :: n = 0
+      integer, allocatable :: seg(:)
+      integer(int64), allocatable :: off(:)
+      integer, allocatable :: disc(:)
+   end type json_dec_t
+
 contains
 
    recursive subroutine clone_jval(dst, src, err)
@@ -140,11 +155,11 @@ contains
       type(disc_opts_t) :: no_disc
       type(jval) :: root
       type(buf_t) :: buf
+      type(json_enc_t) :: cx
       logical :: do_pretty
       integer(int64) :: limit
       err = CAPNP_OK
       text = ''
-      ptr_kind_bad = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -166,30 +181,37 @@ contains
       do_pretty = .true.
       if (present(pretty)) do_pretty = pretty
       if (present(brand_env)) env = brand_env
-      call build_struct(schema, idx, p, env, no_disc, 0, 0, root, err)
+      call build_struct(cx, schema, idx, p, env, no_disc, 0, 0, root, err)
       if (err /= CAPNP_OK) return
       call plan_jval(root, 0, .false., do_pretty, err)
       if (err /= CAPNP_OK) return
       call write_jval(root, buf, 0, .false., do_pretty, err)
       if (err /= CAPNP_OK) return
       call buf_take(buf, text)
-      if (ptr_kind_bad) err = CAPNP_ERR_KIND
+      if (cx%kind_bad) err = CAPNP_ERR_KIND
    end subroutine capnp_json_encode
 
-   subroutine capnp_json_decode(schema, idx, text, msg, err, brand_env)
+   !> number_failed is true when err is CAPNP_ERR_ARG only because a
+   !> number was stored as zero, truncated, or saturated. The message is
+   !> complete. capnp 1.4.0 reports that failure and still writes it.
+   subroutine capnp_json_decode(schema, idx, text, msg, err, brand_env, number_failed)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       character(len=*), intent(in), target :: text
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
       type(capnp_brand_env_t), intent(in), optional :: brand_env
+      logical, intent(out), optional :: number_failed
       type(capnp_brand_env_t) :: env
       type(disc_opts_t) :: no_disc
       type(jval) :: root
       type(capnp_ptr_t) :: obj
       type(scan_t) :: sc
+      type(json_dec_t) :: cx
       integer :: dw, pw, nul
       err = CAPNP_OK
+      last_number_failed = .false.
+      if (present(number_failed)) number_failed = .false.
       if (.not. schema%loaded) then
          err = CAPNP_ERR_ARG
          return
@@ -204,8 +226,6 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      number_bad = .false.
-      value_bad = .false.
       sc%s => text
       nul = index(text, achar(0))
       if (nul > 0) then
@@ -230,24 +250,22 @@ contains
       if (err /= CAPNP_OK) return
       call capnp_set_root(msg, obj, err)
       if (err /= CAPNP_OK) return
-      call union_seen_reset()
       if (present(brand_env)) env = brand_env
-      call fill_struct(schema, idx, obj, env, no_disc, root, 0, .false., err)
-      if (err /= CAPNP_OK) then
-         ! A later type error drops the recoverable number flag, so the
-         ! caller prints nothing for this message.
-         number_bad = .false.
-         value_bad = .false.
-         return
+      call fill_struct(cx, schema, idx, obj, env, no_disc, root, 0, .false., err)
+      ! A later type error drops the recoverable number flag, so the
+      ! caller prints nothing for this message.
+      if (err /= CAPNP_OK) return
+      if (cx%number_bad .or. cx%value_bad) then
+         err = CAPNP_ERR_ARG
+         last_number_failed = .true.
+         if (present(number_failed)) number_failed = .true.
       end if
-      if (number_bad .or. value_bad) err = CAPNP_ERR_ARG
    end subroutine capnp_json_decode
 
-   !> True when the last decode stored zero for a string that was not a
-   !> number. The message is complete. capnp 1.4.0 reports that failure
-   !> and still writes the message.
+   !> number_failed of the last capnp_json_decode on this thread (in an
+   !> OpenMP build). Prefer the number_failed argument.
    logical function capnp_json_number_failed() result(y)
-      y = number_bad .or. value_bad
+      y = last_number_failed
    end function capnp_json_number_failed
 
    !> Locate one top-level JSON value. beg = 0 and err = 0 means no more input.
@@ -295,7 +313,8 @@ contains
       to = 0
    end subroutine capnp_json_span
 
-   recursive subroutine build_struct(schema, idx, p, env, parent_disc, depth, gdepth, jv, err)
+   recursive subroutine build_struct(cx, schema, idx, p, env, parent_disc, depth, gdepth, jv, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
@@ -306,19 +325,20 @@ contains
       integer :: n
       err = CAPNP_OK
       if (node_id(schema%nodes(idx)) == JSON_VALUE_ID) then
-         call json_value_to_jval(schema, idx, p, env, depth, gdepth, jv, err)
+         call json_value_to_jval(cx, schema, idx, p, env, depth, gdepth, jv, err)
          return
       end if
       jv%k = JK_OBJ
       n = 0
-      call append_struct_fields(schema, idx, p, env, '', parent_disc, '', depth, gdepth, jv%kids, n, err)
+      call append_struct_fields(cx, schema, idx, p, env, '', parent_disc, '', depth, gdepth, jv%kids, n, err)
       if (err /= CAPNP_OK) return
       call trim_kids(jv%kids, n, err)
       if (err /= CAPNP_OK) return
    end subroutine build_struct
 
-   recursive subroutine append_struct_fields(schema, idx, p, env, pfx, parent_disc, union_decl, &
+   recursive subroutine append_struct_fields(cx, schema, idx, p, env, pfx, parent_disc, union_decl, &
                                              depth, gdepth, kids, n, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
@@ -366,7 +386,7 @@ contains
                if (err /= CAPNP_OK) return
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
-               call append_struct_fields(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
+               call append_struct_fields(cx, schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
                                          depth, gdepth + 1, kids, n, err)
                if (err /= CAPNP_OK) return
             else
@@ -389,7 +409,7 @@ contains
                end if
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
-               call append_struct_fields(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
+               call append_struct_fields(cx, schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
                                          depth + 1, 0, kids, n, err)
                if (err /= CAPNP_OK) return
             end if
@@ -399,7 +419,7 @@ contains
             if (.not. show) cycle
             call json_field_name(f, nm, err)
             if (err /= CAPNP_OK) return
-            call build_field_value(schema, f, p, env, depth, gdepth, one, err)
+            call build_field_value(cx, schema, f, p, env, depth, gdepth, one, err)
             if (err /= CAPNP_OK) return
             one%key = pfx//nm
             call append_kid(kids, n, one, err)
@@ -468,7 +488,7 @@ contains
                if (err /= CAPNP_OK) return
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
-               call append_struct_fields(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
+               call append_struct_fields(cx, schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, &
                                          depth, gdepth + 1, kids, n, err)
                if (err /= CAPNP_OK) return
             else
@@ -484,7 +504,7 @@ contains
                   q = capnp_getp(p, int(field_slot_offset(f)), err)
                   if (err /= CAPNP_OK) return
                end if
-               call expect_struct_ptr(q)
+               call expect_struct_ptr(cx, q)
                if (q%kind == CAPNP_PK_NULL) then
                   dv = field_slot_default(f, err)
                   if (err /= CAPNP_OK) return
@@ -500,7 +520,7 @@ contains
                end if
                call capnp_brand_enter(env, t, cenv, err)
                if (err /= CAPNP_OK) return
-               call append_struct_fields(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
+               call append_struct_fields(cx, schema, sidx, q, cenv, pfx//fpfx, no_disc, '', &
                                          depth + 1, 0, kids, n, err)
                if (err /= CAPNP_OK) return
             end if
@@ -510,7 +530,7 @@ contains
             else
                vkey = pfx//nm
             end if
-            call build_field_value(schema, f, p, env, depth, gdepth, one, err)
+            call build_field_value(cx, schema, f, p, env, depth, gdepth, one, err)
             if (err /= CAPNP_OK) return
             one%key = vkey
             call append_kid(kids, n, one, err)
@@ -520,7 +540,8 @@ contains
       end do
    end subroutine append_struct_fields
 
-   recursive subroutine build_field_value(schema, f, p, env, depth, gdepth, jv, err)
+   recursive subroutine build_field_value(cx, schema, f, p, env, depth, gdepth, jv, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
@@ -544,7 +565,7 @@ contains
          if (err /= CAPNP_OK) return
          call read_disc_opts(al, gdisc, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, p, env, gdisc, depth, gdepth + 1, jv, err)
+         call build_struct(cx, schema, idx, p, env, gdisc, depth, gdepth + 1, jv, err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -596,7 +617,7 @@ contains
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
             if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
-               ptr_kind_bad = .true.
+               cx%kind_bad = .true.
                err = CAPNP_OK
                q = capnp_ptr_t()
             end if
@@ -611,7 +632,7 @@ contains
          else
             call capnp_get_text(p, int(off), jv%str, err)
             if (err == CAPNP_ERR_KIND) then
-               ptr_kind_bad = .true.
+               cx%kind_bad = .true.
                err = CAPNP_OK
                jv%str = ''
             end if
@@ -621,7 +642,7 @@ contains
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
             if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
-               ptr_kind_bad = .true.
+               cx%kind_bad = .true.
                err = CAPNP_OK
                q = capnp_ptr_t()
             end if
@@ -642,7 +663,7 @@ contains
             call capnp_get_data(p, int(off), raw, err)
             if (err == CAPNP_ERR_KIND) then
                ! get_data already left an empty buffer allocated.
-               ptr_kind_bad = .true.
+               cx%kind_bad = .true.
                err = CAPNP_OK
                if (.not. allocated(raw)) then
                   allocate (raw(0), stat=stat)
@@ -663,7 +684,7 @@ contains
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
             if (err == CAPNP_ERR_KIND .or. err == CAPNP_ERR_BOUNDS) then
-               ptr_kind_bad = .true.
+               cx%kind_bad = .true.
                err = CAPNP_OK
                q = capnp_ptr_t()
             end if
@@ -675,14 +696,14 @@ contains
          end if
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call build_list(schema, et, q, env, depth + 1, jv, err)
+         call build_list(cx, schema, et, q, env, depth + 1, jv, err)
       case (TYPE_STRUCT)
          q = capnp_ptr_t()
          if (p%kind /= CAPNP_PK_NULL) then
             q = capnp_getp(p, int(off), err)
             if (err /= CAPNP_OK) return
          end if
-         call expect_struct_ptr(q)
+         call expect_struct_ptr(cx, q)
          if (q%kind == CAPNP_PK_NULL .and. dv%kind /= CAPNP_PK_NULL) then
             q = value_pointer(dv, err)
             if (err /= CAPNP_OK) return
@@ -694,13 +715,14 @@ contains
          end if
          call capnp_brand_enter(env, t, cenv, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, q, cenv, no_disc, depth + 1, 0, jv, err)
+         call build_struct(cx, schema, idx, q, cenv, no_disc, depth + 1, 0, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine build_field_value
 
-   recursive subroutine build_list(schema, raw_et, lst, env, depth, jv, err)
+   recursive subroutine build_list(cx, schema, raw_et, lst, env, depth, jv, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: raw_et, lst
       type(capnp_brand_env_t), intent(in) :: env
@@ -718,12 +740,12 @@ contains
          return
       end if
       if (lst%kind /= CAPNP_PK_LIST) then
-         if (lst%kind /= CAPNP_PK_NULL) ptr_kind_bad = .true.
+         if (lst%kind /= CAPNP_PK_NULL) cx%kind_bad = .true.
          return
       end if
       et = capnp_brand_resolve(env, raw_et)
       if (.not. json_list_ok(et, lst)) then
-         ptr_kind_bad = .true.
+         cx%kind_bad = .true.
          return
       end if
       nlen = capnp_list_len(lst)
@@ -735,7 +757,7 @@ contains
       end if
       n = 0
       do i = 0_int64, nlen - 1_int64
-         call build_element(schema, et, lst, i, env, depth + 1, one, err)
+         call build_element(cx, schema, et, lst, i, env, depth + 1, one, err)
          if (err /= CAPNP_OK) return
          call append_kid(jv%kids, n, one, err)
          if (err /= CAPNP_OK) return
@@ -744,7 +766,8 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine build_list
 
-   recursive subroutine build_element(schema, et, lst, i, env, depth, jv, err)
+   recursive subroutine build_element(cx, schema, et, lst, i, env, depth, jv, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: et, lst
       integer(int64), intent(in) :: i
@@ -810,7 +833,7 @@ contains
          if (err /= CAPNP_OK) return
          inner = type_list_element(et, err)
          if (err /= CAPNP_OK) return
-         call build_list(schema, inner, q, env, depth, jv, err)
+         call build_list(cx, schema, inner, q, env, depth, jv, err)
       case (TYPE_STRUCT)
          el = capnp_list_get_struct(lst, int(i), err)
          if (err /= CAPNP_OK) return
@@ -821,7 +844,7 @@ contains
          end if
          call capnp_brand_enter(env, et, cenv, err)
          if (err /= CAPNP_OK) return
-         call build_struct(schema, idx, el, cenv, no_disc, depth, 0, jv, err)
+         call build_struct(cx, schema, idx, el, cenv, no_disc, depth, 0, jv, err)
       case default
          err = CAPNP_ERR_KIND
       end select
@@ -938,7 +961,11 @@ contains
          jv%rend_n = 0
          if (allocated(jv%str)) jv%rend_n = len(jv%str)
       case (JK_STR)
-         jv%rend_n = quote_len(jv%str)
+         if (allocated(jv%str)) then
+            jv%rend_n = quote_len(jv%str)
+         else
+            jv%rend_n = quote_len('')
+         end if
       case (JK_ARR)
          if (jv%nrepeat > 0_int64) then
             call null_list_len(jv%nrepeat, pretty, jv%rend_n, err)
@@ -1291,22 +1318,19 @@ contains
    end function quote_len
 
    !> Forget union tags recorded for the decode that is about to start.
-   subroutine union_seen_reset()
-      union_seen_n = 0
-   end subroutine union_seen_reset
-
    !> True when this struct's union discriminant was already selected
    !> while decoding the same object. Flattened keys arrive one at a
    !> time, so the mark has to outlive a single call.
-   function union_was_seen(p, disc) result(yes)
+   function union_was_seen(cx, p, disc) result(yes)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: disc
       logical :: yes
       integer :: i
       yes = .false.
-      do i = 1, union_seen_n
-         if (union_seen_seg(i) == p%seg .and. union_seen_off(i) == p%off .and. &
-             union_seen_disc(i) == disc) then
+      do i = 1, cx%n
+         if (cx%seg(i) == p%seg .and. cx%off(i) == p%off .and. &
+             cx%disc(i) == disc) then
             yes = .true.
             return
          end if
@@ -1315,52 +1339,55 @@ contains
 
    !> Make room for one more note. Every object that is still open keeps
    !> its notes, so the record grows with nesting, not with a fixed cap.
-   subroutine union_seen_room(err)
+   subroutine union_seen_room(cx, err)
+      type(json_dec_t), intent(inout) :: cx
       integer, intent(out) :: err
       integer, allocatable :: seg(:), disc(:)
       integer(int64), allocatable :: off(:)
       integer :: stat, cap
       err = CAPNP_OK
-      if (.not. allocated(union_seen_seg)) then
-         allocate (union_seen_seg(UNION_SEEN_START), union_seen_off(UNION_SEEN_START), &
-                   union_seen_disc(UNION_SEEN_START), stat=stat)
+      if (.not. allocated(cx%seg)) then
+         allocate (cx%seg(UNION_SEEN_START), cx%off(UNION_SEEN_START), &
+                   cx%disc(UNION_SEEN_START), stat=stat)
          if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
-      cap = size(union_seen_seg)
-      if (union_seen_n < cap) return
+      cap = size(cx%seg)
+      if (cx%n < cap) return
       allocate (seg(2*cap), off(2*cap), disc(2*cap), stat=stat)
       if (stat /= 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
-      seg(1:cap) = union_seen_seg
-      off(1:cap) = union_seen_off
-      disc(1:cap) = union_seen_disc
-      call move_alloc(seg, union_seen_seg)
-      call move_alloc(off, union_seen_off)
-      call move_alloc(disc, union_seen_disc)
+      seg(1:cap) = cx%seg
+      off(1:cap) = cx%off
+      disc(1:cap) = cx%disc
+      call move_alloc(seg, cx%seg)
+      call move_alloc(off, cx%off)
+      call move_alloc(disc, cx%disc)
    end subroutine union_seen_room
 
-   subroutine union_note(p, disc, err)
+   subroutine union_note(cx, p, disc, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: disc
       integer, intent(out) :: err
       integer :: i
       err = CAPNP_OK
-      do i = 1, union_seen_n
-         if (union_seen_seg(i) == p%seg .and. union_seen_off(i) == p%off .and. &
-             union_seen_disc(i) == disc) return
+      do i = 1, cx%n
+         if (cx%seg(i) == p%seg .and. cx%off(i) == p%off .and. &
+             cx%disc(i) == disc) return
       end do
-      call union_seen_room(err)
+      call union_seen_room(cx, err)
       if (err /= CAPNP_OK) return
-      union_seen_n = union_seen_n + 1
-      union_seen_seg(union_seen_n) = p%seg
-      union_seen_off(union_seen_n) = p%off
-      union_seen_disc(union_seen_n) = disc
+      cx%n = cx%n + 1
+      cx%seg(cx%n) = p%seg
+      cx%off(cx%n) = p%off
+      cx%disc(cx%n) = disc
    end subroutine union_note
 
-   recursive subroutine fill_struct(schema, idx, p, env, parent_disc, jv, depth, clear_prev, err)
+   recursive subroutine fill_struct(cx, schema, idx, p, env, parent_disc, jv, depth, clear_prev, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -1372,22 +1399,23 @@ contains
       integer :: mark
       err = CAPNP_OK
       if (node_id(schema%nodes(idx)) == JSON_VALUE_ID) then
-         call fill_json_value(schema, idx, p, env, jv, depth, err)
+         call fill_json_value(cx, schema, idx, p, env, jv, depth, err)
          return
       end if
-      mark = union_seen_n
+      mark = cx%n
       if (jv%k /= JK_OBJ) then
          err = CAPNP_ERR_ARG
          return
       end if
-      call fill_struct_pfx(schema, idx, p, env, '', parent_disc, '', jv, depth, clear_prev, err)
+      call fill_struct_pfx(cx, schema, idx, p, env, '', parent_disc, '', jv, depth, clear_prev, err)
       ! Drop notes made for this object. Nested objects save their own
       ! mark, so a long list does not fill the 64-slot record.
-      union_seen_n = mark
+      cx%n = mark
    end subroutine fill_struct
 
-   recursive subroutine fill_struct_pfx(schema, idx, p, env, pfx, parent_disc, union_decl, jv, &
+   recursive subroutine fill_struct_pfx(cx, schema, idx, p, env, pfx, parent_disc, union_decl, jv, &
                                         depth, clear_prev, err, unresolved)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -1434,7 +1462,7 @@ contains
                if (err /= CAPNP_OK) return
                call read_disc_opts(al, gdisc, err)
                if (err /= CAPNP_OK) return
-               call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, &
+               call fill_struct_pfx(cx, schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, jv, &
                                     depth, clear_prev, err)
                if (err /= CAPNP_OK) return
             else
@@ -1465,14 +1493,14 @@ contains
                   call capnp_setp(p, int(field_slot_offset(f)), q, err)
                   if (err /= CAPNP_OK) return
                end if
-               call fill_struct_pfx(schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, &
+               call fill_struct_pfx(cx, schema, sidx, q, cenv, pfx//fpfx, no_disc, '', jv, &
                                     depth, .false., err)
                if (err /= CAPNP_OK) return
             end if
          else
             call json_field_name(f, nm, err)
             if (err /= CAPNP_OK) return
-            call fill_each_key(schema, f, p, env, jv, pfx//nm, depth + 1, err)
+            call fill_each_key(cx, schema, f, p, env, jv, pfx//nm, depth + 1, err)
             if (err /= CAPNP_OK) return
          end if
       end do
@@ -1495,7 +1523,7 @@ contains
          end if
       end if
 
-      call decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, depth, clear_prev, err, &
+      call decode_union_keys(cx, schema, idx, p, env, pfx, opts, dkey, jv, depth, clear_prev, err, &
                              unresolved)
    end subroutine fill_struct_pfx
 
@@ -1593,8 +1621,9 @@ contains
    !> is an error. An unknown tag selects nothing, and plain member keys
    !> still decode. valueName and flattened-union keys that appear before
    !> the tag are retried after it.
-   recursive subroutine decode_union_keys(schema, idx, p, env, pfx, opts, dkey, jv, &
+   recursive subroutine decode_union_keys(cx, schema, idx, p, env, pfx, opts, dkey, jv, &
                                           depth, clear_prev, err, unresolved)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -1615,7 +1644,7 @@ contains
       if (.not. allocated(jv%kids)) return
       nk = size(jv%kids)
       disc = int(node_struct_discriminant_offset(schema%nodes(idx)))
-      tag_set = union_was_seen(p, disc)
+      tag_set = union_was_seen(cx, p, disc)
       have_child = .false.
       child_which = -1
       allocate (pend(nk), nxt(nk), stat=stat)
@@ -1688,7 +1717,7 @@ contains
             if (err /= CAPNP_OK) return
             call clear_field(schema, f, p, env, err)
             if (err /= CAPNP_OK) return
-            call union_note(p, disc, err)
+            call union_note(cx, p, disc, err)
             if (err /= CAPNP_OK) return
             have_child = .false.
             tag_set = .true.
@@ -1706,7 +1735,7 @@ contains
                   return
                end if
                if (union_arm_void(f, env)) return
-               call fill_field(schema, f, p, env, jv%kids(ki), depth + 1, err)
+               call fill_field(cx, schema, f, p, env, jv%kids(ki), depth + 1, err)
                return
             end if
          else if (plen <= len(key)) then
@@ -1729,7 +1758,7 @@ contains
                         field_discriminant(f), err)
                      if (err /= CAPNP_OK) return
                      if (union_arm_void(f, env)) return
-                     call fill_field(schema, f, p, env, jv%kids(ki), depth + 1, err)
+                     call fill_field(cx, schema, f, p, env, jv%kids(ki), depth + 1, err)
                      return
                   end if
                end if
@@ -1771,7 +1800,7 @@ contains
             if (err /= CAPNP_OK) return
             call read_disc_opts(al, gdisc, err)
             if (err /= CAPNP_OK) return
-            call fill_struct_pfx(schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, one, &
+            call fill_struct_pfx(cx, schema, gidx, p, env, pfx//fpfx, gdisc, raw_nm, one, &
                                  depth, clear_prev, err, nested_deferred)
             if (err == CAPNP_OK .and. nested_deferred) defer = .true.
             return
@@ -1803,7 +1832,7 @@ contains
             child_which = w
             have_child = .true.
          end if
-         call fill_struct_pfx(schema, sidx, child, cenv, pfx//fpfx, no_disc, '', one, &
+         call fill_struct_pfx(cx, schema, sidx, child, cenv, pfx//fpfx, no_disc, '', one, &
                               depth, .false., err, nested_deferred)
          if (err == CAPNP_OK .and. nested_deferred) defer = .true.
       end subroutine apply_key
@@ -1920,7 +1949,8 @@ contains
       end do
    end subroutine struct_matches_any
 
-   recursive subroutine fill_field(schema, f, p, env, jv, depth, err)
+   recursive subroutine fill_field(cx, schema, f, p, env, jv, depth, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
@@ -1945,7 +1975,7 @@ contains
          if (err /= CAPNP_OK) return
          call clear_field(schema, f, p, env, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, p, env, gdisc, jv, depth, .true., err)
+         call fill_struct(cx, schema, idx, p, env, gdisc, jv, depth, .true., err)
          return
       end if
       raw_t = field_slot_type(f, err)
@@ -1961,7 +1991,7 @@ contains
       case (TYPE_LIST)
          et = type_list_element(t, err)
          if (err /= CAPNP_OK) return
-         call fill_list(schema, et, p, int(off), env, jv, depth, err)
+         call fill_list(cx, schema, et, p, int(off), env, jv, depth, err)
       case (TYPE_STRUCT)
          idx = capnp_codec_find_id(schema, type_type_id(t))
          if (idx == 0) then
@@ -1981,15 +2011,16 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(off), q, err)
          if (err /= CAPNP_OK) return
-         call fill_struct(schema, idx, q, cenv, no_disc, jv, depth, .false., err)
+         call fill_struct(cx, schema, idx, q, cenv, no_disc, jv, depth, .false., err)
       case (TYPE_DATA)
          call fill_data(p, int(off), jv, mode, .false., 0_int64, err)
       case default
-         call fill_scalar(schema, t, p, off, dv, jv, .false., 0_int64, err)
+         call fill_scalar(cx, schema, t, p, off, dv, jv, .false., 0_int64, err)
       end select
    end subroutine fill_field
 
-   recursive subroutine fill_list(schema, raw_et, parent, slot, env, jv, depth, err)
+   recursive subroutine fill_list(cx, schema, raw_et, parent, slot, env, jv, depth, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: raw_et, parent
       integer, intent(in) :: slot, depth
@@ -2009,7 +2040,7 @@ contains
          ! A non-array where a list is expected is an empty list, and the
          ! message is still written. An object where a number is expected
          ! stays a hard error in fill_scalar.
-         value_bad = .true.
+         cx%value_bad = .true.
          et = capnp_brand_resolve(env, raw_et)
          lst = capnp_codec_alloc_list(parent, et, 0, schema, err, env=env)
          if (err /= CAPNP_OK) return
@@ -2032,7 +2063,7 @@ contains
          case (TYPE_LIST)
             inner = type_list_element(et, err)
             if (err /= CAPNP_OK) return
-            call fill_list(schema, inner, lst, i - 1, env, jv%kids(i), depth + 1, err)
+            call fill_list(cx, schema, inner, lst, i - 1, env, jv%kids(i), depth + 1, err)
          case (TYPE_STRUCT)
             el = capnp_list_get_struct(lst, i - 1, err)
             if (err /= CAPNP_OK) return
@@ -2043,18 +2074,19 @@ contains
             end if
             call capnp_brand_enter(env, et, cenv, err)
             if (err /= CAPNP_OK) return
-            call fill_struct(schema, idx, el, cenv, no_disc, jv%kids(i), depth + 1, .false., err)
+            call fill_struct(cx, schema, idx, el, cenv, no_disc, jv%kids(i), depth + 1, .false., err)
          case (TYPE_DATA)
             call fill_data(lst, i - 1, jv%kids(i), 0, .true., int(i - 1, int64), err)
          case default
-            call fill_scalar(schema, et, lst, 0_int64, capnp_ptr_t(), jv%kids(i), .true., &
+            call fill_scalar(cx, schema, et, lst, 0_int64, capnp_ptr_t(), jv%kids(i), .true., &
                               int(i - 1, int64), err)
          end select
          if (err /= CAPNP_OK) return
       end do
    end subroutine fill_list
 
-   subroutine fill_scalar(schema, t, p, off, dv, jv, in_list, ix, err)
+   subroutine fill_scalar(cx, schema, t, p, off, dv, jv, in_list, ix, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t, p, dv
       integer(int64), intent(in) :: off, ix
@@ -2082,23 +2114,23 @@ contains
             call capnp_set_bool(p, off, bv, err, default=capnp_def_bool(dv))
          end if
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64)
-         call j_signed(jv, iv, err)
+         call j_signed(cx, jv, iv, err)
          if (err /= CAPNP_OK) return
          call capnp_put_signed(p, off, tw, iv, in_list, ix, dv, err)
          if (err == CAPNP_ERR_ARG) then
-            value_bad = .true.
+            cx%value_bad = .true.
             err = CAPNP_OK
          end if
       case (TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
-         call j_unsigned(jv, iv, err)
+         call j_unsigned(cx, jv, iv, err)
          if (err /= CAPNP_OK) return
          call capnp_put_unsigned(p, off, tw, iv, in_list, ix, dv, err)
          if (err == CAPNP_ERR_ARG) then
-            value_bad = .true.
+            cx%value_bad = .true.
             err = CAPNP_OK
          end if
       case (TYPE_FLOAT32, TYPE_FLOAT64)
-         call j_float(jv, fv, err)
+         call j_float(cx, jv, fv, err)
          if (err /= CAPNP_OK) return
          if (tw == TYPE_FLOAT32) then
             if (in_list) then
@@ -2172,16 +2204,18 @@ contains
       end if
    end subroutine fill_data
 
-   subroutine recover_i64(iv, err)
+   subroutine recover_i64(cx, iv, err)
+      type(json_dec_t), intent(inout) :: cx
       integer(int64), intent(inout) :: iv
       integer, intent(inout) :: err
       if (err == CAPNP_OK) return
       iv = 0_int64
       err = CAPNP_OK
-      number_bad = .true.
+      cx%number_bad = .true.
    end subroutine recover_i64
 
-   subroutine j_signed(jv, iv, err)
+   subroutine j_signed(cx, jv, iv, err)
+      type(json_dec_t), intent(inout) :: cx
       type(jval), intent(in) :: jv
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
@@ -2189,17 +2223,18 @@ contains
       iv = 0_int64
       if (jv%k == JK_STR) then
          call kj_parse_i64(jv%str, iv, err)
-         call recover_i64(iv, err)
+         call recover_i64(cx, iv, err)
       else if (jv%k == JK_NUM) then
          ! Unquoted JSON numbers are doubles. 2^53+1 rounds to 2^53.
          ! 9223372036854775807 rounds to 2^63 and does not fit Int64.
-         call signed_from_f64(jv%num, iv, err)
+         call signed_from_f64(cx, jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
    end subroutine j_signed
 
-   subroutine j_unsigned(jv, iv, err)
+   subroutine j_unsigned(cx, jv, iv, err)
+      type(json_dec_t), intent(inout) :: cx
       type(jval), intent(in) :: jv
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
@@ -2207,10 +2242,10 @@ contains
       iv = 0_int64
       if (jv%k == JK_STR) then
          call kj_parse_u64(jv%str, iv, err)
-         call recover_i64(iv, err)
+         call recover_i64(cx, iv, err)
       else if (jv%k == JK_NUM) then
          ! Same double rounding as Int64. Uint64 max rounds to 2^64.
-         call unsigned_from_f64(jv%num, iv, err)
+         call unsigned_from_f64(cx, jv%num, iv, err)
       else
          err = CAPNP_ERR_ARG
       end if
@@ -2218,7 +2253,8 @@ contains
 
    !> capnp 1.4.0 `checkRoundTripFromFloat` for Int64. `double(Int64 max)`
    !> is 2^63, so that one value passes the range test and becomes Int64 min.
-   subroutine signed_from_f64(x, iv, err)
+   subroutine signed_from_f64(cx, x, iv, err)
+      type(json_dec_t), intent(inout) :: cx
       real(real64), intent(in) :: x
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
@@ -2230,17 +2266,17 @@ contains
       iv = 0_int64
       if (ieee_is_nan(x) .or. x < min_f) then
          iv = min_i64
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       if (.not. ieee_is_finite(x) .or. x > max_f) then
          iv = max_i64
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       if (x == max_f) then
          iv = min_i64
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       if (x == min_f) then
@@ -2248,12 +2284,13 @@ contains
          return
       end if
       iv = int(x, int64)
-      if (real(iv, real64) /= x) value_bad = .true.
+      if (real(iv, real64) /= x) cx%value_bad = .true.
    end subroutine signed_from_f64
 
    !> capnp 1.4.0 `checkRoundTripFromFloat` for UInt64. `double(UInt64 max)`
    !> is 2^64, and converting that double yields zero.
-   subroutine unsigned_from_f64(x, iv, err)
+   subroutine unsigned_from_f64(cx, x, iv, err)
+      type(json_dec_t), intent(inout) :: cx
       real(real64), intent(in) :: x
       integer(int64), intent(out) :: iv
       integer, intent(out) :: err
@@ -2262,26 +2299,26 @@ contains
       err = CAPNP_OK
       iv = 0_int64
       if (ieee_is_nan(x) .or. x < 0.0_real64) then
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       if (.not. ieee_is_finite(x) .or. x > two64) then
          iv = max_u64
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       if (x == two64) then
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
       call capnp_f64_to_u64(aint(x), iv, err)
       if (err /= CAPNP_OK) then
          iv = 0_int64
          err = CAPNP_OK
-         value_bad = .true.
+         cx%value_bad = .true.
          return
       end if
-      if (aint(x) /= x) value_bad = .true.
+      if (aint(x) /= x) cx%value_bad = .true.
    end subroutine unsigned_from_f64
 
    function json_list_ok(et, lst) result(ok)
@@ -2473,7 +2510,8 @@ contains
       if (neg .and. v /= 0_int64 .and. v /= min_i64) v = -v
    end subroutine kj_parse_u64
 
-   subroutine j_float(jv, fv, err)
+   subroutine j_float(cx, jv, fv, err)
+      type(json_dec_t), intent(inout) :: cx
       type(jval), intent(in) :: jv
       real(real64), intent(out) :: fv
       integer, intent(out) :: err
@@ -2488,7 +2526,7 @@ contains
          if (err /= CAPNP_OK) then
             fv = 0.0_real64
             err = CAPNP_OK
-            number_bad = .true.
+            cx%number_bad = .true.
          end if
       else
          err = CAPNP_ERR_ARG
@@ -3433,7 +3471,8 @@ contains
 
    !> Decode every occurrence of key in document order. A wrong-typed
    !> earlier value is an error even when a later value would fit.
-   recursive subroutine fill_each_key(schema, f, p, env, jv, key, depth, err)
+   recursive subroutine fill_each_key(cx, schema, f, p, env, jv, key, depth, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: f, p
       type(capnp_brand_env_t), intent(in) :: env
@@ -3447,7 +3486,7 @@ contains
       do i = 1, size(jv%kids)
          if (.not. allocated(jv%kids(i)%key)) cycle
          if (.not. exact_eq(jv%kids(i)%key, key)) cycle
-         call fill_field(schema, f, p, env, jv%kids(i), depth, err)
+         call fill_field(cx, schema, f, p, env, jv%kids(i), depth, err)
          if (err /= CAPNP_OK) return
       end do
    end subroutine fill_each_key
@@ -3455,10 +3494,11 @@ contains
    !> A struct field whose pointer is a list or a far/other word is a
    !> schema mismatch. Encoding continues from a null struct so the
    !> recovered text matches capnp 1.4.0, and the encode reports the error.
-   subroutine expect_struct_ptr(q)
+   subroutine expect_struct_ptr(cx, q)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_ptr_t), intent(inout) :: q
       if (q%kind /= CAPNP_PK_NULL .and. q%kind /= CAPNP_PK_STRUCT) then
-         ptr_kind_bad = .true.
+         cx%kind_bad = .true.
          q = capnp_ptr_t()
       end if
    end subroutine expect_struct_ptr
@@ -4111,7 +4151,8 @@ contains
    end subroutine jname_add
 
    !> Encode capnp/compat/json.capnp Value as the JSON value it holds.
-   recursive subroutine json_value_to_jval(schema, idx, p, env, depth, gdepth, jv, err)
+   recursive subroutine json_value_to_jval(cx, schema, idx, p, env, depth, gdepth, jv, err)
+      type(json_enc_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth, gdepth
       type(capnp_ptr_t), intent(in) :: p
@@ -4166,7 +4207,7 @@ contains
          do i = 1, n
             el = capnp_list_get_struct(body, i - 1, err)
             if (err /= CAPNP_OK) return
-            call build_struct(schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
+            call build_struct(cx, schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
             if (err /= CAPNP_OK) return
          end do
       case ('object')
@@ -4195,7 +4236,7 @@ contains
             child = named_ptr(schema, bidx, el, 'value', err)
             if (err /= CAPNP_OK) return
             if (child%kind == CAPNP_PK_STRUCT) then
-               call build_struct(schema, vidx, child, env, no_disc, depth + 1, gdepth, &
+               call build_struct(cx, schema, vidx, child, env, no_disc, depth + 1, gdepth, &
                                  jv%kids(i), err)
                if (err /= CAPNP_OK) return
             else if (child%kind /= CAPNP_PK_NULL) then
@@ -4227,7 +4268,7 @@ contains
          do i = 1, n
             el = capnp_list_get_struct(child, i - 1, err)
             if (err /= CAPNP_OK) return
-            call build_struct(schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
+            call build_struct(cx, schema, vidx, el, env, no_disc, depth + 1, gdepth, jv%kids(i), err)
             if (err /= CAPNP_OK) return
          end do
       case default
@@ -4236,7 +4277,8 @@ contains
    end subroutine json_value_to_jval
 
    !> Decode any JSON value into a capnp/compat/json.capnp Value.
-   recursive subroutine fill_json_value(schema, idx, p, env, jv, depth, err)
+   recursive subroutine fill_json_value(cx, schema, idx, p, env, jv, depth, err)
+      type(json_dec_t), intent(inout) :: cx
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx, depth
       type(capnp_ptr_t), intent(in) :: p
@@ -4296,7 +4338,7 @@ contains
          if (err /= CAPNP_OK) return
          et = type_list_element(slot_t, err)
          if (err /= CAPNP_OK) return
-         call fill_list(schema, et, p, int(slot), env, jv, depth, err)
+         call fill_list(cx, schema, et, p, int(slot), env, jv, depth, err)
       case (JK_OBJ)
          n = 0
          if (allocated(jv%kids)) n = size(jv%kids)
@@ -4326,7 +4368,7 @@ contains
             if (err /= CAPNP_OK) return
             call named_set_ptr(schema, bidx, el, 'value', child, err)
             if (err /= CAPNP_OK) return
-            call fill_struct(schema, vidx, child, env, no_disc, jv%kids(i), depth + 1, .false., err)
+            call fill_struct(cx, schema, vidx, child, env, no_disc, jv%kids(i), depth + 1, .false., err)
             if (err /= CAPNP_OK) return
          end do
       case (JK_CALL)
@@ -4374,7 +4416,7 @@ contains
             if (err /= CAPNP_OK) return
             pet = type_list_element(pet, err)
             if (err /= CAPNP_OK) return
-            call fill_list(schema, pet, body, int(field_slot_offset(pf)), env, arr, depth, err)
+            call fill_list(cx, schema, pet, body, int(field_slot_offset(pf)), env, arr, depth, err)
          end block
       end select
    end subroutine fill_json_value

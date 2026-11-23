@@ -1372,7 +1372,7 @@ contains
       type(capnp_message_t), target :: msg
       type(capnp_ptr_t) :: root
       integer :: beg, topos, from, count, err
-      logical :: soft
+      logical :: soft, number_failed
       rc = 0
       from = 1
       count = 0
@@ -1384,9 +1384,10 @@ contains
             return
          end if
          if (beg == 0) exit
-         call capnp_json_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv)
+         call capnp_json_decode(sch, idx, text(beg:topos), msg, err, brand_env=benv, &
+                                number_failed=number_failed)
          if (err /= CAPNP_OK) then
-            if (capnp_json_number_failed()) then
+            if (number_failed) then
                root = capnp_root(msg, err)
                if (err == CAPNP_OK .and. root_is_struct(root)) then
                   call emit_one(sch, idx, benv, msg, root, to, pretty, seg_words, rc)

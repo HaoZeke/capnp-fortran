@@ -609,6 +609,7 @@ contains
       type(capnp_ptr_t) :: root
       character(len=:), allocatable :: text
       integer :: err
+      logical :: soft
       if (allocated(error)) return
       call spit(tmp//'/soft.json', js, err)
       if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
@@ -617,9 +618,10 @@ contains
          call test_failed(error, label//': capnp did not report the number')
          return
       end if
-      call capnp_json_decode(schema, idx, js, decoded, err)
+      call capnp_json_decode(schema, idx, js, decoded, err, number_failed=soft)
       call check_(error, err == CAPNP_ERR_ARG, label//': decode error')
-      call check_(error, capnp_json_number_failed(), label//': recoverable')
+      call check_(error, soft, label//': recoverable')
+      call check_(error, capnp_json_number_failed(), label//': legacy query')
       root = capnp_root(decoded, err)
       call capnp_text_encode(schema, idx, root, text, err, pretty=.true.)
       call check_(error, err == CAPNP_OK, label//': encode')
