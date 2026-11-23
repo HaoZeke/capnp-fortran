@@ -3139,7 +3139,9 @@ contains
          'cmp_in json:text Num "{\"big\":1e400}"'//achar(10)// &
          'cmp_in json:text Num "{\"ubig\":-1}"'//achar(10)// &
          'cmp_in json:text Num "{\"ubig\":1e20}"'//achar(10)// &
-         'cmp_in json:text Num "{\"ubig\":18446744073709551616}"'//achar(10)// &
+         ! C++ 1.4.0 casts the rounded 2^64 double to uint64_t. That is
+         ! undefined behaviour, so compiler and target choices disagree.
+         'echo "skip: json UInt64 2^64 has undefined C++ conversion" > '//tmp//'/parity.skip'//achar(10)// &
          'cmp_in json:text Num "{\"i8\":128}"'//achar(10)// &
          'cmp_in json:text Num "{\"u16\":65536}"'//achar(10)// &
          'cmp_in json:text Num "{\"scores\":null}"'//achar(10)// &
@@ -3169,6 +3171,8 @@ contains
          if (err == CAPNP_OK) write (*, '(a)') trim(diag)
          call test_failed(error, 'codec parity')
       end if
+      call slurp(tmp//'/parity.skip', diag, err)
+      if (err == CAPNP_OK) write (*, '(a)') trim(diag)
    end subroutine run_codec_parity
 
    !> Struct, list, enum, and data first fields are not single-value
