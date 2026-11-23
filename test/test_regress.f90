@@ -3020,7 +3020,7 @@ contains
    !> Conversions, lists, and constants compared with capnp 1.4.0.
    subroutine run_codec_parity(error)
       type(error_type), allocatable, intent(out) :: error
-      character(len=:), allocatable :: src
+      character(len=:), allocatable :: src, diag
       integer :: err
       if (.not. have_capnp()) then
          call skip_test(error, 'capnp tool not on PATH')
@@ -3084,7 +3084,11 @@ contains
          '  echo $? > '//tmp//'/ref.rc'//achar(10)// &
          '  printf "%s" "$3" | "$CAP" convert "$1" --short "$SCH" "$2" > '//tmp//'/ours 2>/dev/null'//achar(10)// &
          '  echo $? > '//tmp//'/ours.rc'//achar(10)// &
-         '  cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
+         '  if ! cmp -s '//tmp//'/ref '//tmp//'/ours || ! cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc; then'//achar(10)// &
+         '    { echo "convert $1 $2 input: $3"; echo "reference rc: $(cat '//tmp//'/ref.rc)";'//achar(10)// &
+         '      od -An -tx1 '//tmp//'/ref; echo "ours rc: $(cat '//tmp//'/ours.rc)";'//achar(10)// &
+         '      od -An -tx1 '//tmp//'/ours; } > '//tmp//'/parity.log; bad=1'//achar(10)// &
+         '  fi'//achar(10)// &
          '}'//achar(10)// &
          'empty_err() {'//achar(10)// &
          '  printf "" | capnp convert "$1" --short "$SCH" "$2" > '//tmp//'/ref 2>'//tmp//'/ref.err'//achar(10)// &
@@ -3161,6 +3165,8 @@ contains
          'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc || bad=1'//achar(10)// &
          'test "$bad" = 0'//achar(10)// &
          'END')) then
+         call slurp(tmp//'/parity.log', diag, err)
+         if (err == CAPNP_OK) write (*, '(a)') trim(diag)
          call test_failed(error, 'codec parity')
       end if
    end subroutine run_codec_parity
