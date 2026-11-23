@@ -236,15 +236,20 @@ contains
       class(writer_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
+      character(len=*), parameter :: ifname = 'schema/streamer.capnp:Writer'
       err = CAPNP_ERR_ARG
-      if (ctx%interface_id /= WRITER_INTERFACE_ID) return
+      if (ctx%interface_id /= WRITER_INTERFACE_ID) then
+         call rpc_ctx_unimplemented_interface(ctx, ifname, err)
+         return
+      end if
       select case (ctx%method_id)
       case (0)
          block
             type(writer_write_params_t) :: params
             type(stream_result_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, STREAM_RESULT_DWORDS, STREAM_RESULT_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               STREAM_RESULT_DWORDS, STREAM_RESULT_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%write(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
@@ -254,13 +259,15 @@ contains
             type(writer_done_params_t) :: params
             type(writer_done_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, WRITER_DONE_RESULTS_DWORDS, WRITER_DONE_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               WRITER_DONE_RESULTS_DWORDS, WRITER_DONE_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%done(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, ifname, &
+            WRITER_INTERFACE_ID, err)
       end select
    end subroutine writer_dispatch
 

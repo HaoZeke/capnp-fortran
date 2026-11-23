@@ -78,4 +78,11 @@ meson setup "$WORK/mwb" "$WORK/mw" >"$WORK/mw.log" 2>&1 || { tail -25 "$WORK/mw.
 meson compile -C "$WORK/mwb" >>"$WORK/mw.log" 2>&1 || { tail -25 "$WORK/mw.log"; exit 1; }
 "$WORK/mwb/smoke"
 
+echo "== 5. meson top-level compile"
+meson setup "$WORK/top" "$ROOT" >"$WORK/top.log" 2>&1 || { tail -25 "$WORK/top.log"; exit 1; }
+meson compile -C "$WORK/top" >>"$WORK/top.log" 2>&1 || { tail -25 "$WORK/top.log"; exit 1; }
+if [ -x "$WORK/top/interop/golden_master" ]; then
+  "$WORK/top/interop/golden_master" >>"$WORK/top.log" 2>&1 || { tail -25 "$WORK/top.log"; exit 1; }
+fi
+
 echo "ok packaging-smoke"

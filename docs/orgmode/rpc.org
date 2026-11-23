@@ -52,15 +52,26 @@ per-method procedure (:doc:`tutorial`, part 2.1). A capability object
 stays alive as long as it has a nonzero refcount in some vat's export
 table; ``rpc_ctx_export_cap`` stages a freshly minted capability
 (e.g. one method's result is itself a capability) into the current
-call's results.
+call's results. Pass ``owned=.true.`` when this vat allocated the
+server: the table frees it once the refcount reaches zero, and
+``rpc_conn_close`` drops every export because the peer will not
+Release it. A server whose ``dispatch`` is running is freed after
+that call returns, not during it. A results cap table that cannot
+be written is answered with an exception Return. The flush drops the
+exports it added and frees the owned servers those exports introduced,
+and it frees owned servers that stayed unexported. An export from
+before the flush keeps its refcount.
 
 To opt a capability into level 2 persistence, recognize
 ``ctx%interface_id == RPC_PERSISTENT_IFACE`` in ``dispatch`` and
 answer ``RPC_PERSISTENT_SAVE`` with an application-defined SturdyRef
-(any content the application chooses to write into the results
-struct). Level 3/4 messages (``Provide``, ``Accept``, ``Join``) need
-no application code; the vat answers them with
-``Message.unimplemented`` on its own, matching capnp-C++.
+in pointer field 0 of the results. The request is the generic
+``Persistent<AnyPointer, AnyPointer>.SaveParams`` shape, so pointer
+field 0 contains the optional ``sealFor`` owner. Clients use
+``rpc_persistent_save_begin`` and ``rpc_persistent_save_wait``.
+SturdyRef and Owner are realm-defined. Capnp-C++ does not define a
+universal restore operation or token format, so restoration remains an
+application service in both implementations.
 #+end_export
 
 * Writing a client
@@ -86,11 +97,64 @@ whenever a schema is available (:doc:`tutorial`, part 2.2).
 #+begin_export rst
 ``capnp_rpc_transport`` frames each RPC message with the same
 segment-table framing plain serialization uses
-(:doc:`reference`, "Serialization"), over a file descriptor from
-``capnp_posix``. ``capnp_posix`` is a thin ``bind(c)`` surface over
-POSIX sockets -- no C sources, only ``iso_c_binding`` interfaces into
-libc -- covering stream sockets (TCP and Unix-domain), socketpair
-loopbacks for tests, and poll-based readiness.
+(:doc:`reference`, "Serialization"). ``rpc_byte_stream_t`` is its
+pluggable exact-read, exact-write, readiness, and close interface.
+``rpc_fd_stream_t`` adapts a descriptor and
+``rpc_socketpair_streams`` creates an owned loopback pair.
+``capnp_posix`` remains a thin ``bind(c)`` surface over POSIX sockets.
+The three flags a non-blocking connect has to recognise come from a
+small C file, because their numeric values are not the same on every
+Unix. TCP, Unix-domain sockets, and socketpairs are
+adapters rather than requirements of the RPC core. A TLS implementation
+can provide ``rpc_byte_stream_t`` without coupling this library to a TLS
+stack or certificate policy.
+
+The three-party network layer records ``VatId{host, port}`` values from
+``thirdPartyHosted`` descriptors. ``rpc_introduction_dial`` opens a
+numeric IPv4 address from one of those pending introductions and
+initializes a connection ready for ``rpc_accept_send``. A null dial
+hook refuses every address. After the
+Accept succeeds, ``rpc_introduction_done`` releases the vine.
+Applications can perform DNS or directory lookup before using a custom
+connection adapter.
+
+Capnp-C++ 1.4.0 offers ``TwoPartyVatNetwork`` over an arbitrary byte
+stream. Its two-party IDs deliberately cannot name a third vat, and
+that release has no Provide or Accept implementation. The
+``rpc-threeparty.capnp`` layer and its live TCP handoff test therefore
+exercise this project's network parameterization, not C++ 1.4.0 level
+3 interoperability.
+
+For level 4 equality, ``rpc_join_send`` emits every Join part before
+``rpc_join_wait`` collects the result set and settles its single
+capability. Eight joins fit at once. A part that never finishes holds
+its question id until Finish. The receiver groups incoming parts by
+joinId and compares
+local export identity only after the set is complete. Capnp-C++ 1.4.0
+does not handle Join and replies ``Message.unimplemented``, so this
+feature has same-language wire tests but no live C++ peer test.
+
+``rpc_request_cancellation`` abandons an outstanding question by sending
+Finish with ``requireEarlyCancellationWorkaround = false``. This is the
+behavior of Cap'n Proto 1.0 and newer. ``rpc_stream_cancel`` sends the
+same request for every call still in a stream window. Cancellation is
+cooperative after application delivery: methods that do not opt in may
+continue to completion, matching capnp-C++ ``allowCancellation``. The
+live C++ interop test cancels an opted-in never-ending method and then
+checks that the C++ promise was dropped.
+
+Membranes are local wrappers, not wire messages.
+``rpc_membrane_policy_t`` defines inbound and outbound call checks.
+``rpc_membrane_cap`` applies a policy to an imported client capability,
+while ``rpc_membrane_server_t`` applies it to a local server capability.
+Servers exported through a membraned result are recursively wrapped in
+the same policy. If a wrapper crosses back through that policy in the
+opposite direction it is unwrapped, preserving object identity rather
+than stacking a second membrane. ``rpc_membrane_revoke`` disables all
+wrappers sharing the policy. These are the applicable
+``capnp/membrane.h`` semantics for the runtime's current capability
+surface; C++ interop is not relevant because no membrane state appears
+on the wire.
 #+end_export
 
 * Procedure reference
@@ -98,18 +162,29 @@ loopbacks for tests, and poll-based readiness.
 | Procedure              | Signature                                                            | Notes                                              |
 |-------------------------+-----------------------------------------------------------------------+-----------------------------------------------------|
 | ~rpc_conn_init~         | ~(conn, fd, bootstrap)~                                              | ~bootstrap~ is a ~class(rpc_server_t), pointer~ (may be null) |
-| ~rpc_conn_close~        | ~(conn)~                                                             | half-closes and frees tables                       |
+| ~rpc_conn_init_stream~  | ~(conn, stream, bootstrap)~                                          | use an application-defined ~rpc_byte_stream_t~         |
+| ~rpc_conn_close~        | ~(conn)~                                                             | half-closes and frees tables; an in-call owned server is freed when dispatch returns |
 | ~rpc_bootstrap_send~    | ~(conn, cap, err)~                                                   | returns a pipeline cap, usable immediately          |
 | ~rpc_call_begin~        | ~(conn, target, interface_id, method_id, m, params, qid, err)~        | fill ~params~ content, then send                    |
 | ~rpc_call_send~         | ~(conn, m, err)~                                                     |                                                      |
-| ~rpc_pipeline_cap~      | ~(qid, field_indices) result(cap)~                                   | promise pipelining into unreturned results          |
+| ~rpc_persistent_save_begin~ | ~(conn, target, m, owner, qid, err)~                           | begin generic ~Persistent.save~; ~owner~ is optional |
+| ~rpc_persistent_save_wait~ | ~(conn, qid, sturdy_ref, err)~                                   | return the realm-defined SturdyRef                    |
+| ~rpc_introduction_dial~ | ~(conn, nonce, introduced, bootstrap, err)~                           | dial a pending three-party VatId                      |
+| ~rpc_join_send~         | ~(conn, caps, join_id, qids, err)~                                    | send a complete two-party Join set                    |
+| ~rpc_join_wait~         | ~(conn, qids, joined, succeeded, err)~                                | collect and settle the Join result                    |
+| ~rpc_request_cancellation~ | ~(conn, qid, err)~                                                | abandon a question with modern Finish semantics       |
+| ~rpc_stream_cancel~     | ~(conn, stream, err)~                                                | cancel all outstanding calls in a stream window       |
+| ~rpc_membrane_cap~      | ~(cap, policy, reverse) result(wrapped)~                              | wrap an imported client capability                    |
+| ~rpc_membrane_server_init~ | ~(wrapper, inner, policy, reverse)~                              | wrap a local server capability                        |
+| ~rpc_membrane_revoke~   | ~(policy, reason)~                                                   | revoke every wrapper sharing the policy               |
+| ~rpc_pipeline_cap~      | ~(conn, qid, field_indices) result(cap)~                             | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |
 | ~rpc_result_cap~        | ~(conn, qid, field_indices, cap, err)~                               | settles a result capability into an import          |
 | ~rpc_finish_send~       | ~(conn, qid, retain_caps, err)~                                      |                                                      |
 | ~rpc_release_send~      | ~(conn, cap, err)~                                                   |                                                      |
 | ~rpc_pump_once~         | ~(conn, err)~                                                        | handle exactly one incoming message (servers loop on this) |
-| ~rpc_ctx_export_cap~    | ~(ctx, srv, err) result(idx)~                                        | stage a capability in a dispatch's results          |
+| ~rpc_ctx_export_cap~    | ~(ctx, srv, err [, owned]) result(idx)~                              | stage a capability; ~owned=.true.~ frees it at refcount zero |
 | ~rpc_make_cap_ptr~      | ~(m, idx) result(p)~                                                 | capability pointer for content slots                |
 
 #+begin_export rst

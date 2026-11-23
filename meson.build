@@ -37,6 +37,8 @@ capnp_fsrc = files(
 capnp_flib = library(
   'capnp_fortran',
   capnp_fsrc,
+  'src/capnp_posix_os.c',
+  link_language: 'fortran',
   install: true,
 )
 
@@ -64,6 +66,7 @@ capnpc_fortran = executable(
   'capnpc-fortran',
   ['app/capnpc_emit.f90', 'app/main.f90'],
   link_with: capnp_flib,
+  link_language: 'fortran',
   install: true,
 )
 

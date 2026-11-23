@@ -1,12 +1,13 @@
 !> test-drive entry point for capnp-fortran unit suites.
 program tester
    use, intrinsic :: iso_fortran_env, only: error_unit
-   use testdrive, only: run_testsuite, new_testsuite, testsuite_type, &
+   use testdrive, only: run_testsuite, testsuite_type, &
         select_suite, run_selected, get_argument
    use test_wire, only: collect_wire
    use test_addressbook, only: collect_addressbook
    use test_canonical, only: collect_canonical
    use test_dynamic, only: collect_dynamic
+   use test_annotated, only: collect_annotated
    use test_generated, only: collect_generated
    use test_generic, only: collect_generic
    use test_holder, only: collect_holder
@@ -18,6 +19,12 @@ program tester
    use test_rpc_typed, only: collect_rpc_typed
    use test_stream, only: collect_stream
    use test_codegen_parity, only: collect_codegen_parity
+   use test_idents, only: collect_idents
+   use test_codegen, only: collect_codegen
+   use test_rpc_lifetime, only: collect_rpc_lifetime
+   use test_net, only: collect_net
+   use test_rpc_peer, only: collect_rpc_peer
+   use rpc_servers, only: free_minted_adders
    implicit none
    integer :: stat, is
    character(len=:), allocatable :: suite_name, test_name
@@ -25,23 +32,51 @@ program tester
    character(len=*), parameter :: fmt = '("#", *(1x, a))'
 
    stat = 0
-   testsuites = [ &
-        new_testsuite("wire", collect_wire), &
-        new_testsuite("addressbook", collect_addressbook), &
-        new_testsuite("canonical", collect_canonical), &
-        new_testsuite("dynamic", collect_dynamic), &
-        new_testsuite("generated", collect_generated), &
-        new_testsuite("generic", collect_generic), &
-        new_testsuite("holder", collect_holder), &
-        new_testsuite("interop", collect_interop), &
-        new_testsuite("kitchen", collect_kitchen), &
-        new_testsuite("parity", collect_parity), &
-        new_testsuite("rpc", collect_rpc), &
-        new_testsuite("rpc_handoff", collect_rpc_handoff), &
-        new_testsuite("rpc_typed", collect_rpc_typed), &
-        new_testsuite("stream", collect_stream), &
-        new_testsuite("codegen_parity", collect_codegen_parity) &
-        ]
+   ! Each name is allocated in the element that owns it. A constructor
+   ! of new_testsuite() leaks those strings on this compiler.
+   allocate (testsuites(21))
+   testsuites(1)%name = "wire"
+   testsuites(1)%collect => collect_wire
+   testsuites(2)%name = "addressbook"
+   testsuites(2)%collect => collect_addressbook
+   testsuites(3)%name = "canonical"
+   testsuites(3)%collect => collect_canonical
+   testsuites(4)%name = "dynamic"
+   testsuites(4)%collect => collect_dynamic
+   testsuites(5)%name = "annotated"
+   testsuites(5)%collect => collect_annotated
+   testsuites(6)%name = "generated"
+   testsuites(6)%collect => collect_generated
+   testsuites(7)%name = "generic"
+   testsuites(7)%collect => collect_generic
+   testsuites(8)%name = "holder"
+   testsuites(8)%collect => collect_holder
+   testsuites(9)%name = "interop"
+   testsuites(9)%collect => collect_interop
+   testsuites(10)%name = "kitchen"
+   testsuites(10)%collect => collect_kitchen
+   testsuites(11)%name = "parity"
+   testsuites(11)%collect => collect_parity
+   testsuites(12)%name = "rpc"
+   testsuites(12)%collect => collect_rpc
+   testsuites(13)%name = "rpc_handoff"
+   testsuites(13)%collect => collect_rpc_handoff
+   testsuites(14)%name = "rpc_typed"
+   testsuites(14)%collect => collect_rpc_typed
+   testsuites(15)%name = "stream"
+   testsuites(15)%collect => collect_stream
+   testsuites(16)%name = "codegen_parity"
+   testsuites(16)%collect => collect_codegen_parity
+   testsuites(17)%name = "idents"
+   testsuites(17)%collect => collect_idents
+   testsuites(18)%name = "codegen"
+   testsuites(18)%collect => collect_codegen
+   testsuites(19)%name = "rpc_lifetime"
+   testsuites(19)%collect => collect_rpc_lifetime
+   testsuites(20)%name = "net"
+   testsuites(20)%collect => collect_net
+   testsuites(21)%name = "rpc_peer"
+   testsuites(21)%collect => collect_rpc_peer
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)
@@ -52,7 +87,10 @@ program tester
          if (allocated(test_name)) then
             write (error_unit, fmt) "Suite:", testsuites(is)%name
             call run_selected(testsuites(is)%collect, test_name, error_unit, stat)
-            if (stat < 0) error stop 1
+            if (stat < 0) then
+               call release_runner()
+               error stop 1
+            end if
          else
             write (error_unit, fmt) "Testing:", testsuites(is)%name
             call run_testsuite(testsuites(is)%collect, error_unit, stat)
@@ -62,6 +100,7 @@ program tester
          do is = 1, size(testsuites)
             write (error_unit, fmt) "-", testsuites(is)%name
          end do
+         call release_runner()
          error stop 1
       end if
    else
@@ -73,6 +112,15 @@ program tester
 
    if (stat > 0) then
       write (error_unit, '(i0, 1x, a)') stat, "test(s) failed!"
+      call release_runner()
       error stop 1
    end if
+   call release_runner()
+   call free_minted_adders()
+contains
+   subroutine release_runner()
+      if (allocated(testsuites)) deallocate (testsuites)
+      if (allocated(suite_name)) deallocate (suite_name)
+      if (allocated(test_name)) deallocate (test_name)
+   end subroutine release_runner
 end program tester

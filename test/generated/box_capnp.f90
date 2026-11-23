@@ -22,6 +22,30 @@ module schema__box_capnp
       type(capnp_ptr_t) :: p
    end type box_use_t
 
+   integer, parameter :: Q_DWORDS = 0
+   integer, parameter :: Q_PWORDS = 2
+   type :: q_t
+      type(capnp_ptr_t) :: p
+   end type q_t
+
+   integer, parameter :: Q_USE_DWORDS = 0
+   integer, parameter :: Q_USE_PWORDS = 1
+   type :: q_use_t
+      type(capnp_ptr_t) :: p
+   end type q_use_t
+
+   integer, parameter :: ITEM_DWORDS = 1
+   integer, parameter :: ITEM_PWORDS = 0
+   type :: item_t
+      type(capnp_ptr_t) :: p
+   end type item_t
+
+   integer, parameter :: BAG_USE_DWORDS = 0
+   integer, parameter :: BAG_USE_PWORDS = 1
+   type :: bag_use_t
+      type(capnp_ptr_t) :: p
+   end type bag_use_t
+
    integer, parameter :: BOX_ANY_DWORDS = 0
    integer, parameter :: BOX_ANY_PWORDS = 2
    type :: box_any_t
@@ -45,6 +69,18 @@ module schema__box_capnp
    type :: nest_text_t
       type(capnp_ptr_t) :: p
    end type nest_text_t
+
+   integer, parameter :: Q_TEXT_TEXT_TEXT_TEXT_DWORDS = 0
+   integer, parameter :: Q_TEXT_TEXT_TEXT_TEXT_PWORDS = 2
+   type :: q_text_text_text_text_t
+      type(capnp_ptr_t) :: p
+   end type q_text_text_text_text_t
+
+   integer, parameter :: BOX_LIST_ITEM_DWORDS = 0
+   integer, parameter :: BOX_LIST_ITEM_PWORDS = 2
+   type :: box_list_item_t
+      type(capnp_ptr_t) :: p
+   end type box_list_item_t
 
 contains
 
@@ -395,6 +431,219 @@ contains
       if (err == CAPNP_OK) call capnp_setp(h%p, 4, c, err)
    end subroutine box_use_nest_set
 
+   function q_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_t) :: h
+      h%p = capnp_new_struct(msg, Q_DWORDS, Q_PWORDS, err)
+   end function q_new
+
+   function q_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_t) :: h
+      h = q_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function q_new_root
+
+   function q_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_t) :: h
+      h%p = capnp_root(msg, err)
+   end function q_read_root
+
+   function q_a_has(h) result(v)
+      type(q_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function q_a_has
+
+   function q_a_get(h, err) result(q)
+      type(q_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      q = capnp_getp(h%p, 0, err)
+   end function q_a_get
+
+   subroutine q_a_set(h, q, err)
+      type(q_t), intent(in) :: h
+      type(capnp_ptr_t), intent(in) :: q
+      integer, intent(out) :: err
+      call capnp_setp(h%p, 0, q, err)
+   end subroutine q_a_set
+
+   function q_e_has(h) result(v)
+      type(q_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function q_e_has
+
+   function q_e_get(h, err) result(q)
+      type(q_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      q = capnp_getp(h%p, 1, err)
+   end function q_e_get
+
+   subroutine q_e_set(h, q, err)
+      type(q_t), intent(in) :: h
+      type(capnp_ptr_t), intent(in) :: q
+      integer, intent(out) :: err
+      call capnp_setp(h%p, 1, q, err)
+   end subroutine q_e_set
+
+   function q_use_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_use_t) :: h
+      h%p = capnp_new_struct(msg, Q_USE_DWORDS, Q_USE_PWORDS, err)
+   end function q_use_new
+
+   function q_use_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_use_t) :: h
+      h = q_use_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function q_use_new_root
+
+   function q_use_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_use_t) :: h
+      h%p = capnp_root(msg, err)
+   end function q_use_read_root
+
+   function q_use_q_has(h) result(v)
+      type(q_use_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function q_use_q_has
+
+   function q_use_q_get(h, err) result(o)
+      type(q_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(q_text_text_text_text_t) :: o
+      o%p = capnp_getp(h%p, 0, err)
+   end function q_use_q_get
+
+   function q_use_q_init(h, err) result(o)
+      type(q_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(q_text_text_text_text_t) :: o
+      o%p = capnp_new_struct(h%p%msg, Q_TEXT_TEXT_TEXT_TEXT_DWORDS, Q_TEXT_TEXT_TEXT_TEXT_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
+   end function q_use_q_init
+
+   subroutine q_use_q_set(h, src, err)
+      type(q_use_t), intent(in) :: h
+      type(q_text_text_text_text_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: c
+      c = capnp_copy(h%p%msg, src%p, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, c, err)
+   end subroutine q_use_q_set
+
+   function item_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(item_t) :: h
+      h%p = capnp_new_struct(msg, ITEM_DWORDS, ITEM_PWORDS, err)
+   end function item_new
+
+   function item_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(item_t) :: h
+      h = item_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function item_new_root
+
+   function item_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(item_t) :: h
+      h%p = capnp_root(msg, err)
+   end function item_read_root
+
+   function item_n_get(h) result(v)
+      type(item_t), intent(in) :: h
+      integer(int32) :: v
+      v = capnp_get_i32(h%p, 0_int64)
+   end function item_n_get
+
+   subroutine item_n_set(h, v, err)
+      type(item_t), intent(in) :: h
+      integer(int32), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_i32(h%p, 0_int64, v, err)
+   end subroutine item_n_set
+
+   function bag_use_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(bag_use_t) :: h
+      h%p = capnp_new_struct(msg, BAG_USE_DWORDS, BAG_USE_PWORDS, err)
+   end function bag_use_new
+
+   function bag_use_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(bag_use_t) :: h
+      h = bag_use_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function bag_use_new_root
+
+   function bag_use_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(bag_use_t) :: h
+      h%p = capnp_root(msg, err)
+   end function bag_use_read_root
+
+   function bag_use_bag_has(h) result(v)
+      type(bag_use_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function bag_use_bag_has
+
+   function bag_use_bag_get(h, err) result(o)
+      type(bag_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_list_item_t) :: o
+      o%p = capnp_getp(h%p, 0, err)
+   end function bag_use_bag_get
+
+   function bag_use_bag_init(h, err) result(o)
+      type(bag_use_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(box_list_item_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_LIST_ITEM_DWORDS, BOX_LIST_ITEM_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
+   end function bag_use_bag_init
+
+   subroutine bag_use_bag_set(h, src, err)
+      type(bag_use_t), intent(in) :: h
+      type(box_list_item_t), intent(in) :: src
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: c
+      c = capnp_copy(h%p%msg, src%p, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, c, err)
+   end subroutine bag_use_bag_set
+
    function box_any_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
@@ -678,6 +927,138 @@ contains
       l = capnp_new_composite_list(h%p%msg, n, BOX_TEXT_DWORDS, BOX_TEXT_PWORDS, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 1, l, err)
    end function nest_text_boxes_init
+
+   function q_text_text_text_text_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_text_text_text_text_t) :: h
+      h%p = capnp_new_struct(msg, Q_TEXT_TEXT_TEXT_TEXT_DWORDS, Q_TEXT_TEXT_TEXT_TEXT_PWORDS, err)
+   end function q_text_text_text_text_new
+
+   function q_text_text_text_text_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(q_text_text_text_text_t) :: h
+      h%p = capnp_root(msg, err)
+   end function q_text_text_text_text_read_root
+
+   function q_text_text_text_text_a_has(h) result(v)
+      type(q_text_text_text_text_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function q_text_text_text_text_a_has
+
+   subroutine q_text_text_text_text_a_get(h, s, err)
+      type(q_text_text_text_text_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 0, s, err)
+   end subroutine q_text_text_text_text_a_get
+
+   subroutine q_text_text_text_text_a_set(h, s, err)
+      type(q_text_text_text_text_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 0, s, err)
+   end subroutine q_text_text_text_text_a_set
+
+   function q_text_text_text_text_e_has(h) result(v)
+      type(q_text_text_text_text_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function q_text_text_text_text_e_has
+
+   subroutine q_text_text_text_text_e_get(h, b, err)
+      type(q_text_text_text_text_t), intent(in) :: h
+      integer(int8), allocatable, intent(out) :: b(:)
+      integer, intent(out) :: err
+      call capnp_get_data(h%p, 1, b, err)
+   end subroutine q_text_text_text_text_e_get
+
+   subroutine q_text_text_text_text_e_set(h, b, err)
+      type(q_text_text_text_text_t), intent(in) :: h
+      integer(int8), intent(in) :: b(:)
+      integer, intent(out) :: err
+      call capnp_set_data(h%p, 1, b, err)
+   end subroutine q_text_text_text_text_e_set
+
+   function box_list_item_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_list_item_t) :: h
+      h%p = capnp_new_struct(msg, BOX_LIST_ITEM_DWORDS, BOX_LIST_ITEM_PWORDS, err)
+   end function box_list_item_new
+
+   function box_list_item_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(box_list_item_t) :: h
+      h%p = capnp_root(msg, err)
+   end function box_list_item_read_root
+
+   function box_list_item_value_has(h) result(v)
+      type(box_list_item_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 0, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function box_list_item_value_has
+
+   function box_list_item_value_get(h, err) result(l)
+      type(box_list_item_t), intent(in) :: h
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_getp(h%p, 0, err)
+   end function box_list_item_value_get
+
+   function box_list_item_value_get_elem(h, i, err) result(o)
+      type(box_list_item_t), intent(in) :: h
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      type(item_t) :: o
+      type(capnp_ptr_t) :: l
+      l = box_list_item_value_get(h, err)
+      if (err == CAPNP_OK) o%p = capnp_list_get_struct(l, i, err)
+   end function box_list_item_value_get_elem
+
+   function box_list_item_value_init(h, n, err) result(l)
+      type(box_list_item_t), intent(in) :: h
+      integer(int64), intent(in) :: n
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: l
+      l = capnp_new_composite_list(h%p%msg, n, ITEM_DWORDS, ITEM_PWORDS, err)
+      if (err == CAPNP_OK) call capnp_setp(h%p, 0, l, err)
+   end function box_list_item_value_init
+
+   function box_list_item_label_has(h) result(v)
+      type(box_list_item_t), intent(in) :: h
+      logical :: v
+      type(capnp_ptr_t) :: q
+      integer :: err
+      q = capnp_getp(h%p, 1, err)
+      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+   end function box_list_item_label_has
+
+   subroutine box_list_item_label_get(h, s, err)
+      type(box_list_item_t), intent(in) :: h
+      character(len=:), allocatable, intent(out) :: s
+      integer, intent(out) :: err
+      call capnp_get_text(h%p, 1, s, err)
+   end subroutine box_list_item_label_get
+
+   subroutine box_list_item_label_set(h, s, err)
+      type(box_list_item_t), intent(in) :: h
+      character(len=*), intent(in) :: s
+      integer, intent(out) :: err
+      call capnp_set_text(h%p, 1, s, err)
+   end subroutine box_list_item_label_set
 
 end module schema__box_capnp
 

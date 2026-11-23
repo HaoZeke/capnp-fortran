@@ -14,6 +14,10 @@ module schema__rpc_twoparty_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_RPC_TWOPARTY_CAPNP_ANNOTATION_NAMESPACE_KIND = 12
+   character(len=*), parameter :: SCHEMA_RPC_TWOPARTY_CAPNP_ANNOTATION_NAMESPACE = &
+      'capnp::rpc::twoparty'
+
    integer, parameter :: SIDE_SERVER_E = 0
    integer, parameter :: SIDE_CLIENT_E = 1
 

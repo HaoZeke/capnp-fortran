@@ -135,21 +135,27 @@ contains
       class(echo_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
+      character(len=*), parameter :: ifname = 'schema/holder.capnp:Echo'
       err = CAPNP_ERR_ARG
-      if (ctx%interface_id /= ECHO_INTERFACE_ID) return
+      if (ctx%interface_id /= ECHO_INTERFACE_ID) then
+         call rpc_ctx_unimplemented_interface(ctx, ifname, err)
+         return
+      end if
       select case (ctx%method_id)
       case (0)
          block
             type(echo_ping_params_t) :: params
             type(echo_ping_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ECHO_PING_RESULTS_DWORDS, ECHO_PING_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%ping(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, ifname, &
+            ECHO_INTERFACE_ID, err)
       end select
    end subroutine echo_dispatch
 

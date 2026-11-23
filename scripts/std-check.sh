@@ -41,10 +41,11 @@ SOURCES=(
   test/generated/streamer_capnp.f90
   test/generated/dual_capnp.f90
   test/generated/holder_capnp.f90
+  test/generated/dynamic_capnp.f90
+  test/generated/idents_capnp.f90
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
-  # fpm unit suites (test/tester.f90 + test/test_*.f90) need test-drive; skip here
   interop/rpc_client.f90
 )
 
@@ -60,7 +61,11 @@ for f in "${SOURCES[@]}"; do
   fi
 done
 rm -f "$OUT/stdcheck.o"
-if [ $status -eq 0 ]; then
-  echo "All sources conform to -std=f2018."
+if [ $status -ne 0 ]; then
+  exit $status
 fi
-exit $status
+echo "All sources conform to -std=f2018."
+
+# The unit suites use fpm's default flags. No extra line-length switch.
+root=$(cd "$(dirname "$0")/.." && pwd)
+(cd "$root" && fpm test)

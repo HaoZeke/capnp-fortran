@@ -5,9 +5,20 @@ module schema__kitchen_capnp
    implicit none
    public
 
+   integer, parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE = 'kitchen schema'
+
+   integer(int64), parameter :: SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID = -382609556834940135_int64
+
    integer(int64), parameter :: ANSWER = 42_int64
    real(real64), parameter :: TAU = transfer(4618760256179416344_int64, 1.0_real64)
    character(len=*), parameter :: GREETING = 'hey there'
+   integer, parameter :: SINK_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_ANNOTATION_NOTE = 'sink type'
+
+   integer, parameter :: SINK_FLAG_ANNOTATION_NOTE_KIND = 12
+   character(len=*), parameter :: SINK_FLAG_ANNOTATION_NOTE = 'flag field'
+
    integer, parameter :: SINK_DWORDS = 2
    integer, parameter :: SINK_PWORDS = 9
    type :: sink_t
@@ -22,7 +33,7 @@ module schema__kitchen_capnp
    integer(int8), parameter :: HOME_DEFAULT(0:39) = [integer(int8) :: &
       0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,  &
       0, 0, 0, 0, 0, 0, -16, -65, 0, 0, 0, 0, 0, 0, -32, 63,  &
-      0, 0, 0, 0, 0, -128, 34, 64]
+      0, 0, 0, 0, 0, -huge(0_int8)-1_int8, 34, 64]
    integer(int8), parameter :: SINK_PAYLOAD_DEFAULT(0:3) = [integer(int8) :: &
       -34, -83, -66, -17]
    integer(int8), parameter :: SINK_ORIGIN_DEFAULT(0:39) = [integer(int8) :: &
@@ -34,6 +45,10 @@ module schema__kitchen_capnp
       3, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,  &
       4, 0, 0, 0, 0, 0, 0, 0]
 
+   integer(int64), parameter :: SCHEMA__9715_NOTE_ID = -382609556834940135_int64
+   character(len=*), parameter :: SCHEMA__9715_SINK_NOTE = 'sink type'
+   character(len=*), parameter :: SCHEMA__9715_SINK_FLAG_NOTE = 'flag field'
+   character(len=*), parameter :: KITCHEN_CAPNP_NOTE = 'kitchen schema'
 contains
 
    function primes(err) result(o)

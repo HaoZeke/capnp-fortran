@@ -66,8 +66,14 @@ module capnp_message
       integer :: esize = -1
       integer(int64) :: nelem = 0_int64
       integer(int64) :: capidx = 0_int64
+      !> Schema node id when the dynamic API knows the struct type. 0 means
+      !> the handle was not stamped, so callers cannot check identity.
+      integer(int64) :: schema_id = 0_int64
       integer(int64) :: dbits = -1_int64
       integer :: depth = 0
+      !> Reader views of schema defaults. Writers refuse these so a
+      !> default shared with the schema cannot be mutated.
+      logical :: frozen = .false.
       type(capnp_message_t), pointer :: msg => null()
    end type capnp_ptr_t
 
@@ -329,7 +335,11 @@ contains
       p = capnp_ptr_t()
       p%msg => msg
       ! An out-of-range root is not charged (arena.h:430 short-circuits).
-      if (msg%nsegs < 1 .or. msg%segs(1)%len < 8_int64) then
+      if (msg%nsegs < 1) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (msg%segs(1)%len < 8_int64) then
          err = CAPNP_ERR_BOUNDS
          return
       end if
@@ -386,6 +396,7 @@ contains
          return
       end select
       call resolve_at(p%msg, p%seg, slot, p%depth + 1, q, err)
+      if (p%frozen) q%frozen = .true.
    end function capnp_getp
 
    !> Struct element i of a struct list. Composite lists give the real
@@ -458,6 +469,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
+      if (err == CAPNP_OK) q%frozen = p%frozen
    end function capnp_list_get_struct
 
    !> Element i of a pointer list (alias of capnp_getp for lists).
@@ -573,6 +585,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: slot
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (.not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
@@ -1027,6 +1043,10 @@ contains
       integer(int8), intent(in), optional :: default
       integer(int8) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int8
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1060,6 +1080,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 8, err)
       if (err /= CAPNP_OK) return
       call cp_put_i8 (p%msg%segs(p%seg)%bytes, base, v)
@@ -1122,6 +1146,10 @@ contains
       integer(int16), intent(in), optional :: default
       integer(int16) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int16
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1155,6 +1183,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 16, err)
       if (err /= CAPNP_OK) return
       call cp_put_i16 (p%msg%segs(p%seg)%bytes, base, v)
@@ -1217,6 +1249,10 @@ contains
       integer(int32), intent(in), optional :: default
       integer(int32) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1250,6 +1286,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 32, err)
       if (err /= CAPNP_OK) return
       call cp_put_i32 (p%msg%segs(p%seg)%bytes, base, v)
@@ -1312,6 +1352,10 @@ contains
       integer(int64), intent(in), optional :: default
       integer(int64) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1345,6 +1389,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: base
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       base = list_elem_base(p, i, 64, err)
       if (err /= CAPNP_OK) return
       call cp_put_i64 (p%msg%segs(p%seg)%bytes, base, v)
@@ -1411,6 +1459,10 @@ contains
       integer(int16) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int16
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1450,6 +1502,10 @@ contains
       integer(int32) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1489,6 +1545,10 @@ contains
       integer(int64) :: d, x
       integer(int64) :: u
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1528,6 +1588,10 @@ contains
       real(real32), intent(in), optional :: default
       integer(int32) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int32
       if (present(default)) d = cp_f32_bits(default)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1579,6 +1643,10 @@ contains
       real(real64), intent(in), optional :: default
       integer(int64) :: d
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = 0_int64
       if (present(default)) d = cp_f64_bits(default)
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1639,6 +1707,10 @@ contains
       integer(int64) :: byte
       integer :: bit
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       d = .false.
       if (present(default)) d = default
       if (p%kind /= CAPNP_PK_STRUCT .or. .not. associated(p%msg)) then
@@ -1687,6 +1759,10 @@ contains
       integer, intent(out) :: err
       integer(int64) :: byte
       err = CAPNP_OK
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (p%kind /= CAPNP_PK_LIST .or. p%esize /= CAPNP_SZ_BIT .or. &
           .not. associated(p%msg)) then
          err = CAPNP_ERR_KIND
@@ -1709,8 +1785,21 @@ contains
    ! NUL; Data is a bare byte list.
    ! ------------------------------------------------------------------
 
+   !> Text bytes include a trailing NUL. A missing NUL is malformed.
+   function text_has_nul(q) result(ok)
+      type(capnp_ptr_t), intent(in) :: q
+      logical :: ok
+      integer(int64) :: last
+      ok = .false.
+      if (.not. associated(q%msg)) return
+      if (q%nelem < 1_int64) return
+      last = q%off + q%nelem - 1_int64
+      ok = cp_u8(q%msg%segs(q%seg)%bytes(last)) == 0
+   end function text_has_nul
+
    !> Text at pointer field i of p. Missing/null yields an empty string with
    !> err = CAPNP_OK, matching default-text-is-empty semantics.
+   !> A byte list whose last byte is not NUL is malformed text.
    subroutine capnp_get_text(p, i, str, err)
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: i
@@ -1722,6 +1811,10 @@ contains
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
       if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -1741,7 +1834,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       integer(int64) :: j
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1780,7 +1873,7 @@ contains
       integer(int8), intent(in) :: bytes(:)
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -1829,6 +1922,10 @@ contains
       character(len=*), intent(in) :: str
       integer, intent(out) :: err
       type(capnp_ptr_t) :: el
+      if (p%frozen) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       if (p%kind /= CAPNP_PK_LIST) then
          err = CAPNP_ERR_KIND
          return
@@ -1940,7 +2037,11 @@ contains
       view => null()
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -1959,7 +2060,11 @@ contains
       n = 0_int64
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) then
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE .or. q%nelem < 1_int64) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. text_has_nul(q)) then
          err = CAPNP_ERR_KIND
          return
       end if
@@ -1977,7 +2082,7 @@ contains
       integer(int64) :: slot
       q = capnp_getp(p, i, err)
       if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) return
-      if (.not. p%msg%is_builder) then
+      if (p%frozen .or. .not. p%msg%is_builder) then
          err = CAPNP_ERR_ARG
          q = capnp_ptr_t()
          return
@@ -2106,19 +2211,27 @@ contains
    ! basis of orphan adoption.
    ! ------------------------------------------------------------------
 
-   recursive function capnp_copy(msg, src, err) result(q)
+   !> With `caps`, each capability pointer met gets the next index of a
+   !> new cap table, and `caps` lists the source index of each entry in
+   !> order. That is how C++ injectCap numbers the caps of a copy.
+   recursive function capnp_copy(msg, src, err, caps) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: q
-      q = copy_depth(msg, src, 0, err)
+      if (present(caps)) then
+         if (.not. allocated(caps)) allocate (caps(0))
+      end if
+      q = copy_depth(msg, src, 0, err, caps)
    end function capnp_copy
 
-   recursive function copy_depth(msg, src, depth, err) result(q)
+   recursive function copy_depth(msg, src, depth, err, caps) result(q)
       type(capnp_message_t), intent(inout), target :: msg
       type(capnp_ptr_t), intent(in) :: src
       integer, intent(in) :: depth
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: r, c
       integer(int64) :: i, nb
@@ -2135,10 +2248,14 @@ contains
          q%msg => msg
          q%kind = CAPNP_PK_CAP
          q%capidx = src%capidx
+         if (present(caps)) then
+            q%capidx = int(size(caps), int64)
+            caps = [caps, src%capidx]
+         end if
       case (CAPNP_PK_STRUCT)
          q = capnp_new_struct(msg, src%dwords, src%pwords, err)
          if (err /= CAPNP_OK) return
-         call copy_struct_body(q, src, depth, err)
+         call copy_struct_body(q, src, depth, err, caps)
       case (CAPNP_PK_LIST)
          select case (src%esize)
          case (CAPNP_SZ_COMPOSITE)
@@ -2155,7 +2272,7 @@ contains
                c = capnp_list_get_struct(q, int(i), err)
                if (err /= CAPNP_OK) return
                r%off = src%off + i*int(src%dwords + src%pwords, int64)*8_int64
-               call copy_struct_body(c, r, depth + 1, err)
+               call copy_struct_body(c, r, depth + 1, err, caps)
                if (err /= CAPNP_OK) return
             end do
          case (CAPNP_SZ_PTR)
@@ -2164,7 +2281,7 @@ contains
             do i = 0_int64, src%nelem - 1_int64
                r = capnp_getp(src, int(i), err)
                if (err /= CAPNP_OK) return
-               c = copy_depth(msg, r, depth + 1, err)
+               c = copy_depth(msg, r, depth + 1, err, caps)
                if (err /= CAPNP_OK) return
                call capnp_setp(q, int(i), c, err)
                if (err /= CAPNP_OK) return
@@ -2183,10 +2300,11 @@ contains
 
    !> Copy the contents of struct src into the (already allocated) struct
    !> dst: overlapping data bytes verbatim, pointer fields recursively.
-   recursive subroutine copy_struct_body(dst, src, depth, err)
+   recursive subroutine copy_struct_body(dst, src, depth, err, caps)
       type(capnp_ptr_t), intent(in) :: dst, src
       integer, intent(in) :: depth
       integer, intent(out) :: err
+      integer(int64), allocatable, intent(inout), optional :: caps(:)
       type(capnp_ptr_t) :: r, c
       integer(int64) :: nb
       integer :: i, np
@@ -2201,7 +2319,7 @@ contains
          r = capnp_getp(src, i, err)
          if (err /= CAPNP_OK) return
          if (r%kind == CAPNP_PK_NULL) cycle
-         c = copy_depth(dst%msg, r, depth + 1, err)
+         c = copy_depth(dst%msg, r, depth + 1, err, caps)
          if (err /= CAPNP_OK) return
          call capnp_setp(dst, i, c, err)
          if (err /= CAPNP_OK) return
