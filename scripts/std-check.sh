@@ -51,6 +51,7 @@ SOURCES=(
   test/rpc_servers.f90
   test/rpc_adder_impl.f90
   test/rpc_writer_impl.f90
+  test/reentrancy.f90
   interop/rpc_client.f90
 )
 
