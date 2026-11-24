@@ -1073,7 +1073,7 @@ contains
    subroutine test_overwrite_zeroing(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
-      type(capnp_ptr_t) :: root, child
+      type(capnp_ptr_t) :: root, old, child
       integer(int64) :: slot, far_w, pad_off
       integer :: err, pad_seg
 
@@ -1102,6 +1102,21 @@ contains
       call check(error, err == CAPNP_OK .and. &
                  capnp_get_i64(child, 0_int64) == 456_int64, &
                  'overwrite: self-alias retains the target')
+      call capnp_message_free(msg)
+      if (allocated(error)) return
+
+      ! The replacement can be a child of the object being replaced. Its
+      ! body must survive while the old parent is cleared.
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      old = capnp_new_struct(msg, 0, 1, err)
+      child = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i64(child, 0_int64, 654_int64, err)
+      call capnp_setp(old, 0, child, err)
+      call capnp_setp(root, 0, old, err)
+      call capnp_setp(root, 0, child, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(child, 0_int64) == 654_int64, &
+                 'overwrite: replacement child is retained')
       call capnp_message_free(msg)
       if (allocated(error)) return
 
