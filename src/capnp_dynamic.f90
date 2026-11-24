@@ -100,24 +100,38 @@ contains
       ! Schema graphs are deep; match the plugin's generous reader guards.
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
                                    traversal_words=1073741824_int64, depth_limit=256)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_dyn_free(schema)
+         return
+      end if
       root = capnp_root(schema%cgr, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_dyn_free(schema)
+         return
+      end if
       l = cgr_nodes(root, err)
-      if (err /= CAPNP_OK) return
+      if (err /= CAPNP_OK) then
+         call capnp_dyn_free(schema)
+         return
+      end if
       n = capnp_list_len(l)
       if (.not. wire_count_ok(l, n)) then
          err = CAPNP_ERR_ALLOC
+         call capnp_dyn_free(schema)
          return
       end if
       allocate (schema%nodes(n), stat=stat)
       if (stat /= 0) then
          err = CAPNP_ERR_ALLOC
+         call capnp_dyn_free(schema)
          return
       end if
       do i = 1_int64, n
          schema%nodes(i) = capnp_list_get_struct(l, int(i - 1), err)
-         if (err /= CAPNP_OK) return
+         if (err /= CAPNP_OK) then
+            call capnp_dyn_free(schema)
+            return
+         end if
       end do
       schema%loaded = .true.
    end subroutine capnp_dyn_load
