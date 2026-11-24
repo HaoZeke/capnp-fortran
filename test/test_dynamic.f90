@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(19))
+      allocate (testsuite(20))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -69,6 +69,8 @@ contains
       testsuite(18)%test => run_union_arm_defaults
       testsuite(19)%name = "dynamic-setp-text-nul"
       testsuite(19)%test => run_setp_text_nul
+      testsuite(20)%name = "dynamic-node-bomb"
+      testsuite(20)%test => run_node_bomb
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1278,5 +1280,26 @@ contains
       end do
       close (u)
    end function file_has
+
+   !> A composite list of zero-sized nodes can name far more elements than
+   !> the message has bytes. Loading it must return CAPNP_ERR_ALLOC.
+   subroutine run_node_bomb(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_dyn_schema_t) :: schema
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_composite_list(msg, 10000_int64, 0, 0, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_ERR_ALLOC, 'nodes: zero-size list is not allocated')
+      call capnp_dyn_free(schema)
+   end subroutine run_node_bomb
 
 end module test_dynamic

@@ -27,6 +27,12 @@ module capnp_dynamic
    public :: capnp_dyn_field_annotations, capnp_dyn_enumerant_annotations
    public :: capnp_dyn_method_annotations
 
+   ! Groups share their parent's pointer section, so a chain of them does
+   ! not count toward the reader nesting limit of 64, and capnp 1.4.0
+   ! compiles chains of hundreds. Stop only before a cyclic graph in a
+   ! corrupt schema exhausts the stack.
+   integer, parameter :: SCHEMA_WALK_LIMIT = 4096
+
    !> A loaded compiled schema: the CGR message plus a node index.
    type :: capnp_dyn_schema_t
       type(capnp_message_t) :: cgr
@@ -89,6 +95,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: root, l
       integer(int64) :: n, i
+      integer :: stat
       call capnp_dyn_free(schema)
       ! Schema graphs are deep; match the plugin's generous reader guards.
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
@@ -99,7 +106,15 @@ contains
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
-      allocate (schema%nodes(n))
+      if (.not. wire_count_ok(l, n)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (schema%nodes(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 1_int64, n
          schema%nodes(i) = capnp_list_get_struct(l, int(i - 1), err)
          if (err /= CAPNP_OK) return
@@ -121,6 +136,23 @@ contains
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
    end subroutine capnp_dyn_free
+
+   !> A list element stored in a host array is at least one byte on the wire.
+   !> A count past the message size is a zero-size claim.
+   function wire_count_ok(p, n) result(ok)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: n
+      logical :: ok
+      if (n < 0_int64) then
+         ok = .false.
+         return
+      end if
+      if (.not. associated(p%msg)) then
+         ok = n == 0_int64
+         return
+      end if
+      ok = capnp_host_count_ok(n, capnp_message_nbytes(p%msg))
+   end function wire_count_ok
 
    !> Node index for a type name: an exact displayName match, or the
    !> part after the file prefix ('Person' finds
@@ -268,7 +300,8 @@ contains
       type(capnp_dyn_brand_t), intent(out) :: brand
       integer, intent(out) :: err
       type(capnp_ptr_t) :: raw, scopes, scope, bindings, binding
-      integer(int64) :: i, j
+      integer(int64) :: i, j, nsc, nb
+      integer :: stat
       err = CAPNP_OK
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
@@ -293,8 +326,17 @@ contains
       end if
       scopes = brand_scopes(raw, err)
       if (err /= CAPNP_OK) return
-      allocate (brand%scopes(capnp_list_len(scopes)))
-      do i = 0_int64, capnp_list_len(scopes) - 1_int64
+      nsc = capnp_list_len(scopes)
+      if (.not. wire_count_ok(scopes, nsc)) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      allocate (brand%scopes(nsc), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 0_int64, nsc - 1_int64
          scope = capnp_list_get_struct(scopes, int(i), err)
          if (err /= CAPNP_OK) return
          brand%scopes(i + 1)%id = scope_scope_id(scope)
@@ -311,8 +353,17 @@ contains
          end select
          bindings = scope_bindings(scope, err)
          if (err /= CAPNP_OK) return
-         allocate (brand%scopes(i + 1)%bindings(capnp_list_len(bindings)))
-         do j = 0_int64, capnp_list_len(bindings) - 1_int64
+         nb = capnp_list_len(bindings)
+         if (.not. wire_count_ok(bindings, nb)) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         allocate (brand%scopes(i + 1)%bindings(nb), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
+         do j = 0_int64, nb - 1_int64
             binding = capnp_list_get_struct(bindings, int(j), err)
             if (err /= CAPNP_OK) return
             select case (binding_which(binding))
@@ -335,6 +386,10 @@ contains
    subroutine dyn_resolve_brand(brand, err)
       type(capnp_dyn_brand_t), intent(inout) :: brand
       integer, intent(out) :: err
+      ! A parameter inside a binding names the enclosing scope, so it is
+      ! never resolved against this brand. TestGenerics(Bar, Foo) inside
+      ! TestGenerics would otherwise loop.
+      type(capnp_dyn_brand_t) :: outer
       integer :: i, j
       err = CAPNP_OK
       if (.not. allocated(brand%scopes)) return
@@ -342,7 +397,7 @@ contains
          if (.not. allocated(brand%scopes(i)%bindings)) cycle
          do j = 1, size(brand%scopes(i)%bindings)
             if (brand%scopes(i)%bindings(j)%unbound) cycle
-            call dyn_resolve_type(brand, brand%scopes(i)%bindings(j)%type, 0, &
+            call dyn_resolve_type(outer, brand%scopes(i)%bindings(j)%type, 0, &
                                   brand%scopes(i)%bindings(j)%resolved_which, &
                                   brand%scopes(i)%bindings(j)%resolved_id, err)
             if (err /= CAPNP_OK) return
@@ -363,7 +418,10 @@ contains
       which = -1
       id = 0_int64
       err = CAPNP_OK
-      if (depth > 8) return
+      if (depth > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
       if (t%kind == CAPNP_PK_NULL) return
       which = type_which(t)
       ! A discriminant with no arm is unset. Leaving the raw tag (anyPointer
@@ -492,8 +550,8 @@ contains
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
       err = CAPNP_OK
-      if (depth > 8) then
-         err = CAPNP_ERR_ARG
+      if (depth > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
          return
       end if
       if (idx < 1 .or. idx > size(schema%nodes)) then
@@ -604,9 +662,19 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: a
       integer(int64) :: i, n
+      integer :: stat
       err = CAPNP_OK
       n = capnp_list_len(list)
-      allocate (annotations(n))
+      if (.not. wire_count_ok(list, n)) then
+         err = CAPNP_ERR_ALLOC
+         allocate (annotations(0), stat=stat)
+         return
+      end if
+      allocate (annotations(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
       do i = 0_int64, n - 1_int64
          a = capnp_list_get_struct(list, int(i), err)
          if (err /= CAPNP_OK) return

@@ -49,7 +49,7 @@ LIB_SOURCES=(
 )
 for f in "$SRC"/src/*.f90; do
   b=$(basename "$f")
-  case " ${LIB_SOURCES[*]} capnp_schema.f90 capnp_dynamic.f90 stream_capnp.f90 " in
+  case " ${LIB_SOURCES[*]} capnp_schema.f90 capnp_dynamic.f90 capnp_codec.f90 capnp_text.f90 capnp_json.f90 stream_capnp.f90 " in
     *" $b "*) ;;
     *) echo "build.sh: $b is not in LIB_SOURCES; add it in dependency order" >&2; exit 1 ;;
   esac

@@ -11,7 +11,7 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(50))
+      allocate (testsuite(58))
       testsuite(1)%name = "endian"
       testsuite(1)%test => test_endian
       testsuite(2)%name = "pointer-words"
@@ -112,6 +112,22 @@ contains
       testsuite(49)%test => test_nest_limit_64
       testsuite(50)%name = "far-depth-one"
       testsuite(50)%test => test_far_depth_one
+      testsuite(51)%name = "reader-options"
+      testsuite(51)%test => test_reader_options
+      testsuite(52)%name = "builder-options"
+      testsuite(52)%test => test_builder_options
+      testsuite(53)%name = "void-list-words"
+      testsuite(53)%test => test_void_list_words
+      testsuite(54)%name = "alloc-in-bounds"
+      testsuite(54)%test => test_alloc_in_bounds
+      testsuite(55)%name = "void-list-get-all"
+      testsuite(55)%test => test_void_list_get_all
+      testsuite(56)%name = "root-uninit"
+      testsuite(56)%test => test_root_uninit
+      testsuite(57)%name = "wide-list-get-all"
+      testsuite(57)%test => test_wide_list_get_all
+      testsuite(58)%name = "copy-empty-first-pointer"
+      testsuite(58)%test => test_copy_empty_first_pointer
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2058,15 +2074,19 @@ contains
    subroutine test_traversal_limit(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg, rmsg
-      type(capnp_ptr_t) :: root, r
+      type(capnp_ptr_t) :: root
       integer(int8), allocatable :: bytes(:)
       integer :: err
       call capnp_message_init_builder(msg, err)
       root = capnp_new_struct(msg, 64, 0, err)
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
+      ! A flat reader keeps the segment. The 64-word struct fails when the
+      ! root is resolved, which is where the traversal budget is charged.
       call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=4_int64)
-      r = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'guards: flat read keeps the segment')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
       call check(error, err == CAPNP_ERR_TRAVERSAL, 'guards: traversal limit enforced')
       if (allocated(error)) return
       call capnp_message_free(msg)
@@ -2157,6 +2177,149 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_traversal_double_far
+   !> List(Void) charges one traversal word per element. A count of three
+   !> fits in a six-word budget (root pointer + root struct use three).
+   !> One more element, or ten million under the default budget, is
+   !> CAPNP_ERR_TRAVERSAL.
+   subroutine test_void_list_words(error)
+      type(error_type), allocatable, intent(out) :: error
+      call void_list_case(error, 3_int64, 6_int64, CAPNP_OK)
+      if (allocated(error)) return
+      call void_list_case(error, 4_int64, 6_int64, CAPNP_ERR_TRAVERSAL)
+      if (allocated(error)) return
+      call void_list_case(error, 10000000_int64, CAPNP_DEFAULT_TRAVERSAL_WORDS, &
+                          CAPNP_ERR_TRAVERSAL)
+   end subroutine test_void_list_words
+
+   !> A void list that fits in the traversal budget is still the wrong
+   !> element kind for an integer bulk read. The kind check happens
+   !> before the host array is allocated.
+   subroutine test_void_list_get_all(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: bytes(:)
+      integer(int32), allocatable :: arr(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 64_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=1000_int64)
+      root = capnp_root(rmsg, err)
+      lst = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == 64_int64, &
+                 'void get-all: list is in budget')
+      if (allocated(error)) then
+         call capnp_message_free(rmsg)
+         return
+      end if
+      call capnp_list_get_all_i32(lst, arr, err)
+      call check(error, err == CAPNP_ERR_KIND .and. allocated(arr) .and. size(arr) == 0, &
+                 'void get-all: kind error before a sized allocate')
+      call capnp_message_free(rmsg)
+   end subroutine test_void_list_get_all
+
+   !> A bulk read accepts an element wider than the requested type.
+   !> The low-order byte of each 16-bit element is the uint8 value.
+   subroutine test_wide_list_get_all(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: lst
+      integer(int8), allocatable :: arr(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_TWO, 2_int64, err)
+      call capnp_list_set_i16(lst, 0_int64, 513_int16, err)
+      call capnp_list_set_i16(lst, 1_int64, 772_int16, err)
+      call capnp_list_get_all_i8(lst, arr, err)
+      call check(error, err == CAPNP_OK .and. allocated(arr) .and. size(arr) == 2, &
+                 'wide get-all: two bytes')
+      if (.not. allocated(error) .and. allocated(arr)) then
+         call check(error, arr(0) == 1_int8 .and. arr(1) == 4_int8, &
+                    'wide get-all: low bytes')
+      end if
+      call capnp_message_free(msg)
+   end subroutine test_wide_list_get_all
+
+   !> An empty struct at offset -1 in the first pointer of a struct with no
+   !> data section has the parent's address. That is not a cycle, so the
+   !> copy and the size walk both accept it.
+   subroutine test_copy_empty_first_pointer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: src, dst
+      type(capnp_ptr_t) :: parent, empty, copied, child
+      integer(int64) :: words
+      integer :: err
+      call capnp_message_init_builder(src, err)
+      call capnp_message_init_builder(dst, err)
+      parent = capnp_new_struct(src, 0, 1, err)
+      empty = capnp_new_struct(src, 0, 0, err)
+      call capnp_setp(parent, 0, empty, err)
+      child = capnp_getp(parent, 0, err)
+      call check(error, err == CAPNP_OK .and. child%kind == CAPNP_PK_STRUCT .and. &
+                 child%seg == parent%seg .and. child%off == parent%off, &
+                 'empty first pointer: shares the parent address')
+      if (.not. allocated(error)) then
+         words = capnp_total_size(parent, err)
+         call check(error, err == CAPNP_OK .and. words == 1_int64, &
+                    'empty first pointer: size walk')
+      end if
+      if (.not. allocated(error)) then
+         copied = capnp_copy(dst, parent, err)
+         call check(error, err == CAPNP_OK .and. copied%kind == CAPNP_PK_STRUCT, &
+                    'empty first pointer: copy is not a cycle')
+      end if
+      if (.not. allocated(error)) then
+         child = capnp_getp(copied, 0, err)
+         call check(error, err == CAPNP_OK .and. child%kind == CAPNP_PK_STRUCT .and. &
+                    child%dwords == 0 .and. child%pwords == 0, &
+                    'empty first pointer: copied child is an empty struct')
+      end if
+      call capnp_message_free(src)
+      call capnp_message_free(dst)
+   end subroutine test_copy_empty_first_pointer
+
+   subroutine void_list_case(error, count, budget, expect)
+      type(error_type), allocatable, intent(inout) :: error
+      integer(int64), intent(in) :: count, budget
+      integer, intent(in) :: expect
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, count, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=budget)
+      if (err /= CAPNP_OK) then
+         call check(error, .false., 'void list: framing')
+         call capnp_message_free(rmsg)
+         return
+      end if
+      root = capnp_root(rmsg, err)
+      if (err /= CAPNP_OK) then
+         call check(error, .false., 'void list: root')
+         call capnp_message_free(rmsg)
+         return
+      end if
+      lst = capnp_getp(root, 0, err)
+      if (expect == CAPNP_OK) then
+         call check(error, err == CAPNP_OK .and. capnp_list_len(lst) == count, &
+                    'void list: small count is readable')
+      else
+         call check(error, err == expect, 'void list: element words hit the budget')
+      end if
+      call capnp_message_free(rmsg)
+   end subroutine void_list_case
+
    !> nestingLimit must be greater than zero to read the root
    !> (layout.c++:2186). Limit 1 allows the root and rejects the first getp.
    subroutine test_depth_limit(error)
@@ -2286,5 +2449,442 @@ contains
       if (allocated(error)) return
       call capnp_message_free(msg)
    end subroutine test_far_depth_one
+
+   !> A segment table under the default eight mebiword budget is rejected
+   !> when the caller passes a smaller reader budget, and accepted when the
+   !> caller raises the budget past the default.
+   subroutine test_reader_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, kid, q
+      type(capnp_reader_options_t) :: opt
+      integer(int8) :: hdr(0:7)
+      integer :: err, unit, ios
+      integer(int64) :: total
+      character(len=:), allocatable :: path
+
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err, 50_int64)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: small budget rejects 100 words')
+      if (allocated(error)) return
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err, 100_int64)
+      call check(error, err == CAPNP_OK .and. total == 100_int64, &
+                  'options: budget equal to the sum is allowed')
+      if (allocated(error)) return
+      total = 0_int64
+      call capnp_add_segment_words(total, 100_int64, err)
+      call check(error, err == CAPNP_OK, 'options: default budget still accepts 100 words')
+      if (allocated(error)) return
+
+      path = reader_pid_path('reader')
+      hdr = 0_int8
+      hdr(4) = 100_int8
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='replace', action='readwrite', iostat=ios)
+      call check(error, ios == 0, 'options: open stream')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      write (unit) hdr
+      rewind (unit)
+      opt%traversal_words = 50_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: stream honors a lower budget')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 1000_int64
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: raised budget reaches the body check')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+
+      ! 8388609 words is one past the default budget and still a legal u32.
+      hdr = 0_int8
+      hdr(4) = 1_int8
+      hdr(6) = int(-128, int8)
+      rewind (unit)
+      write (unit) hdr
+      rewind (unit)
+      call capnp_read_message_unit(unit, rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                  'options: default still rejects eight mebiwords plus one')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 8388609_int64
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: a higher budget accepts the table')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      close (unit, status='delete')
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      kid = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(kid, 0_int64, 7_int32, err)
+      call capnp_setp(root, 0, kid, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_write_message(path, msg, err)
+      call check(error, err == CAPNP_OK, 'options: wrote nested message')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      opt%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      opt%nesting_limit = 1
+      call capnp_read_message_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_OK, 'options: nested message framed')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. root%kind == CAPNP_PK_STRUCT, &
+                  'options: root within nesting limit')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      q = capnp_getp(root, 0, err)
+      call check(error, err == CAPNP_ERR_DEPTH, 'options: stream nesting limit is one')
+      call close_delete(unit, path)
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+      call reader_flat_and_packed(error)
+      if (allocated(error)) return
+      call reader_over_default(error)
+   end subroutine test_reader_options
+
+   !> Fixed-size allocation repeats the first segment (or the object, if
+   !> larger). Heuristic growth follows MallocMessageBuilder: the second
+   !> segment repeats the first size, and each later one adds the size
+   !> just allocated.
+   subroutine test_builder_options(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_builder_options_t) :: opt
+      type(capnp_ptr_t) :: a
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      call check(error, err == CAPNP_OK .and. seg_words(msg, 1) == 1024_int64, &
+                  'builder: default first segment is 1024 words')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_message_init_builder(msg, err, first_words=4_int64)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 2, 'builder: default spills')
+      if (allocated(error)) return
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: second segment repeats the first size')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 8_int64, &
+                  'builder: third segment adds the previous size')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = 4_int64
+      opt%allocation_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
+      call capnp_message_init_builder(msg, err, options=opt)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: heuristic matches the default')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%allocation_strategy = CAPNP_ALLOC_FIXED_SIZE
+      call capnp_message_init_builder(msg, err, options=opt)
+      a = capnp_new_struct(msg, 2, 0, err)
+      a = capnp_new_struct(msg, 2, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs == 2, 'builder: fixed spills')
+      if (allocated(error)) return
+      call check(error, seg_words(msg, 2) == 4_int64, 'builder: fixed repeats the first size')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 5, 0, err)
+      ! The new segment holds the landing pad plus the five data words.
+      call check(error, msg%nsegs == 3 .and. seg_words(msg, 3) == 6_int64, &
+                  'builder: fixed grows to fit one object')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = 0_int64
+      call capnp_message_init_builder(msg, err, options=opt)
+      call check(error, err == CAPNP_OK .and. seg_words(msg, 1) == 1_int64, &
+                  'builder: zero first segment keeps the root word')
+      if (allocated(error)) return
+      a = capnp_new_struct(msg, 1, 0, err)
+      a = capnp_new_struct(msg, 3, 0, err)
+      ! Each spill adds the landing pad, so the segments are 2 and 4 words.
+      call check(error, seg_words(msg, 2) == 2_int64 .and. seg_words(msg, 3) == 4_int64, &
+                  'builder: zero fixed size isolates each object')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      opt%first_segment_words = huge(0_int64)
+      opt%allocation_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
+      call capnp_message_init_builder(msg, err, options=opt)
+      call check(error, err == CAPNP_ERR_ARG, 'builder: huge first segment is rejected')
+      if (allocated(error)) return
+      call capnp_message_init_builder(msg, err, first_words=huge(0_int64))
+      call check(error, err == CAPNP_ERR_ARG, 'builder: huge first_words is rejected')
+      if (allocated(error)) return
+      ! A previous segment past half the cap must not double with a signed
+      ! overflow. Both sizes sit above that half, so both saturate equal.
+      call check(error, capnp_grown_segment_bytes(huge(0_int64)/2_int64 + 1_int64, 8_int64) == &
+                 capnp_grown_segment_bytes(huge(0_int64), 8_int64), &
+                 'builder: growth saturates instead of wrapping')
+      if (allocated(error)) return
+      call check(error, capnp_grown_segment_bytes(16_int64, 8_int64) == 32_int64, &
+                 'builder: a small segment still doubles')
+   end subroutine test_builder_options
+
+   pure function seg_words(msg, idx) result(n)
+      type(capnp_message_t), intent(in) :: msg
+      integer, intent(in) :: idx
+      integer(int64) :: n
+      n = size(msg%segs(idx)%bytes, kind=int64)/CAPNP_WORD_BYTES
+   end function seg_words
+
+   !> Flat deserialize and packed expansion both honor the traversal budget.
+   !> A packed zero-run is rejected before the expanded buffer is allocated.
+   subroutine reader_flat_and_packed(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root
+      type(capnp_reader_options_t) :: opt
+      integer(int8), allocatable :: bytes(:), bomb(:), packed(:)
+      integer(int8) :: hdr(0:7)
+      integer :: err, i, unit, ios
+      character(len=:), allocatable :: path
+      allocate (bytes(0:7))
+      bytes = 0_int8
+      bytes(4) = 100_int8
+      opt%traversal_words = 50_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat bytes check the body first')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat view checks the body first')
+      if (allocated(error)) return
+      opt%traversal_words = 100_int64
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat bytes at the budget reach the body')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING, 'options: flat view at the budget reaches the body')
+      if (allocated(error)) return
+
+      call capnp_message_init_builder(msg, err, first_words=4_int64)
+      root = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_i32(root, 0_int64, 9_int32, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, err == CAPNP_OK, 'options: serialized a small struct')
+      if (allocated(error)) return
+      opt%traversal_words = 0_int64
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      call check(error, err == CAPNP_OK, 'options: zero budget still reads the table')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: zero budget rejects a struct')
+      if (allocated(error)) return
+      opt%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      call capnp_deserialize_bytes(bytes, rmsg, err, options=opt)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i32(root, 0_int64) == 9_int32, &
+                 'options: flat bytes keep the field')
+      if (allocated(error)) return
+      call capnp_deserialize_view(bytes, rmsg, err, options=opt)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i32(root, 0_int64) == 9_int32, &
+                 'options: flat view keeps the field')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      ! A 1-segment header declaring 20*256 words followed by 20 zero-runs
+      ! of 00 FF exceeds a 10-word budget before body allocation.
+      allocate (bomb(0:41))
+      bomb(0) = 32_int8
+      bomb(1) = 20_int8
+      do i = 0, 19
+         bomb(2 + 2*i) = 0_int8
+         bomb(3 + 2*i) = -1_int8
+      end do
+      opt%traversal_words = 10_int64
+      opt%nesting_limit = CAPNP_DEFAULT_DEPTH_LIMIT
+      call capnp_deserialize_packed_bytes(bomb, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed zero-run stops at the budget')
+      if (allocated(error)) return
+      path = reader_pid_path('packed')
+      call capnp_write_file(path, bomb, err)
+      call capnp_read_message_packed(path, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed file stops at the budget')
+      call unlink_path(path)
+      if (allocated(error)) return
+
+      hdr = 0_int8
+      hdr(4) = 100_int8
+      call capnp_pack(hdr, packed, err)
+      call check(error, err == CAPNP_OK, 'options: packed the segment table')
+      if (allocated(error)) return
+      path = reader_pid_path('punit')
+      call capnp_write_file(path, packed, err)
+      open (newunit=unit, file=path, access='stream', form='unformatted', &
+            status='old', action='read', iostat=ios)
+      call check(error, ios == 0, 'options: open packed stream')
+      if (allocated(error)) then
+         call unlink_path(path)
+         return
+      end if
+      opt%traversal_words = 50_int64
+      call capnp_read_message_packed_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: packed stream honors a lower budget')
+      if (allocated(error)) then
+         call close_delete(unit, path)
+         return
+      end if
+      rewind (unit)
+      opt%traversal_words = 100_int64
+      call capnp_read_message_packed_unit(unit, rmsg, err, options=opt)
+      call check(error, err == CAPNP_ERR_FRAMING .or. err == CAPNP_ERR_PACKED, &
+                 'options: packed stream at the budget reaches the body')
+      call close_delete(unit, path)
+      call capnp_message_free(rmsg)
+   end subroutine reader_flat_and_packed
+
+   !> One word past the default 8 Mi budget. A flat reader accepts it and
+   !> the root data word is readable. A two-word budget fails at the root.
+   subroutine reader_over_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: rmsg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable, target :: big(:)
+      integer(int64), parameter :: nwords = 8388609_int64
+      integer(int64) :: nbytes
+      integer :: err
+      nbytes = 8_int64 + nwords*CAPNP_WORD_BYTES
+      allocate (big(0:nbytes - 1))
+      big = 0_int8
+      big(4) = 1_int8
+      big(6) = int(-128, int8)
+      call cp_put_i64(big, 8_int64, wp_make_struct(0_int32, 1_int32, 0_int32))
+      call cp_put_i64(big, 16_int64, 42_int64)
+      call capnp_deserialize_bytes(big, rmsg, err)
+      call check(error, err == CAPNP_OK, 'options: flat bytes past eight mebiwords')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: root past eight mebiwords')
+      if (allocated(error)) return
+      call capnp_deserialize_view(big, rmsg, err)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: view past eight mebiwords')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(big, rmsg, err, traversal_words=2_int64)
+      call check(error, err == CAPNP_OK, 'options: small budget keeps the large table')
+      if (allocated(error)) return
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, 'options: two words stop the large root')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(big, rmsg, err, traversal_words=3_int64)
+      root = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK .and. capnp_get_i64(root, 0_int64) == 42_int64, &
+                 'options: three words read the large root')
+      call capnp_message_free(rmsg)
+   end subroutine reader_over_default
+
+   function reader_pid_path(tag) result(path)
+      character(len=*), intent(in) :: tag
+      character(len=:), allocatable :: path
+      character(len=16) :: buf
+      interface
+         function c_getpid() bind(c, name='getpid') result(pid)
+            use iso_c_binding, only: c_int
+            integer(c_int) :: pid
+         end function c_getpid
+      end interface
+      write (buf, '(i0)') int(c_getpid())
+      path = '/tmp/capnpf-wire-'//trim(buf)//'-'//tag//'.bin'
+   end function reader_pid_path
+
+   subroutine close_delete(unit, path)
+      integer, intent(in) :: unit
+      character(len=*), intent(in) :: path
+      integer :: ios
+      close (unit, status='delete', iostat=ios)
+      if (ios /= 0) call unlink_path(path)
+   end subroutine close_delete
+
+   !> A non-empty segment must not grow by a negative count or by a count
+   !> past the segment cap. The used length stays where it was.
+   subroutine test_alloc_in_bounds(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: a
+      integer(int64) :: off, len0
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      a = capnp_new_struct(msg, 1, 0, err)
+      call check(error, err == CAPNP_OK .and. msg%nsegs >= 1, 'alloc-in: builder')
+      if (allocated(error)) return
+      len0 = msg%segs(1)%len
+      call capnp_arena_alloc_in(msg, 1, -1_int64, off, err)
+      call check(error, err == CAPNP_ERR_ARG .and. msg%segs(1)%len == len0, &
+                 'alloc-in: negative count')
+      if (allocated(error)) return
+      call capnp_arena_alloc_in(msg, 1, 1152921504606846976_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: word count past the segment cap')
+      if (allocated(error)) return
+      ! One past the cap, and the cap itself beside an object already in
+      ! the segment. Both are refused before any multi-gigabyte allocate.
+      call capnp_arena_alloc_in(msg, 1, 536870913_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: one past the segment cap')
+      if (allocated(error)) return
+      call capnp_arena_alloc_in(msg, 1, 536870912_int64, off, err)
+      call check(error, err == CAPNP_ERR_ALLOC .and. msg%segs(1)%len == len0, &
+                 'alloc-in: full cap does not fit beside the object')
+      call capnp_message_free(msg)
+   end subroutine test_alloc_in_bounds
+
+   !> capnp_root must return CAPNP_ERR_BOUNDS on an uninitialized or empty
+   !> message without indexing an unallocated segment table.
+   subroutine test_root_uninit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer :: err
+      root = capnp_root(msg, err)
+      call check(error, err == CAPNP_ERR_BOUNDS .and. root%kind == CAPNP_PK_NULL, &
+                 'root-uninit: empty message returns bounds error')
+   end subroutine test_root_uninit
+
+   subroutine unlink_path(path)
+      character(len=*), intent(in) :: path
+      integer :: u, ios
+      if (len(path) == 0) return
+      open (newunit=u, file=path, status='old', iostat=ios)
+      if (ios == 0) close (u, status='delete', iostat=ios)
+   end subroutine unlink_path
 
 end module test_wire

@@ -16,10 +16,34 @@ contains
 
    subroutine collect_generated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(1))
+      allocate (testsuite(2))
       testsuite(1)%name = "generated"
       testsuite(1)%test => run_generated
+      testsuite(2)%name = "union-setter-error"
+      testsuite(2)%test => run_union_setter_error
    end subroutine collect_generated
+
+   !> A union setter must report a failed discriminant write. A struct
+   !> with no data words cannot hold the tag, so the setter returns
+   !> CAPNP_ERR_BOUNDS and leaves the value unwritten.
+   subroutine run_union_setter_error(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(person_t) :: pe
+      type(capnp_ptr_t) :: txt
+      integer :: err
+      call capnp_message_init_builder(msg, err)
+      pe%p = capnp_new_struct(msg, 0, 4, err)
+      call check_(error, err == CAPNP_OK, 'union setter: short struct')
+      call person_employment_school_set(pe, 'MIT', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'union setter: text arm keeps the tag error')
+      txt = capnp_getp(pe%p, 3, err)
+      call check_(error, err == CAPNP_OK .and. txt%kind == CAPNP_PK_NULL, &
+                  'union setter: value not written after a tag error')
+      call person_employment_unemployed_set(pe, err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'union setter: void arm keeps the tag error')
+      call capnp_message_free(msg)
+   end subroutine run_union_setter_error
 
    subroutine check_(error, cond, name)
       type(error_type), allocatable, intent(inout) :: error

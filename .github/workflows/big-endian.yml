@@ -16,7 +16,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: full suite on emulated s390x (big-endian)
+      # The container has no fpm, so fetch the test-drive sources here; the
+      # workspace is shared with it.
+      - name: fetch test-drive
+        run: git clone --depth 1 --branch v0.6.1 https://github.com/fortran-lang/test-drive.git build/test-drive
+      - name: codec and regress suites on emulated s390x (big-endian)
         uses: uraimo/run-on-arch-action@ac33288c3728ca72563c97b8b88dda5a65a84448 # v2
         with:
           arch: s390x
@@ -25,20 +29,32 @@ jobs:
           # account and is not required for the suite itself.
           install: |
             apt-get update -q -y
-            apt-get install -q -y gfortran
+            # cycle-guard writes its input messages with python3.
+            apt-get install -q -y gfortran gcc locales python3
+            # float-comma-locale needs a locale whose radix is a comma.
+            sed -i 's/^# *de_DE.UTF-8/de_DE.UTF-8/' /etc/locale.gen
+            locale-gen
           run: |
             set -euo pipefail
             uname -m
             gfortran --version | head -1
             # Outer retries: whole nofpm path can die mid-compile under qemu.
+            # Status 3 is a failing suite, which a rebuild cannot fix.
             for attempt in 1 2 3; do
               echo "=== nofpm suite attempt $attempt ==="
               rm -rf build/nofpm
-              if FFLAGS="-O0 -g" COMPILE_RETRIES=3 ./scripts/build-nofpm.sh; then
+              rc=0
+              TESTDRIVE_DIR=build/test-drive FFLAGS="-O0 -g" COMPILE_RETRIES=3 \
+                ./scripts/build-nofpm.sh || rc=$?
+              if [ "$rc" -eq 0 ]; then
                 echo "=== nofpm suite OK on attempt $attempt ==="
                 exit 0
               fi
-              echo "=== nofpm suite failed on attempt $attempt ===" >&2
+              if [ "$rc" -eq 3 ]; then
+                echo "=== nofpm suites failed ===" >&2
+                exit 1
+              fi
+              echo "=== nofpm build failed on attempt $attempt (rc=$rc) ===" >&2
               sleep 2
             done
             echo "nofpm suite failed after 3 attempts" >&2
