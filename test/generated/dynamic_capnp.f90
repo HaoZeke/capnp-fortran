@@ -17,6 +17,8 @@ module schema__dynamic_capnp
    implicit none
    public
 
+   integer(int64), parameter :: SCHEMA__DYNAMIC_CAPNP_METHOD_NOTE_ANNOTATION_ID = -2113916645833798051_int64
+
    integer, parameter :: DYNAMIC_DWORDS = 1
    integer, parameter :: DYNAMIC_PWORDS = 4
    type :: dynamic_t
@@ -70,6 +72,9 @@ module schema__dynamic_capnp
          capnp_any_capability_client_t
 
    integer(int64), parameter :: ANNOTATED_SERVICE_INTERFACE_ID = -1406778577523547304_int64
+   integer, parameter :: ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE_KIND = 12
+   character(len=*), parameter :: ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE = 'ping method'
+
    type :: annotated_service_client_t
       type(rpc_cap_t) :: cap
    end type annotated_service_client_t
@@ -362,22 +367,27 @@ contains
       class(annotated_service_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
+      character(len=*), parameter :: ifname = 'schema/dynamic.capnp:AnnotatedService'
       err = CAPNP_ERR_ARG
-      if (ctx%interface_id /= ANNOTATED_SERVICE_INTERFACE_ID) return
+      if (ctx%interface_id /= ANNOTATED_SERVICE_INTERFACE_ID) then
+         call rpc_ctx_unimplemented_interface(ctx, ifname, err)
+         return
+      end if
       select case (ctx%method_id)
       case (0)
          block
             type(annotated_service_ping_params_t) :: params
             type(annotated_service_ping_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, ANNOTATED_SERVICE_PING_RESULTS_DWORDS, ANNOTATED_SERVICE_PING_RESULTS_PWORDS, &
-                  err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ANNOTATED_SERVICE_PING_RESULTS_DWORDS, ANNOTATED_SERVICE_PING_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%ping(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, ifname, &
+            ANNOTATED_SERVICE_INTERFACE_ID, err)
       end select
    end subroutine annotated_service_dispatch
 

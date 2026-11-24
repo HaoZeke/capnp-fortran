@@ -3,7 +3,7 @@
 !> Decode the reference `capnp encode` bytes through the generated API, then
 !> build the same book with it and re-verify.
 module test_generated
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_stream
    use addressbook_capnp
@@ -16,11 +16,11 @@ contains
 
    subroutine collect_generated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(2))
-      testsuite(1) = new_unittest("generated", run_generated)
-      testsuite(2) = new_unittest("union-setter-error", run_union_setter_error)
+      testsuite(1)%name = "generated"
+      testsuite(1)%test => run_generated
+      testsuite(2)%name = "union-setter-error"
+      testsuite(2)%test => run_union_setter_error
    end subroutine collect_generated
 
    !> A union setter must report a failed discriminant write. A struct

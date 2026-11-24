@@ -3,12 +3,16 @@
 !> addressbook; kitchen is used only to seed bool/f64 wire values that
 !> capnp_dyn_get_bool / capnp_dyn_get_f64 then re-read by name.
 module test_dynamic
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
-                                type_which, value_which, value_text, node_id
-   use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__9715_NOTE_ID
+                                TYPE_STRUCT, TYPE_ANY_POINTER, type_which, &
+                                type_list_element, type_type_id, type_anyptr_which, &
+                                type_param_scope_id, ANYPTR_PARAMETER, &
+                                value_which, value_text, node_id, &
+                                node_struct_discriminant_offset
+   use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
@@ -26,19 +30,47 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(10))
-      testsuite(1) = new_unittest("dynamic", run_dynamic)
-      testsuite(2) = new_unittest("dynamic-default-isolation", run_default_isolation)
-      testsuite(3) = new_unittest("dynamic-malformed-text", run_malformed_text)
-      testsuite(4) = new_unittest("dynamic-unloaded-schema", run_unloaded_schema)
-      testsuite(5) = new_unittest("dynamic-init-null", run_init_null)
-      testsuite(6) = new_unittest("dynamic-assign-types", run_assign_types)
-      testsuite(7) = new_unittest("dynamic-group-union", run_group_union)
-      testsuite(8) = new_unittest("dynamic-union-clear", run_union_clear)
-      testsuite(9) = new_unittest("dynamic-scalars", run_scalars)
-      testsuite(10) = new_unittest("dynamic-node-bomb", run_node_bomb)
+      allocate (testsuite(20))
+      testsuite(1)%name = "dynamic"
+      testsuite(1)%test => run_dynamic
+      testsuite(2)%name = "dynamic-default-isolation"
+      testsuite(2)%test => run_default_isolation
+      testsuite(3)%name = "dynamic-malformed-text"
+      testsuite(3)%test => run_malformed_text
+      testsuite(4)%name = "dynamic-unloaded-schema"
+      testsuite(4)%test => run_unloaded_schema
+      testsuite(5)%name = "dynamic-init-null"
+      testsuite(5)%test => run_init_null
+      testsuite(6)%name = "dynamic-assign-types"
+      testsuite(6)%test => run_assign_types
+      testsuite(7)%name = "dynamic-group-union"
+      testsuite(7)%test => run_group_union
+      testsuite(8)%name = "dynamic-union-clear"
+      testsuite(8)%test => run_union_clear
+      testsuite(9)%name = "dynamic-scalars"
+      testsuite(9)%test => run_scalars
+      testsuite(10)%name = "dynamic-two-hop-brand"
+      testsuite(10)%test => run_two_hop_brand
+      testsuite(11)%name = "dynamic-reader-default"
+      testsuite(11)%test => run_reader_default
+      testsuite(12)%name = "dynamic-unset-which"
+      testsuite(12)%test => run_unset_which
+      testsuite(13)%name = "dynamic-unbound-anypointer"
+      testsuite(13)%test => run_unbound_anypointer
+      testsuite(14)%name = "dynamic-default-arena"
+      testsuite(14)%test => run_default_arena
+      testsuite(15)%name = "dynamic-schema-inout"
+      testsuite(15)%test => run_schema_inout
+      testsuite(16)%name = "dynamic-null-reader"
+      testsuite(16)%test => run_null_reader
+      testsuite(17)%name = "dynamic-nested-default-view"
+      testsuite(17)%test => run_nested_default_view
+      testsuite(18)%name = "dynamic-union-arm-defaults"
+      testsuite(18)%test => run_union_arm_defaults
+      testsuite(19)%name = "dynamic-setp-text-nul"
+      testsuite(19)%test => run_setp_text_nul
+      testsuite(20)%name = "dynamic-node-bomb"
+      testsuite(20)%test => run_node_bomb
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -150,14 +182,14 @@ contains
       call check_(error, sink_idx > 0 .and. vec_idx > 0, 'dyn: Sink and Vec3 nodes found')
       call capnp_dyn_node_annotations(kschema, sink_idx, annotations, err)
       call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
-                  annotations(1)%id == SCHEMA__9715_NOTE_ID .and. &
+                  annotations(1)%id == SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID .and. &
                   value_which(annotations(1)%value) == TYPE_TEXT, &
                   'dyn: node annotation metadata')
       call value_text(annotations(1)%value, s, err)
       call check_(error, err == CAPNP_OK .and. s == 'sink type', 'dyn: node annotation value')
       call capnp_dyn_field_annotations(kschema, sink_idx, 'flag', annotations, err)
       call check_(error, err == CAPNP_OK .and. size(annotations) == 1 .and. &
-                  annotations(1)%id == SCHEMA__9715_NOTE_ID .and. &
+                  annotations(1)%id == SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID .and. &
                   value_which(annotations(1)%value) == TYPE_TEXT, &
                   'dyn: field annotation metadata')
       call value_text(annotations(1)%value, s, err)
@@ -468,7 +500,9 @@ contains
       raw%msg%segs(raw%seg)%bytes(raw%off) = int(iachar('a'), int8)
       raw%msg%segs(raw%seg)%bytes(raw%off + 1_int64) = int(iachar('b'), int8)
       call capnp_dyn_setp(schema, person_idx, person, 'name', raw, err)
-      call check_(error, err == CAPNP_OK, 'text: byte list can be stored')
+      call check_(error, err == CAPNP_ERR_KIND, 'text: dynamic store rejects missing NUL')
+      call capnp_setp(person, 0, raw, err)
+      call check_(error, err == CAPNP_OK, 'text: raw store into the name slot')
       call capnp_dyn_get_text(schema, person_idx, person, 'name', s, err)
       call check_(error, err == CAPNP_ERR_KIND, 'text: dynamic read rejects missing NUL')
 
@@ -749,6 +783,503 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_union_clear
+
+   !> A reader of a pointer default must not alias the schema message.
+   subroutine run_reader_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(sink_t) :: sink
+      type(capnp_ptr_t) :: root, origin, again
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call check_(error, sink_idx > 0 .and. vec_idx > 0, 'reader-default: nodes')
+
+      call capnp_message_init_builder(built, err)
+      sink = sink_new_root(built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT, &
+                  'reader-default: view')
+      call check_(error, .not. associated(origin%msg, schema%cgr), &
+                  'reader-default: view is not the schema')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'reader-default: reads 1.5')
+      call capnp_dyn_set_f64(schema, vec_idx, origin, 'x', 99.0_real64, err)
+      call check_(error, err /= CAPNP_OK, 'reader-default: write is refused')
+      again = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      x = capnp_dyn_get_f64(schema, vec_idx, again, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'reader-default: schema default stays 1.5')
+
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_reader_default
+
+   !> No active union arm is -1, for both a struct discriminant and a brand.
+   subroutine run_unset_which(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_ptr_t) :: shape, typed, raw, scopes, scope, binds, binding, bad
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: off
+      integer :: err, shape_idx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      shape_idx = capnp_dyn_find(schema, 'Shape', err)
+      call check_(error, shape_idx > 0, 'unset: shape node')
+      call capnp_message_init_builder(msg, err)
+      shape = capnp_dyn_new_root(schema, shape_idx, msg, err)
+      off = node_struct_discriminant_offset(schema%nodes(shape_idx))
+      call capnp_set_u16(shape, off*2_int64, 18_int32, err)
+      tag = capnp_dyn_which(schema, shape_idx, shape, err)
+      call check_(error, err == CAPNP_OK .and. tag == -1, 'unset: discriminant 18 is no arm')
+
+      typed = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(typed, 0_int64, 16_int32, err)
+      raw = capnp_new_struct(msg, 0, 1, err)
+      scopes = capnp_new_composite_list(msg, 1_int64, 2, 1, err)
+      call capnp_setp(raw, 0, scopes, err)
+      scope = capnp_list_get_struct(scopes, 0, err)
+      call capnp_set_i64(scope, 0_int64, 42_int64, err)
+      call capnp_set_u16(scope, 8_int64, 0_int32, err)
+      binds = capnp_new_composite_list(msg, 1_int64, 1, 1, err)
+      call capnp_setp(scope, 0, binds, err)
+      binding = capnp_list_get_struct(binds, 0, err)
+      call capnp_set_u16(binding, 0_int64, 1_int32, err)
+      bad = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(bad, 0_int64, 18_int32, err)
+      call capnp_set_u16(bad, 8_int64, 99_int32, err)
+      call capnp_setp(binding, 0, bad, err)
+      call capnp_setp(typed, 0, raw, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_OK .and. size(brand%scopes) == 1 .and. &
+                  size(brand%scopes(1)%bindings) == 1 .and. &
+                  brand%scopes(1)%bindings(1)%resolved_which == -1, &
+                  'unset: resolved_which is not anyPointer')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_unset_which
+
+   !> Box(parameter of Nest) plus Nest(Item). Cap'n Proto 1.4.0 resolves
+   !> that walk to Item.
+   subroutine run_two_hop_brand(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: inner_brand, bag_brand, brand
+      type(capnp_ptr_t) :: inner_t, bag_t, item_type
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: nest_scope, bound
+      integer :: err, box_idx, nest_idx, item_idx, bag_idx, tw
+      ! Ids reported by the C++ 1.4.0 schema loader for schema/box.capnp.
+      integer(int64), parameter :: cpp_item_id = -6139276977445145440_int64
+      integer(int64), parameter :: cpp_nest_id = -5680941978801891149_int64
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      nest_idx = capnp_dyn_find(schema, 'Nest', err)
+      item_idx = capnp_dyn_find(schema, 'Item', err)
+      bag_idx = capnp_dyn_find(schema, 'BagUse', err)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. nest_idx > 0 .and. &
+                  item_idx > 0 .and. bag_idx > 0 .and. &
+                  node_id(schema%nodes(item_idx)) == cpp_item_id .and. &
+                  node_id(schema%nodes(nest_idx)) == cpp_nest_id, &
+                  'twohop: schema ids match the C++ loader')
+
+      ! Nest.inner is Box, bound to Nest's own parameter.
+      inner_t = capnp_dyn_field_schema(schema, nest_idx, 'inner', err)
+      call capnp_dyn_load_brand(inner_t, inner_brand, err)
+      call check_(error, err == CAPNP_OK .and. allocated(inner_brand%scopes) .and. &
+                  size(inner_brand%scopes) == 1 .and. &
+                  allocated(inner_brand%scopes(1)%bindings) .and. &
+                  size(inner_brand%scopes(1)%bindings) == 1, &
+                  'twohop: inner brand has one binding')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      nest_scope = type_param_scope_id(inner_brand%scopes(1)%bindings(1)%type)
+      call check_(error, type_which(inner_brand%scopes(1)%bindings(1)%type) == &
+                  TYPE_ANY_POINTER .and. &
+                  type_anyptr_which(inner_brand%scopes(1)%bindings(1)%type) == &
+                  ANYPTR_PARAMETER .and. nest_scope == cpp_nest_id, &
+                  'twohop: box binding is a parameter of Nest')
+
+      ! BagUse.bag is Box(List(Item)); the list element is the Item type.
+      bag_t = capnp_dyn_field_schema(schema, bag_idx, 'bag', err)
+      call capnp_dyn_load_brand(bag_t, bag_brand, err)
+      call check_(error, err == CAPNP_OK .and. allocated(bag_brand%scopes) .and. &
+                  size(bag_brand%scopes) == 1 .and. &
+                  allocated(bag_brand%scopes(1)%bindings) .and. &
+                  type_which(bag_brand%scopes(1)%bindings(1)%type) == TYPE_LIST, &
+                  'twohop: bag binding is a list')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+      item_type = type_list_element(bag_brand%scopes(1)%bindings(1)%type, err)
+      call check_(error, err == CAPNP_OK .and. type_which(item_type) == TYPE_STRUCT .and. &
+                  type_type_id(item_type) == cpp_item_id, &
+                  'twohop: list element is Item')
+
+      allocate (brand%scopes(2))
+      brand%scopes(1) = inner_brand%scopes(1)
+      brand%scopes(2)%id = nest_scope
+      brand%scopes(2)%inherited = .false.
+      allocate (brand%scopes(2)%bindings(1))
+      brand%scopes(2)%bindings(1)%unbound = .false.
+      brand%scopes(2)%bindings(1)%type = item_type
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_STRUCT .and. &
+                  bound == cpp_item_id, &
+                  'twohop: value resolves to Item')
+
+      call capnp_dyn_free(schema)
+   end subroutine run_two_hop_brand
+
+   !> An unbound Box(T) field is AnyPointer, as in the C++ schema loader.
+   subroutine run_unbound_anypointer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: empty, brand
+      type(capnp_ptr_t) :: raw
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: scope_id
+      integer :: err, box_idx, tw
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      raw = capnp_dyn_field_schema(schema, box_idx, 'value', err)
+      scope_id = type_param_scope_id(raw)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. &
+                  scope_id == node_id(schema%nodes(box_idx)) .and. scope_id /= 0_int64, &
+                  'unbound: parameter scope is the Box node')
+
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=empty)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: empty brand is AnyPointer')
+
+      allocate (brand%scopes(1))
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%inherited = .false.
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .true.
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: unbound binding is AnyPointer')
+
+      deallocate (brand%scopes(1)%bindings)
+      allocate (brand%scopes(1)%bindings(0))
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: index past the bindings is AnyPointer')
+
+      brand%scopes(1)%id = 0_int64
+      deallocate (brand%scopes(1)%bindings)
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .true.
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand)
+      call check_(error, err == CAPNP_OK .and. tw == TYPE_ANY_POINTER, &
+                  'unbound: missing scope is AnyPointer')
+
+      call capnp_dyn_free(schema)
+   end subroutine run_unbound_anypointer
+
+
+   !> A second read of a defaulted pointer must not grow the reader arena.
+   subroutine run_default_arena(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(sink_t) :: sink
+      type(capnp_ptr_t) :: root, origin
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: len1
+      integer :: err, sink_idx, vec_idx, n1, i
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call capnp_message_init_builder(built, err)
+      sink = sink_new_root(built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. schema%ro_ready .and. schema%ro_arena%nsegs >= 1, &
+                  'arena: first read copies once')
+      n1 = schema%ro_arena%nsegs
+      len1 = schema%ro_arena%segs(1)%len
+      do i = 1, 32
+         origin = capnp_dyn_getp(schema, sink_idx, root, 'origin', err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call check_(error, err == CAPNP_OK .and. schema%ro_arena%nsegs == n1 .and. &
+                  schema%ro_arena%segs(1)%len == len1 .and. len1 > 8_int64, &
+                  'arena: later reads do not allocate')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'arena: cached default still reads 1.5')
+
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_default_arena
+
+   !> The inout schema on reader lookups is stated where callers look.
+   subroutine run_schema_inout(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), parameter :: sentence = &
+         'Reader pointer lookups store one cached copy of each defaulted field on the schema'
+      call check_(error, file_has('src/capnp_dynamic.f90', sentence), &
+                  'inout: source states the cache')
+      call check_(error, file_has('CHANGELOG.md', sentence) .or. &
+                  file_has('docs/newsfragments/+dyn-schema-cache.fixed.md', sentence), &
+                  'inout: changelog states the cache')
+      call check_(error, file_has('docs/reference.md', sentence), &
+                  'inout: reference states the cache')
+   end subroutine run_schema_inout
+
+   !> A reader handle with no message still receives the default, and the
+   !> reader branch does not dereference that message to ask if it is a builder.
+   subroutine run_null_reader(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_ptr_t) :: bare, origin
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+      character(len=*), parameter :: bad = &
+         'associated(p%msg) .or. .not. p%msg%is_builder'
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      bare = capnp_ptr_t()
+      bare%kind = CAPNP_PK_STRUCT
+      bare%pwords = 1
+      origin = capnp_dyn_getp(schema, sink_idx, bare, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT .and. origin%frozen, &
+                  'null reader: default view')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'null reader: reads 1.5')
+      call check_(error, .not. file_has('src/capnp_dynamic.f90', bad), &
+                  'null reader: builder flag is not read through or')
+      call capnp_dyn_free(schema)
+   end subroutine run_null_reader
+
+   !> Compile a small schema with the capnp tool so a test can use shapes
+   !> the checked-in fixtures do not have.
+   subroutine load_defaults_schema(error, schema, ok)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(inout) :: schema
+      logical, intent(out) :: ok
+      character(len=*), parameter :: dir = 'build/dyn_inline'
+      integer(int8), allocatable :: bytes(:)
+      integer :: u, ios, stat, cs, err
+      ok = .false.
+      call execute_command_line('mkdir -p '//dir, exitstat=stat, cmdstat=cs)
+      open (newunit=u, file=dir//'/defaults.capnp', status='replace', action='write', iostat=ios)
+      if (ios /= 0 .or. cs /= 0) then
+         call skip_test(error, 'cannot write '//dir)
+         return
+      end if
+      write (u, '(a)') '@0xd1f0c3a5b7e90a11;'
+      write (u, '(a)') 'struct Leaf { v @0 :UInt32; }'
+      write (u, '(a)') 'struct Mid { leaf @0 :Leaf = (v = 7); }'
+      write (u, '(a)') 'struct Outer { mid @0 :Mid = (); }'
+      write (u, '(a)') 'struct Pick { union { a @0 :Leaf = (v = 1); b @1 :Leaf = (v = 2); } }'
+      close (u)
+      call execute_command_line('capnp compile -o- '//dir//'/defaults.capnp > '// &
+                                dir//'/defaults.cgr', exitstat=stat, cmdstat=cs)
+      if (cs /= 0 .or. stat /= 0) then
+         call skip_test(error, 'capnp compile is not available')
+         return
+      end if
+      call capnp_read_file(dir//'/defaults.cgr', bytes, err)
+      if (err /= CAPNP_OK) return
+      call capnp_dyn_load(schema, bytes, err)
+      ok = err == CAPNP_OK
+   end subroutine load_defaults_schema
+
+   !> A defaulted pointer inside a frozen default view reads its own
+   !> default, as a reader does.
+   subroutine run_nested_default_view(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built, reader
+      type(capnp_ptr_t) :: root, mid, leaf
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, outer_idx, mid_idx, leaf_idx
+      logical :: ok
+      call load_defaults_schema(error, schema, ok)
+      if (allocated(error)) return
+      call check_(error, ok, 'nested view: schema loads')
+      if (allocated(error)) return
+      outer_idx = capnp_dyn_find(schema, 'Outer', err)
+      mid_idx = capnp_dyn_find(schema, 'Mid', err)
+      leaf_idx = capnp_dyn_find(schema, 'Leaf', err)
+      call capnp_message_init_builder(built, err)
+      root = capnp_dyn_new_root(schema, outer_idx, built, err)
+      call capnp_serialize_bytes(built, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader, err)
+      root = capnp_root(reader, err)
+      mid = capnp_dyn_getp(schema, outer_idx, root, 'mid', err)
+      call check_(error, err == CAPNP_OK .and. mid%frozen, 'nested view: mid is a frozen view')
+      leaf = capnp_dyn_getp(schema, mid_idx, mid, 'leaf', err)
+      call check_(error, err == CAPNP_OK .and. leaf%kind == CAPNP_PK_STRUCT .and. leaf%frozen, &
+                  'nested view: leaf default reads from the view')
+      call check_(error, capnp_dyn_get_int(schema, leaf_idx, leaf, 'v', err) == 7_int64 .and. &
+                  err == CAPNP_OK, 'nested view: leaf default is 7')
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_dyn_free(schema)
+   end subroutine run_nested_default_view
+
+   !> Two union arms share one pointer slot but not one default.
+   subroutine run_union_arm_defaults(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: built_a, built_b, reader_a, reader_b
+      type(capnp_ptr_t) :: root, leaf
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, pick_idx, leaf_idx
+      logical :: ok
+      call load_defaults_schema(error, schema, ok)
+      if (allocated(error)) return
+      call check_(error, ok, 'union defaults: schema loads')
+      if (allocated(error)) return
+      pick_idx = capnp_dyn_find(schema, 'Pick', err)
+      leaf_idx = capnp_dyn_find(schema, 'Leaf', err)
+      call capnp_message_init_builder(built_a, err)
+      root = capnp_dyn_new_root(schema, pick_idx, built_a, err)
+      call capnp_serialize_bytes(built_a, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader_a, err)
+      root = capnp_root(reader_a, err)
+      leaf = capnp_dyn_getp(schema, pick_idx, root, 'a', err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, leaf_idx, leaf, 'v', err) == 1_int64, &
+                  'union defaults: arm a reads 1')
+      call capnp_message_init_builder(built_b, err)
+      root = capnp_dyn_new_root(schema, pick_idx, built_b, err)
+      call capnp_dyn_select(schema, pick_idx, root, 'b', err)
+      call check_(error, err == CAPNP_OK, 'union defaults: select b')
+      call capnp_serialize_bytes(built_b, bytes, err)
+      call capnp_deserialize_bytes(bytes, reader_b, err)
+      root = capnp_root(reader_b, err)
+      leaf = capnp_dyn_getp(schema, pick_idx, root, 'b', err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, leaf_idx, leaf, 'v', err) == 2_int64, &
+                  'union defaults: arm b reads its own default 2')
+      call capnp_message_free(built_a)
+      call capnp_message_free(built_b)
+      call capnp_message_free(reader_a)
+      call capnp_message_free(reader_b)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_arm_defaults
+
+   !> A Text value needs its trailing NUL; Data takes any bytes.
+   subroutine run_setp_text_nul(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, raw
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, person_idx
+      call capnp_read_file('test/fixtures/addressbook.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      person_idx = capnp_dyn_find(schema, 'Person', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, person_idx, msg, err)
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(raw, 0_int64, 97_int8, err)
+      call capnp_list_set_i8(raw, 1_int64, 98_int8, err)
+      call capnp_list_set_i8(raw, 2_int64, 99_int8, err)
+      call capnp_dyn_setp(schema, person_idx, root, 'name', raw, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'text nul: unterminated Text is rejected')
+      call capnp_dyn_get_text(schema, person_idx, root, 'name', s, err)
+      call check_(error, err == CAPNP_OK .and. s == '', 'text nul: field left unset')
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 0_int64, err)
+      call capnp_dyn_setp(schema, person_idx, root, 'name', raw, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'text nul: empty byte list is rejected')
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(raw, 0_int64, 104_int8, err)
+      call capnp_list_set_i8(raw, 1_int64, 105_int8, err)
+      call capnp_dyn_setp(schema, person_idx, root, 'name', raw, err)
+      call capnp_dyn_get_text(schema, person_idx, root, 'name', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'hi', 'text nul: terminated Text is kept')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_setp_text_nul
+
+   function file_has(path, needle) result(found)
+      character(len=*), intent(in) :: path, needle
+      logical :: found
+      integer :: u, ios
+      character(len=512) :: line
+      found = .false.
+      open (newunit=u, file=path, status='old', action='read', iostat=ios)
+      if (ios /= 0) return
+      do
+         read (u, '(A)', iostat=ios) line
+         if (ios /= 0) exit
+         if (index(line, needle) > 0) then
+            found = .true.
+            exit
+         end if
+      end do
+      close (u)
+   end function file_has
 
    !> A composite list of zero-sized nodes can name far more elements than
    !> the message has bytes. Loading it must return CAPNP_ERR_ALLOC.

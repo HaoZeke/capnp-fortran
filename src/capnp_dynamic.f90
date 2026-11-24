@@ -38,6 +38,20 @@ module capnp_dynamic
       type(capnp_message_t) :: cgr
       type(capnp_ptr_t), allocatable :: nodes(:)
       logical :: loaded = .false.
+      !> One frozen copy of each defaulted pointer handed to readers, keyed
+      !> by node, slot and field: union arms share a slot but not a default.
+      !> The schema message itself stays untouched.
+      !> Freed with the schema. Further reads reuse the copy, so a reader
+      !> loop does not grow the arena.
+      type(capnp_message_t) :: ro_arena
+      logical :: ro_ready = .false.
+      !> Parallel cache of reader copies. ro_node(i), ro_slot(i), the field
+      !> location ro_fseg(i) and ro_foff(i), and ro_view(i) describe one
+      !> field. n_ro is the live prefix.
+      integer, allocatable :: ro_node(:), ro_fseg(:)
+      integer(int64), allocatable :: ro_slot(:), ro_foff(:)
+      type(capnp_ptr_t), allocatable :: ro_view(:)
+      integer :: n_ro = 0
    end type capnp_dyn_schema_t
 
    !> An annotation use as exposed by the C++ schema API. `value` and
@@ -111,6 +125,14 @@ contains
    subroutine capnp_dyn_free(schema)
       type(capnp_dyn_schema_t), intent(inout) :: schema
       call capnp_message_free(schema%cgr)
+      if (schema%ro_ready) call capnp_message_free(schema%ro_arena)
+      schema%ro_ready = .false.
+      schema%n_ro = 0
+      if (allocated(schema%ro_node)) deallocate (schema%ro_node)
+      if (allocated(schema%ro_slot)) deallocate (schema%ro_slot)
+      if (allocated(schema%ro_fseg)) deallocate (schema%ro_fseg)
+      if (allocated(schema%ro_foff)) deallocate (schema%ro_foff)
+      if (allocated(schema%ro_view)) deallocate (schema%ro_view)
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
    end subroutine capnp_dyn_free
@@ -392,7 +414,7 @@ contains
       integer(int64), intent(out) :: id
       integer, intent(out) :: err
       type(capnp_ptr_t) :: et
-      integer :: i, idx, ew
+      integer :: ew
       which = -1
       id = 0_int64
       err = CAPNP_OK
@@ -402,6 +424,12 @@ contains
       end if
       if (t%kind == CAPNP_PK_NULL) return
       which = type_which(t)
+      ! A discriminant with no arm is unset. Leaving the raw tag (anyPointer
+      ! is 18) would claim a member that is not active.
+      if (which < TYPE_VOID .or. which > TYPE_ANY_POINTER) then
+         which = -1
+         return
+      end if
       select case (which)
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
          id = type_type_id(t)
@@ -414,21 +442,65 @@ contains
          which = TYPE_LIST
          if (ew /= TYPE_STRUCT .and. ew /= TYPE_ENUM .and. ew /= TYPE_INTERFACE) id = 0_int64
       case (TYPE_ANY_POINTER)
-         if (type_anyptr_which(t) /= ANYPTR_PARAMETER) return
-         if (.not. allocated(brand%scopes)) return
+         call dyn_resolve_anyptr(brand, t, depth, which, id, err)
+      end select
+   end subroutine dyn_resolve_type
+
+   !> An anyPointer parameter with no binding, an unknown scope, or an
+   !> index past the binding list stays AnyPointer. That is what the C++
+   !> schema loader returns, so a type parameter added later does not
+   !> break an older brand. Only an anyPointer arm that is not one of the
+   !> three legal arms, or an unconstrained tag outside its range, is unset.
+   recursive subroutine dyn_resolve_anyptr(brand, t, depth, which, id, err)
+      type(capnp_dyn_brand_t), intent(in) :: brand
+      type(capnp_ptr_t), intent(in) :: t
+      integer, intent(in) :: depth
+      integer, intent(inout) :: which
+      integer(int64), intent(inout) :: id
+      integer, intent(out) :: err
+      integer :: aw, uw, i, idx
+      err = CAPNP_OK
+      aw = type_anyptr_which(t)
+      select case (aw)
+      case (ANYPTR_UNCONSTRAINED)
+         uw = type_uncon_which(t)
+         if (uw < UNCON_ANY .or. uw > UNCON_CAPABILITY) which = -1
+      case (ANYPTR_IMPLICIT)
+      case (ANYPTR_PARAMETER)
+         if (.not. allocated(brand%scopes)) then
+            which = TYPE_ANY_POINTER
+            id = 0_int64
+            return
+         end if
          idx = type_param_index(t) + 1
          do i = 1, size(brand%scopes)
             if (brand%scopes(i)%inherited) cycle
             if (brand%scopes(i)%id /= type_param_scope_id(t)) cycle
-            if (.not. allocated(brand%scopes(i)%bindings)) return
-            if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) return
-            if (brand%scopes(i)%bindings(idx)%unbound) return
+            if (.not. allocated(brand%scopes(i)%bindings)) then
+               which = TYPE_ANY_POINTER
+               id = 0_int64
+               return
+            end if
+            if (idx < 1 .or. idx > size(brand%scopes(i)%bindings)) then
+               which = TYPE_ANY_POINTER
+               id = 0_int64
+               return
+            end if
+            if (brand%scopes(i)%bindings(idx)%unbound) then
+               which = TYPE_ANY_POINTER
+               id = 0_int64
+               return
+            end if
             call dyn_resolve_type(brand, brand%scopes(i)%bindings(idx)%type, &
                                   depth + 1, which, id, err)
             return
          end do
+         which = TYPE_ANY_POINTER
+         id = 0_int64
+      case default
+         which = -1
       end select
-   end subroutine dyn_resolve_type
+   end subroutine dyn_resolve_anyptr
 
    !> Zero one slot. Wire zero reads back as the field's default.
    subroutine dyn_zero_slot(p, f, err)
@@ -969,8 +1041,13 @@ contains
    !> Resolved pointer field (Text, Data, List, struct, anyPointer). For
    !> groups the parent handle itself addresses the members, so groups
    !> return p unchanged.
+   !>
+   !> Reader pointer lookups store one cached copy of each defaulted field on the schema.
+   !> schema is therefore intent(inout). A routine that only holds the
+   !> schema as intent(in) cannot call this, nor capnp_dyn_get_any_struct
+   !> or capnp_dyn_get_any_list, which share the same cache.
    function capnp_dyn_getp(schema, idx, p, fname, err) result(q)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
@@ -999,14 +1076,95 @@ contains
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
       if (err /= CAPNP_OK) return
-      ! The default object lives in the schema message. Handing that
-      ! pointer back would let a write change every later default.
-      call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
+      ! The default object lives in the schema message. A reader gets a
+      ! frozen view of one cached copy of this field. A builder copies
+      ! into its own message, as the C++ runtime does, so a write cannot
+      ! change later defaults. A frozen view is read-only, so it reads as
+      ! a reader even though its arena is a builder. Association is tested
+      ! before the builder flag: Fortran does not promise to skip the
+      ! second operand of or.
+      if (.not. associated(p%msg)) then
+         call dyn_reader_view(schema, idx, f, q, err)
+      else if (p%frozen .or. .not. p%msg%is_builder) then
+         call dyn_reader_view(schema, idx, f, q, err)
+      else
+         call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
+      end if
       if (err == CAPNP_OK .and. type_which(t) == TYPE_STRUCT .and. &
           q%kind == CAPNP_PK_STRUCT) then
          q%schema_id = type_type_id(t)
       end if
+      if (err == CAPNP_OK) then
+         if (.not. associated(p%msg)) then
+            q%frozen = .true.
+         else if (p%frozen .or. .not. p%msg%is_builder) then
+            q%frozen = .true.
+         end if
+      end if
    end function capnp_dyn_getp
+
+   !> Copy a schema default into a reader-owned arena once per field and
+   !> freeze the handle. Later reads of the same field reuse that copy.
+   subroutine dyn_reader_view(schema, node, f, q, err)
+      type(capnp_dyn_schema_t), intent(inout), target :: schema
+      integer, intent(in) :: node
+      type(capnp_ptr_t), intent(in) :: f
+      type(capnp_ptr_t), intent(inout) :: q
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: copied
+      integer, allocatable :: grown_node(:), grown_fseg(:)
+      integer(int64), allocatable :: grown_slot(:), grown_foff(:)
+      type(capnp_ptr_t), allocatable :: grown_view(:)
+      integer(int64) :: sid, slot
+      integer :: i, n
+      err = CAPNP_OK
+      if (q%kind == CAPNP_PK_NULL) return
+      slot = field_slot_offset(f)
+      if (allocated(schema%ro_node)) then
+         do i = 1, schema%n_ro
+            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot .and. &
+                schema%ro_fseg(i) == f%seg .and. schema%ro_foff(i) == f%off) then
+               q = schema%ro_view(i)
+               return
+            end if
+         end do
+      end if
+      sid = q%schema_id
+      if (.not. schema%ro_ready) then
+         call capnp_message_init_builder(schema%ro_arena, err)
+         if (err /= CAPNP_OK) return
+         schema%ro_ready = .true.
+      end if
+      copied = capnp_copy(schema%ro_arena, q, err)
+      if (err /= CAPNP_OK) return
+      copied%schema_id = sid
+      copied%frozen = .true.
+      n = schema%n_ro
+      if (.not. allocated(schema%ro_node)) then
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
+         allocate (schema%ro_fseg(8), schema%ro_foff(8))
+      else if (n >= size(schema%ro_node)) then
+         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
+         allocate (grown_fseg(n*2), grown_foff(n*2))
+         grown_node(1:n) = schema%ro_node(1:n)
+         grown_slot(1:n) = schema%ro_slot(1:n)
+         grown_view(1:n) = schema%ro_view(1:n)
+         grown_fseg(1:n) = schema%ro_fseg(1:n)
+         grown_foff(1:n) = schema%ro_foff(1:n)
+         call move_alloc(grown_node, schema%ro_node)
+         call move_alloc(grown_slot, schema%ro_slot)
+         call move_alloc(grown_view, schema%ro_view)
+         call move_alloc(grown_fseg, schema%ro_fseg)
+         call move_alloc(grown_foff, schema%ro_foff)
+      end if
+      schema%n_ro = n + 1
+      schema%ro_node(schema%n_ro) = node
+      schema%ro_slot(schema%n_ro) = slot
+      schema%ro_fseg(schema%n_ro) = f%seg
+      schema%ro_foff(schema%n_ro) = f%off
+      schema%ro_view(schema%n_ro) = copied
+      q = copied
+   end subroutine dyn_reader_view
 
    !> Copy a schema default into the caller's builder and, when the slot
    !> exists, store that copy in the field.
@@ -1115,6 +1273,8 @@ contains
          return
       end if
       tag = capnp_which(p, int(disc_off))
+      ! C++ which() is empty when the discriminant names no arm.
+      if (tag < 0 .or. tag >= disc_count) tag = -1
    end function capnp_dyn_which
 
    !> Select a union member by its field name before initializing or assigning
@@ -1353,15 +1513,15 @@ contains
       case (ANYPTR_PARAMETER, ANYPTR_IMPLICIT)
          ok = kind == CAPNP_PK_STRUCT .or. kind == CAPNP_PK_LIST .or. kind == CAPNP_PK_CAP
       case (ANYPTR_UNCONSTRAINED)
-         inner = type_anyptr_kind(t)
+         inner = type_uncon_which(t)
          select case (inner)
-         case (ANYPTR_KIND_ANY)
+         case (UNCON_ANY)
             ok = kind == CAPNP_PK_STRUCT .or. kind == CAPNP_PK_LIST .or. kind == CAPNP_PK_CAP
-         case (ANYPTR_KIND_STRUCT)
+         case (UNCON_STRUCT)
             ok = kind == CAPNP_PK_STRUCT
-         case (ANYPTR_KIND_LIST)
+         case (UNCON_LIST)
             ok = kind == CAPNP_PK_LIST
-         case (ANYPTR_KIND_CAPABILITY)
+         case (UNCON_CAPABILITY)
             ok = kind == CAPNP_PK_CAP
          end select
       end select
@@ -1398,6 +1558,18 @@ contains
                if (value%kind /= CAPNP_PK_LIST .or. value%esize /= CAPNP_SZ_BYTE) then
                   err = CAPNP_ERR_KIND
                   return
+               end if
+               if (type_which(t) == TYPE_TEXT) then
+                  ! capnp_get_text rejects Text without its trailing NUL.
+                  if (value%nelem < 1_int64) then
+                     err = CAPNP_ERR_KIND
+                     return
+                  end if
+                  if (capnp_list_get_i8(value, value%nelem - 1_int64, err) /= 0_int8) then
+                     err = CAPNP_ERR_KIND
+                     return
+                  end if
+                  if (err /= CAPNP_OK) return
                end if
             case (TYPE_INTERFACE)
                if (value%kind /= CAPNP_PK_CAP) then
@@ -1473,8 +1645,11 @@ contains
       call capnp_dyn_setp(schema, idx, p, fname, value, err)
    end subroutine capnp_dyn_set_capability
 
+   !> Struct view of an anyPointer field. schema is intent(inout) because
+   !> a missing value is filled from the reader default cache. See
+   !> capnp_dyn_getp.
    function capnp_dyn_get_any_struct(schema, idx, p, fname, err) result(value)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
@@ -1498,8 +1673,11 @@ contains
       if (value%kind /= CAPNP_PK_STRUCT) err = CAPNP_ERR_KIND
    end function capnp_dyn_get_any_struct
 
+   !> List view of an anyPointer field. schema is intent(inout) because
+   !> a missing value is filled from the reader default cache. See
+   !> capnp_dyn_getp.
    function capnp_dyn_get_any_list(schema, idx, p, fname, err) result(value)
-      type(capnp_dyn_schema_t), intent(in) :: schema
+      type(capnp_dyn_schema_t), intent(inout) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname

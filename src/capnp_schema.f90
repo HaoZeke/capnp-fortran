@@ -56,11 +56,12 @@ module capnp_schema
    public :: field_slot_offset, field_slot_type, field_slot_default, field_group_type_id
    public :: field_slot_had_default
    public :: enumerant_name
+   public :: annotation_brand
    public :: type_which, type_list_element, type_type_id
    public :: value_which, value_bool, value_i8, value_i16, value_i32, value_i64
    public :: value_u8, value_u16, value_u32, value_u64, value_f32, value_f64
    public :: value_text, value_enum, value_pointer, value_data
-   public :: type_brand, type_anyptr_which, type_anyptr_kind
+   public :: type_brand, type_anyptr_which, type_anyptr_kind, type_uncon_which
    public :: type_param_scope_id, type_param_index
    public :: brand_scopes, scope_scope_id, scope_which, scope_bindings
    public :: binding_which, binding_type
@@ -68,7 +69,7 @@ module capnp_schema
    public :: node_interface_superclasses, superclass_id
    public :: field_annotations, enumerant_annotations, method_annotations
    public :: method_implicit_count
-   public :: annotation_id, annotation_value, annotation_brand
+   public :: annotation_id, annotation_value
 
    integer, parameter, public :: ANYPTR_UNCONSTRAINED = 0
    integer, parameter, public :: ANYPTR_PARAMETER = 1
@@ -78,6 +79,12 @@ module capnp_schema
    integer, parameter, public :: ANYPTR_KIND_STRUCT = 1
    integer, parameter, public :: ANYPTR_KIND_LIST = 2
    integer, parameter, public :: ANYPTR_KIND_CAPABILITY = 3
+   ! anyPointer.unconstrained inner tag (u16 at byte 10). These are not
+   ! Type union tags: 25, 26 and 27 are the field ordinals of that group.
+   integer, parameter, public :: UNCON_ANY = 0
+   integer, parameter, public :: UNCON_STRUCT = 1
+   integer, parameter, public :: UNCON_LIST = 2
+   integer, parameter, public :: UNCON_CAPABILITY = 3
    integer, parameter, public :: SCOPE_BIND = 0
    integer, parameter, public :: SCOPE_INHERIT = 1
    integer, parameter, public :: BINDING_UNBOUND = 0
@@ -108,6 +115,14 @@ contains
       integer :: w
       w = int(capnp_get_u16(p, 10_int64))
    end function type_anyptr_kind
+   !> anyPointer.unconstrained tag (u16 at byte 10): anyKind=0, struct=1,
+   !> list=2, capability=3. The same bits hold parameterIndex when the
+   !> anyPointer tag is parameter, so callers must check the outer tag.
+   function type_uncon_which(p) result(w)
+      type(capnp_ptr_t), intent(in) :: p
+      integer :: w
+      w = int(capnp_get_u16(p, 10_int64))
+   end function type_uncon_which
 
    !> Type.anyPointer.parameter: scopeId u64 at byte 16, parameterIndex
    !> u16 at byte 10.
@@ -423,6 +438,15 @@ contains
       call capnp_get_text(p, 0, s, err)
    end subroutine enumerant_name
 
+   ! --- Annotation: 1 data word, 2 ptrs ----------------------------------
+
+   function annotation_brand(p, err) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: v
+      v = capnp_getp(p, 1, err)
+   end function annotation_brand
+
    ! --- Type: 3 data words, 1 ptr ----------------------------------------
 
    function type_which(p) result(w)
@@ -628,12 +652,5 @@ contains
       type(capnp_ptr_t) :: v
       v = capnp_getp(p, 0, err)
    end function annotation_value
-
-   function annotation_brand(p, err) result(v)
-      type(capnp_ptr_t), intent(in) :: p
-      integer, intent(out) :: err
-      type(capnp_ptr_t) :: v
-      v = capnp_getp(p, 1, err)
-   end function annotation_brand
 
 end module capnp_schema

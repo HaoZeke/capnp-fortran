@@ -1,11 +1,13 @@
 !> Typed generated-code RPC: the emitter's client helpers and abstract
 !> server base carry an Adder call end to end over a socketpair.
 module test_rpc_typed
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use adder_capnp
+   use rpc_capnp
    use capnp_posix
    use capnp_rpc
+   use capnp_rpc_transport
    use rpc_adder_impl
    implicit none
 
@@ -16,10 +18,11 @@ contains
 
    subroutine collect_rpc_typed(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(1))
-      testsuite(1) = new_unittest("rpc-typed", run_rpc_typed)
+      allocate (testsuite(2))
+      testsuite(1)%name = "rpc-typed"
+      testsuite(1)%test => run_rpc_typed
+      testsuite(2)%name = "rpc-typed-unimplemented"
+      testsuite(2)%test => run_rpc_typed_unimplemented
    end subroutine collect_rpc_typed
 
    subroutine check_(error, cond, name)
@@ -84,5 +87,91 @@ contains
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
    end subroutine run_rpc_typed
+
+   !> Unknown method and unknown interface on a generated server return
+   !> exception type unimplemented with C++ 1.4.0's formatted text.
+   subroutine run_rpc_typed_unimplemented(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: srv
+      type(my_adder_t), target :: impl
+      class(rpc_server_t), pointer :: boot
+      type(capnp_message_t), target :: m, reply
+      type(message_t) :: msg
+      type(bootstrap_t) :: b
+      type(call_t) :: c
+      type(message_target_t) :: tgt
+      type(return_t) :: r
+      type(exception_t) :: ex
+      character(len=:), allocatable :: reason
+      integer :: fda, fdb, err
+
+      call px_socketpair(fda, fdb, err)
+      call check_(error, err == CAPNP_OK, 'unimpl: socketpair')
+      boot => impl
+      call rpc_conn_init(srv, fdb, boot)
+
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      b = message_bootstrap_init(msg, err)
+      call bootstrap_question_id_set(b, 0_int64, err)
+      call rpc_send_message(fda, m, err)
+      call capnp_message_free(m)
+      call rpc_pump_once(srv, err)
+      call rpc_recv_message(fda, reply, err)
+      call capnp_message_free(reply)
+
+      ! Unknown method id 99 on Adder.
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      c = message_call_init(msg, err)
+      call call_question_id_set(c, 1_int64, err)
+      tgt = call_target_init(c, err)
+      call message_target_imported_cap_set(tgt, 0_int64, err)
+      call call_interface_id_set(c, ADDER_INTERFACE_ID, err)
+      call call_method_id_set(c, 99_int32, err)
+      call rpc_send_message(fda, m, err)
+      call capnp_message_free(m)
+      call rpc_pump_once(srv, err)
+      call rpc_recv_message(fda, reply, err)
+      msg = message_read_root(reply, err)
+      r = message_return_get(msg, err)
+      call check_(error, return_which(r) == RETURN_EXCEPTION_TAG, 'unimpl method: exception return')
+      ex = return_exception_get(r, err)
+      call exception_reason_get(ex, reason, err)
+      call check_(error, exception_type_get(ex) == EXCEPTION_TYPE_UNIMPLEMENTED_E, &
+                  'unimpl method: type is unimplemented')
+      call check_(error, reason == 'Method not implemented.; interfaceName = ' // &
+                  'schema/adder.capnp:Adder; typeId = 16862005924666098705; methodId = 99', &
+                  'unimpl method: reason '//reason)
+      call capnp_message_free(reply)
+
+      ! Unknown interface id 0xffffffffffffffff on Adder.
+      call capnp_message_init_builder(m, err)
+      msg = message_new_root(m, err)
+      c = message_call_init(msg, err)
+      call call_question_id_set(c, 2_int64, err)
+      tgt = call_target_init(c, err)
+      call message_target_imported_cap_set(tgt, 0_int64, err)
+      call call_interface_id_set(c, -1_int64, err)
+      call call_method_id_set(c, 0_int32, err)
+      call rpc_send_message(fda, m, err)
+      call capnp_message_free(m)
+      call rpc_pump_once(srv, err)
+      call rpc_recv_message(fda, reply, err)
+      msg = message_read_root(reply, err)
+      r = message_return_get(msg, err)
+      call check_(error, return_which(r) == RETURN_EXCEPTION_TAG, 'unimpl iface: exception return')
+      ex = return_exception_get(r, err)
+      call exception_reason_get(ex, reason, err)
+      call check_(error, exception_type_get(ex) == EXCEPTION_TYPE_UNIMPLEMENTED_E, &
+                  'unimpl iface: type is unimplemented')
+      call check_(error, reason == 'Requested interface not implemented.; actualInterfaceName = ' // &
+                  'schema/adder.capnp:Adder; requestedTypeId = 18446744073709551615', &
+                  'unimpl iface: reason '//reason)
+      call capnp_message_free(reply)
+
+      call rpc_conn_close(srv)
+      call px_close(fda)
+   end subroutine run_rpc_typed_unimplemented
 
 end module test_rpc_typed

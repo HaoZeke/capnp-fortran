@@ -26,6 +26,30 @@ module schema__adder_capnp
       type(capnp_ptr_t) :: p
    end type adder_add_results_t
 
+   integer, parameter :: ADDER_WAIT_FOREVER_PARAMS_DWORDS = 0
+   integer, parameter :: ADDER_WAIT_FOREVER_PARAMS_PWORDS = 0
+   type :: adder_wait_forever_params_t
+      type(capnp_ptr_t) :: p
+   end type adder_wait_forever_params_t
+
+   integer, parameter :: ADDER_WAIT_FOREVER_RESULTS_DWORDS = 0
+   integer, parameter :: ADDER_WAIT_FOREVER_RESULTS_PWORDS = 0
+   type :: adder_wait_forever_results_t
+      type(capnp_ptr_t) :: p
+   end type adder_wait_forever_results_t
+
+   integer, parameter :: ADDER_CANCELLATION_COUNT_PARAMS_DWORDS = 0
+   integer, parameter :: ADDER_CANCELLATION_COUNT_PARAMS_PWORDS = 0
+   type :: adder_cancellation_count_params_t
+      type(capnp_ptr_t) :: p
+   end type adder_cancellation_count_params_t
+
+   integer, parameter :: ADDER_CANCELLATION_COUNT_RESULTS_DWORDS = 1
+   integer, parameter :: ADDER_CANCELLATION_COUNT_RESULTS_PWORDS = 0
+   type :: adder_cancellation_count_results_t
+      type(capnp_ptr_t) :: p
+   end type adder_cancellation_count_results_t
+
    private :: cap_resolve
    private :: rpc_capnp_cap_descriptor_t, rpc_capnp_cap_descriptor_which
    private :: rpc_capnp_cap_descriptor_sender_hosted_get
@@ -36,12 +60,16 @@ module schema__adder_capnp
    private :: rpc_capnp_cap_descriptor_receiver_hosted_tag
 
    integer(int64), parameter :: ADDER_INTERFACE_ID = -1584738149043452911_int64
+   integer, parameter :: ADDER_WAIT_FOREVER_ANNOTATION_ALLOW_CANCELLATION_KIND = 0
+
    type :: adder_client_t
       type(rpc_cap_t) :: cap
    end type adder_client_t
    type, extends(rpc_server_t), abstract :: adder_server_t
    contains
       procedure(adder_add_ifc), deferred :: add
+      procedure(adder_wait_forever_ifc), deferred :: wait_forever
+      procedure(adder_cancellation_count_ifc), deferred :: cancellation_count
       procedure :: dispatch => adder_dispatch
    end type adder_server_t
    abstract interface
@@ -53,6 +81,22 @@ module schema__adder_capnp
          type(adder_add_results_t), intent(in) :: results
          integer, intent(out) :: err
       end subroutine adder_add_ifc
+      subroutine adder_wait_forever_ifc(self, ctx, params, results, err)
+         import :: adder_server_t, rpc_call_ctx_t, adder_wait_forever_params_t, adder_wait_forever_results_t
+         class(adder_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
+         type(adder_wait_forever_params_t), intent(in) :: params
+         type(adder_wait_forever_results_t), intent(in) :: results
+         integer, intent(out) :: err
+      end subroutine adder_wait_forever_ifc
+      subroutine adder_cancellation_count_ifc(self, ctx, params, results, err)
+         import :: adder_server_t, rpc_call_ctx_t, adder_cancellation_count_params_t, adder_cancellation_count_results_t
+         class(adder_server_t), intent(inout) :: self
+         type(rpc_call_ctx_t), intent(inout) :: ctx
+         type(adder_cancellation_count_params_t), intent(in) :: params
+         type(adder_cancellation_count_results_t), intent(in) :: results
+         integer, intent(out) :: err
+      end subroutine adder_cancellation_count_ifc
    end interface
 
 contains
@@ -140,6 +184,107 @@ contains
       call capnp_set_i64(h%p, 0_int64, v, err)
    end subroutine adder_add_results_sum_set
 
+   function adder_wait_forever_params_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_params_t) :: h
+      h%p = capnp_new_struct(msg, ADDER_WAIT_FOREVER_PARAMS_DWORDS, ADDER_WAIT_FOREVER_PARAMS_PWORDS, err)
+   end function adder_wait_forever_params_new
+
+   function adder_wait_forever_params_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_params_t) :: h
+      h = adder_wait_forever_params_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function adder_wait_forever_params_new_root
+
+   function adder_wait_forever_params_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_params_t) :: h
+      h%p = capnp_root(msg, err)
+   end function adder_wait_forever_params_read_root
+
+   function adder_wait_forever_results_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_results_t) :: h
+      h%p = capnp_new_struct(msg, ADDER_WAIT_FOREVER_RESULTS_DWORDS, ADDER_WAIT_FOREVER_RESULTS_PWORDS, err)
+   end function adder_wait_forever_results_new
+
+   function adder_wait_forever_results_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_results_t) :: h
+      h = adder_wait_forever_results_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function adder_wait_forever_results_new_root
+
+   function adder_wait_forever_results_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_wait_forever_results_t) :: h
+      h%p = capnp_root(msg, err)
+   end function adder_wait_forever_results_read_root
+
+   function adder_cancellation_count_params_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_params_t) :: h
+      h%p = capnp_new_struct(msg, ADDER_CANCELLATION_COUNT_PARAMS_DWORDS, ADDER_CANCELLATION_COUNT_PARAMS_PWORDS, err)
+   end function adder_cancellation_count_params_new
+
+   function adder_cancellation_count_params_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_params_t) :: h
+      h = adder_cancellation_count_params_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function adder_cancellation_count_params_new_root
+
+   function adder_cancellation_count_params_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_params_t) :: h
+      h%p = capnp_root(msg, err)
+   end function adder_cancellation_count_params_read_root
+
+   function adder_cancellation_count_results_new(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_results_t) :: h
+      h%p = capnp_new_struct(msg, ADDER_CANCELLATION_COUNT_RESULTS_DWORDS, ADDER_CANCELLATION_COUNT_RESULTS_PWORDS, err)
+   end function adder_cancellation_count_results_new
+
+   function adder_cancellation_count_results_new_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_results_t) :: h
+      h = adder_cancellation_count_results_new(msg, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, h%p, err)
+   end function adder_cancellation_count_results_new_root
+
+   function adder_cancellation_count_results_read_root(msg, err) result(h)
+      type(capnp_message_t), intent(inout), target :: msg
+      integer, intent(out) :: err
+      type(adder_cancellation_count_results_t) :: h
+      h%p = capnp_root(msg, err)
+   end function adder_cancellation_count_results_read_root
+
+   function adder_cancellation_count_results_count_get(h) result(v)
+      type(adder_cancellation_count_results_t), intent(in) :: h
+      integer(int64) :: v
+      v = capnp_get_u32(h%p, 0_int64)
+   end function adder_cancellation_count_results_count_get
+
+   subroutine adder_cancellation_count_results_count_set(h, v, err)
+      type(adder_cancellation_count_results_t), intent(in) :: h
+      integer(int64), intent(in) :: v
+      integer, intent(out) :: err
+      call capnp_set_u32(h%p, 0_int64, v, err)
+   end subroutine adder_cancellation_count_results_count_set
+
    subroutine adder_add_begin(conn, client, m, params, qid, err)
       type(rpc_conn_t), intent(inout), target :: conn
       type(adder_client_t), intent(in) :: client
@@ -164,25 +309,101 @@ contains
       call rpc_result_content(conn, qid, results%p, err)
    end subroutine adder_add_wait
 
+   subroutine adder_wait_forever_begin(conn, client, m, params, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(adder_client_t), intent(in) :: client
+      type(capnp_message_t), intent(inout), target :: m
+      type(adder_wait_forever_params_t), intent(out) :: params
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(payload_t) :: pl
+      call rpc_call_begin(conn, client%cap, ADDER_INTERFACE_ID, 1, m, pl, qid, err)
+      if (err /= CAPNP_OK) return
+      params%p = capnp_new_struct(m, ADDER_WAIT_FOREVER_PARAMS_DWORDS, ADDER_WAIT_FOREVER_PARAMS_PWORDS, err)
+      if (err == CAPNP_OK) call payload_content_set(pl, params%p, err)
+   end subroutine adder_wait_forever_begin
+
+   subroutine adder_wait_forever_wait(conn, qid, results, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(adder_wait_forever_results_t), intent(out) :: results
+      integer, intent(out) :: err
+      call rpc_wait(conn, qid, err)
+      if (err /= CAPNP_OK) return
+      call rpc_result_content(conn, qid, results%p, err)
+   end subroutine adder_wait_forever_wait
+
+   subroutine adder_cancellation_count_begin(conn, client, m, params, qid, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(adder_client_t), intent(in) :: client
+      type(capnp_message_t), intent(inout), target :: m
+      type(adder_cancellation_count_params_t), intent(out) :: params
+      integer(int64), intent(out) :: qid
+      integer, intent(out) :: err
+      type(payload_t) :: pl
+      call rpc_call_begin(conn, client%cap, ADDER_INTERFACE_ID, 2, m, pl, qid, err)
+      if (err /= CAPNP_OK) return
+      params%p = capnp_new_struct(m, ADDER_CANCELLATION_COUNT_PARAMS_DWORDS, ADDER_CANCELLATION_COUNT_PARAMS_PWORDS, err)
+      if (err == CAPNP_OK) call payload_content_set(pl, params%p, err)
+   end subroutine adder_cancellation_count_begin
+
+   subroutine adder_cancellation_count_wait(conn, qid, results, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      integer(int64), intent(in) :: qid
+      type(adder_cancellation_count_results_t), intent(out) :: results
+      integer, intent(out) :: err
+      call rpc_wait(conn, qid, err)
+      if (err /= CAPNP_OK) return
+      call rpc_result_content(conn, qid, results%p, err)
+   end subroutine adder_cancellation_count_wait
+
    subroutine adder_dispatch(self, ctx, err)
       class(adder_server_t), intent(inout) :: self
       type(rpc_call_ctx_t), intent(inout) :: ctx
       integer, intent(out) :: err
+      character(len=*), parameter :: ifname = 'schema/adder.capnp:Adder'
       err = CAPNP_ERR_ARG
-      if (ctx%interface_id /= ADDER_INTERFACE_ID) return
+      if (ctx%interface_id /= ADDER_INTERFACE_ID) then
+         call rpc_ctx_unimplemented_interface(ctx, ifname, err)
+         return
+      end if
       select case (ctx%method_id)
       case (0)
          block
             type(adder_add_params_t) :: params
             type(adder_add_results_t) :: results
             params%p = ctx%params
-            results%p = capnp_new_struct(ctx%rmsg, ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ADDER_ADD_RESULTS_DWORDS, ADDER_ADD_RESULTS_PWORDS, err)
             if (err /= CAPNP_OK) return
             call self%add(ctx, params, results, err)
             if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
          end block
+      case (1)
+         block
+            type(adder_wait_forever_params_t) :: params
+            type(adder_wait_forever_results_t) :: results
+            params%p = ctx%params
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ADDER_WAIT_FOREVER_RESULTS_DWORDS, ADDER_WAIT_FOREVER_RESULTS_PWORDS, err)
+            if (err /= CAPNP_OK) return
+            call self%wait_forever(ctx, params, results, err)
+            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
+         end block
+      case (2)
+         block
+            type(adder_cancellation_count_params_t) :: params
+            type(adder_cancellation_count_results_t) :: results
+            params%p = ctx%params
+            results%p = capnp_new_struct(ctx%rmsg, &
+               ADDER_CANCELLATION_COUNT_RESULTS_DWORDS, ADDER_CANCELLATION_COUNT_RESULTS_PWORDS, err)
+            if (err /= CAPNP_OK) return
+            call self%cancellation_count(ctx, params, results, err)
+            if (err == CAPNP_OK) call payload_content_set(ctx%results, results%p, err)
+         end block
       case default
-         err = CAPNP_ERR_ARG
+         call rpc_ctx_unimplemented_method(ctx, ifname, &
+            ADDER_INTERFACE_ID, err)
       end select
    end subroutine adder_dispatch
 

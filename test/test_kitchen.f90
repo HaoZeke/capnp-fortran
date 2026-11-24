@@ -2,7 +2,7 @@
 !> pointer-field defaults (data, struct, list), enums from another module,
 !> List(Text)/List(Data)/List(List)/List(struct), anyPointer.
 module test_kitchen
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use common_capnp
    use kitchen_capnp
@@ -16,12 +16,13 @@ contains
 
    subroutine collect_kitchen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(3))
-      testsuite(1) = new_unittest("consts", t_consts)
-      testsuite(2) = new_unittest("defaults-on-fresh-struct", t_defaults_on_fresh_struct)
-      testsuite(3) = new_unittest("values-roundtrip", t_values_roundtrip)
+      testsuite(1)%name = "consts"
+      testsuite(1)%test => t_consts
+      testsuite(2)%name = "defaults-on-fresh-struct"
+      testsuite(2)%test => t_defaults_on_fresh_struct
+      testsuite(3)%name = "values-roundtrip"
+      testsuite(3)%test => t_values_roundtrip
    end subroutine collect_kitchen
 
    subroutine check_(error, cond, name)
@@ -41,11 +42,11 @@ contains
       call check_(error, ANSWER == 42_int64, 'const: answer')
       call check_(error, abs(TAU - 6.283185307179586_real64) < 1.0e-15_real64, 'const: tau')
       call check_(error, GREETING == 'hey there', 'const: greeting')
-      call check_(error, SCHEMA__9715_NOTE_ID /= 0_int64, 'annotation: declaration id')
-      call check_(error, KITCHEN_CAPNP_NOTE == 'kitchen schema', &
+      call check_(error, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID /= 0_int64, 'annotation: declaration id')
+      call check_(error, SCHEMA_KITCHEN_CAPNP_ANNOTATION_NOTE == 'kitchen schema', &
                   'annotation: file value')
-      call check_(error, SCHEMA__9715_SINK_NOTE == 'sink type', 'annotation: struct value')
-      call check_(error, SCHEMA__9715_SINK_FLAG_NOTE == 'flag field', 'annotation: field value')
+      call check_(error, SINK_ANNOTATION_NOTE == 'sink type', 'annotation: struct value')
+      call check_(error, SINK_FLAG_ANNOTATION_NOTE == 'flag field', 'annotation: field value')
       call check_(error, STATUS_BUSY_E == 1, 'const: imported enum')
       call check_(error, size(MAGIC) == 4 .and. MAGIC(0) == -54_int8 .and. &
                   MAGIC(3) == 13_int8, 'const: data bytes')

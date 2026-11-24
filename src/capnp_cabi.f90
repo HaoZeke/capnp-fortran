@@ -18,6 +18,25 @@ module capnp_cabi
    implicit none
    private
 
+   public :: cabi_builder_new, cabi_builder_free
+   public :: cabi_new_struct, cabi_new_composite_list, cabi_list_get_struct
+   public :: cabi_set_root, cabi_setp
+   public :: cabi_set_u32, cabi_set_u16, cabi_set_i64
+   public :: cabi_set_f64, cabi_set_bool, cabi_set_text
+   public :: cabi_serialize, cabi_deserialize, cabi_root
+   public :: cabi_get_u32, cabi_get_u16, cabi_get_i64
+   public :: cabi_get_f64, cabi_get_bool, cabi_getp, cabi_get_text
+   public :: cabi_list_len, cabi_new_list
+   public :: cabi_list_set_i8, cabi_list_get_i8
+   public :: cabi_list_set_i16, cabi_list_get_i16
+   public :: cabi_list_set_i32, cabi_list_get_i32
+   public :: cabi_list_set_i64, cabi_list_get_i64
+   public :: cabi_list_set_text
+   public :: cabi_set_data, cabi_get_data
+   public :: cabi_which, cabi_set_which
+   public :: cabi_serialize_packed, cabi_deserialize_packed
+   public :: cabi_canonicalize
+
    integer, parameter :: MAXMSG = 16
    integer, parameter :: MAXOBJ = 1024
 

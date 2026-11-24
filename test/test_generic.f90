@@ -3,7 +3,7 @@
 !> list-element, list-binding, and nested-brand positions; unbound uses
 !> keep the AnyPointer degradation, wire compatible either way.
 module test_generic
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use box_capnp
    implicit none
@@ -15,11 +15,11 @@ contains
 
    subroutine collect_generic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(2))
-      testsuite(1) = new_unittest("generic", run_generic)
-      testsuite(2) = new_unittest("generic-five-bindings", run_five_bindings)
+      testsuite(1)%name = "generic"
+      testsuite(1)%test => run_generic
+      testsuite(2)%name = "generic-five-bindings"
+      testsuite(2)%test => run_five_bindings
    end subroutine collect_generic
 
    subroutine check_(error, cond, name)

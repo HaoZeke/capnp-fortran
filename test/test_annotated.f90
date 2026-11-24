@@ -1,7 +1,7 @@
 !> An annotated interface must come out as Fortran that compiles: the
 !> method note is a module parameter, and the server type can be extended.
 module test_annotated
-   use testdrive, only: new_unittest, unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check
    use capnp
    use capnp_rpc, only: rpc_call_ctx_t
    use dynamic_capnp
@@ -18,11 +18,11 @@ contains
 
    subroutine collect_annotated(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(2))
-      testsuite(1) = new_unittest("annotated-interface", run_annotated)
-      testsuite(2) = new_unittest("union-disc-bounds", run_union_disc_bounds)
+      testsuite(1)%name = "annotated-interface"
+      testsuite(1)%test => run_annotated
+      testsuite(2)%name = "union-disc-bounds"
+      testsuite(2)%test => run_union_disc_bounds
    end subroutine collect_annotated
 
    subroutine ping_srv(self, ctx, params, results, err)
@@ -46,8 +46,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       type(ping_srv_t) :: srv
       call check(error, &
-                 SCHEMA__9768_ANNOTATED_SERVICE_PING_METHOD_NOTE == 'ping method', &
+                 ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE == 'ping method', &
                  'annotated: method note is generated')
+      if (allocated(error)) return
+      call check(error, ANNOTATED_SERVICE_PING_ANNOTATION_METHOD_NOTE_KIND == 12, &
+                 'annotated: method note kind')
       if (allocated(error)) return
       call check(error, same_type_as(srv, srv), 'annotated: server type extends')
    end subroutine run_annotated

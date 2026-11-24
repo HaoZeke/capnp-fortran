@@ -30,6 +30,9 @@ sphinx-copybutton = ">=0.5.2, <1"
 sphinx-design = ">=0.6, <1"
 myst-parser = ">=4.0, <5"
 sphinxcontrib-mermaid = ">=1.0, <2"
+[feature.interop.tasks]
+rpc-diff = { cmd = "bash interop/rpc-diff/check.sh", description = "RPC differential check against Cap'n Proto C++ 1.4.0 (needs python3 on PATH)" }
+
 [feature.docs.tasks]
 orgbld = { cmd = "emacs --batch -l docs/export.el", description = "Export docs/orgmode/*.org to docs/source/*.rst" }
 docs = { cmd = "sphinx-build docs/source docs/build -b html", depends-on = ["orgbld"], description = "Build the Sphinx HTML docs" }

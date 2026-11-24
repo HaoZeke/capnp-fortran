@@ -38,6 +38,7 @@ else
   bash = find_program('bash', required: rpc_required)
 
   if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+    capnp_include = capnp_rpc_dep.get_variable(pkgconfig: 'includedir')
     adder_gen = custom_target(
       'adder-capnp-cpp',
       input: '../schema/adder.capnp',
@@ -45,6 +46,7 @@ else
       command: [
         capnp_tool, 'compile',
         '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-I' + capnp_include,
         '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
         '@INPUT@',
       ],
@@ -76,6 +78,7 @@ else
       'rpc_client_f',
       rpc_client_built,
       link_with: capnp_flib,
+      link_language: 'fortran',
     )
 
     test(
@@ -88,6 +91,84 @@ else
       ],
       depends: [rpc_peer_server, rpc_client_f],
       timeout: 60,
+    )
+
+    live_gen = custom_target(
+      'livecap-capnp-cpp',
+      input: '../schema/livecap.capnp',
+      output: ['livecap.capnp.c++', 'livecap.capnp.h'],
+      command: [
+        capnp_tool, 'compile',
+        '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-I' + capnp_include,
+        '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+        '@INPUT@',
+      ],
+    )
+
+    live_server = executable(
+      'live_server',
+      ['live_server.c++', live_gen],
+      dependencies: capnp_rpc_dep,
+      override_options: ['cpp_std=c++17'],
+    )
+
+    live_client_f = executable(
+      'live_client_f',
+      'live_client.f90',
+      link_with: capnp_flib,
+      link_language: 'fortran',
+    )
+
+    test(
+      'rpc_live_count',
+      bash,
+      args: [
+        meson.current_source_dir() / 'run_rpc_interop.sh',
+        live_server.full_path(),
+        live_client_f.full_path(),
+      ],
+      depends: [live_server, live_client_f],
+      timeout: 60,
+    )
+
+    probe_gen = custom_target(
+      'probe-capnp-cpp',
+      input: '../schema/probe.capnp',
+      output: ['probe.capnp.c++', 'probe.capnp.h'],
+      command: [
+        capnp_tool, 'compile',
+        '--src-prefix=' + meson.project_source_root() / 'schema',
+        '-I' + capnp_include,
+        '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+        '@INPUT@',
+      ],
+    )
+
+    probe_server = executable(
+      'probe_server',
+      ['probe_server.c++', probe_gen],
+      dependencies: capnp_rpc_dep,
+      override_options: ['cpp_std=c++17'],
+    )
+
+    probe_client_f = executable(
+      'probe_client_f',
+      'probe_client.f90',
+      link_with: capnp_flib,
+      link_language: 'fortran',
+    )
+
+    test(
+      'rpc_probe_cpp',
+      bash,
+      args: [
+        meson.current_source_dir() / 'run_probe.sh',
+        probe_server.full_path(),
+        probe_client_f.full_path(),
+      ],
+      depends: [probe_server, probe_client_f],
+      timeout: 180,
     )
   else
     message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')

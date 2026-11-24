@@ -1,6 +1,6 @@
 !> Interface-typed struct field: Holder.svc is Echo_client on the wire.
 module test_holder
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use holder_capnp
    implicit none
@@ -11,10 +11,9 @@ contains
 
    subroutine collect_holder(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      ! One assignment per case. An array constructor of these values
-      ! leaves the case-name temporaries allocated on gfortran.
       allocate (testsuite(1))
-      testsuite(1) = new_unittest("holder", run_holder)
+      testsuite(1)%name = "holder"
+      testsuite(1)%test => run_holder
    end subroutine collect_holder
 
    subroutine check_(error, cond, name)
