@@ -1093,6 +1093,30 @@ g18() {
   local d
   d=$(work)
   cd "$d"
+  python3 - "$ROOT/app/capnpc_emit.f90" "$CAPNP_PREFIX/include" "$ROOT" << 'EOF'
+import re
+import sys
+
+src, inc, root = sys.argv[1:]
+text = open(src).read()
+bad = 0
+for name, base in (("bundled_capnp_schema", inc), ("runtime_module_taken", root)):
+    m = re.search(r"function %s\b(.*?)end function %s" % (name, name), text, re.S)
+    if not m:
+        print("FAIL: %s not found" % name, file=sys.stderr)
+        sys.exit(1)
+    body = m.group(1)
+    pairs = re.findall(r"(-?\d+)_int64\b[^\n!]*!\s*(\S+\.capnp)", body)
+    if not pairs or len(pairs) != len(re.findall(r"-?\d+_int64", body)):
+        print("FAIL: %s lists an id without its schema file" % name, file=sys.stderr)
+        bad = 1
+    for lit, rel in pairs:
+        m = re.search(r"^@0x([0-9a-f]+);", open("%s/%s" % (base, rel)).read(), re.M)
+        if int(lit) % 2**64 != int(m.group(1), 16):
+            print("FAIL: %s id %s is not the id of %s" % (name, lit, rel), file=sys.stderr)
+            bad = 1
+sys.exit(bad)
+EOF
   cat > strm.capnp << 'EOF'
 @0x9100000000000032;
 interface AbcdefghijklmnopqrstuvwxyzA {
@@ -1103,6 +1127,55 @@ EOF
   capnp compile "${CAPNP_INC[@]}" -o"$BIN" strm.capnp
   no_long_lines strm_capnp.f90
   fc -c strm_capnp.f90 -I "$MOD" -J .
+  mkdir -p nested/capnp
+  cat > nested/capnp/stream.capnp << 'EOF'
+@0x9100000000000033;
+struct NestedStream { x @0 :Int32; }
+EOF
+  cxx_ok nested/capnp/stream.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" nested/capnp/stream.capnp
+  if ! grep -q '^module nested__capnp__stream_capnp$' nested/capnp/stream_capnp.f90; then
+    echo 'FAIL: nested schema module name was not qualified' >&2
+    exit 1
+  fi
+  fc -c nested/capnp/stream_capnp.f90 -I "$MOD" -J .
+  if grep -q '^module stream_capnp$' nested/capnp/stream_capnp.f90; then
+    echo 'FAIL: nested schema emitted a runtime module shim' >&2
+    exit 1
+  fi
+  mkdir -p mycapnp
+  cat > mycapnp/foo.capnp << 'EOF'
+@0x9100000000000034;
+struct Foo { x @0 :Int32; }
+EOF
+  cxx_ok mycapnp/foo.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" mycapnp/foo.capnp
+  if ! grep -q '^module mycapnp__foo_capnp$' mycapnp/foo_capnp.f90; then
+    echo 'FAIL: mycapnp schema module name was not qualified' >&2
+    exit 1
+  fi
+  fc -c mycapnp/foo_capnp.f90 -I "$MOD" -J .
+  local p
+  for p in include vendor; do
+    mkdir -p "$p/capnp"
+    cp "$CAPNP_PREFIX/include/capnp/stream.capnp" "$p/capnp/stream.capnp"
+    cat > imports.capnp << EOF
+@0x9100000000000035;
+using Stream = import "$p/capnp/stream.capnp";
+struct Imports { result @0 :Stream.StreamResult; }
+EOF
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" imports.capnp
+    if ! grep -Eq '^ *use stream_capnp(,|$)' imports_capnp.f90; then
+      echo "FAIL: import of $p/capnp/stream.capnp did not use stream_capnp" >&2
+      exit 1
+    fi
+    fc -c imports_capnp.f90 -I "$MOD" -J .
+  done
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" vendor/capnp/stream.capnp
+  if ! grep -q '^module stream_capnp$' vendor/capnp/stream_capnp.f90; then
+    echo 'FAIL: bundled stream schema was not mapped to its runtime module' >&2
+    exit 1
+  fi
   echo "g18 ok"
 }
 
