@@ -62,7 +62,10 @@ contains
       call capnp_message_free(msg)
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
-      if (present(traversal_words)) msg%traversal_words = traversal_words
+      if (present(traversal_words)) then
+         msg%traversal_words = traversal_words
+         msg%traversal_limit = traversal_words
+      end if
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
@@ -96,7 +99,10 @@ contains
       call capnp_message_free(msg)
       call parse_header(bytes, nsegs, pos, err)
       if (err /= CAPNP_OK) return
-      if (present(traversal_words)) msg%traversal_words = traversal_words
+      if (present(traversal_words)) then
+         msg%traversal_words = traversal_words
+         msg%traversal_limit = traversal_words
+      end if
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs

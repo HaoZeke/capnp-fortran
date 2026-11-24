@@ -33,6 +33,7 @@ module capnp_arena
       logical :: is_builder = .false.
       !> Reader guards; builders leave them untouched.
       integer(int64) :: traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      integer(int64) :: traversal_limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       integer :: depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
    end type capnp_message_t
 
@@ -84,6 +85,7 @@ contains
       msg%nsegs = 0
       msg%is_builder = .false.
       msg%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      msg%traversal_limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       msg%depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
    end subroutine capnp_message_free
 
