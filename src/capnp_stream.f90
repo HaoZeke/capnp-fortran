@@ -13,6 +13,7 @@ module capnp_stream
    public :: capnp_write_message_packed, capnp_read_message_packed
    public :: capnp_read_message_unit, capnp_read_message_packed_unit
    public :: capnp_add_segment_words, capnp_packed_room
+   public :: capnp_prefix_bytes, capnp_write_chunk_bytes
 
    !> Run-length state carried between packed words pulled off a stream.
    type :: pk_source_t
@@ -539,6 +540,22 @@ contains
       end if
       room = room + (rem/2_int64)*256_int64
    end subroutine capnp_packed_room
+
+   !> Length of the first bytes of a buffer, at most cap. Both counts stay
+   !> 64-bit, so a buffer above 2 GiB does not wrap a default integer.
+   elemental function capnp_prefix_bytes(total, cap) result(n)
+      integer(int64), intent(in) :: total, cap
+      integer(int64) :: n
+      n = max(0_int64, min(total, cap))
+   end function capnp_prefix_bytes
+
+   !> Bytes to pass to one write(2) call. Some systems reject a count above
+   !> INT_MAX, so a larger buffer goes out in 1 GiB pieces.
+   elemental function capnp_write_chunk_bytes(left) result(n)
+      integer(int64), intent(in) :: left
+      integer(int64) :: n
+      n = capnp_prefix_bytes(left, 1073741824_int64)
+   end function capnp_write_chunk_bytes
 
    !> Reject a body longer than the bytes still in a sized file. Pipes
    !> report no size; the traversal cap is the bound in that case.

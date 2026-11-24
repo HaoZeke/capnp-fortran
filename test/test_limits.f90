@@ -42,7 +42,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(8))
+      allocate (testsuite(9))
       testsuite(1) = new_unittest("json-audit-depth", run_json_audit_depth)
       testsuite(2) = new_unittest("group-encode-depth", run_group_encode_depth)
       testsuite(3) = new_unittest("json-flat-depth", run_json_flat_depth)
@@ -51,6 +51,7 @@ contains
       testsuite(6) = new_unittest("json-dfu65", run_json_dfu65)
       testsuite(7) = new_unittest("json-fs70", run_json_fs70)
       testsuite(8) = new_unittest("stream-read-clear", run_stream_read_clear)
+      testsuite(9) = new_unittest("large-sizes", run_large_sizes)
    end subroutine collect_limits
 
    subroutine check_(error, cond, name)
@@ -467,5 +468,42 @@ contains
          if (allocated(error)) return
       end do
    end subroutine run_stream_read_clear
+
+   !> Lengths above huge(0) through the helpers capnpf sizes its format
+   !> check and stdout writes with. A default integer size wraps 2**32 + 5
+   !> to 5 and 3 GiB to a negative count.
+   subroutine run_large_sizes(error)
+      type(error_type), allocatable, intent(out) :: error
+      integer(int64), parameter :: big(4) = [int(huge(0), int64) + 1_int64, &
+                                             3221225472_int64, 4294967301_int64, &
+                                             huge(0_int64)]
+      integer(int64) :: left, step, sent, calls
+      integer :: i
+      do i = 1, size(big)
+         call check_(error, capnp_prefix_bytes(big(i), 8192_int64) == 8192_int64, &
+                     'large-sizes: format check reads an 8 KiB prefix')
+         call check_(error, capnp_write_chunk_bytes(big(i)) == 1073741824_int64, &
+                     'large-sizes: one write takes 1 GiB')
+      end do
+      call check_(error, capnp_prefix_bytes(100_int64, 8192_int64) == 100_int64, &
+                  'large-sizes: short input is read whole')
+      call check_(error, capnp_prefix_bytes(0_int64, 8192_int64) == 0_int64, &
+                  'large-sizes: empty input has no prefix')
+      call check_(error, capnp_write_chunk_bytes(100_int64) == 100_int64, &
+                  'large-sizes: short output is one write')
+      if (allocated(error)) return
+      left = 4294967301_int64
+      sent = 0_int64
+      calls = 0_int64
+      do while (left > 0_int64)
+         step = capnp_write_chunk_bytes(left)
+         if (step <= 0_int64 .or. step > int(huge(0), int64)) exit
+         sent = sent + step
+         left = left - step
+         calls = calls + 1_int64
+      end do
+      call check_(error, left == 0_int64 .and. sent == 4294967301_int64 .and. calls == 5_int64, &
+                  'large-sizes: 4 GiB output goes out whole in 1 GiB writes')
+   end subroutine run_large_sizes
 
 end module test_limits
