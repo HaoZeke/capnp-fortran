@@ -2226,7 +2226,7 @@ contains
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '// &
              ident_fit(upcase(m)//'_'//upcase(an)//'_ANNOTATION_ID')//' = '// &
-             itoa(node_id(np))//'_int64')
+             signed_lit(node_id(np), '_int64'))
       call w('')
    end subroutine emit_annotation_node_decl
 
@@ -2254,13 +2254,13 @@ contains
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, TYPE_ENUM, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call w('   integer(int64), parameter :: '//name//' = '// &
-                itoa(const_int_value(v))//'_int64')
+                signed_lit(const_int_value(v), '_int64'))
       case (TYPE_FLOAT32)
          call w('   real(real32), parameter :: '//name//' = transfer('// &
-                itoa(int(cp_f32_bits(value_f32(v)), int64))//'_int32, 1.0_real32)')
+                signed_lit(int(cp_f32_bits(value_f32(v)), int64), '_int32')//', 1.0_real32)')
       case (TYPE_FLOAT64)
          call w('   real(real64), parameter :: '//name//' = transfer('// &
-                itoa(cp_f64_bits(value_f64(v)))//'_int64, 1.0_real64)')
+                signed_lit(cp_f64_bits(value_f64(v)), '_int64')//', 1.0_real64)')
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
@@ -4192,7 +4192,7 @@ contains
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '// &
              ident_const(upcase(tn)//'_INTERFACE_ID')//' = '// &
-             itoa(node_id(np))//'_int64')
+             signed_lit(node_id(np), '_int64'))
       ! Annotation values are module data, not type-bound procedure bindings.
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)
