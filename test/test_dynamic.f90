@@ -32,7 +32,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(32))
+      allocate (testsuite(33))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -97,6 +97,8 @@ contains
       testsuite(31)%test => run_int_to_float
       testsuite(32)%name = "dynamic-union-pointer-defaults"
       testsuite(32)%test => run_union_pointer_defaults
+      testsuite(33)%name = "dynamic-init-list-rollback"
+      testsuite(33)%test => run_init_list_rollback
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2047,5 +2049,103 @@ contains
       call capnp_message_free(r2)
       call capnp_dyn_free(schema)
    end subroutine run_union_pointer_defaults
+
+   !> capnp_dyn_init_list validates the element struct node id and list
+   !> allocation before switching the union discriminant.
+   subroutine run_init_list_rollback(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: cgr_msg, bmsg
+      type(capnp_ptr_t) :: root, nodes, node, fields, f0, f1, f2
+      type(capnp_ptr_t) :: t0, t1, t2, elem1, elem2, s, made
+      character(len=:), allocatable :: txt
+      integer(int8), allocatable :: cgr_bytes(:)
+      integer :: err, idx, tag
+
+      call capnp_message_init_builder(cgr_msg, err)
+      root = capnp_new_struct(cgr_msg, 0, 4, err)
+      nodes = capnp_new_composite_list(cgr_msg, 1_int64, 6, 6, err)
+      node = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(node, 0_int64, 1002_int64, err)
+      call capnp_set_text(node, 0, 'InitListUnion', err)
+      call capnp_set_u16(node, 12_int64, int(NODE_STRUCT, int32), err)
+      call capnp_set_u16(node, 14_int64, 1_int32, err)
+      call capnp_set_u16(node, 24_int64, 1_int32, err)
+      call capnp_set_u16(node, 30_int64, 3_int32, err)
+      call capnp_set_u32(node, 32_int64, 0_int64, err)
+
+      fields = capnp_new_composite_list(cgr_msg, 3_int64, 3, 4, err)
+      f0 = capnp_list_get_struct(fields, 0, err)
+      call capnp_set_text(f0, 0, 'label', err)
+      call capnp_set_u16(f0, 0_int64, 0_int32, err)
+      call capnp_set_u16(f0, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u32(f0, 4_int64, 0_int64, err)
+      call capnp_set_u16(f0, 8_int64, int(FIELD_SLOT, int32), err)
+      t0 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t0, 0_int64, int(TYPE_TEXT, int32), err)
+      call capnp_setp(f0, 2, t0, err)
+
+      f1 = capnp_list_get_struct(fields, 1, err)
+      call capnp_set_text(f1, 0, 'missing', err)
+      call capnp_set_u16(f1, 0_int64, 1_int32, err)
+      call capnp_set_u16(f1, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u32(f1, 4_int64, 0_int64, err)
+      call capnp_set_u16(f1, 8_int64, int(FIELD_SLOT, int32), err)
+      t1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t1, 0_int64, int(TYPE_LIST, int32), err)
+      elem1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem1, 0_int64, int(TYPE_STRUCT, int32), err)
+      call capnp_set_i64(elem1, 8_int64, 9999_int64, err)
+      call capnp_setp(t1, 0, elem1, err)
+      call capnp_setp(f1, 2, t1, err)
+
+      f2 = capnp_list_get_struct(fields, 2, err)
+      call capnp_set_text(f2, 0, 'nums', err)
+      call capnp_set_u16(f2, 0_int64, 2_int32, err)
+      call capnp_set_u16(f2, 2_int64, 2_int32, err, default=65535_int32)
+      call capnp_set_u32(f2, 4_int64, 0_int64, err)
+      call capnp_set_u16(f2, 8_int64, int(FIELD_SLOT, int32), err)
+      t2 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t2, 0_int64, int(TYPE_LIST, int32), err)
+      elem2 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem2, 0_int64, int(TYPE_INT32, int32), err)
+      call capnp_setp(t2, 0, elem2, err)
+      call capnp_setp(f2, 2, t2, err)
+
+      call capnp_setp(node, 3, fields, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_set_root(cgr_msg, root, err)
+      call capnp_serialize_bytes(cgr_msg, cgr_bytes, err)
+      call check_(error, err == CAPNP_OK, 'init-list-rollback: serialize cgr')
+
+      call capnp_dyn_load(schema, cgr_bytes, err)
+      idx = capnp_dyn_find(schema, 'InitListUnion', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'init-list-rollback: find node')
+
+      call capnp_message_init_builder(bmsg, err)
+      s = capnp_dyn_new_root(schema, idx, bmsg, err)
+      call capnp_dyn_set_text(schema, idx, s, 'label', 'keep', err)
+      call check_(error, err == CAPNP_OK, 'init-list-rollback: seed label')
+
+      made = capnp_dyn_init_list(schema, idx, s, 'missing', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
+                  'init-list-rollback: missing struct node rejected')
+      tag = capnp_dyn_which(schema, idx, s, err)
+      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
+                  'init-list-rollback: missing node leaves prior arm intact')
+
+      made = capnp_dyn_init_list(schema, idx, s, 'nums', 2000000000_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
+                  'init-list-rollback: oversize list rejected')
+      tag = capnp_dyn_which(schema, idx, s, err)
+      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
+                  'init-list-rollback: failed alloc leaves prior arm intact')
+
+      call capnp_message_free(cgr_msg)
+      call capnp_message_free(bmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_init_list_rollback
 
 end module test_dynamic
