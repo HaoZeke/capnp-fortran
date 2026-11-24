@@ -95,20 +95,25 @@ contains
    !> Resolve the pointer word stored at (seg, byte_off) into an object
    !> handle, following a single or double far pointer as in C++
    !> `WireHelpers::followFars`. Reader guard: traversal budget is charged
-   !> per landing pad and per resolved object.
-   subroutine resolve_at(msg, seg, byte_off, depth, p, err)
+   !> per landing pad and per resolved object. With charged=.false. only
+   !> the zero-size list amplification charge is skipped (see fill_list).
+   subroutine resolve_at(msg, seg, byte_off, depth, p, err, charged)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: seg
       integer(int64), intent(in) :: byte_off
       integer, intent(in) :: depth
       type(capnp_ptr_t), intent(out) :: p
       integer, intent(out) :: err
+      logical, intent(in), optional :: charged
       integer(int64) :: w, w0, base, need_bytes, tseg64, pad_off, pad_bytes
       integer :: k, tseg, oseg
+      logical :: do_charge
 
       err = CAPNP_OK
       p = capnp_ptr_t()
       p%msg => msg
+      do_charge = .true.
+      if (present(charged)) do_charge = charged
 
       if (seg < 1 .or. seg > msg%nsegs) then
          err = CAPNP_ERR_SEGMENT
@@ -194,7 +199,7 @@ contains
          p%depth = depth
 
       case (CAPNP_WK_LIST)
-         call fill_list(msg, tseg, base, w, p, err)
+         call fill_list(msg, tseg, base, w, p, err, charged=do_charge)
          if (err == CAPNP_OK) p%depth = depth
 
       case (CAPNP_WK_FAR)
@@ -215,19 +220,26 @@ contains
 
    !> Populate a list handle from a list pointer word whose content starts at
    !> base (byte offset in seg). Composite lists consume their tag word here.
-   subroutine fill_list(msg, seg, base, w, p, err)
+   !> charged=.false. skips only the amplification charge of zero-sized
+   !> elements (VOID lists and zero-stride composites); the words the list
+   !> actually occupies are always charged.
+   subroutine fill_list(msg, seg, base, w, p, err, charged)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: seg
       integer(int64), intent(in) :: base
       integer(int64), intent(in) :: w
       type(capnp_ptr_t), intent(out) :: p
       integer, intent(out) :: err
+      logical, intent(in), optional :: charged
       integer(int64) :: cnt, content_bytes, tag
       integer :: es, sb
+      logical :: do_charge
 
       err = CAPNP_OK
       p = capnp_ptr_t()
       p%msg => msg
+      do_charge = .true.
+      if (present(charged)) do_charge = charged
       es = wp_list_esize(w)
       cnt = wp_list_count(w)
 
@@ -259,7 +271,7 @@ contains
             return
          end if
          ! layout.c++:2323: a zero-word element still costs one word.
-         if (p%dwords + p%pwords == 0 .and. p%nelem > 0_int64) then
+         if (do_charge .and. p%dwords + p%pwords == 0 .and. p%nelem > 0_int64) then
             if (.not. charge(msg, p%nelem*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       else
@@ -276,7 +288,7 @@ contains
          p%esize = es
          p%nelem = cnt
          ! layout.c++:2396: List(Void) costs one word per element.
-         if (es == CAPNP_SZ_VOID .and. cnt > 0_int64) then
+         if (do_charge .and. es == CAPNP_SZ_VOID .and. cnt > 0_int64) then
             if (.not. charge(msg, cnt*8_int64, err)) p%kind = CAPNP_PK_NULL
          end if
       end if
@@ -378,6 +390,15 @@ contains
       integer, intent(in) :: i
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      q = getp_impl(p, i, err, charged=.true.)
+   end function capnp_getp
+
+   function getp_impl(p, i, err, charged) result(q)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      integer, intent(out) :: err
+      logical, intent(in) :: charged
+      type(capnp_ptr_t) :: q
       integer(int64) :: slot
       err = CAPNP_OK
       q = capnp_ptr_t()
@@ -414,9 +435,9 @@ contains
          err = CAPNP_ERR_KIND
          return
       end select
-      call resolve_at(p%msg, p%seg, slot, p%depth + 1, q, err)
+      call resolve_at(p%msg, p%seg, slot, p%depth + 1, q, err, charged=charged)
       if (p%frozen) q%frozen = .true.
-   end function capnp_getp
+   end function getp_impl
 
    !> Struct element i of a struct list. Composite lists give the real
    !> element; primitive and pointer lists give the schema-evolution upgrade
@@ -507,13 +528,14 @@ contains
       if (p%kind == CAPNP_PK_LIST) n = p%nelem
    end function capnp_list_len
 
-   !> A list count is usable as a default-integer allocation extent. The
-   !> reader charges zero-sized lists to its traversal budget; with the
-   !> compiler's 2^30-word budget, a count may exceed the physical message.
+   !> A list count is usable as a default-integer allocation extent and fits
+   !> within the backing segment (or traversal limit for zero-sized elements).
    subroutine capnp_count_fits(host, n, err)
       type(capnp_ptr_t), intent(in) :: host
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
+      integer(int64) :: stride, need_bytes, avail
+      integer :: sb
       err = CAPNP_OK
       if (n == 0_int64) return
       if (n < 0_int64 .or. n > int(huge(0), int64)) then
@@ -523,6 +545,59 @@ contains
       if (.not. associated(host%msg)) then
          err = CAPNP_ERR_BOUNDS
          return
+      end if
+      if (host%kind == CAPNP_PK_NULL) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (host%kind /= CAPNP_PK_LIST) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (n > host%nelem) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (host%esize == CAPNP_SZ_COMPOSITE) then
+         stride = int(host%dwords, int64) + int(host%pwords, int64)
+         if (stride > 0_int64) then
+            if (.not. allocated(host%msg%segs) .or. host%seg < 1 .or. &
+                host%seg > host%msg%nsegs) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+            avail = host%msg%segs(host%seg)%len - host%off
+            if (host%off < 0_int64 .or. avail < 0_int64 .or. &
+                n > avail/(stride*CAPNP_WORD_BYTES)) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+         else if (.not. host%msg%is_builder .and. n > host%msg%traversal_limit) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
+      else
+         sb = capnp_list_step_bits(host%esize)
+         if (sb < 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         if (sb > 0) then
+            if (.not. allocated(host%msg%segs) .or. host%seg < 1 .or. &
+                host%seg > host%msg%nsegs) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+            avail = host%msg%segs(host%seg)%len - host%off
+            need_bytes = (int(sb, int64)*n + 7_int64)/8_int64
+            if (host%off < 0_int64 .or. avail < 0_int64 .or. need_bytes > avail) then
+               err = CAPNP_ERR_BOUNDS
+               return
+            end if
+         else if (.not. host%msg%is_builder .and. n > host%msg%traversal_limit) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
       end if
    end subroutine capnp_count_fits
 
@@ -2415,7 +2490,7 @@ contains
             case (CAPNP_SZ_PTR)
                words = p%nelem
                do i = 0_int64, p%nelem - 1_int64
-                  r = capnp_getp(p, int(i), err)
+                  r = getp_impl(p, int(i), err, charged=.false.)
                   if (err /= CAPNP_OK) exit size_walk
                   words = words + size_depth(st, r, depth + 1, err)
                   if (err /= CAPNP_OK) exit size_walk
@@ -2441,7 +2516,7 @@ contains
       err = CAPNP_OK
       words = 0_int64
       do j = 0, p%pwords - 1
-         r = capnp_getp(p, j, err)
+         r = getp_impl(p, j, err, charged=.false.)
          if (err /= CAPNP_OK) return
          words = words + size_depth(st, r, depth + 1, err)
          if (err /= CAPNP_OK) return

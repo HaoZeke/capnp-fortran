@@ -11,7 +11,7 @@ contains
 
    subroutine collect_wire(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(58))
+      allocate (testsuite(61))
       testsuite(1)%name = "endian"
       testsuite(1)%test => test_endian
       testsuite(2)%name = "pointer-words"
@@ -128,6 +128,12 @@ contains
       testsuite(57)%test => test_wide_list_get_all
       testsuite(58)%name = "copy-empty-first-pointer"
       testsuite(58)%test => test_copy_empty_first_pointer
+      testsuite(59)%name = "count-fits-bounds"
+      testsuite(59)%test => test_count_fits_bounds
+      testsuite(60)%name = "total-size-zero-lists"
+      testsuite(60)%test => test_total_size_zero_lists
+      testsuite(61)%name = "total-size-alias"
+      testsuite(61)%test => test_total_size_alias
    end subroutine collect_wire
 
    subroutine test_endian(error)
@@ -2907,5 +2913,232 @@ contains
       open (newunit=u, file=path, status='old', iostat=ios)
       if (ios == 0) close (u, status='delete', iostat=ios)
    end subroutine unlink_path
+
+   !> capnp_count_fits bounds non-zero lists by segment capacity and
+   !> reader zero-sized lists by the message traversal budget while
+   !> leaving builders exempt; fill_list charges void lists against that
+   !> budget too (layout.c++ amplifiedRead).
+   subroutine test_count_fits_bounds(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst, got
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_FOUR, 2_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_count_fits(lst, 2_int64, err)
+      call check(error, err == CAPNP_OK, 'count-fits: actual four-byte count fits')
+      if (allocated(error)) return
+      call capnp_count_fits(lst, 1000000_int64, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, &
+                 'count-fits: count past segment bytes rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 10000000_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_count_fits(lst, 10000000_int64, err)
+      call check(error, err == CAPNP_OK, &
+                 'count-fits: builder void list is exempt from traversal limit')
+      if (allocated(error)) return
+
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      if (err == CAPNP_OK) got = capnp_getp(got, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'count-fits: void list reader enforces traversal budget')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 64_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      if (err == CAPNP_OK) got = capnp_getp(got, 0, err)
+      call check(error, err == CAPNP_OK, &
+                 'count-fits: small void list fits default traversal budget')
+      if (allocated(error)) return
+      call capnp_count_fits(got, 64_int64, err)
+      call check(error, err == CAPNP_OK, 'count-fits: small void list count fits')
+      if (allocated(error)) return
+      call capnp_message_free(rmsg)
+
+      call capnp_deserialize_bytes(bytes, rmsg, err, traversal_words=20_int64)
+      got = capnp_root(rmsg, err)
+      if (err == CAPNP_OK) got = capnp_getp(got, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'count-fits: void list past custom traversal limit rejected')
+      if (allocated(error)) return
+      got = capnp_ptr_t()
+      got%msg => rmsg
+      got%kind = CAPNP_PK_LIST
+      got%esize = CAPNP_SZ_VOID
+      got%nelem = 64_int64
+      call capnp_count_fits(got, 20_int64, err)
+      call check(error, err == CAPNP_OK, &
+                 'count-fits: reader void list within custom traversal limit fits')
+      if (allocated(error)) return
+      call capnp_count_fits(got, 64_int64, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, &
+                 'count-fits: reader void list past custom traversal limit rejected')
+      if (allocated(error)) return
+      got%esize = CAPNP_SZ_COMPOSITE
+      got%dwords = 0
+      got%pwords = 0
+      call capnp_count_fits(got, 64_int64, err)
+      call check(error, err == CAPNP_ERR_BOUNDS, &
+                 'count-fits: reader empty composite list past traversal limit rejected')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_count_fits_bounds
+
+   !> capnp_total_size skips only the zero-size amplification charge,
+   !> matching C++ 1.4.0 totalSize() (layout.c++:776-898).
+   subroutine test_total_size_zero_lists(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst, got
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: words
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_composite_list(msg, 9000000_int64, 0, 0, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'total-size-zero: composite root')
+      if (allocated(error)) return
+      words = capnp_total_size(got, err)
+      call check(error, err == CAPNP_OK .and. words == 2_int64, &
+                 'total-size-zero: 9M empty struct list total size is 2 words')
+      if (allocated(error)) return
+      got = capnp_getp(got, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'total-size-zero: getp on 9M empty struct list still hits traversal limit')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_VOID, 9000000_int64, err)
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'total-size-zero: void root')
+      if (allocated(error)) return
+      words = capnp_total_size(got, err)
+      call check(error, err == CAPNP_OK .and. words == 1_int64, &
+                 'total-size-zero: 9M void list total size is 1 word')
+      if (allocated(error)) return
+      got = capnp_getp(got, 0, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'total-size-zero: getp on 9M void list still hits traversal limit')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_total_size_zero_lists
+
+   !> capnp_total_size still charges real object words on every visit, so
+   !> pointer aliasing past the traversal budget fails with ERR_TRAVERSAL.
+   subroutine test_total_size_alias(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg, rmsg
+      type(capnp_ptr_t) :: root, lst, payload, cur, nxt, got
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: words
+      integer :: err, j
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 1, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_PTR, 10000_int64, err)
+      payload = capnp_new_list(msg, CAPNP_SZ_BYTE, 8000_int64, err)
+      do j = 0, 9999
+         call capnp_setp(lst, j, payload, err)
+         if (err /= CAPNP_OK) exit
+      end do
+      call capnp_setp(root, 0, lst, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'total-size-alias: ptr list root')
+      if (allocated(error)) return
+      words = capnp_total_size(got, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'total-size-alias: aliased ptr list exceeds traversal budget')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      cur = root
+      do j = 1, 14
+         nxt = capnp_new_struct(msg, 0, 2, err)
+         call capnp_setp(cur, 0, nxt, err)
+         call capnp_setp(cur, 1, nxt, err)
+         cur = nxt
+      end do
+      payload = capnp_new_list(msg, CAPNP_SZ_BYTE, 8000_int64, err)
+      call capnp_setp(cur, 0, payload, err)
+      call capnp_setp(cur, 1, payload, err)
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'total-size-alias: diamond root')
+      if (allocated(error)) return
+      words = capnp_total_size(got, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'total-size-alias: bounded diamond chain exceeds traversal budget')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 2, err)
+      cur = root
+      do j = 1, 39
+         nxt = capnp_new_struct(msg, 0, 2, err)
+         call capnp_setp(cur, 0, nxt, err)
+         call capnp_setp(cur, 1, nxt, err)
+         cur = nxt
+      end do
+      call capnp_set_root(msg, root, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check(error, size(bytes) == 656, 'total-size-alias: 40-struct chain is 656 bytes')
+      if (allocated(error)) return
+      call capnp_deserialize_bytes(bytes, rmsg, err)
+      got = capnp_root(rmsg, err)
+      call check(error, err == CAPNP_OK, 'total-size-alias: 40-struct chain root')
+      if (allocated(error)) return
+      words = capnp_total_size(got, err)
+      call check(error, err == CAPNP_ERR_TRAVERSAL, &
+                 'total-size-alias: 40-struct chain exceeds traversal budget')
+      if (allocated(error)) return
+      call capnp_message_free(msg)
+      call capnp_message_free(rmsg)
+   end subroutine test_total_size_alias
 
 end module test_wire

@@ -44,6 +44,7 @@ module capnp_arena
       logical :: is_builder = .false.
       !> Reader guards; builders leave them untouched.
       integer(int64) :: traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      integer(int64) :: traversal_limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       integer :: depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
       !> How later segments are sized. The first segment stays first_words.
       integer :: alloc_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
@@ -155,6 +156,7 @@ contains
       msg%nsegs = 0
       msg%is_builder = .false.
       msg%traversal_words = CAPNP_DEFAULT_TRAVERSAL_WORDS
+      msg%traversal_limit = CAPNP_DEFAULT_TRAVERSAL_WORDS
       msg%depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT
       msg%alloc_strategy = CAPNP_ALLOC_GROW_HEURISTICALLY
       msg%segment_words = DEFAULT_FIRST_WORDS
