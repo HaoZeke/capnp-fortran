@@ -7,7 +7,8 @@ module test_dynamic
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, TYPE_INT64, &
-                                TYPE_STRUCT, TYPE_ANY_POINTER, type_which, &
+                                TYPE_INT32, TYPE_STRUCT, TYPE_ANY_POINTER, NODE_STRUCT, &
+                                FIELD_SLOT, type_which, &
                                 type_list_element, type_type_id, type_anyptr_which, &
                                 type_param_scope_id, ANYPTR_PARAMETER, &
                                 value_which, value_text, node_id, &
@@ -31,7 +32,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(26))
+      allocate (testsuite(27))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -84,6 +85,8 @@ contains
       testsuite(25)%test => run_null_struct_pointers
       testsuite(26)%name = "dynamic-int-to-float"
       testsuite(26)%test => run_int_to_float
+      testsuite(27)%name = "dynamic-union-pointer-defaults"
+      testsuite(27)%test => run_union_pointer_defaults
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1700,6 +1703,110 @@ contains
                   'wire-count: void scopes are not struct scopes')
       call capnp_message_free(msg)
    end subroutine run_wire_count
+
+   !> Union pointer arms share a slot offset; reader default caching must
+   !> distinguish arms rather than returning the first arm's default.
+   subroutine run_union_pointer_defaults(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: cgr_msg, b1, b2, r1, r2
+      type(capnp_ptr_t) :: root, nodes, node, fields, f0, f1
+      type(capnp_ptr_t) :: t0, t1, elem, dv0, dv1, def0, def1
+      type(capnp_ptr_t) :: s1, s2, rr1, rr2, got0, got1
+      integer(int8), allocatable :: cgr_bytes(:), msg1(:), msg2(:)
+      integer :: err, idx
+      integer(int32) :: v0, v1
+
+      call capnp_message_init_builder(cgr_msg, err)
+      root = capnp_new_struct(cgr_msg, 0, 4, err)
+      nodes = capnp_new_composite_list(cgr_msg, 1_int64, 6, 6, err)
+      node = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(node, 0_int64, 1001_int64, err)
+      call capnp_set_text(node, 0, 'UnionDef', err)
+      call capnp_set_u16(node, 12_int64, int(NODE_STRUCT, int32), err)
+      call capnp_set_u16(node, 14_int64, 1_int32, err)
+      call capnp_set_u16(node, 24_int64, 1_int32, err)
+      call capnp_set_u16(node, 30_int64, 2_int32, err)
+      call capnp_set_u32(node, 32_int64, 0_int64, err)
+
+      fields = capnp_new_composite_list(cgr_msg, 2_int64, 3, 4, err)
+      f0 = capnp_list_get_struct(fields, 0, err)
+      call capnp_set_text(f0, 0, 'first', err)
+      call capnp_set_u16(f0, 0_int64, 0_int32, err)
+      call capnp_set_u16(f0, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u32(f0, 4_int64, 0_int64, err)
+      call capnp_set_u16(f0, 8_int64, int(FIELD_SLOT, int32), err)
+      t0 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t0, 0_int64, int(TYPE_LIST, int32), err)
+      elem = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem, 0_int64, int(TYPE_INT32, int32), err)
+      call capnp_setp(t0, 0, elem, err)
+      call capnp_setp(f0, 2, t0, err)
+      dv0 = capnp_new_struct(cgr_msg, 2, 1, err)
+      call capnp_set_u16(dv0, 0_int64, int(TYPE_LIST, int32), err)
+      def0 = capnp_new_list(cgr_msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(def0, 0_int64, 111_int32, err)
+      call capnp_setp(dv0, 0, def0, err)
+      call capnp_setp(f0, 3, dv0, err)
+
+      f1 = capnp_list_get_struct(fields, 1, err)
+      call capnp_set_text(f1, 0, 'second', err)
+      call capnp_set_u16(f1, 0_int64, 1_int32, err)
+      call capnp_set_u16(f1, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u32(f1, 4_int64, 0_int64, err)
+      call capnp_set_u16(f1, 8_int64, int(FIELD_SLOT, int32), err)
+      t1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t1, 0_int64, int(TYPE_LIST, int32), err)
+      call capnp_setp(t1, 0, elem, err)
+      call capnp_setp(f1, 2, t1, err)
+      dv1 = capnp_new_struct(cgr_msg, 2, 1, err)
+      call capnp_set_u16(dv1, 0_int64, int(TYPE_LIST, int32), err)
+      def1 = capnp_new_list(cgr_msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(def1, 0_int64, 222_int32, err)
+      call capnp_setp(dv1, 0, def1, err)
+      call capnp_setp(f1, 3, dv1, err)
+
+      call capnp_setp(node, 3, fields, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_set_root(cgr_msg, root, err)
+      call capnp_serialize_bytes(cgr_msg, cgr_bytes, err)
+      call check_(error, err == CAPNP_OK, 'union-ptr-def: serialize cgr')
+
+      call capnp_dyn_load(schema, cgr_bytes, err)
+      idx = capnp_dyn_find(schema, 'UnionDef', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'union-ptr-def: find node')
+
+      call capnp_message_init_builder(b1, err)
+      s1 = capnp_dyn_new_root(schema, idx, b1, err)
+      call capnp_dyn_select(schema, idx, s1, 'first', err)
+      call capnp_serialize_bytes(b1, msg1, err)
+      call capnp_deserialize_bytes(msg1, r1, err)
+      rr1 = capnp_root(r1, err)
+
+      call capnp_message_init_builder(b2, err)
+      s2 = capnp_dyn_new_root(schema, idx, b2, err)
+      call capnp_dyn_select(schema, idx, s2, 'second', err)
+      call capnp_serialize_bytes(b2, msg2, err)
+      call capnp_deserialize_bytes(msg2, r2, err)
+      rr2 = capnp_root(r2, err)
+
+      got0 = capnp_dyn_getp(schema, idx, rr1, 'first', err)
+      if (err == CAPNP_OK) v0 = capnp_list_get_i32(got0, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v0 == 111_int32, &
+                  'union-ptr-def: first arm default')
+
+      got1 = capnp_dyn_getp(schema, idx, rr2, 'second', err)
+      if (err == CAPNP_OK) v1 = capnp_list_get_i32(got1, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v1 == 222_int32, &
+                  'union-ptr-def: second arm default')
+
+      call capnp_message_free(cgr_msg)
+      call capnp_message_free(b1)
+      call capnp_message_free(b2)
+      call capnp_message_free(r1)
+      call capnp_message_free(r2)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_pointer_defaults
 
    function file_has(path, needle) result(found)
       character(len=*), intent(in) :: path, needle

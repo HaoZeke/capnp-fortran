@@ -44,10 +44,11 @@ module capnp_dynamic
       !> loop does not grow the arena.
       type(capnp_message_t) :: ro_arena
       logical :: ro_ready = .false.
-      !> Parallel cache of reader copies. ro_node(i), ro_slot(i) and
-      !> ro_view(i) describe one field. n_ro is the live prefix.
+      !> Parallel cache of reader copies. ro_node(i), ro_slot(i),
+      !> ro_disc(i) and ro_view(i) describe one field. n_ro is the live prefix.
       integer, allocatable :: ro_node(:)
       integer(int64), allocatable :: ro_slot(:)
+      integer, allocatable :: ro_disc(:)
       type(capnp_ptr_t), allocatable :: ro_view(:)
       integer :: n_ro = 0
    end type capnp_dyn_schema_t
@@ -135,6 +136,7 @@ contains
       schema%n_ro = 0
       if (allocated(schema%ro_node)) deallocate (schema%ro_node)
       if (allocated(schema%ro_slot)) deallocate (schema%ro_slot)
+      if (allocated(schema%ro_disc)) deallocate (schema%ro_disc)
       if (allocated(schema%ro_view)) deallocate (schema%ro_view)
       if (allocated(schema%nodes)) deallocate (schema%nodes)
       schema%loaded = .false.
@@ -1175,9 +1177,11 @@ contains
       ! change later defaults. Association is tested before the builder
       ! flag: Fortran does not promise to skip the second operand of or.
       if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
-         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
+         call dyn_reader_view(schema, idx, field_slot_offset(f), &
+                              field_discriminant(f), q, err)
       else if (.not. p%msg%is_builder) then
-         call dyn_reader_view(schema, idx, field_slot_offset(f), q, err)
+         call dyn_reader_view(schema, idx, field_slot_offset(f), &
+                              field_discriminant(f), q, err)
       else
          call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
       end if
@@ -1196,14 +1200,15 @@ contains
 
    !> Copy a schema default into a reader-owned arena once per field and
    !> freeze the handle. Later reads of the same field reuse that copy.
-   subroutine dyn_reader_view(schema, node, slot, q, err)
+   subroutine dyn_reader_view(schema, node, slot, disc, q, err)
       type(capnp_dyn_schema_t), intent(inout), target :: schema
       integer, intent(in) :: node
       integer(int64), intent(in) :: slot
+      integer, intent(in) :: disc
       type(capnp_ptr_t), intent(inout) :: q
       integer, intent(out) :: err
       type(capnp_ptr_t) :: copied
-      integer, allocatable :: grown_node(:)
+      integer, allocatable :: grown_node(:), grown_disc(:)
       integer(int64), allocatable :: grown_slot(:)
       type(capnp_ptr_t), allocatable :: grown_view(:)
       integer(int64) :: sid
@@ -1212,7 +1217,8 @@ contains
       if (q%kind == CAPNP_PK_NULL) return
       if (allocated(schema%ro_node)) then
          do i = 1, schema%n_ro
-            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot) then
+            if (schema%ro_node(i) == node .and. schema%ro_slot(i) == slot .and. &
+                schema%ro_disc(i) == disc) then
                q = schema%ro_view(i)
                return
             end if
@@ -1230,27 +1236,32 @@ contains
       copied%frozen = .true.
       n = schema%n_ro
       if (.not. allocated(schema%ro_node)) then
-         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8), stat=stat)
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_disc(8), &
+                   schema%ro_view(8), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
       else if (n >= size(schema%ro_node)) then
-         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2), stat=stat)
+         allocate (grown_node(n*2), grown_slot(n*2), grown_disc(n*2), &
+                   grown_view(n*2), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
          grown_node(1:n) = schema%ro_node(1:n)
          grown_slot(1:n) = schema%ro_slot(1:n)
+         grown_disc(1:n) = schema%ro_disc(1:n)
          grown_view(1:n) = schema%ro_view(1:n)
          call move_alloc(grown_node, schema%ro_node)
          call move_alloc(grown_slot, schema%ro_slot)
+         call move_alloc(grown_disc, schema%ro_disc)
          call move_alloc(grown_view, schema%ro_view)
       end if
       schema%n_ro = n + 1
       schema%ro_node(schema%n_ro) = node
       schema%ro_slot(schema%n_ro) = slot
+      schema%ro_disc(schema%n_ro) = disc
       schema%ro_view(schema%n_ro) = copied
       q = copied
    end subroutine dyn_reader_view
