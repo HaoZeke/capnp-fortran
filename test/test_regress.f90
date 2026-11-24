@@ -4013,7 +4013,7 @@ contains
          'oob = bytes.fromhex("1400000001000000")'//achar(10)// &
          'farp = bytes.fromhex("0200000000000000")'//achar(10)// &
          'z = bytes(8)'//achar(10)// &
-         'vec = msg([bytes.fromhex("0000000003000000"), struct.pack("<ddd", 1, 2, 3)])'//achar(10)// &
+         'vec = msg([bytes.fromhex("0000000003000000")] + [struct.pack("<d", x) for x in (1, 2, 3)])'//achar(10)// &
          'inputs = ['//achar(10)// &
          '    ("flat", listp + z), ("flat", capp), ("flat", listp), ("flat", oob),'//achar(10)// &
          '    ("flat-packed", bytes.fromhex("0101")), ("flat-packed", bytes.fromhex("0103")),'//achar(10)// &
