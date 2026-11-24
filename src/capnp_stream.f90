@@ -126,6 +126,7 @@ contains
       type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8), allocatable :: bytes(:)
       integer(int64) :: limit
+      call capnp_message_free(msg)
       call capnp_read_file(path, bytes, err)
       if (err /= CAPNP_OK) return
       if (size(bytes, kind=int64) == 0_int64) then
@@ -188,6 +189,7 @@ contains
       integer, intent(in), optional :: depth_limit
       type(capnp_reader_options_t), intent(in), optional :: options
       integer(int8), allocatable :: bytes(:)
+      call capnp_message_free(msg)
       call capnp_read_file(path, bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_deserialize_packed_bytes(bytes, msg, err, traversal_words, depth_limit, options)
@@ -208,6 +210,7 @@ contains
       integer(int8), allocatable :: table(:), body(:), whole(:)
       integer(int64) :: nsegs64, header_bytes, total, limit, i, n
       integer :: ios, stat
+      call capnp_message_free(msg)
       err = CAPNP_OK
       limit = reader_word_limit(traversal_words, options)
       read (unit, iostat=ios) head
@@ -286,6 +289,7 @@ contains
       integer(int8), allocatable :: flat(:)
       integer(int64) :: nsegs64, header_words, total_words, nwords, limit, i, n
       integer :: ios
+      call capnp_message_free(msg)
       err = CAPNP_OK
       limit = reader_word_limit(traversal_words, options)
       call unpack_word_from_unit(unit, st, w8, err)

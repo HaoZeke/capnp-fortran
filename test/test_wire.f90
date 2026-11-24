@@ -1769,7 +1769,8 @@ contains
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: bytes(:)
       type(capnp_message_t), target :: msg
-      integer :: err, efile, unit, ios
+      type(capnp_ptr_t) :: root
+      integer :: err, efile, eclear, unit, ios
       logical :: canonical
       character(len=*), parameter :: path = 'empty-file.bin'
       open (newunit=unit, file=path, access='stream', form='unformatted', &
@@ -1780,8 +1781,13 @@ contains
       end if
       close (unit)
       call capnp_read_file(path, bytes, efile)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 1, 0, err)
+      call capnp_set_root(msg, root, err)
       call capnp_read_message(path, msg, err)
-      call check(error, err == CAPNP_ERR_FRAMING, 'empty-file: stream reader rejects empty input')
+      root = capnp_root(msg, eclear)
+      call check(error, err == CAPNP_ERR_FRAMING .and. eclear == CAPNP_ERR_BOUNDS, &
+                 'empty-file: stream reader clears a prior message')
       call capnp_message_free(msg)
       if (allocated(error)) return
       open (newunit=unit, file=path, status='old', iostat=ios)
