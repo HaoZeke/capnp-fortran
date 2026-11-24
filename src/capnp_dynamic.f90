@@ -1881,7 +1881,8 @@ contains
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t, elem
-      integer :: nidx, esize
+      integer :: nidx, esize, slot, disc
+      integer(int64) :: doff
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
@@ -1897,12 +1898,35 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
+      if (.not. p%msg%is_builder) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      slot = int(field_slot_offset(f))
+      if (slot < 0 .or. slot >= p%pwords) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      disc = field_discriminant(f)
+      if (disc /= NO_DISCRIMINANT) then
+         if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         doff = node_struct_discriminant_offset(schema%nodes(idx))
+         if (doff < 0_int64 .or. doff*2_int64 + 2_int64 > int(p%dwords, int64)*8_int64) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
+      end if
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          if (nidx == 0) then
@@ -1928,7 +1952,17 @@ contains
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
-      if (err == CAPNP_OK) call capnp_setp(p, int(field_slot_offset(f)), value, err)
+      if (err /= CAPNP_OK) then
+         value = capnp_ptr_t()
+         return
+      end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) then
+         value = capnp_ptr_t()
+         return
+      end if
+      call capnp_setp(p, slot, value, err)
+      if (err /= CAPNP_OK) value = capnp_ptr_t()
    end function capnp_dyn_init_list
 
 end module capnp_dynamic
