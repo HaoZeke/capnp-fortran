@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(40))
+      allocate (testsuite(45))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -115,6 +115,16 @@ contains
       testsuite(39)%test => run_data_anypointer
       testsuite(40)%name = "dynamic-init-blob"
       testsuite(40)%test => run_init_blob
+      testsuite(41)%name = "dynamic-init-group-any"
+      testsuite(41)%test => run_init_group_any
+      testsuite(42)%name = "dynamic-init-reader"
+      testsuite(42)%test => run_init_reader
+      testsuite(43)%name = "dynamic-init-frozen"
+      testsuite(43)%test => run_init_frozen
+      testsuite(44)%name = "dynamic-init-list-handle"
+      testsuite(44)%test => run_init_list_handle
+      testsuite(45)%name = "dynamic-init-short"
+      testsuite(45)%test => run_init_short
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1212,7 +1222,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_message_t), target :: built, reader
-      type(capnp_ptr_t) :: root, mid, leaf
+      type(capnp_ptr_t) :: root, mid, leaf, made
       integer(int8), allocatable :: bytes(:)
       integer :: err, outer_idx, mid_idx, leaf_idx
       logical :: ok
@@ -1235,6 +1245,11 @@ contains
                   'nested view: leaf default reads from the view')
       call check_(error, capnp_dyn_get_int(schema, leaf_idx, leaf, 'v', err) == 7_int64 .and. &
                   err == CAPNP_OK, 'nested view: leaf default is 7')
+      call capnp_serialize_bytes(schema%ro_arena, bytes, err)
+      made = capnp_dyn_init_struct(schema, mid_idx, mid, 'leaf', err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(schema%ro_arena, bytes), &
+                  'nested view: init on a frozen default allocates nothing')
       call capnp_message_free(built)
       call capnp_message_free(reader)
       call capnp_dyn_free(schema)
@@ -2620,5 +2635,231 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_init_blob
+
+   !> capnp_dyn_init_struct on a group selects it and clears it as
+   !> dynamic.c++ clear does: only the arm with discriminant 0 and the
+   !> non-union members. On an AnyPointer it clears the pointer.
+   subroutine run_init_group_any(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: shape, root, dyn, made, q
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, sidx, circle_idx, idx, gidx, didx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sidx = capnp_dyn_find(schema, 'Shape', err)
+      circle_idx = capnp_dyn_find(schema, 'Shape.circle', err)
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      didx = capnp_dyn_find(schema, 'Dynamic', err)
+      call capnp_message_init_builder(msg, err)
+
+      shape = capnp_dyn_new_root(schema, sidx, msg, err)
+      call capnp_dyn_set_f64(schema, circle_idx, shape, 'radius', 3.5_real64, err)
+      made = capnp_dyn_init_struct(schema, sidx, shape, 'square', err)
+      call check_(error, err == CAPNP_OK .and. made%kind == CAPNP_PK_STRUCT .and. &
+                  made%seg == shape%seg .and. made%off == shape%off .and. &
+                  capnp_which(shape, 4) == 1 .and. capnp_get_f64(shape, 0_int64) == 0.0_real64, &
+                  'init-group: square selected and cleared')
+
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, root, 'y', 'hello', err)
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      made = capnp_dyn_init_struct(schema, idx, root, 'g', err)
+      call capnp_get_text(root, 0, s, err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(schema, idx, root, err) == 1 .and. &
+                  capnp_dyn_which(schema, gidx, root, err) == 0 .and. &
+                  capnp_dyn_get_int(schema, gidx, root, 'x', err) == 0_int64 .and. s == 'hello', &
+                  'init-group: inner arm 0 cleared, other arm kept')
+
+      dyn = capnp_dyn_new_root(schema, didx, msg, err)
+      call capnp_dyn_set_text(schema, didx, dyn, 'anyStruct', 'hi', err)
+      made = capnp_dyn_init_struct(schema, didx, dyn, 'anyStruct', err)
+      q = capnp_getp(dyn, 1, err)
+      call check_(error, err == CAPNP_OK .and. made%kind == CAPNP_PK_NULL .and. &
+                  q%kind == CAPNP_PK_NULL, 'init-any: AnyPointer cleared')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_init_group_any
+
+   !> Load kitchen and dynamic for the init guard tests.
+   subroutine load_guard_schemas(error, kit, dyn, ok)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(inout) :: kit, dyn
+      logical, intent(out) :: ok
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      ok = .false.
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err == CAPNP_OK) call capnp_dyn_load(kit, bytes, err)
+      if (err == CAPNP_OK) call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(dyn, bytes, err)
+      ok = err == CAPNP_OK
+   end subroutine load_guard_schemas
+
+   !> True when msg still serializes to before.
+   logical function same_bytes(msg, before)
+      type(capnp_message_t), intent(inout) :: msg
+      integer(int8), intent(in) :: before(:)
+      integer(int8), allocatable :: now(:)
+      integer :: err
+      call capnp_serialize_bytes(msg, now, err)
+      same_bytes = .false.
+      if (err /= CAPNP_OK .or. size(now) /= size(before)) return
+      same_bytes = all(now == before)
+   end function same_bytes
+
+   !> C++ has no Reader::init. Init on a reader writes nothing and returns
+   !> CAPNP_ERR_KIND for a field init cannot make, CAPNP_ERR_ARG otherwise.
+   subroutine run_init_reader(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: kit, dyn
+      type(capnp_message_t), target :: bm, rm, sm, rsm
+      type(capnp_ptr_t) :: sink, rsink, shape, rshape, made
+      integer(int8), allocatable :: bytes(:), sbytes(:)
+      integer :: err, sink_idx, shape_idx, circle_idx
+      logical :: ok
+      call load_guard_schemas(error, kit, dyn, ok)
+      if (allocated(error) .or. .not. ok) return
+      sink_idx = capnp_dyn_find(kit, 'Sink', err)
+      shape_idx = capnp_dyn_find(dyn, 'Shape', err)
+      circle_idx = capnp_dyn_find(dyn, 'Shape.circle', err)
+      call capnp_message_init_builder(bm, err)
+      sink = capnp_dyn_new_root(kit, sink_idx, bm, err)
+      call capnp_serialize_bytes(bm, bytes, err)
+      call capnp_deserialize_bytes(bytes, rm, err)
+      rsink = capnp_root(rm, err)
+      call capnp_message_init_builder(sm, err)
+      shape = capnp_dyn_new_root(dyn, shape_idx, sm, err)
+      call capnp_dyn_set_f64(dyn, circle_idx, shape, 'radius', 3.5_real64, err)
+      call capnp_serialize_bytes(sm, sbytes, err)
+      call capnp_deserialize_bytes(sbytes, rsm, err)
+      rshape = capnp_root(rsm, err)
+
+      made = capnp_dyn_init_struct(dyn, shape_idx, rshape, 'square', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(rsm, sbytes), 'init-reader: group untouched')
+      made = capnp_dyn_init_struct(kit, sink_idx, rsink, 'stuff', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(rm, bytes), 'init-reader: AnyPointer untouched')
+      made = capnp_dyn_init_struct(kit, sink_idx, rsink, 'origin', err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(rm, bytes), 'init-reader: struct untouched')
+      made = capnp_dyn_init_list(kit, sink_idx, rsink, 'label', 3_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(rm, bytes), 'init-reader: text untouched')
+      made = capnp_dyn_init_list(kit, sink_idx, rsink, 'tags', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(rm, bytes), 'init-reader: list untouched')
+      call capnp_message_free(bm)
+      call capnp_message_free(rm)
+      call capnp_message_free(sm)
+      call capnp_message_free(rsm)
+      call capnp_dyn_free(kit)
+      call capnp_dyn_free(dyn)
+   end subroutine run_init_reader
+
+   !> A frozen handle is read-only: init allocates nothing and returns a
+   !> null handle.
+   subroutine run_init_frozen(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: kit, dyn
+      type(capnp_message_t), target :: bm
+      type(capnp_ptr_t) :: sink, fz, made
+      integer(int8), allocatable :: before(:)
+      integer :: err, sink_idx
+      logical :: ok
+      call load_guard_schemas(error, kit, dyn, ok)
+      if (allocated(error) .or. .not. ok) return
+      sink_idx = capnp_dyn_find(kit, 'Sink', err)
+      call capnp_message_init_builder(bm, err)
+      sink = capnp_dyn_new_root(kit, sink_idx, bm, err)
+      fz = sink
+      fz%frozen = .true.
+      call capnp_serialize_bytes(bm, before, err)
+      made = capnp_dyn_init_struct(kit, sink_idx, fz, 'origin', err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-frozen: struct allocates nothing')
+      made = capnp_dyn_init_struct(kit, sink_idx, fz, 'stuff', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-frozen: AnyPointer untouched')
+      call capnp_message_free(bm)
+      call capnp_dyn_free(kit)
+      call capnp_dyn_free(dyn)
+   end subroutine run_init_frozen
+
+   !> A list handle is not a struct: init returns CAPNP_ERR_KIND and does
+   !> not write a list element.
+   subroutine run_init_list_handle(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: kit, dyn
+      type(capnp_message_t), target :: bm
+      type(capnp_ptr_t) :: plist, made
+      integer(int8), allocatable :: before(:)
+      integer :: err, sink_idx, dyn_idx
+      logical :: ok
+      call load_guard_schemas(error, kit, dyn, ok)
+      if (allocated(error) .or. .not. ok) return
+      sink_idx = capnp_dyn_find(kit, 'Sink', err)
+      dyn_idx = capnp_dyn_find(dyn, 'Dynamic', err)
+      call capnp_message_init_builder(bm, err)
+      plist = capnp_new_list(bm, CAPNP_SZ_PTR, 4_int64, err)
+      call capnp_set_root(bm, plist, err)
+      call capnp_serialize_bytes(bm, before, err)
+      made = capnp_dyn_init_struct(kit, sink_idx, plist, 'origin', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-list-handle: struct field')
+      made = capnp_dyn_init_struct(dyn, dyn_idx, plist, 'anyStruct', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-list-handle: AnyPointer field')
+      call capnp_message_free(bm)
+      call capnp_dyn_free(kit)
+      call capnp_dyn_free(dyn)
+   end subroutine run_init_list_handle
+
+   !> A struct with no room for the slot or the discriminant returns
+   !> CAPNP_ERR_BOUNDS before anything is allocated.
+   subroutine run_init_short(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: kit, dyn
+      type(capnp_message_t), target :: bm
+      type(capnp_ptr_t) :: short, made
+      integer(int8), allocatable :: before(:)
+      integer :: err, sink_idx, shape_idx
+      logical :: ok
+      call load_guard_schemas(error, kit, dyn, ok)
+      if (allocated(error) .or. .not. ok) return
+      sink_idx = capnp_dyn_find(kit, 'Sink', err)
+      shape_idx = capnp_dyn_find(dyn, 'Shape', err)
+      call capnp_message_init_builder(bm, err)
+      short = capnp_new_struct(bm, 0, 0, err)
+      call capnp_set_root(bm, short, err)
+      call capnp_serialize_bytes(bm, before, err)
+      made = capnp_dyn_init_struct(kit, sink_idx, short, 'origin', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-short: struct slot out of range')
+      made = capnp_dyn_init_struct(kit, sink_idx, short, 'stuff', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-short: AnyPointer slot out of range')
+      made = capnp_dyn_init_struct(dyn, shape_idx, short, 'square', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. made%kind == CAPNP_PK_NULL .and. &
+                  same_bytes(bm, before), 'init-short: no room for the discriminant')
+      call capnp_message_free(bm)
+      call capnp_dyn_free(kit)
+      call capnp_dyn_free(dyn)
+   end subroutine run_init_short
 
 end module test_dynamic
