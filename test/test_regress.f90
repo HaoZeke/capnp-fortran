@@ -1694,7 +1694,8 @@ contains
          //' && dir=$(dirname "$mod")' &
          //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
          //' then san="-fsanitize=address,undefined"; fi' &
-         //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_text.f90 -o ' &
+         //' && cov=; if nm -A "$lib" 2>/dev/null | grep -q " __gcov_init"; then cov=--coverage; fi' &
+         //' && gfortran $san $cov -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_text.f90 -o ' &
          //tmp//'/text_check.o' &
          //' && cat > '//tmp//'/ubounds.f90 <<''EOF'' &&'//achar(10)// &
          'program u'//achar(10)// &
@@ -1711,7 +1712,7 @@ contains
          '   if (err /= capnp_err_arg) stop 1'//achar(10)// &
          'end program'//achar(10)// &
          'EOF'//achar(10)// &
-         'gfortran $san -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/ubounds.f90 ' &
+         'gfortran $san $cov -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/ubounds.f90 ' &
          //tmp//'/text_check.o "$lib" -o '//tmp//'/ubounds' &
          //' && ASAN_OPTIONS=detect_leaks=0 '//tmp//'/ubounds')) then
          call test_failed(error, 'guard: bounds-checked text encode')
@@ -1726,7 +1727,8 @@ contains
          //' && dir=$(dirname "$mod")' &
          //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
          //' then san="-fsanitize=address,undefined"; fi' &
-         //' && gfortran $san -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_json.f90 -o ' &
+         //' && cov=; if nm -A "$lib" 2>/dev/null | grep -q " __gcov_init"; then cov=--coverage; fi' &
+         //' && gfortran $san $cov -fcheck=all -J '//tmp//'/mods -I "$dir" -c src/capnp_json.f90 -o ' &
          //tmp//'/json_check.o' &
          //' && cat > '//tmp//'/jbounds.f90 <<''EOF'' &&'//achar(10)// &
          'program u'//achar(10)// &
@@ -1743,7 +1745,7 @@ contains
          '   if (err /= capnp_err_arg) stop 1'//achar(10)// &
          'end program'//achar(10)// &
          'EOF'//achar(10)// &
-         'gfortran $san -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/jbounds.f90 ' &
+         'gfortran $san $cov -fcheck=all -I '//tmp//'/mods -I "$dir" '//tmp//'/jbounds.f90 ' &
          //tmp//'/json_check.o "$lib" -o '//tmp//'/jbounds' &
          //' && ASAN_OPTIONS=detect_leaks=0 '//tmp//'/jbounds')) then
          call test_failed(error, 'guard: bounds-checked json encode')
@@ -1813,7 +1815,8 @@ contains
          //' && dir=$(dirname "$mod")' &
          //' && san=; if [ -n "${ASAN_OPTIONS:-}" ] || nm -A "$lib" 2>/dev/null | grep -q " __asan";' &
          //' then san="-fsanitize=address,undefined"; fi' &
-         //' && gfortran $san -I "$dir" '//tmp//'/once.f90 "$lib" -o '//tmp//'/once' &
+         //' && cov=; if nm -A "$lib" 2>/dev/null | grep -q " __gcov_init"; then cov=--coverage; fi' &
+         //' && gfortran $san $cov -I "$dir" '//tmp//'/once.f90 "$lib" -o '//tmp//'/once' &
          //' && FAIL_SIZE=200 FAIL_INDEX=2 LD_PRELOAD='//tmp//'/faili.so ' &
          //tmp//'/once')) then
          call test_failed(error, 'canon: failed byte allocation is reported')
