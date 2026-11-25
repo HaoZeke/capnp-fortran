@@ -6,14 +6,16 @@ module test_dynamic
    use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    use capnp
    use capnp_dynamic
-   use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, &
-                                TYPE_STRUCT, TYPE_ANY_POINTER, type_which, &
+   use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, TYPE_INT64, &
+                                TYPE_INT32, TYPE_STRUCT, TYPE_ANY_POINTER, NODE_STRUCT, &
+                                FIELD_SLOT, type_which, &
                                 type_list_element, type_type_id, type_anyptr_which, &
                                 type_param_scope_id, ANYPTR_PARAMETER, &
                                 value_which, value_text, node_id, &
                                 node_struct_discriminant_offset
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
+                                person_employment_employer_set, &
                                 PERSON_EMPLOYMENT_SCHOOL_TAG
    use dual_capnp, only: dual_t, dual_new_root, dual_primary_void_a_set, &
                          dual_primary_text_a_set, dual_secondary_void_b_set, &
@@ -30,7 +32,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(21))
+      allocate (testsuite(33))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -73,6 +75,30 @@ contains
       testsuite(20)%test => run_node_bomb
       testsuite(21)%name = "dynamic-load-cleans-failure"
       testsuite(21)%test => run_load_cleanup
+      testsuite(22)%name = "dynamic-wire-count"
+      testsuite(22)%test => run_wire_count
+      testsuite(23)%name = "dynamic-int-range"
+      testsuite(23)%test => run_int_range
+      testsuite(24)%name = "dynamic-unknown-list"
+      testsuite(24)%test => run_unknown_list
+      testsuite(25)%name = "dynamic-brand-depth"
+      testsuite(25)%test => run_brand_depth
+      testsuite(26)%name = "dynamic-union-disc"
+      testsuite(26)%test => run_union_disc
+      testsuite(27)%name = "dynamic-bad-handle"
+      testsuite(27)%test => run_bad_handle
+      testsuite(28)%name = "dynamic-deep-groups"
+      testsuite(28)%test => run_deep_groups
+      testsuite(29)%name = "dynamic-nested-union-clear"
+      testsuite(29)%test => run_nested_union_clear
+      testsuite(30)%name = "dynamic-null-struct-pointers"
+      testsuite(30)%test => run_null_struct_pointers
+      testsuite(31)%name = "dynamic-int-to-float"
+      testsuite(31)%test => run_int_to_float
+      testsuite(32)%name = "dynamic-union-pointer-defaults"
+      testsuite(32)%test => run_union_pointer_defaults
+      testsuite(33)%name = "dynamic-init-list-rollback"
+      testsuite(33)%test => run_init_list_rollback
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1276,6 +1302,66 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_setp_text_nul
+   !> Zero-sized lists load like C++ 1.4.0, one traversal word per element
+   !> against the budget the reader configures. Past it the read fails.
+   subroutine run_wire_count(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t) :: schema
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_message_t), target :: msg, rd
+      type(capnp_ptr_t) :: root, nodes, typed, raw, scopes
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_new_struct(msg, 0, 4, err)
+      call capnp_set_root(msg, root, err)
+      nodes = capnp_new_composite_list(msg, 4096_int64, 0, 0, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call check_(error, err == CAPNP_OK, 'wire-count: framed')
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK .and. schema%loaded, &
+                  'wire-count: 4096 zero-size nodes load')
+      if (schema%loaded) call check_(error, size(schema%nodes) == 4096, &
+                                     'wire-count: all 4096 nodes are kept')
+      call capnp_dyn_free(schema)
+      call capnp_dyn_load(schema, bytes, err, traversal_words=4096_int64)
+      call check_(error, err /= CAPNP_OK .and. .not. schema%loaded, &
+                  'wire-count: 4096 nodes exceed a 4096-word budget')
+      call capnp_dyn_free(schema)
+      call capnp_message_free(msg)
+
+      call capnp_message_init_builder(msg, err)
+      typed = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(typed, 0_int64, 16_int32, err)
+      raw = capnp_new_struct(msg, 0, 1, err)
+      scopes = capnp_new_list(msg, CAPNP_SZ_VOID, 4096_int64, err)
+      call capnp_setp(raw, 0, scopes, err)
+      call capnp_setp(typed, 0, raw, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_OK, 'wire-count: 4096 void brand scopes load')
+      if (err == CAPNP_OK) call check_(error, size(brand%scopes) == 4096, &
+                                       'wire-count: all 4096 scopes are kept')
+      call capnp_set_root(msg, typed, err)
+      call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+
+      call capnp_deserialize_bytes(bytes, rd, err)
+      typed = capnp_root(rd, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err == CAPNP_OK, 'wire-count: 4096 read brand scopes load')
+      if (err == CAPNP_OK) call check_(error, size(brand%scopes) == 4096, &
+                                       'wire-count: all 4096 read scopes are kept')
+      call capnp_message_free(rd)
+
+      call capnp_deserialize_bytes(bytes, rd, err, traversal_words=4096_int64)
+      typed = capnp_root(rd, err)
+      call capnp_dyn_load_brand(typed, brand, err)
+      call check_(error, err /= CAPNP_OK, &
+                  'wire-count: brand scopes past the reader budget')
+      call capnp_message_free(rd)
+   end subroutine run_wire_count
 
    function file_has(path, needle) result(found)
       character(len=*), intent(in) :: path, needle
@@ -1296,8 +1382,8 @@ contains
       close (u)
    end function file_has
 
-   !> A composite list of zero-sized nodes can name far more elements than
-   !> the message has bytes. Loading it must return CAPNP_ERR_ALLOC.
+   !> Main's 10000 zero-sized nodes under a smaller configured budget.
+   !> The traversal charge refuses them before any host array is allocated.
    subroutine run_node_bomb(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_message_t), target :: msg
@@ -1312,9 +1398,754 @@ contains
       call capnp_set_root(msg, root, err)
       call capnp_serialize_bytes(msg, bytes, err)
       call capnp_message_free(msg)
-      call capnp_dyn_load(schema, bytes, err)
-      call check_(error, err == CAPNP_ERR_ALLOC, 'nodes: zero-size list is not allocated')
+      call capnp_dyn_load(schema, bytes, err, traversal_words=8192_int64)
+      call check_(error, err /= CAPNP_OK .and. .not. allocated(schema%nodes), &
+                  'nodes: zero-size list past the budget is not allocated')
       call capnp_dyn_free(schema)
    end subroutine run_node_bomb
+
+   !> Values that do not fit the field width are rejected and leave the
+   !> previous bits alone.
+   subroutine run_int_range(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, choice
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, idx, cidx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 3_int64, err)
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 128_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == 3_int64, &
+                  'range: int8 overflow keeps 3')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', -129_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int8 underflow')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', -128_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == -128_int64, &
+                  'range: int8 minimum')
+      call capnp_dyn_set_int(schema, idx, root, 'i8', 127_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'i8', err) == 127_int64, &
+                  'range: int8 maximum')
+      call capnp_dyn_set_int(schema, idx, root, 'u8', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint8 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'u8', 256_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint8 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'i16', 32768_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int16 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u16', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint16 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'i32', 2147483648_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: int32 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u32', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint32 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'u32', 4294967296_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint32 overflow')
+      call capnp_dyn_set_int(schema, idx, root, 'u64', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: uint64 rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', -1_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: enum rejects a negative')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 65536_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: enum above uint16')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 9_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'hue', err) == 9_int64, &
+                  'range: unknown enumerant still fits')
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 2147483648_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG, 'range: union int32 overflow')
+      tag = capnp_dyn_which(schema, cidx, choice, err)
+      call capnp_dyn_get_text(schema, cidx, choice, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1 .and. s == 'keep', &
+                  'range: rejected union write preserves prior arm')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_int_range
+
+   !> An unknown dynamic element tag uses a void list, as it does in C++.
+   subroutine run_unknown_list(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: sink, elem, made, alien, field_t
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, sink_idx
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      call capnp_message_init_builder(msg, err)
+      sink = capnp_dyn_new_root(schema, sink_idx, msg, err)
+      made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 2_int64, err)
+      call check_(error, err == CAPNP_OK .and. made%esize == CAPNP_SZ_EIGHT, &
+                  'unknown-list: int64 list still inits')
+      field_t = capnp_dyn_field_schema(schema, sink_idx, 'scores', err)
+      elem = type_list_element(field_t, err)
+      call check_(error, err == CAPNP_OK .and. type_which(elem) == TYPE_INT64, &
+                  'unknown-list: element starts as int64')
+      call capnp_set_u16(elem, 0_int64, 99_int32, err)
+      made = capnp_dyn_init_list(schema, sink_idx, sink, 'scores', 1_int64, err)
+      call check_(error, err == CAPNP_OK .and. made%esize == CAPNP_SZ_VOID, &
+                  'unknown-list: init makes a void list')
+      alien = capnp_new_list(msg, CAPNP_SZ_PTR, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'unknown-list: pointer list is not a match')
+      alien = capnp_new_list(msg, CAPNP_SZ_VOID, 1_int64, err)
+      call capnp_dyn_setp(schema, sink_idx, sink, 'scores', alien, err)
+      call check_(error, err == CAPNP_OK, 'unknown-list: void list is a match')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_unknown_list
+
+   !> A parameter binding that points at itself stops with a depth error.
+   subroutine run_brand_depth(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_dyn_brand_t) :: brand
+      type(capnp_ptr_t) :: raw
+      integer(int8), allocatable :: bytes(:)
+      integer(int64) :: scope_id, bound
+      integer :: err, box_idx, tw
+
+      call capnp_read_file('test/fixtures/box.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      box_idx = capnp_dyn_find(schema, 'Box', err)
+      raw = capnp_dyn_field_schema(schema, box_idx, 'value', err)
+      scope_id = type_param_scope_id(raw)
+      call check_(error, err == CAPNP_OK .and. box_idx > 0 .and. scope_id /= 0_int64, &
+                  'depth: box parameter')
+      allocate (brand%scopes(1))
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%inherited = .false.
+      allocate (brand%scopes(1)%bindings(1))
+      brand%scopes(1)%bindings(1)%unbound = .false.
+      brand%scopes(1)%bindings(1)%type = raw
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      call check_(error, err == CAPNP_ERR_DEPTH .and. tw == -1 .and. bound == 0_int64, &
+                  'depth: cyclic parameter is an error')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 12) == TYPE_LIST, &
+                  'depth: twelve nested lists resolve')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 300) == TYPE_LIST, &
+                  'depth: three hundred nested lists resolve')
+      call check_(error, brand_chain_type(schema, box_idx, brand, scope_id, 4100) == -1, &
+                  'depth: a chain past the limit is an error')
+      call capnp_dyn_free(schema)
+   end subroutine run_brand_depth
+
+   !> Bind the parameter of Box to List(...List(Text)) nested n deep and
+   !> return the resolved type, or -1 with the error left in the check.
+   function brand_chain_type(schema, box_idx, brand, scope_id, n) result(tw)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: box_idx, n
+      type(capnp_dyn_brand_t), intent(inout) :: brand
+      integer(int64), intent(in) :: scope_id
+      integer :: tw
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: inner, outer
+      integer(int64) :: bound
+      integer :: err, i
+
+      call capnp_message_init_builder(msg, err)
+      inner = capnp_new_struct(msg, 3, 1, err)
+      call capnp_set_u16(inner, 0_int64, int(TYPE_TEXT, int32), err)
+      do i = 1, n
+         outer = capnp_new_struct(msg, 3, 1, err)
+         call capnp_set_u16(outer, 0_int64, int(TYPE_LIST, int32), err)
+         call capnp_setp(outer, 0, inner, err)
+         inner = outer
+      end do
+      brand%scopes(1)%id = scope_id
+      brand%scopes(1)%bindings(1)%type = inner
+      tw = capnp_dyn_field_type(schema, box_idx, 'value', err, brand=brand, &
+                                resolved_id=bound)
+      if (err /= CAPNP_OK) tw = -1
+      call capnp_message_free(msg)
+   end function brand_chain_type
+
+   !> A failed discriminant write is the error the caller sees, and the
+   !> value is not stored afterwards.
+   subroutine run_union_disc(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_message_t), target :: msg
+      type(person_t) :: h
+      type(capnp_ptr_t) :: q
+      integer :: err
+
+      call capnp_message_init_builder(msg, err)
+      h%p = capnp_new_struct(msg, 0, 4, err)
+      call check_(error, err == CAPNP_OK, 'union-disc: short struct')
+      call person_employment_employer_set(h, 'Acme', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS, 'union-disc: discriminant error stands')
+      q = capnp_getp(h%p, 3, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL, &
+                  'union-disc: text was not written')
+      call capnp_message_free(msg)
+   end subroutine run_union_disc
+
+   !> A list, or a struct that claims data it does not have, is not a
+   !> successful default. A null handle still reads the default.
+   subroutine run_bad_handle(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, lst, bare, plist, q
+      integer(int8), allocatable :: bytes(:), payload(:)
+      integer(int64) :: n
+      integer :: err, idx, tag
+      logical :: flag
+      real(real64) :: x
+      character(len=:), allocatable :: s
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_EIGHT, 1_int64, err)
+      n = capnp_dyn_get_int(schema, idx, lst, 'i8', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. n == 0_int64, &
+                  'bad-handle: int on a list')
+      flag = capnp_dyn_get_bool(schema, idx, lst, 'b', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. .not. flag, &
+                  'bad-handle: bool on a list')
+      x = capnp_dyn_get_f64(schema, idx, lst, 'f64', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. x == 0.0_real64, &
+                  'bad-handle: float on a list')
+      plist = capnp_new_list(msg, CAPNP_SZ_PTR, 2_int64, err)
+      call capnp_dyn_get_text(schema, idx, plist, 'note', s, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'bad-handle: text on a pointer list')
+      call capnp_dyn_get_data(schema, idx, plist, 'blob', payload, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'bad-handle: data on a pointer list')
+      q = capnp_dyn_getp(schema, idx, plist, 'note', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'bad-handle: pointer on a pointer list')
+      idx = capnp_dyn_find(schema, 'Dynamic', err)
+      q = capnp_dyn_getp(schema, idx, plist, 'choice', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'bad-handle: group on a pointer list')
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      bare = capnp_ptr_t()
+      bare%kind = CAPNP_PK_STRUCT
+      bare%dwords = 1
+      n = capnp_dyn_get_int(schema, idx, bare, 'i8', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. n == 0_int64, &
+                  'bad-handle: int with no message')
+      bare = capnp_ptr_t()
+      n = capnp_dyn_get_int(schema, idx, bare, 'i8', err)
+      call check_(error, err == CAPNP_OK .and. n == 0_int64, &
+                  'bad-handle: null handle reads the default')
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      root%seg = 9
+      n = capnp_dyn_get_int(schema, idx, root, 'i8', err)
+      call check_(error, err == CAPNP_ERR_BOUNDS .and. n == 0_int64, &
+                  'bad-handle: segment is outside the message')
+      idx = capnp_dyn_find(schema, 'Shape', err)
+      tag = capnp_dyn_which(schema, idx, lst, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. tag == -1, &
+                  'bad-handle: which on a list')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_bad_handle
+
+   !> Selecting another union arm clears an arm made of groups nested ten
+   !> deep. dynamic.c++ clears a group arm without a nesting cap.
+   subroutine run_deep_groups(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: path
+      character(len=3) :: num
+      integer :: err, idx, last, i
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'DeepGroups', err)
+      path = 'DeepGroups'
+      do i = 1, 10
+         write (num, '(i0)') i
+         path = path//'.g'//trim(num)
+      end do
+      last = capnp_dyn_find(schema, path, err)
+      call check_(error, idx > 0 .and. last > 0 .and. err == CAPNP_OK, &
+                  'deep-groups: nodes found')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g1', err)
+      call check_(error, err == CAPNP_OK, 'deep-groups: select the group arm')
+      call capnp_dyn_set_int(schema, last, root, 'v10', 77_int64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, last, root, 'v10', err) == 77_int64, &
+                  'deep-groups: write the innermost field')
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call check_(error, err == CAPNP_OK, 'deep-groups: another arm replaces the groups')
+      call check_(error, capnp_dyn_which(schema, idx, root, err) == 0, &
+                  'deep-groups: the new arm is selected')
+      call check_(error, capnp_dyn_get_int(schema, last, root, 'v10', err) == 0_int64, &
+                  'deep-groups: the innermost field is cleared')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_deep_groups
+
+   !> Clearing a union group arm resets any inner union discriminant as well
+   !> as the slots, and a cyclic group schema terminates with CAPNP_ERR_DEPTH.
+   subroutine run_nested_union_clear(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema, cschema
+      type(capnp_message_t), target :: msg, cgr, cmsg
+      type(capnp_ptr_t) :: root, croot, nodes, n0, n1, fl0, fl1, f, sroot
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer(int64) :: v
+      integer :: err, idx, gidx, tag
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0 .and. gidx > 0, &
+                  'nested-union: nodes found')
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, root, 'y', 'hello', err)
+      tag = capnp_dyn_which(schema, gidx, root, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1, &
+                  'nested-union: inner y arm active')
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call check_(error, err == CAPNP_OK, 'nested-union: switch to outer a')
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      tag = capnp_dyn_which(schema, gidx, root, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0, &
+                  'nested-union: inner discriminant reset to 0')
+      v = capnp_dyn_get_int(schema, gidx, root, 'x', err)
+      call check_(error, err == CAPNP_OK .and. v == 0_int64, &
+                  'nested-union: inner x arm readable as 0')
+      call capnp_dyn_select(schema, gidx, root, 'y', err)
+      call capnp_dyn_get_text(schema, gidx, root, 'y', s, err)
+      call check_(error, err == CAPNP_OK .and. s == '', &
+                  'nested-union: inner text slot cleared')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+
+      ! Build a two-node CGR where a union group arm references itself.
+      call capnp_message_init_builder(cgr, err)
+      croot = capnp_new_struct(cgr, 0, 4, err)
+      call capnp_set_root(cgr, croot, err)
+      nodes = capnp_new_composite_list(cgr, 2_int64, 6, 6, err)
+      call capnp_setp(croot, 0, nodes, err)
+
+      n0 = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(n0, 0_int64, 100_int64, err)
+      call capnp_set_text(n0, 0, 'Cyclic', err)
+      call capnp_set_u16(n0, 12_int64, 1_int32, err)
+      call capnp_set_u16(n0, 14_int64, 1_int32, err)
+      call capnp_set_u16(n0, 24_int64, 0_int32, err)
+      call capnp_set_u16(n0, 30_int64, 2_int32, err)
+      call capnp_set_u32(n0, 32_int64, 0_int64, err)
+      fl0 = capnp_new_composite_list(cgr, 2_int64, 3, 4, err)
+      call capnp_setp(n0, 3, fl0, err)
+      f = capnp_list_get_struct(fl0, 0, err)
+      call capnp_set_text(f, 0, 'a', err)
+      call capnp_set_u16(f, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 0_int32, err)
+      f = capnp_list_get_struct(fl0, 1, err)
+      call capnp_set_text(f, 0, 'g', err)
+      call capnp_set_u16(f, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 1_int32, err)
+      call capnp_set_i64(f, 16_int64, 200_int64, err)
+
+      n1 = capnp_list_get_struct(nodes, 1, err)
+      call capnp_set_i64(n1, 0_int64, 200_int64, err)
+      call capnp_set_text(n1, 0, 'Cyclic.g', err)
+      call capnp_set_u16(n1, 12_int64, 1_int32, err)
+      call capnp_set_u16(n1, 14_int64, 1_int32, err)
+      call capnp_set_u16(n1, 24_int64, 0_int32, err)
+      call capnp_set_bool(n1, 224_int64, .true., err)
+      fl1 = capnp_new_composite_list(cgr, 1_int64, 3, 4, err)
+      call capnp_setp(n1, 3, fl1, err)
+      f = capnp_list_get_struct(fl1, 0, err)
+      call capnp_set_text(f, 0, 'loop', err)
+      call capnp_set_u16(f, 2_int64, 65535_int32, err, default=65535_int32)
+      call capnp_set_u16(f, 8_int64, 1_int32, err)
+      call capnp_set_i64(f, 16_int64, 200_int64, err)
+
+      call capnp_serialize_bytes(cgr, bytes, err)
+      call capnp_dyn_load(cschema, bytes, err)
+      idx = capnp_dyn_find(cschema, 'Cyclic', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'nested-union: cyclic schema loaded')
+      call capnp_message_init_builder(cmsg, err)
+      sroot = capnp_dyn_new_root(cschema, idx, cmsg, err)
+      call capnp_dyn_select(cschema, idx, sroot, 'g', err)
+      call check_(error, err == CAPNP_OK, 'nested-union: select cyclic group arm')
+      call capnp_dyn_select(cschema, idx, sroot, 'a', err)
+      call check_(error, err == CAPNP_ERR_DEPTH, &
+                  'nested-union: cyclic group terminates with CAPNP_ERR_DEPTH')
+      call capnp_message_free(cmsg)
+      call capnp_dyn_free(cschema)
+      call capnp_message_free(cgr)
+   end subroutine run_nested_union_clear
+
+   !> Reading pointer fields through a null struct handle that is attached to
+   !> a message returns the field defaults, matching C++ StructReader.
+   subroutine run_null_struct_pointers(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: bmsg, rmsg
+      type(capnp_ptr_t) :: broot, bnull, rnull, origin, scores, tags, q
+      integer(int8), allocatable :: bytes(:), raw(:), blob(:)
+      character(len=:), allocatable :: s
+      integer :: err, sink_idx, vec_idx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sink_idx = capnp_dyn_find(schema, 'Sink', err)
+      vec_idx = capnp_dyn_find(schema, 'Vec3', err)
+      call check_(error, err == CAPNP_OK .and. sink_idx > 0 .and. vec_idx > 0, &
+                  'null-ptr: nodes found')
+
+      ! Empty reader message: root handle is CAPNP_PK_NULL with msg associated.
+      call capnp_message_init_builder(bmsg, err)
+      call capnp_serialize_bytes(bmsg, raw, err)
+      call capnp_deserialize_bytes(raw, rmsg, err)
+      rnull = capnp_root(rmsg, err)
+      call check_(error, err == CAPNP_OK .and. rnull%kind == CAPNP_PK_NULL .and. &
+                  associated(rnull%msg), 'null-ptr: associated reader null')
+
+      q = capnp_getp(rnull, 0, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL, &
+                  'null-ptr: capnp_getp on reader null returns null')
+      call capnp_dyn_get_text(schema, sink_idx, rnull, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', &
+                  'null-ptr: reader text default')
+      call capnp_dyn_get_data(schema, sink_idx, rnull, 'payload', blob, err)
+      call check_(error, err == CAPNP_OK .and. size(blob) == 4 .and. &
+                  iand(int(blob(lbound(blob, 1))), 255) == int(z'de') .and. &
+                  iand(int(blob(ubound(blob, 1))), 255) == int(z'ef'), &
+                  'null-ptr: reader data default')
+      origin = capnp_dyn_getp(schema, sink_idx, rnull, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT, &
+                  'null-ptr: reader struct default')
+      x = capnp_dyn_get_f64(schema, vec_idx, origin, 'x', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1.5_real64) < 1.0e-15_real64, &
+                  'null-ptr: reader nested struct default x')
+      scores = capnp_dyn_getp(schema, sink_idx, rnull, 'scores', err)
+      call check_(error, err == CAPNP_OK .and. scores%kind == CAPNP_PK_LIST .and. &
+                  capnp_list_len(scores) == 3_int64, 'null-ptr: reader list default')
+      tags = capnp_dyn_getp(schema, sink_idx, rnull, 'tags', err)
+      call check_(error, err == CAPNP_OK .and. tags%kind == CAPNP_PK_NULL, &
+                  'null-ptr: reader unset list without default')
+
+      ! Associated builder null handle (unset pointer slot on a builder struct).
+      broot = capnp_new_struct(bmsg, 0, 1, err)
+      bnull = capnp_getp(broot, 0, err)
+      call check_(error, err == CAPNP_OK .and. bnull%kind == CAPNP_PK_NULL .and. &
+                  associated(bnull%msg), 'null-ptr: associated builder null')
+      call capnp_dyn_get_text(schema, sink_idx, bnull, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'unnamed', &
+                  'null-ptr: builder text default')
+      origin = capnp_dyn_getp(schema, sink_idx, bnull, 'origin', err)
+      call check_(error, err == CAPNP_OK .and. origin%kind == CAPNP_PK_STRUCT .and. &
+                  origin%frozen, 'null-ptr: builder null returns frozen default')
+      call capnp_dyn_set_f64(schema, vec_idx, origin, 'x', 9.0_real64, err)
+      call check_(error, err /= CAPNP_OK, 'null-ptr: frozen default rejects write')
+
+      call capnp_message_free(rmsg)
+      call capnp_message_free(bmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_null_struct_pointers
+
+   !> Integer writes on Float32 and Float64 fields convert to float,
+   !> matching DynamicStruct::Builder::set in dynamic.c++.
+   subroutine run_int_to_float(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema, kschema
+      type(capnp_message_t), target :: msg, kmsg
+      type(capnp_ptr_t) :: root, sink
+      integer(int8), allocatable :: bytes(:)
+      integer :: err, idx, sidx
+      real(real64) :: x
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+
+      call capnp_dyn_set_int(schema, idx, root, 'f32', -42_int64, err)
+      x = capnp_dyn_get_f64(schema, idx, root, 'f32', err)
+      call check_(error, err == CAPNP_OK .and. abs(x + 42.0_real64) < 1.0e-6_real64, &
+                  'int-to-float: negative int to f32')
+
+      call capnp_dyn_set_int(schema, idx, root, 'f64', 1000000_int64, err)
+      x = capnp_dyn_get_f64(schema, idx, root, 'f64', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 1000000.0_real64) < 1.0e-12_real64, &
+                  'int-to-float: positive int to f64')
+
+      call capnp_read_file('test/fixtures/kitchen.cgr.bin', bytes, err)
+      call capnp_dyn_load(kschema, bytes, err)
+      sidx = capnp_dyn_find(kschema, 'Sink', err)
+      call capnp_message_init_builder(kmsg, err)
+      sink = capnp_dyn_new_root(kschema, sidx, kmsg, err)
+      call capnp_dyn_set_int(kschema, sidx, sink, 'ratio', 7_int64, err)
+      x = capnp_dyn_get_f64(kschema, sidx, sink, 'ratio', err)
+      call check_(error, err == CAPNP_OK .and. abs(x - 7.0_real64) < 1.0e-12_real64, &
+                  'int-to-float: defaulted f64 set to 7')
+      call capnp_dyn_set_int(kschema, sidx, sink, 'ratio', 0_int64, err)
+      x = capnp_dyn_get_f64(kschema, sidx, sink, 'ratio', err)
+      call check_(error, err == CAPNP_OK .and. abs(x) < 1.0e-12_real64, &
+                  'int-to-float: defaulted f64 set to 0')
+
+      call capnp_message_free(kmsg)
+      call capnp_dyn_free(kschema)
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_int_to_float
+
+   !> Union pointer arms share a slot offset; reader default caching must
+   !> distinguish arms rather than returning the first arm's default.
+   subroutine run_union_pointer_defaults(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: cgr_msg, b1, b2, r1, r2
+      type(capnp_ptr_t) :: root, nodes, node, fields, f0, f1
+      type(capnp_ptr_t) :: t0, t1, elem, dv0, dv1, def0, def1
+      type(capnp_ptr_t) :: s1, s2, rr1, rr2, got0, got1
+      integer(int8), allocatable :: cgr_bytes(:), msg1(:), msg2(:)
+      integer :: err, idx
+      integer(int32) :: v0, v1
+
+      call capnp_message_init_builder(cgr_msg, err)
+      root = capnp_new_struct(cgr_msg, 0, 4, err)
+      nodes = capnp_new_composite_list(cgr_msg, 1_int64, 6, 6, err)
+      node = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(node, 0_int64, 1001_int64, err)
+      call capnp_set_text(node, 0, 'UnionDef', err)
+      call capnp_set_u16(node, 12_int64, int(NODE_STRUCT, int32), err)
+      call capnp_set_u16(node, 14_int64, 1_int32, err)
+      call capnp_set_u16(node, 24_int64, 1_int32, err)
+      call capnp_set_u16(node, 30_int64, 2_int32, err)
+      call capnp_set_u32(node, 32_int64, 0_int64, err)
+
+      fields = capnp_new_composite_list(cgr_msg, 2_int64, 3, 4, err)
+      f0 = capnp_list_get_struct(fields, 0, err)
+      call capnp_set_text(f0, 0, 'first', err)
+      call capnp_set_u16(f0, 0_int64, 0_int32, err)
+      call capnp_set_u16(f0, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u32(f0, 4_int64, 0_int64, err)
+      call capnp_set_u16(f0, 8_int64, int(FIELD_SLOT, int32), err)
+      t0 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t0, 0_int64, int(TYPE_LIST, int32), err)
+      elem = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem, 0_int64, int(TYPE_INT32, int32), err)
+      call capnp_setp(t0, 0, elem, err)
+      call capnp_setp(f0, 2, t0, err)
+      dv0 = capnp_new_struct(cgr_msg, 2, 1, err)
+      call capnp_set_u16(dv0, 0_int64, int(TYPE_LIST, int32), err)
+      def0 = capnp_new_list(cgr_msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(def0, 0_int64, 111_int32, err)
+      call capnp_setp(dv0, 0, def0, err)
+      call capnp_setp(f0, 3, dv0, err)
+
+      f1 = capnp_list_get_struct(fields, 1, err)
+      call capnp_set_text(f1, 0, 'second', err)
+      call capnp_set_u16(f1, 0_int64, 1_int32, err)
+      call capnp_set_u16(f1, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u32(f1, 4_int64, 0_int64, err)
+      call capnp_set_u16(f1, 8_int64, int(FIELD_SLOT, int32), err)
+      t1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t1, 0_int64, int(TYPE_LIST, int32), err)
+      call capnp_setp(t1, 0, elem, err)
+      call capnp_setp(f1, 2, t1, err)
+      dv1 = capnp_new_struct(cgr_msg, 2, 1, err)
+      call capnp_set_u16(dv1, 0_int64, int(TYPE_LIST, int32), err)
+      def1 = capnp_new_list(cgr_msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(def1, 0_int64, 222_int32, err)
+      call capnp_setp(dv1, 0, def1, err)
+      call capnp_setp(f1, 3, dv1, err)
+
+      call capnp_setp(node, 3, fields, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_set_root(cgr_msg, root, err)
+      call capnp_serialize_bytes(cgr_msg, cgr_bytes, err)
+      call check_(error, err == CAPNP_OK, 'union-ptr-def: serialize cgr')
+
+      call capnp_dyn_load(schema, cgr_bytes, err)
+      idx = capnp_dyn_find(schema, 'UnionDef', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'union-ptr-def: find node')
+
+      call capnp_message_init_builder(b1, err)
+      s1 = capnp_dyn_new_root(schema, idx, b1, err)
+      call capnp_dyn_select(schema, idx, s1, 'first', err)
+      call capnp_serialize_bytes(b1, msg1, err)
+      call capnp_deserialize_bytes(msg1, r1, err)
+      rr1 = capnp_root(r1, err)
+
+      call capnp_message_init_builder(b2, err)
+      s2 = capnp_dyn_new_root(schema, idx, b2, err)
+      call capnp_dyn_select(schema, idx, s2, 'second', err)
+      call capnp_serialize_bytes(b2, msg2, err)
+      call capnp_deserialize_bytes(msg2, r2, err)
+      rr2 = capnp_root(r2, err)
+
+      got0 = capnp_dyn_getp(schema, idx, rr1, 'first', err)
+      if (err == CAPNP_OK) v0 = capnp_list_get_i32(got0, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v0 == 111_int32, &
+                  'union-ptr-def: first arm default')
+
+      got1 = capnp_dyn_getp(schema, idx, rr2, 'second', err)
+      if (err == CAPNP_OK) v1 = capnp_list_get_i32(got1, 0_int64, err)
+      call check_(error, err == CAPNP_OK .and. v1 == 222_int32, &
+                  'union-ptr-def: second arm default')
+
+      call capnp_message_free(cgr_msg)
+      call capnp_message_free(b1)
+      call capnp_message_free(b2)
+      call capnp_message_free(r1)
+      call capnp_message_free(r2)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_pointer_defaults
+
+   !> capnp_dyn_init_list validates the element struct node id and list
+   !> allocation before switching the union discriminant.
+   subroutine run_init_list_rollback(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: cgr_msg, bmsg
+      type(capnp_ptr_t) :: root, nodes, node, fields, f0, f1, f2
+      type(capnp_ptr_t) :: t0, t1, t2, elem1, elem2, s, made
+      character(len=:), allocatable :: txt
+      integer(int8), allocatable :: cgr_bytes(:)
+      integer :: err, idx, tag
+
+      call capnp_message_init_builder(cgr_msg, err)
+      root = capnp_new_struct(cgr_msg, 0, 4, err)
+      nodes = capnp_new_composite_list(cgr_msg, 1_int64, 6, 6, err)
+      node = capnp_list_get_struct(nodes, 0, err)
+      call capnp_set_i64(node, 0_int64, 1002_int64, err)
+      call capnp_set_text(node, 0, 'InitListUnion', err)
+      call capnp_set_u16(node, 12_int64, int(NODE_STRUCT, int32), err)
+      call capnp_set_u16(node, 14_int64, 1_int32, err)
+      call capnp_set_u16(node, 24_int64, 1_int32, err)
+      call capnp_set_u16(node, 30_int64, 3_int32, err)
+      call capnp_set_u32(node, 32_int64, 0_int64, err)
+
+      fields = capnp_new_composite_list(cgr_msg, 3_int64, 3, 4, err)
+      f0 = capnp_list_get_struct(fields, 0, err)
+      call capnp_set_text(f0, 0, 'label', err)
+      call capnp_set_u16(f0, 0_int64, 0_int32, err)
+      call capnp_set_u16(f0, 2_int64, 0_int32, err, default=65535_int32)
+      call capnp_set_u32(f0, 4_int64, 0_int64, err)
+      call capnp_set_u16(f0, 8_int64, int(FIELD_SLOT, int32), err)
+      t0 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t0, 0_int64, int(TYPE_TEXT, int32), err)
+      call capnp_setp(f0, 2, t0, err)
+
+      f1 = capnp_list_get_struct(fields, 1, err)
+      call capnp_set_text(f1, 0, 'missing', err)
+      call capnp_set_u16(f1, 0_int64, 1_int32, err)
+      call capnp_set_u16(f1, 2_int64, 1_int32, err, default=65535_int32)
+      call capnp_set_u32(f1, 4_int64, 0_int64, err)
+      call capnp_set_u16(f1, 8_int64, int(FIELD_SLOT, int32), err)
+      t1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t1, 0_int64, int(TYPE_LIST, int32), err)
+      elem1 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem1, 0_int64, int(TYPE_STRUCT, int32), err)
+      call capnp_set_i64(elem1, 8_int64, 9999_int64, err)
+      call capnp_setp(t1, 0, elem1, err)
+      call capnp_setp(f1, 2, t1, err)
+
+      f2 = capnp_list_get_struct(fields, 2, err)
+      call capnp_set_text(f2, 0, 'nums', err)
+      call capnp_set_u16(f2, 0_int64, 2_int32, err)
+      call capnp_set_u16(f2, 2_int64, 2_int32, err, default=65535_int32)
+      call capnp_set_u32(f2, 4_int64, 0_int64, err)
+      call capnp_set_u16(f2, 8_int64, int(FIELD_SLOT, int32), err)
+      t2 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(t2, 0_int64, int(TYPE_LIST, int32), err)
+      elem2 = capnp_new_struct(cgr_msg, 3, 1, err)
+      call capnp_set_u16(elem2, 0_int64, int(TYPE_INT32, int32), err)
+      call capnp_setp(t2, 0, elem2, err)
+      call capnp_setp(f2, 2, t2, err)
+
+      call capnp_setp(node, 3, fields, err)
+      call capnp_setp(root, 0, nodes, err)
+      call capnp_set_root(cgr_msg, root, err)
+      call capnp_serialize_bytes(cgr_msg, cgr_bytes, err)
+      call check_(error, err == CAPNP_OK, 'init-list-rollback: serialize cgr')
+
+      call capnp_dyn_load(schema, cgr_bytes, err)
+      idx = capnp_dyn_find(schema, 'InitListUnion', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0, 'init-list-rollback: find node')
+
+      call capnp_message_init_builder(bmsg, err)
+      s = capnp_dyn_new_root(schema, idx, bmsg, err)
+      call capnp_dyn_set_text(schema, idx, s, 'label', 'keep', err)
+      call check_(error, err == CAPNP_OK, 'init-list-rollback: seed label')
+
+      made = capnp_dyn_init_list(schema, idx, s, 'missing', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
+                  'init-list-rollback: missing struct node rejected')
+      tag = capnp_dyn_which(schema, idx, s, err)
+      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
+                  'init-list-rollback: missing node leaves prior arm intact')
+
+      made = capnp_dyn_init_list(schema, idx, s, 'nums', 2000000000_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
+                  'init-list-rollback: oversize list rejected')
+      tag = capnp_dyn_which(schema, idx, s, err)
+      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
+                  'init-list-rollback: failed alloc leaves prior arm intact')
+
+      call capnp_message_free(cgr_msg)
+      call capnp_message_free(bmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_init_list_rollback
 
 end module test_dynamic

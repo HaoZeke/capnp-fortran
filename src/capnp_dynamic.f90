@@ -88,18 +88,21 @@ module capnp_dynamic
 contains
 
    !> Load a framed CodeGeneratorRequest (the bytes `capnp compile -o-`
-   !> writes).
-   subroutine capnp_dyn_load(schema, bytes, err)
+   !> writes). traversal_words sets the reader budget (default 2**30 words).
+   subroutine capnp_dyn_load(schema, bytes, err, traversal_words)
       type(capnp_dyn_schema_t), intent(inout), target :: schema
       integer(int8), intent(in) :: bytes(0:)
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: traversal_words
       type(capnp_ptr_t) :: root, l
-      integer(int64) :: n, i
+      integer(int64) :: n, i, budget
       integer :: stat
       call capnp_dyn_free(schema)
       ! Schema graphs are deep; match the plugin's generous reader guards.
+      budget = 1073741824_int64
+      if (present(traversal_words)) budget = traversal_words
       call capnp_deserialize_bytes(bytes, schema%cgr, err, &
-                                   traversal_words=1073741824_int64, depth_limit=256)
+                                   traversal_words=budget, depth_limit=256)
       if (err /= CAPNP_OK) then
          call capnp_dyn_free(schema)
          return
@@ -151,8 +154,10 @@ contains
       schema%loaded = .false.
    end subroutine capnp_dyn_free
 
-   !> A list element stored in a host array is at least one byte on the wire.
-   !> A count past the message size is a zero-size claim.
+   !> A host array sized from a wire count. A reader charged a zero-size
+   !> list one traversal word per element when it read the pointer, as C++
+   !> amplifiedRead does, so its counts fit the configured budget. A
+   !> builder has no budget.
    function wire_count_ok(p, n) result(ok)
       type(capnp_ptr_t), intent(in) :: p
       integer(int64), intent(in) :: n
@@ -161,11 +166,7 @@ contains
          ok = .false.
          return
       end if
-      if (.not. associated(p%msg)) then
-         ok = n == 0_int64
-         return
-      end if
-      ok = capnp_host_count_ok(n, capnp_message_nbytes(p%msg))
+      ok = associated(p%msg) .or. n == 0_int64
    end function wire_count_ok
 
    !> Node index for a type name: an exact displayName match, or the
@@ -320,7 +321,8 @@ contains
       if (allocated(brand%scopes)) deallocate (brand%scopes)
       if (t%kind /= CAPNP_PK_STRUCT) then
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       ! Brand is a pointer on struct, enum and interface only. Text, lists
@@ -329,13 +331,15 @@ contains
       case (TYPE_STRUCT, TYPE_ENUM, TYPE_INTERFACE)
       case default
          err = CAPNP_ERR_KIND
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end select
       raw = type_brand(t, err)
       if (err /= CAPNP_OK) return
       if (raw%kind == CAPNP_PK_NULL) then
-         allocate (brand%scopes(0))
+         allocate (brand%scopes(0), stat=stat)
+         if (stat /= 0) err = CAPNP_ERR_ALLOC
          return
       end if
       scopes = brand_scopes(raw, err)
@@ -357,7 +361,11 @@ contains
          select case (scope_which(scope))
          case (SCOPE_INHERIT)
             brand%scopes(i + 1)%inherited = .true.
-            allocate (brand%scopes(i + 1)%bindings(0))
+            allocate (brand%scopes(i + 1)%bindings(0), stat=stat)
+            if (stat /= 0) then
+               err = CAPNP_ERR_ALLOC
+               return
+            end if
             cycle
          case (SCOPE_BIND)
             brand%scopes(i + 1)%inherited = .false.
@@ -554,8 +562,10 @@ contains
       end select
    end subroutine dyn_zero_slot
 
-   !> Zero every slot of a struct or group, including nested groups.
+   !> Zero every slot and inner union discriminant of a struct or group,
+   !> including nested groups.
    recursive subroutine dyn_clear_slots(schema, idx, p, depth, err)
+      use capnp_union, only: capnp_set_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
@@ -571,6 +581,10 @@ contains
       if (idx < 1 .or. idx > size(schema%nodes)) then
          err = CAPNP_ERR_ARG
          return
+      end if
+      if (node_struct_discriminant_count(schema%nodes(idx)) > 0) then
+         call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), 0, err)
+         if (err /= CAPNP_OK) return
       end if
       fl = node_struct_fields(schema%nodes(idx), err)
       if (err /= CAPNP_OK) return
@@ -647,6 +661,76 @@ contains
       call capnp_set_which(p, off, disc, err)
    end subroutine dyn_select_field
 
+   !> A field that sits past the data section reads as the default.
+   !> A field inside the claimed section needs a struct whose bytes are
+   !> in a segment. layout.h StructReader::getDataField (1098) returns
+   !> zero past dataSize, and layout.c++ (800) rejects a struct that does
+   !> not lie in its segment.
+   subroutine dyn_bits_readable(p, bit_off, bit_len, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: bit_off, bit_len
+      integer, intent(out) :: err
+      integer(int64) :: bits, byte_off, nbytes
+      err = CAPNP_OK
+      if (p%kind /= CAPNP_PK_NULL .and. p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (bit_off < 0_int64 .or. bit_len < 0_int64) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (p%dbits >= 0_int64) then
+         bits = p%dbits
+      else
+         bits = int(p%dwords, int64)*64_int64
+      end if
+      if (bit_len == 0_int64 .or. bit_off + bit_len > bits) return
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. allocated(p%msg%segs) .or. p%seg < 1 .or. p%seg > p%msg%nsegs) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      byte_off = p%off + bit_off/8_int64
+      nbytes = (bit_off + bit_len + 7_int64)/8_int64 - bit_off/8_int64
+      if (p%off < 0_int64 .or. byte_off < 0_int64 .or. &
+          byte_off + nbytes > p%msg%segs(p%seg)%len) err = CAPNP_ERR_BOUNDS
+   end subroutine dyn_bits_readable
+
+   !> A pointer field beyond a struct's pointer section is null. A field
+   !> inside that section must name bytes in a message segment.
+   subroutine dyn_pointer_readable(p, slot, err)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: slot
+      integer, intent(out) :: err
+      integer(int64) :: byte_off
+      err = CAPNP_OK
+      if (p%kind == CAPNP_PK_NULL) return
+      if (p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (slot < 0) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (slot >= p%pwords) return
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (.not. allocated(p%msg%segs) .or. p%seg < 1 .or. p%seg > p%msg%nsegs) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      byte_off = p%off + int(p%dwords + slot, int64)*8_int64
+      if (p%off < 0_int64 .or. byte_off < 0_int64 .or. &
+          byte_off + 8_int64 > p%msg%segs(p%seg)%len) err = CAPNP_ERR_BOUNDS
+   end subroutine dyn_pointer_readable
+
    !> C++ DynamicStruct::get rejects a union arm that is not selected.
    subroutine dyn_require_active(schema, idx, p, f, err)
       use capnp_union, only: capnp_which
@@ -667,6 +751,8 @@ contains
          return
       end if
       off = int(node_struct_discriminant_offset(schema%nodes(idx)))
+      call dyn_bits_readable(p, int(off, int64)*16_int64, 16_int64, err)
+      if (err /= CAPNP_OK) return
       if (capnp_which(p, off) /= disc) err = CAPNP_ERR_KIND
    end subroutine dyn_require_active
 
@@ -922,18 +1008,32 @@ contains
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_INT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i8(p, off, default=int(value_i8(dv), int8)), int64)
       case (TYPE_UINT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_u8(p, off, default=value_u8(dv)), int64)
       case (TYPE_INT16)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i16(p, off*2_int64, default=value_i16(dv)), int64)
       case (TYPE_UINT16, TYPE_ENUM)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_u16(p, off*2_int64, default=value_u16(dv)), int64)
       case (TYPE_INT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = int(capnp_get_i32(p, off*4_int64, default=value_i32(dv)), int64)
       case (TYPE_UINT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_u32(p, off*4_int64, default=value_u32(dv))
       case (TYPE_INT64, TYPE_UINT64)
+         call dyn_bits_readable(p, off*64_int64, 64_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_i64(p, off*8_int64, default=value_i64(dv))
       case default
          err = CAPNP_ERR_KIND
@@ -961,8 +1061,12 @@ contains
       off = field_slot_offset(f)
       select case (type_which(t))
       case (TYPE_FLOAT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
          v = real(capnp_get_f32(p, off*4_int64, default=value_f32(dv)), real64)
       case (TYPE_FLOAT64)
+         call dyn_bits_readable(p, off*64_int64, 64_int64, err)
+         if (err /= CAPNP_OK) return
          v = capnp_get_f64(p, off*8_int64, default=value_f64(dv))
       case default
          err = CAPNP_ERR_KIND
@@ -990,6 +1094,8 @@ contains
       end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      call dyn_bits_readable(p, field_slot_offset(f), 1_int64, err)
+      if (err /= CAPNP_OK) return
       v = capnp_get_bool(p, field_slot_offset(f), default=value_bool(dv))
    end function capnp_dyn_get_bool
 
@@ -1011,6 +1117,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (q%kind /= CAPNP_PK_NULL) then
@@ -1041,6 +1149,8 @@ contains
          allocate (bytes(0:-1))
          return
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (q%kind /= CAPNP_PK_NULL) then
@@ -1068,11 +1178,16 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       type(capnp_ptr_t) :: f, t, dv
+      q = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       call dyn_require_active(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
+         if (p%kind /= CAPNP_PK_NULL .and. p%kind /= CAPNP_PK_STRUCT) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          q = p
          return
       end if
@@ -1084,6 +1199,8 @@ contains
          err = CAPNP_ERR_KIND
          return
       end select
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
       dv = field_slot_default(f, err)
@@ -1094,10 +1211,11 @@ contains
       ! frozen view of one cached copy of this field. A builder copies
       ! into its own message, as the C++ runtime does, so a write cannot
       ! change later defaults. A frozen view is read-only, so it reads as
-      ! a reader even though its arena is a builder. Association is tested
+      ! a reader even though its arena is a builder. A null parent reads
+      ! defaults without allocating in its message. Association is tested
       ! before the builder flag: Fortran does not promise to skip the
       ! second operand of or.
-      if (.not. associated(p%msg)) then
+      if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
          call dyn_reader_view(schema, idx, f, q, err)
       else if (p%frozen .or. .not. p%msg%is_builder) then
          call dyn_reader_view(schema, idx, f, q, err)
@@ -1109,7 +1227,7 @@ contains
          q%schema_id = type_type_id(t)
       end if
       if (err == CAPNP_OK) then
-         if (.not. associated(p%msg)) then
+         if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
             q%frozen = .true.
          else if (p%frozen .or. .not. p%msg%is_builder) then
             q%frozen = .true.
@@ -1130,7 +1248,7 @@ contains
       integer(int64), allocatable :: grown_slot(:), grown_foff(:)
       type(capnp_ptr_t), allocatable :: grown_view(:)
       integer(int64) :: sid, slot
-      integer :: i, n
+      integer :: i, n, stat
       err = CAPNP_OK
       if (q%kind == CAPNP_PK_NULL) return
       slot = field_slot_offset(f)
@@ -1155,11 +1273,19 @@ contains
       copied%frozen = .true.
       n = schema%n_ro
       if (.not. allocated(schema%ro_node)) then
-         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8))
-         allocate (schema%ro_fseg(8), schema%ro_foff(8))
+         allocate (schema%ro_node(8), schema%ro_slot(8), schema%ro_view(8), &
+                   schema%ro_fseg(8), schema%ro_foff(8), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
       else if (n >= size(schema%ro_node)) then
-         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2))
-         allocate (grown_fseg(n*2), grown_foff(n*2))
+         allocate (grown_node(n*2), grown_slot(n*2), grown_view(n*2), &
+                   grown_fseg(n*2), grown_foff(n*2), stat=stat)
+         if (stat /= 0) then
+            err = CAPNP_ERR_ALLOC
+            return
+         end if
          grown_node(1:n) = schema%ro_node(1:n)
          grown_slot(1:n) = schema%ro_slot(1:n)
          grown_view(1:n) = schema%ro_view(1:n)
@@ -1286,6 +1412,11 @@ contains
          err = CAPNP_ERR_KIND
          return
       end if
+      call dyn_bits_readable(p, disc_off*16_int64, 16_int64, err)
+      if (err /= CAPNP_OK) then
+         tag = -1
+         return
+      end if
       tag = capnp_which(p, int(disc_off))
       ! C++ which() is empty when the discriminant names no arm.
       if (tag < 0 .or. tag >= disc_count) tag = -1
@@ -1329,11 +1460,18 @@ contains
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
-            TYPE_INT64, TYPE_UINT64, TYPE_ENUM)
+            TYPE_INT64, TYPE_UINT64, TYPE_ENUM, TYPE_FLOAT32, TYPE_FLOAT64)
       case default
          err = CAPNP_ERR_KIND
          return
       end select
+      ! dynamic.c++ checkRoundTrip (1737) and signedToUnsigned (1699):
+      ! as<int8_t>() and as<uint8_t>() reject a value that does not survive
+      ! the narrowing cast. Unsigned targets reject a negative.
+      if (.not. dyn_int_fits(type_which(t), v)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
@@ -1350,12 +1488,45 @@ contains
          call capnp_set_i32(p, off*4_int64, int(v, int32), err, default=value_i32(dv))
       case (TYPE_UINT32)
          call capnp_set_u32(p, off*4_int64, v, err, default=value_u32(dv))
-      case (TYPE_INT64, TYPE_UINT64)
+      case (TYPE_INT64)
          call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
+      case (TYPE_UINT64)
+         call capnp_set_i64(p, off*8_int64, v, err, default=value_i64(dv))
+      case (TYPE_FLOAT32)
+         call capnp_set_f32(p, off*4_int64, real(v, real32), err, default=value_f32(dv))
+      case (TYPE_FLOAT64)
+         call capnp_set_f64(p, off*8_int64, real(v, real64), err, default=value_f64(dv))
       case default
          err = CAPNP_ERR_KIND
       end select
    end subroutine capnp_dyn_set_int
+
+   !> True when v round-trips through the field width. Matches
+   !> DynamicValue::Reader::as in dynamic.c++.
+   pure function dyn_int_fits(tw, v) result(ok)
+      integer, intent(in) :: tw
+      integer(int64), intent(in) :: v
+      logical :: ok
+      ok = .false.
+      select case (tw)
+      case (TYPE_INT8)
+         ok = v >= -128_int64 .and. v <= 127_int64
+      case (TYPE_UINT8)
+         ok = v >= 0_int64 .and. v <= 255_int64
+      case (TYPE_INT16)
+         ok = v >= -32768_int64 .and. v <= 32767_int64
+      case (TYPE_UINT16, TYPE_ENUM)
+         ok = v >= 0_int64 .and. v <= 65535_int64
+      case (TYPE_INT32)
+         ok = v >= -2147483648_int64 .and. v <= 2147483647_int64
+      case (TYPE_UINT32)
+         ok = v >= 0_int64 .and. v <= 4294967295_int64
+      case (TYPE_INT64, TYPE_FLOAT32, TYPE_FLOAT64)
+         ok = .true.
+      case (TYPE_UINT64)
+         ok = v >= 0_int64
+      end select
+   end function dyn_int_fits
 
    subroutine capnp_dyn_set_bool(schema, idx, p, fname, v, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -1508,7 +1679,9 @@ contains
             if (value%pwords /= node_struct_pointer_count(schema%nodes(nidx))) ok = .false.
          end if
       case default
-         ok = .true.
+         ! dynamic.c++ elementSizeFor (70-97) maps an unknown tag to
+         ! ElementSize::VOID, rather than treating it as a pointer.
+         ok = value%esize == CAPNP_SZ_VOID
       end select
    end function dyn_list_ok
 
@@ -1630,6 +1803,8 @@ contains
             return
          end if
       end if
+      call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
+      if (err /= CAPNP_OK) return
       value = capnp_getp(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       if (value%kind == CAPNP_PK_NULL) return
@@ -1758,7 +1933,8 @@ contains
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t, elem
-      integer :: nidx, esize
+      integer :: nidx, esize, slot, disc
+      integer(int64) :: doff
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
@@ -1774,12 +1950,35 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (.not. associated(p%msg)) then
+      if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
+      if (.not. p%msg%is_builder) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      slot = int(field_slot_offset(f))
+      if (slot < 0 .or. slot >= p%pwords) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      disc = field_discriminant(f)
+      if (disc /= NO_DISCRIMINANT) then
+         if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         doff = node_struct_discriminant_offset(schema%nodes(idx))
+         if (doff < 0_int64 .or. doff*2_int64 + 2_int64 > int(p%dwords, int64)*8_int64) then
+            err = CAPNP_ERR_BOUNDS
+            return
+         end if
+      end if
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          if (nidx == 0) then
@@ -1796,11 +1995,26 @@ contains
          case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); esize = CAPNP_SZ_TWO
          case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); esize = CAPNP_SZ_FOUR
          case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); esize = CAPNP_SZ_EIGHT
-         case default; esize = CAPNP_SZ_PTR
+         case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+            esize = CAPNP_SZ_PTR
+         case default
+            ! Unknown dynamic element tags are forward-compatible void lists
+            ! in Cap'n Proto C++ 1.4.0.
+            esize = CAPNP_SZ_VOID
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
-      if (err == CAPNP_OK) call capnp_setp(p, int(field_slot_offset(f)), value, err)
+      if (err /= CAPNP_OK) then
+         value = capnp_ptr_t()
+         return
+      end if
+      call dyn_select_field(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) then
+         value = capnp_ptr_t()
+         return
+      end if
+      call capnp_setp(p, slot, value, err)
+      if (err /= CAPNP_OK) value = capnp_ptr_t()
    end function capnp_dyn_init_list
 
 end module capnp_dynamic

@@ -202,8 +202,7 @@ contains
       l = cgr_nodes(root, err)
       if (err /= CAPNP_OK) return
       n = capnp_list_len(l)
-      if (.not. associated(l%msg) .or. &
-          .not. capnp_host_count_ok(n, capnp_message_nbytes(l%msg))) then
+      if (.not. associated(l%msg)) then
          err = CAPNP_ERR_ALLOC
          return
       end if
@@ -3230,6 +3229,10 @@ contains
          newexpr = 'capnp_new_composite_list(h%p%msg, n, '//upcase(st)// &
                    '_DWORDS, '//upcase(st)//'_PWORDS, err)'
       case default
+         if (list_esize_for(type_which(et)) < 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
          newexpr = 'capnp_new_list(h%p%msg, '// &
                    itoa(int(list_esize_for(type_which(et)), int64))//', n, err)'
       end select
@@ -3514,6 +3517,8 @@ contains
       if (b%kind == CAPNP_PK_NULL) return
       scopes = brand_scopes(b, err)
       if (err /= CAPNP_OK) return
+      call capnp_count_fits(scopes, capnp_list_len(scopes), err)
+      if (err /= CAPNP_OK) return
       n = 0
       do i = 0_int64, capnp_list_len(scopes) - 1_int64
          sc = capnp_list_get_struct(scopes, int(i), err)
@@ -3523,6 +3528,8 @@ contains
          binds = scope_bindings(sc, err)
          if (err /= CAPNP_OK) return
          nb = capnp_list_len(binds)
+         call capnp_count_fits(binds, nb, err)
+         if (err /= CAPNP_OK) return
          if (allocated(btypes)) deallocate (btypes)
          if (allocated(bctx)) deallocate (bctx)
          if (nb > 0_int64) then
@@ -5017,7 +5024,9 @@ contains
       case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); es = CAPNP_SZ_TWO
       case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); es = CAPNP_SZ_FOUR
       case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); es = CAPNP_SZ_EIGHT
-      case default; es = CAPNP_SZ_PTR ! text, data, list, anyPointer
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         es = CAPNP_SZ_PTR
+      case default; es = -1
       end select
    end function list_esize_for
 

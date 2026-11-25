@@ -73,6 +73,7 @@ contains
             msg%depth_limit = options%nesting_limit
          end if
          if (present(traversal_words)) msg%traversal_words = traversal_words
+         msg%traversal_limit = msg%traversal_words
          if (present(depth_limit)) msg%depth_limit = depth_limit
          msg%is_builder = .false.
          msg%nsegs = 0
@@ -87,6 +88,7 @@ contains
          msg%depth_limit = options%nesting_limit
       end if
       if (present(traversal_words)) msg%traversal_words = traversal_words
+      msg%traversal_limit = msg%traversal_words
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
@@ -135,6 +137,7 @@ contains
             msg%depth_limit = options%nesting_limit
          end if
          if (present(traversal_words)) msg%traversal_words = traversal_words
+         msg%traversal_limit = msg%traversal_words
          if (present(depth_limit)) msg%depth_limit = depth_limit
          msg%is_builder = .false.
          msg%nsegs = 0
@@ -149,6 +152,7 @@ contains
          msg%depth_limit = options%nesting_limit
       end if
       if (present(traversal_words)) msg%traversal_words = traversal_words
+      msg%traversal_limit = msg%traversal_words
       if (present(depth_limit)) msg%depth_limit = depth_limit
       msg%is_builder = .false.
       msg%nsegs = nsegs
