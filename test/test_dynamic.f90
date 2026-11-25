@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(35))
+      allocate (testsuite(36))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -105,6 +105,8 @@ contains
       testsuite(34)%test => run_union_rejected_set
       testsuite(35)%name = "dynamic-union-set-keeps-arm"
       testsuite(35)%test => run_union_set_keeps_arm
+      testsuite(36)%name = "dynamic-f64-to-int"
+      testsuite(36)%test => run_f64_to_int
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2303,5 +2305,97 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_union_set_keeps_arm
+
+   !> A double written to an integer field converts as dynamic.c++
+   !> checkRoundTripFromFloat does. Enum and Bool still reject it.
+   subroutine run_f64_to_int(error)
+      use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan, ieee_positive_inf
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, choice
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      real(real64), parameter :: two63 = 9223372036854775808.0_real64
+      real(real64) :: nan, inf
+      integer :: err, idx, cidx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      nan = ieee_value(nan, ieee_quiet_nan)
+      inf = ieee_value(inf, ieee_positive_inf)
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+
+      call expect('i8', 2.0_real64, CAPNP_OK, 2_int64, 'f64-int: 2.0 stores 2')
+      call expect('i8', 1.5_real64, CAPNP_ERR_ARG, 2_int64, 'f64-int: 1.5 rejected')
+      call expect('i8', -1.5_real64, CAPNP_ERR_ARG, 2_int64, 'f64-int: -1.5 rejected')
+      call expect('i8', 127.0_real64, CAPNP_OK, 127_int64, 'f64-int: int8 max')
+      call expect('i8', 128.0_real64, CAPNP_ERR_ARG, 127_int64, 'f64-int: int8 max + 1')
+      call expect('i8', -128.0_real64, CAPNP_OK, -128_int64, 'f64-int: int8 min')
+      call expect('i8', -129.0_real64, CAPNP_ERR_ARG, -128_int64, 'f64-int: int8 min - 1')
+      call expect('u8', 255.0_real64, CAPNP_OK, 255_int64, 'f64-int: uint8 max')
+      call expect('u8', 256.0_real64, CAPNP_ERR_ARG, 255_int64, 'f64-int: uint8 max + 1')
+      call expect('u8', -0.0_real64, CAPNP_OK, 0_int64, 'f64-int: -0.0 stores 0')
+      call expect('u16', -1.0_real64, CAPNP_ERR_ARG, 0_int64, 'f64-int: unsigned rejects -1')
+      call expect('i16', -32768.0_real64, CAPNP_OK, -32768_int64, 'f64-int: int16 min')
+      call expect('u32', 4294967295.0_real64, CAPNP_OK, 4294967295_int64, 'f64-int: uint32 max')
+      call expect('u32', 4294967296.0_real64, CAPNP_ERR_ARG, 4294967295_int64, &
+                  'f64-int: uint32 max + 1')
+      call expect('i32', -2147483648.0_real64, CAPNP_OK, -2147483648_int64, 'f64-int: int32 min')
+      call expect('i32', 1.0e-300_real64, CAPNP_ERR_ARG, -2147483648_int64, &
+                  'f64-int: tiny fraction rejected')
+      call expect('i32', nan, CAPNP_ERR_ARG, -2147483648_int64, 'f64-int: NaN rejected')
+      call expect('i32', inf, CAPNP_ERR_ARG, -2147483648_int64, 'f64-int: infinity rejected')
+      call expect('i64', -two63, CAPNP_OK, -huge(0_int64) - 1_int64, 'f64-int: int64 min')
+      call expect('i64', two63, CAPNP_ERR_ARG, -huge(0_int64) - 1_int64, &
+                  'f64-int: 2**63 rejected for int64')
+      call expect('i64', two63 - 1024.0_real64, CAPNP_OK, 9223372036854774784_int64, &
+                  'f64-int: largest int64 double')
+      call expect('u64', two63, CAPNP_OK, -huge(0_int64) - 1_int64, &
+                  'f64-int: 2**63 fits uint64')
+      call expect('u64', 2.0_real64*two63 - 2048.0_real64, CAPNP_OK, -2048_int64, &
+                  'f64-int: largest uint64 double')
+      call expect('u64', 2.0_real64*two63, CAPNP_ERR_ARG, -2048_int64, &
+                  'f64-int: 2**64 rejected for uint64')
+      call capnp_dyn_set_int(schema, idx, root, 'hue', 1_int64, err)
+      call expect('hue', 2.0_real64, CAPNP_ERR_KIND, 1_int64, 'f64-int: enum rejects a double')
+      call capnp_dyn_set_f64(schema, idx, root, 'b', 1.0_real64, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'f64-int: bool rejects a double')
+
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      call capnp_dyn_set_f64(schema, cidx, choice, 'number', 1.5_real64, err)
+      call capnp_get_text(choice, 3, s, err)
+      call check_(error, capnp_which(choice, 2) == 0 .and. s == 'keep' .and. &
+                  capnp_get_i32(choice, 0_int64) == 0_int32, &
+                  'f64-int: rejected union write selects the arm only')
+      call capnp_dyn_set_f64(schema, cidx, choice, 'number', 2.0_real64, err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, cidx, choice, 'number', err) == 2_int64, &
+                  'f64-int: union member stores 2')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+
+   contains
+
+      subroutine expect(fname, v, code, stored, label)
+         character(len=*), intent(in) :: fname, label
+         real(real64), intent(in) :: v
+         integer, intent(in) :: code
+         integer(int64), intent(in) :: stored
+         integer :: werr
+         call capnp_dyn_set_f64(schema, idx, root, fname, v, werr)
+         call check_(error, werr == code .and. &
+                     capnp_dyn_get_int(schema, idx, root, fname, err) == stored, label)
+      end subroutine expect
+   end subroutine run_f64_to_int
 
 end module test_dynamic

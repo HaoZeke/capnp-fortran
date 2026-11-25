@@ -1485,7 +1485,6 @@ contains
       integer(int64), intent(in) :: v
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv
-      integer(int64) :: off
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -1508,8 +1507,17 @@ contains
       end if
       call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
-      off = field_slot_offset(f)
-      select case (type_which(t))
+      call dyn_store_int(p, field_slot_offset(f), type_which(t), dv, v, err)
+   end subroutine capnp_dyn_set_int
+
+   !> Store v in a numeric slot at element offset off. UInt64 takes the
+   !> bit pattern of v.
+   subroutine dyn_store_int(p, off, tw, dv, v, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, v
+      integer, intent(in) :: tw
+      integer, intent(out) :: err
+      select case (tw)
       case (TYPE_INT8)
          call capnp_set_i8(p, off, int(v, int8), err, default=int(value_i8(dv), int8))
       case (TYPE_UINT8)
@@ -1533,7 +1541,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
-   end subroutine capnp_dyn_set_int
+   end subroutine dyn_store_int
 
    !> True when v round-trips through the field width. Matches
    !> DynamicValue::Reader::as in dynamic.c++.
@@ -1561,6 +1569,46 @@ contains
          ok = v >= 0_int64
       end select
    end function dyn_int_fits
+
+   !> dynamic.c++ checkRoundTripFromFloat (1747-1764): v must lie within
+   !> the field's range and survive the cast back, so NaN, infinities and
+   !> fractions fail. iv is the stored bit pattern.
+   function dyn_f64_int(tw, v, iv) result(ok)
+      integer, intent(in) :: tw
+      real(real64), intent(in) :: v
+      integer(int64), intent(out) :: iv
+      logical :: ok
+      real(real64), parameter :: two63 = 9223372036854775808.0_real64
+      iv = 0_int64
+      ok = .false.
+      select case (tw)
+      case (TYPE_INT8)
+         ok = v >= -128.0_real64 .and. v <= 127.0_real64
+      case (TYPE_UINT8)
+         ok = v >= 0.0_real64 .and. v <= 255.0_real64
+      case (TYPE_INT16)
+         ok = v >= -32768.0_real64 .and. v <= 32767.0_real64
+      case (TYPE_UINT16)
+         ok = v >= 0.0_real64 .and. v <= 65535.0_real64
+      case (TYPE_INT32)
+         ok = v >= -2147483648.0_real64 .and. v <= 2147483647.0_real64
+      case (TYPE_UINT32)
+         ok = v >= 0.0_real64 .and. v <= 4294967295.0_real64
+      ! The 64-bit maxima round up to 2**63 and 2**64 as doubles. C++ lets
+      ! those through the range check, but their cast does not round-trip.
+      case (TYPE_INT64)
+         ok = v >= -two63 .and. v < two63
+      case (TYPE_UINT64)
+         ok = v >= 0.0_real64 .and. v < 2.0_real64*two63
+      end select
+      if (ok) ok = aint(v) == v
+      if (.not. ok) return
+      if (v >= two63) then
+         iv = ibset(int(v - two63, int64), 63)
+      else
+         iv = int(v, int64)
+      end if
+   end function dyn_f64_int
 
    subroutine capnp_dyn_set_bool(schema, idx, p, fname, v, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -1593,7 +1641,7 @@ contains
       real(real64), intent(in) :: v
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv
-      integer(int64) :: off
+      integer(int64) :: off, iv
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -1602,6 +1650,16 @@ contains
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_FLOAT32, TYPE_FLOAT64)
+      case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
+            TYPE_INT64, TYPE_UINT64)
+         if (.not. dyn_f64_int(type_which(t), v, iv)) then
+            call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
+            return
+         end if
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call dyn_store_int(p, field_slot_offset(f), type_which(t), dv, iv, err)
+         return
       case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
