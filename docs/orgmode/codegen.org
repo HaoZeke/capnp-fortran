@@ -25,7 +25,7 @@ For a struct =Person= in file =addressbook.capnp= the generator emits (names are
 | =person_<field>_get_elem= / =_set_elem= | =List(Text)= / =List(Data)= helpers |
 | typed =_get_elem= for struct lists | element as =<type>_t= |
 
-Unions get =which= helpers and =<PFX>_<MEMBER>_TAG= constants. Groups expose =_select= setters. Enums become integer parameters. Constants become parameters or blob-backed accessors for pointer-valued consts.
+Unions get =which= helpers and =<PFX>_<MEMBER>_TAG= constants. Groups expose =_select= setters, which zero every slot of the group. Enums become integer parameters. Constants become parameters or blob-backed accessors for pointer-valued consts.
 
 * Interfaces
 

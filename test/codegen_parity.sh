@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g52|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g53|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -2722,6 +2722,130 @@ EOS
   echo "g52 ok"
 }
 
+# Selecting a union group zeroes every slot of the group, nested groups and
+# inner discriminants included, as the C++ init<Group> accessor does.
+g53() {
+  local d c
+  d=$(work)
+  cd "$d"
+  cat > gsel.capnp << 'EOS'
+@0xf0000000000008e3;
+struct Gs {
+  pre @0 :UInt8;
+  union {
+    a :group {
+      x @1 :UInt64;
+      t @2 :Text;
+    }
+    b :group {
+      f @3 :Bool;
+      h @4 :UInt16;
+      s @5 :Text;
+      inner :union {
+        p @6 :Int32;
+        q @7 :Data;
+      }
+      deep :group { d @8 :Float64; }
+    }
+  }
+  post @9 :UInt32;
+  c :group {
+    cu :union {
+      n @10 :Void;
+      g :group { gg @11 :UInt8; k @12 :Text; }
+    }
+  }
+}
+EOS
+  capnp compile "${CAPNP_INC[@]}" -oc++ gsel.capnp
+  cat > cpp.cpp << 'EOS'
+#include "gsel.capnp.h"
+#include <capnp/message.h>
+#include <capnp/any.h>
+#include <cstdio>
+static void fill(Gs::Builder r) {
+  auto s = capnp::AnyStruct::Builder(kj::cp(r));
+  for (auto& b : s.getDataSection()) b = 0xff;
+  auto ps = s.getPointerSection();
+  for (unsigned i = 0; i < ps.size(); i++) ps[i].setAs<capnp::Text>("zz");
+}
+static void dump(Gs::Builder r) {
+  auto s = capnp::AnyStruct::Builder(kj::cp(r));
+  for (auto b : s.getDataSection()) std::printf("%02x", (unsigned)b);
+  std::printf(" ");
+  auto ps = s.getPointerSection();
+  for (unsigned i = 0; i < ps.size(); i++) std::printf("%c", ps[i].isNull() ? 'N' : 'P');
+  std::printf("\n");
+}
+int main() {
+  capnp::MallocMessageBuilder m;
+  auto r = m.initRoot<Gs>();
+  fill(r); r.initB(); dump(r);
+  fill(r); r.initA(); dump(r);
+  fill(r); r.getC().getCu().initG(); dump(r);
+}
+EOS
+  capnp_cxx_flags
+  "$CXX" -std=c++17 cpp.cpp gsel.capnp.c++ "${CAPNP_PC[@]}" -o cppdrv
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" gsel.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use gsel_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(gs_t) :: h
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = gs_new_root(m, err)
+   call fill(h); call gs_b_select(h, err); call dump(h, err)
+   call fill(h); call gs_a_select(h, err); call dump(h, err)
+   call fill(h); call gs_c_cu_g_select(h, err); call dump(h, err)
+   call capnp_message_free(m)
+contains
+   subroutine fill(h)
+      type(gs_t), intent(in) :: h
+      integer :: i, e
+      do i = 0, h%p%dwords - 1
+         call capnp_set_i64(h%p, int(i, int64)*8_int64, -1_int64, e)
+      end do
+      do i = 0, h%p%pwords - 1
+         call capnp_set_text(h%p, i, 'zz', e)
+      end do
+   end subroutine fill
+   subroutine dump(h, err)
+      type(gs_t), intent(in) :: h
+      integer, intent(in) :: err
+      type(capnp_ptr_t) :: q
+      character(len=:), allocatable :: line
+      character(len=2) :: hx
+      integer :: i, e
+      if (err /= 0) error stop 1
+      line = ''
+      do i = 0, h%p%dwords*8 - 1
+         write (hx, '(z2.2)') capnp_get_u8(h%p, int(i, int64))
+         line = line//hx
+      end do
+      line = line//' '
+      do i = 0, h%p%pwords - 1
+         q = capnp_getp(h%p, i, e)
+         if (q%kind == CAPNP_PK_NULL) then
+            line = line//'N'
+         else
+            line = line//'P'
+         end if
+      end do
+      print '(a)', line
+   end subroutine dump
+end program drv
+EOS
+  fc gsel_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  c=$(./cppdrv)
+  cmp_out "$(tr 'A-F' 'a-f' <<< "$DRV_OUT")" "$c"
+  echo "g53 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -2775,11 +2899,12 @@ case "$CASE" in
   g50) g50 ;;
   g51) g51 ;;
   g52) g52 ;;
+  g53) g53 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|all" >&2
     exit 2
     ;;
 esac

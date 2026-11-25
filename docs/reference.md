@@ -426,7 +426,8 @@ surface per struct `Foo`: `foo_t` handle type, `FOO_DWORDS`/`FOO_PWORDS`,
 struct lists, `<union>_which` plus `<PFX>_<MEMBER>_TAG`
 constants, group `_select` setters, enum `<TYPE>_<MEMBER>` constants, and
 constants (scalar parameters; Data as byte arrays; struct/list consts as
-accessor functions over embedded blobs).
+accessor functions over embedded blobs). A group `_select` sets the
+discriminant and zeroes every slot of the group, nested groups included.
 
 Interfaces emit an `INTERFACE_ID` parameter, a `<iface>_client_t` handle,
 per-method `_begin`/`_wait` helpers over the vat, and an abstract
