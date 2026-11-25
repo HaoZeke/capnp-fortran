@@ -32,7 +32,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(33))
+      allocate (testsuite(34))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -99,6 +99,8 @@ contains
       testsuite(32)%test => run_union_pointer_defaults
       testsuite(33)%name = "dynamic-init-list-rollback"
       testsuite(33)%test => run_init_list_rollback
+      testsuite(34)%name = "dynamic-union-rejected-set"
+      testsuite(34)%test => run_union_rejected_set
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1405,7 +1407,8 @@ contains
    end subroutine run_node_bomb
 
    !> Values that do not fit the field width are rejected and leave the
-   !> previous bits alone.
+   !> previous bits alone. A rejected union member still becomes the
+   !> active arm, as in C++.
    subroutine run_int_range(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -1413,7 +1416,7 @@ contains
       type(capnp_ptr_t) :: root, choice
       integer(int8), allocatable :: bytes(:)
       character(len=:), allocatable :: s
-      integer :: err, idx, cidx, tag
+      integer :: err, werr, idx, cidx, tag
 
       call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
       if (err /= CAPNP_OK) then
@@ -1468,10 +1471,22 @@ contains
       call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
       call capnp_dyn_set_int(schema, cidx, choice, 'number', 2147483648_int64, err)
       call check_(error, err == CAPNP_ERR_ARG, 'range: union int32 overflow')
+      ! C++ set() runs setInUnion before as<int32_t>() throws.
+      tag = capnp_dyn_which(schema, cidx, choice, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0 .and. &
+                  capnp_dyn_get_int(schema, cidx, choice, 'number', werr) == 0_int64, &
+                  'range: rejected union write selects the arm without storing')
+      call capnp_dyn_set_int(schema, cidx, choice, 'missing', 1_int64, err)
+      call check_(error, err /= CAPNP_OK, 'range: unknown member rejected')
+      tag = capnp_dyn_which(schema, cidx, choice, err)
+      call check_(error, err == CAPNP_OK .and. tag == 0, &
+                  'range: unknown member leaves the arm alone')
+      call capnp_dyn_set_int(schema, cidx, choice, 'label', 5_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'range: union type mismatch')
       tag = capnp_dyn_which(schema, cidx, choice, err)
       call capnp_dyn_get_text(schema, cidx, choice, 'label', s, err)
       call check_(error, err == CAPNP_OK .and. tag == 1 .and. s == 'keep', &
-                  'range: rejected union write preserves prior arm')
+                  'range: rejected writes leave the arm data alone')
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_int_range
@@ -2147,5 +2162,60 @@ contains
       call capnp_message_free(bmsg)
       call capnp_dyn_free(schema)
    end subroutine run_init_list_rollback
+
+   !> Every typed setter moves the union arm before it rejects a value,
+   !> as dynamic.c++ Builder::set does. The arm data is not cleared.
+   subroutine run_union_rejected_set(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: choice, raw
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, werr, cidx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      call capnp_message_init_builder(msg, err)
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      call check_(error, err == CAPNP_OK, 'rejected-set: seed label')
+
+      call capnp_dyn_set_text(schema, cidx, choice, 'number', 'x', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 0, &
+                  'rejected-set: text into number')
+      call capnp_dyn_set_data(schema, cidx, choice, 'label', [1_int8, 2_int8], err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 1, &
+                  'rejected-set: data into label')
+      call capnp_dyn_set_bool(schema, cidx, choice, 'number', .true., err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 0, &
+                  'rejected-set: bool into number')
+      call capnp_dyn_set_f64(schema, cidx, choice, 'label', 1.5_real64, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 1, &
+                  'rejected-set: float into label')
+      raw = capnp_new_list(msg, CAPNP_SZ_BYTE, 2_int64, err)
+      call capnp_dyn_setp(schema, cidx, choice, 'items', raw, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 2, &
+                  'rejected-set: byte list into items')
+      call capnp_dyn_set_int(schema, cidx, choice, 'label', 5_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. &
+                  capnp_dyn_which(schema, cidx, choice, werr) == 1, &
+                  'rejected-set: int into label')
+      call capnp_dyn_get_text(schema, cidx, choice, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'keep', &
+                  'rejected-set: label data survives every rejected write')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_rejected_set
 
 end module test_dynamic

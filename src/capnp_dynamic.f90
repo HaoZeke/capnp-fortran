@@ -661,6 +661,25 @@ contains
       call capnp_set_which(p, off, disc, err)
    end subroutine dyn_select_field
 
+   !> Reject a typed write with code. dynamic.c++ Builder::set (509-528)
+   !> calls setInUnion before as<T>() can throw, so a union member still
+   !> becomes the active arm. Like setInUnion, only the discriminant is
+   !> written: no arm is cleared and no value is stored.
+   subroutine dyn_reject_set(schema, idx, p, f, code, err)
+      use capnp_union, only: capnp_set_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f
+      integer, intent(in) :: code
+      integer, intent(out) :: err
+      integer :: disc, werr
+      err = code
+      disc = field_discriminant(f)
+      if (disc == NO_DISCRIMINANT) return
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) return
+      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, werr)
+   end subroutine dyn_reject_set
+
    !> A field that sits past the data section reads as the default.
    !> A field inside the claimed section needs a struct whose bytes are
    !> in a segment. layout.h StructReader::getDataField (1098) returns
@@ -1462,14 +1481,14 @@ contains
       case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
             TYPE_INT64, TYPE_UINT64, TYPE_ENUM, TYPE_FLOAT32, TYPE_FLOAT64)
       case default
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end select
       ! dynamic.c++ checkRoundTrip (1737) and signedToUnsigned (1699):
       ! as<int8_t>() and as<uint8_t>() reject a value that does not survive
       ! the narrowing cast. Unsigned targets reject a negative.
       if (.not. dyn_int_fits(type_which(t), v)) then
-         err = CAPNP_ERR_ARG
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
          return
       end if
       call dyn_select_field(schema, idx, p, f, err)
@@ -1541,7 +1560,7 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       if (type_which(t) /= TYPE_BOOL) then
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
       dv = field_slot_default(f, err)
@@ -1569,7 +1588,7 @@ contains
       select case (type_which(t))
       case (TYPE_FLOAT32, TYPE_FLOAT64)
       case default
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end select
       call dyn_select_field(schema, idx, p, f, err)
@@ -1598,7 +1617,7 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       if (type_which(t) /= TYPE_TEXT) then
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
       call dyn_select_field(schema, idx, p, f, err)
@@ -1619,7 +1638,7 @@ contains
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       if (type_which(t) /= TYPE_DATA) then
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
       call dyn_select_field(schema, idx, p, f, err)
@@ -1731,41 +1750,41 @@ contains
             select case (type_which(t))
             case (TYPE_STRUCT)
                if (.not. dyn_struct_ok(schema, t, value)) then
-                  err = CAPNP_ERR_KIND
+                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
             case (TYPE_LIST)
                elem = type_list_element(t, err)
                if (err /= CAPNP_OK) return
                if (.not. dyn_list_ok(schema, elem, value)) then
-                  err = CAPNP_ERR_KIND
+                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
             case (TYPE_TEXT, TYPE_DATA)
                if (value%kind /= CAPNP_PK_LIST .or. value%esize /= CAPNP_SZ_BYTE) then
-                  err = CAPNP_ERR_KIND
+                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
                if (type_which(t) == TYPE_TEXT) then
                   ! capnp_get_text rejects Text without its trailing NUL.
                   if (value%nelem < 1_int64) then
-                     err = CAPNP_ERR_KIND
+                     call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                      return
                   end if
                   if (capnp_list_get_i8(value, value%nelem - 1_int64, err) /= 0_int8) then
-                     err = CAPNP_ERR_KIND
+                     call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                      return
                   end if
                   if (err /= CAPNP_OK) return
                end if
             case (TYPE_INTERFACE)
                if (value%kind /= CAPNP_PK_CAP) then
-                  err = CAPNP_ERR_KIND
+                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
             case (TYPE_ANY_POINTER)
                if (.not. any_accepts(t, value%kind)) then
-                  err = CAPNP_ERR_KIND
+                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
             end select
@@ -1774,7 +1793,7 @@ contains
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(field_slot_offset(f)), value, err)
       case default
-         err = CAPNP_ERR_KIND
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
       end select
    end subroutine capnp_dyn_setp
 
