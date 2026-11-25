@@ -563,13 +563,15 @@ contains
    end subroutine dyn_zero_slot
 
    !> Zero every slot and inner union discriminant of a struct or group,
-   !> including nested groups.
-   recursive subroutine dyn_clear_slots(schema, idx, p, depth, err)
+   !> including nested groups. Without all_arms, union arms other than
+   !> discriminant 0 keep their bits, as dynamic.c++ clear (978-991) does.
+   recursive subroutine dyn_clear_slots(schema, idx, p, depth, all_arms, err)
       use capnp_union, only: capnp_set_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       integer, intent(in) :: depth
+      logical, intent(in) :: all_arms
       integer, intent(out) :: err
       type(capnp_ptr_t) :: fl, f
       integer(int64) :: i
@@ -591,15 +593,18 @@ contains
       do i = 0_int64, capnp_list_len(fl) - 1_int64
          f = capnp_list_get_struct(fl, int(i), err)
          if (err /= CAPNP_OK) return
-         call dyn_clear_field(schema, p, f, depth, err)
+         if (.not. all_arms .and. field_discriminant(f) /= NO_DISCRIMINANT .and. &
+             field_discriminant(f) /= 0) cycle
+         call dyn_clear_field(schema, p, f, depth, all_arms, err)
          if (err /= CAPNP_OK) return
       end do
    end subroutine dyn_clear_slots
 
-   recursive subroutine dyn_clear_field(schema, p, f, depth, err)
+   recursive subroutine dyn_clear_field(schema, p, f, depth, all_arms, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: p, f
       integer, intent(in) :: depth
+      logical, intent(in) :: all_arms
       integer, intent(out) :: err
       integer :: gidx
       err = CAPNP_OK
@@ -609,7 +614,7 @@ contains
             err = CAPNP_ERR_ARG
             return
          end if
-         call dyn_clear_slots(schema, gidx, p, depth + 1, err)
+         call dyn_clear_slots(schema, gidx, p, depth + 1, all_arms, err)
          return
       end if
       call dyn_zero_slot(p, f, err)
@@ -631,7 +636,7 @@ contains
          f = capnp_list_get_struct(fl, int(i), err)
          if (err /= CAPNP_OK) return
          if (field_discriminant(f) /= disc) cycle
-         call dyn_clear_field(schema, p, f, 0, err)
+         call dyn_clear_field(schema, p, f, 0, .true., err)
          return
       end do
    end subroutine dyn_clear_arm
@@ -652,7 +657,7 @@ contains
       end if
       off = int(node_struct_discriminant_offset(schema%nodes(idx)))
       old = capnp_which(p, off)
-      ! C++ DynamicStruct::init clears the previous member. The arm being
+      ! capnp_dyn_select zeroes the previous member. The arm being
       ! selected is left alone so the write that follows can fill it.
       if (old /= disc) then
          call dyn_clear_arm(schema, idx, p, old, err)
@@ -661,24 +666,73 @@ contains
       call capnp_set_which(p, off, disc, err)
    end subroutine dyn_select_field
 
+   !> dynamic.c++ setInUnion (163-171): a union member writes its
+   !> discriminant and nothing else. The previous arm's bits stay.
+   subroutine dyn_set_in_union(schema, idx, p, f, err)
+      use capnp_union, only: capnp_set_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f
+      integer, intent(out) :: err
+      integer :: disc
+      err = CAPNP_OK
+      disc = field_discriminant(f)
+      if (disc == NO_DISCRIMINANT) return
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, err)
+   end subroutine dyn_set_in_union
+
    !> Reject a typed write with code. dynamic.c++ Builder::set (509-528)
    !> calls setInUnion before as<T>() can throw, so a union member still
    !> becomes the active arm. Like setInUnion, only the discriminant is
    !> written: no arm is cleared and no value is stored.
    subroutine dyn_reject_set(schema, idx, p, f, code, err)
-      use capnp_union, only: capnp_set_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p, f
       integer, intent(in) :: code
       integer, intent(out) :: err
-      integer :: disc, werr
+      integer :: werr
       err = code
-      disc = field_discriminant(f)
-      if (disc == NO_DISCRIMINANT) return
-      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) return
-      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, werr)
+      call dyn_set_in_union(schema, idx, p, f, werr)
    end subroutine dyn_reject_set
+
+   !> Handle checks an init runs before it selects the arm. C++ has no
+   !> Reader::init: a reader, a frozen view or a handle without a message
+   !> writes nothing and returns CAPNP_ERR_KIND when the field is not of
+   !> type want, CAPNP_ERR_ARG otherwise.
+   subroutine dyn_init_target(schema, idx, p, f, t, want, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx, want
+      type(capnp_ptr_t), intent(in) :: p, f, t
+      integer, intent(out) :: err
+      integer(int64) :: doff
+      logical :: ro
+      err = CAPNP_OK
+      ro = p%frozen .or. .not. associated(p%msg)
+      if (.not. ro) ro = .not. p%msg%is_builder
+      if (ro) then
+         err = CAPNP_ERR_ARG
+         if (field_which(f) == FIELD_GROUP .or. type_which(t) /= want) err = CAPNP_ERR_KIND
+         return
+      end if
+      if (p%kind /= CAPNP_PK_STRUCT) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      if (field_discriminant(f) == NO_DISCRIMINANT) return
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      doff = node_struct_discriminant_offset(schema%nodes(idx))
+      if (doff < 0_int64 .or. doff*2_int64 + 2_int64 > int(p%dwords, int64)*8_int64) then
+         err = CAPNP_ERR_BOUNDS
+      end if
+   end subroutine dyn_init_target
 
    !> A field that sits past the data section reads as the default.
    !> A field inside the claimed section needs a struct whose bytes are
@@ -1453,8 +1507,8 @@ contains
       type(capnp_ptr_t) :: f
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
-      ! Setters of ordinary fields also call dyn_select_field, which must
-      ! stay a no-op for them. select itself is only for union arms.
+      ! dyn_select_field is a no-op for ordinary fields. select itself is
+      ! only for union arms.
       if (field_discriminant(f) == NO_DISCRIMINANT) then
          err = CAPNP_ERR_KIND
          return
@@ -1470,7 +1524,6 @@ contains
       integer(int64), intent(in) :: v
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv
-      integer(int64) :: off
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -1491,10 +1544,19 @@ contains
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
-      off = field_slot_offset(f)
-      select case (type_which(t))
+      call dyn_store_int(p, field_slot_offset(f), type_which(t), dv, v, err)
+   end subroutine capnp_dyn_set_int
+
+   !> Store v in a numeric slot at element offset off. UInt64 takes the
+   !> bit pattern of v.
+   subroutine dyn_store_int(p, off, tw, dv, v, err)
+      type(capnp_ptr_t), intent(in) :: p, dv
+      integer(int64), intent(in) :: off, v
+      integer, intent(in) :: tw
+      integer, intent(out) :: err
+      select case (tw)
       case (TYPE_INT8)
          call capnp_set_i8(p, off, int(v, int8), err, default=int(value_i8(dv), int8))
       case (TYPE_UINT8)
@@ -1518,7 +1580,7 @@ contains
       case default
          err = CAPNP_ERR_KIND
       end select
-   end subroutine capnp_dyn_set_int
+   end subroutine dyn_store_int
 
    !> True when v round-trips through the field width. Matches
    !> DynamicValue::Reader::as in dynamic.c++.
@@ -1547,6 +1609,46 @@ contains
       end select
    end function dyn_int_fits
 
+   !> dynamic.c++ checkRoundTripFromFloat (1747-1764): v must lie within
+   !> the field's range and survive the cast back, so NaN, infinities and
+   !> fractions fail. iv is the stored bit pattern.
+   function dyn_f64_int(tw, v, iv) result(ok)
+      integer, intent(in) :: tw
+      real(real64), intent(in) :: v
+      integer(int64), intent(out) :: iv
+      logical :: ok
+      real(real64), parameter :: two63 = 9223372036854775808.0_real64
+      iv = 0_int64
+      ok = .false.
+      select case (tw)
+      case (TYPE_INT8)
+         ok = v >= -128.0_real64 .and. v <= 127.0_real64
+      case (TYPE_UINT8)
+         ok = v >= 0.0_real64 .and. v <= 255.0_real64
+      case (TYPE_INT16)
+         ok = v >= -32768.0_real64 .and. v <= 32767.0_real64
+      case (TYPE_UINT16)
+         ok = v >= 0.0_real64 .and. v <= 65535.0_real64
+      case (TYPE_INT32)
+         ok = v >= -2147483648.0_real64 .and. v <= 2147483647.0_real64
+      case (TYPE_UINT32)
+         ok = v >= 0.0_real64 .and. v <= 4294967295.0_real64
+      ! The 64-bit maxima round up to 2**63 and 2**64 as doubles. C++ lets
+      ! those through the range check, but their cast does not round-trip.
+      case (TYPE_INT64)
+         ok = v >= -two63 .and. v < two63
+      case (TYPE_UINT64)
+         ok = v >= 0.0_real64 .and. v < 2.0_real64*two63
+      end select
+      if (ok) ok = aint(v) == v
+      if (.not. ok) return
+      if (v >= two63) then
+         iv = ibset(int(v - two63, int64), 63)
+      else
+         iv = int(v, int64)
+      end if
+   end function dyn_f64_int
+
    subroutine capnp_dyn_set_bool(schema, idx, p, fname, v, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -1565,7 +1667,7 @@ contains
       end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       call capnp_set_bool(p, field_slot_offset(f), v, err, default=value_bool(dv))
    end subroutine capnp_dyn_set_bool
@@ -1578,7 +1680,7 @@ contains
       real(real64), intent(in) :: v
       integer, intent(out) :: err
       type(capnp_ptr_t) :: f, t, dv
-      integer(int64) :: off
+      integer(int64) :: off, iv
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
@@ -1587,11 +1689,21 @@ contains
       if (err /= CAPNP_OK) return
       select case (type_which(t))
       case (TYPE_FLOAT32, TYPE_FLOAT64)
+      case (TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_INT32, TYPE_UINT32, &
+            TYPE_INT64, TYPE_UINT64)
+         if (.not. dyn_f64_int(type_which(t), v, iv)) then
+            call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
+            return
+         end if
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call dyn_store_int(p, field_slot_offset(f), type_which(t), dv, iv, err)
+         return
       case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end select
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
@@ -1611,19 +1723,71 @@ contains
       character(len=*), intent(in) :: fname
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv
+      integer :: ord
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_TEXT) then
+      ! dynamic.c++ Builder::set (546-610): an Enum takes the enumerant of
+      ! that name, Data takes the bytes without the NUL, and AnyPointer
+      ! stores the Text.
+      select case (type_which(t))
+      case (TYPE_TEXT, TYPE_ANY_POINTER)
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_text(p, int(field_slot_offset(f)), s, err)
+      case (TYPE_DATA)
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_data(p, int(field_slot_offset(f)), transfer(s, 0_int8, len(s)), err)
+      case (TYPE_ENUM)
+         ord = dyn_enumerant_ordinal(schema, type_type_id(t), s, err)
+         if (err /= CAPNP_OK) return
+         if (ord < 0) then
+            call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
+            return
+         end if
+         dv = field_slot_default(f, err)
+         if (err /= CAPNP_OK) return
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_u16(p, field_slot_offset(f)*2_int64, int(ord, int32), err, &
+                            default=value_u16(dv))
+      case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
-         return
-      end if
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
-      call capnp_set_text(p, int(field_slot_offset(f)), s, err)
+      end select
    end subroutine capnp_dyn_set_text
+
+   !> Ordinal of the enumerant called name in enum node id, or -1.
+   !> schema.c++ getEnumerantByName matches the whole name.
+   function dyn_enumerant_ordinal(schema, id, name, err) result(ord)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id
+      character(len=*), intent(in) :: name
+      integer, intent(out) :: err
+      integer :: ord, nidx
+      type(capnp_ptr_t) :: enums, en
+      character(len=:), allocatable :: ename
+      integer(int64) :: i
+      ord = -1
+      err = CAPNP_OK
+      nidx = dyn_node_by_id(schema, id)
+      if (nidx == 0) return
+      if (node_which(schema%nodes(nidx)) /= NODE_ENUM) return
+      enums = node_enumerants(schema%nodes(nidx), err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(enums) - 1_int64
+         en = capnp_list_get_struct(enums, int(i), err)
+         if (err /= CAPNP_OK) return
+         call enumerant_name(en, ename, err)
+         if (err /= CAPNP_OK) return
+         if (len(ename) == len(name) .and. ename == name) then
+            ord = int(i)
+            return
+         end if
+      end do
+   end function dyn_enumerant_ordinal
 
    subroutine capnp_dyn_set_data(schema, idx, p, fname, bytes, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -1637,11 +1801,12 @@ contains
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_DATA) then
+      ! dynamic.c++ Builder::set (607-609) stores Data in AnyPointer too.
+      if (type_which(t) /= TYPE_DATA .and. type_which(t) /= TYPE_ANY_POINTER) then
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       call capnp_set_data(p, int(field_slot_offset(f)), bytes, err)
    end subroutine capnp_dyn_set_data
@@ -1782,14 +1947,11 @@ contains
                   call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
-            case (TYPE_ANY_POINTER)
-               if (.not. any_accepts(t, value%kind)) then
-                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
-                  return
-               end if
+            ! dynamic.c++ Builder::set (599-633) stores any pointer value in
+            ! an AnyPointer field without checking whichAnyPointerKind.
             end select
          end if
-         call dyn_select_field(schema, idx, p, f, err)
+         call dyn_set_in_union(schema, idx, p, f, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(field_slot_offset(f)), value, err)
       case default
@@ -1909,6 +2071,9 @@ contains
       if (value%kind /= CAPNP_PK_LIST) err = CAPNP_ERR_KIND
    end function capnp_dyn_get_any_list
 
+   !> New struct in a struct field. A group field is cleared like
+   !> dynamic.c++ clear and returns p. An AnyPointer field is cleared and
+   !> the result is null, for capnp_dyn_setp to fill.
    function capnp_dyn_init_struct(schema, idx, p, fname, err) result(value)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
@@ -1916,14 +2081,38 @@ contains
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t
-      integer :: nidx
+      integer :: nidx, slot
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_STRUCT) then
+      call dyn_init_target(schema, idx, p, f, t, TYPE_STRUCT, err)
+      if (err /= CAPNP_OK) return
+      ! dynamic.c++ init (672-706) runs setInUnion before any check.
+      call dyn_set_in_union(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         nidx = dyn_node_by_id(schema, field_group_type_id(f))
+         if (nidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call dyn_clear_slots(schema, nidx, p, 0, .false., err)
+         if (err == CAPNP_OK) value = p
+         return
+      end if
+      if (type_which(t) /= TYPE_STRUCT .and. type_which(t) /= TYPE_ANY_POINTER) then
          err = CAPNP_ERR_KIND
+         return
+      end if
+      slot = int(field_slot_offset(f))
+      if (slot < 0 .or. slot >= p%pwords) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (type_which(t) == TYPE_ANY_POINTER) then
+         call capnp_setp(p, slot, capnp_ptr_t(), err)
          return
       end if
       nidx = dyn_node_by_id(schema, type_type_id(t))
@@ -1931,17 +2120,12 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (.not. associated(p%msg)) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      call dyn_select_field(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
       if (err /= CAPNP_OK) return
       value%schema_id = node_id(schema%nodes(nidx))
-      call capnp_setp(p, int(field_slot_offset(f)), value, err)
+      call capnp_setp(p, slot, value, err)
+      if (err /= CAPNP_OK) value = capnp_ptr_t()
    end function capnp_dyn_init_struct
 
    function capnp_dyn_init_list(schema, idx, p, fname, n, err) result(value)
@@ -1952,33 +2136,27 @@ contains
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t, elem
-      integer :: nidx, esize, slot, disc
-      integer(int64) :: doff
+      integer :: nidx, esize, slot
+      integer(int64) :: nb
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_LIST) then
+      call dyn_init_target(schema, idx, p, f, t, TYPE_LIST, err)
+      if (err /= CAPNP_OK) return
+      ! dynamic.c++ init(field, size) (708-752) runs setInUnion before any
+      ! check, so a failed init still selects the arm.
+      call dyn_set_in_union(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
+      select case (type_which(t))
+      case (TYPE_LIST, TYPE_TEXT, TYPE_DATA)
+      case default
          err = CAPNP_ERR_KIND
          return
-      end if
-      elem = type_list_element(t, err)
-      if (err /= CAPNP_OK) return
+      end select
       if (n < 0_int64) then
          err = CAPNP_ERR_ARG
-         return
-      end if
-      if (p%frozen .or. .not. associated(p%msg)) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      if (.not. p%msg%is_builder) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      if (p%kind /= CAPNP_PK_STRUCT) then
-         err = CAPNP_ERR_KIND
          return
       end if
       slot = int(field_slot_offset(f))
@@ -1986,18 +2164,17 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
-      disc = field_discriminant(f)
-      if (disc /= NO_DISCRIMINANT) then
-         if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
-            err = CAPNP_ERR_KIND
-            return
-         end if
-         doff = node_struct_discriminant_offset(schema%nodes(idx))
-         if (doff < 0_int64 .or. doff*2_int64 + 2_int64 > int(p%dwords, int64)*8_int64) then
-            err = CAPNP_ERR_BOUNDS
-            return
-         end if
+      if (type_which(t) /= TYPE_LIST) then
+         ! A zeroed blob of n bytes, as initBlob makes. Text adds its NUL.
+         nb = n
+         if (type_which(t) == TYPE_TEXT .and. n < huge(n)) nb = n + 1_int64
+         value = capnp_new_list(p%msg, CAPNP_SZ_BYTE, nb, err)
+         if (err == CAPNP_OK) call capnp_setp(p, slot, value, err)
+         if (err /= CAPNP_OK) value = capnp_ptr_t()
+         return
       end if
+      elem = type_list_element(t, err)
+      if (err /= CAPNP_OK) return
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          if (nidx == 0) then
@@ -2023,11 +2200,6 @@ contains
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
-      if (err /= CAPNP_OK) then
-         value = capnp_ptr_t()
-         return
-      end if
-      call dyn_select_field(schema, idx, p, f, err)
       if (err /= CAPNP_OK) then
          value = capnp_ptr_t()
          return
