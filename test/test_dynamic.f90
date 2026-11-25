@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(49))
+      allocate (testsuite(50))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -134,6 +134,8 @@ contains
       testsuite(48)%test => run_set_version_skew
       testsuite(49)%name = "dynamic-iface-visit-limit"
       testsuite(49)%test => run_iface_visit_limit
+      testsuite(50)%name = "dynamic-set-same-message"
+      testsuite(50)%test => run_set_same_message
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3178,5 +3180,93 @@ contains
          iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
       end function iface_id
    end subroutine run_iface_visit_limit
+
+   !> dynamic.c++ Builder::set copies a struct, text, data, or list that
+   !> already lives in the message. Replacing the source leaves the copy.
+   subroutine run_set_same_message(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, src, dst, q, got
+      character(len=:), allocatable :: s
+      character(len=80), parameter :: lines(10) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a22;', &
+         'struct Inner { name @0 :Text; }', &
+         'struct Box {', &
+         '  src @0 :Inner;', &
+         '  dst @1 :Inner;', &
+         '  label @2 :Text;', &
+         '  raw @3 :Data;', &
+         '  nums @4 :List(Int32);', &
+         '  any @5 :AnyPointer;', &
+         '}']
+      integer(int8) :: ab(0:1), zz, c0, c1
+      integer(int8), allocatable :: raw(:)
+      integer :: err, rc, bidx, iidx
+      integer(int32) :: n0
+      logical :: ok
+      ab = [int(iachar('a'), int8), int(iachar('b'), int8)]
+      zz = int(iachar('z'), int8)
+      call load_inline_schema(error, 'alias', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      bidx = capnp_dyn_find(schema, 'Box', err)
+      iidx = capnp_dyn_find(schema, 'Inner', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, bidx, msg, err)
+      src = capnp_dyn_init_struct(schema, bidx, root, 'src', err)
+      call capnp_dyn_set_text(schema, iidx, src, 'name', 'ab', err)
+      call capnp_dyn_setp(schema, bidx, root, 'dst', src, rc)
+      call capnp_dyn_set_text(schema, iidx, src, 'name', 'zz', err)
+      dst = capnp_dyn_getp(schema, bidx, root, 'dst', err)
+      call capnp_dyn_get_text(schema, iidx, dst, 'name', s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. s == 'ab', &
+                  'same-message: struct keeps ab')
+      call capnp_dyn_get_text(schema, iidx, src, 'name', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'zz', &
+                  'same-message: source replaced with zz')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'label', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      call capnp_dyn_get_text(schema, bidx, root, 'label', s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. s == 'ab', &
+                  'same-message: text keeps ab')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 2_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'raw', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      call capnp_dyn_get_data(schema, bidx, root, 'raw', raw, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. size(raw) == 2 .and. &
+                  raw(0) == ab(0) .and. raw(1) == ab(1), 'same-message: data keeps ab')
+
+      q = capnp_new_list(msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(q, 0_int64, 7_int32, err)
+      call capnp_dyn_setp(schema, bidx, root, 'nums', q, rc)
+      call capnp_list_set_i32(q, 0_int64, 9_int32, err)
+      got = capnp_dyn_getp(schema, bidx, root, 'nums', err)
+      n0 = capnp_list_get_i32(got, 0_int64, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. n0 == 7_int32, &
+                  'same-message: list keeps its element')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'any', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      got = capnp_dyn_getp(schema, bidx, root, 'any', err)
+      c0 = capnp_list_get_i8(got, 0_int64, err)
+      c1 = capnp_list_get_i8(got, 1_int64, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. c0 == ab(0) .and. &
+                  c1 == ab(1), 'same-message: anypointer text keeps ab')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_set_same_message
 
 end module test_dynamic

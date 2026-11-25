@@ -1934,7 +1934,7 @@ contains
       type(capnp_ptr_t), intent(in) :: p, value
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t, elem
+      type(capnp_ptr_t) :: f, t, elem, stored
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       if (field_which(f) == FIELD_GROUP) then
@@ -1997,7 +1997,19 @@ contains
          end if
          call dyn_set_in_union(schema, idx, p, f, err)
          if (err /= CAPNP_OK) return
-         call capnp_setp(p, int(field_slot_offset(f)), value, err)
+         ! layout.c++ setTextPointer, setDataPointer, setListPointer and
+         ! setStructPointer allocate a fresh object. Copy a same-message
+         ! value first, as dyn_copy_member does, so a later write to the
+         ! source leaves the stored value unchanged. A capability pointer
+         ! is stored as the capability.
+         stored = value
+         if (stored%kind /= CAPNP_PK_NULL .and. stored%kind /= CAPNP_PK_CAP) then
+            if (associated(p%msg) .and. associated(stored%msg, p%msg)) then
+               stored = capnp_copy(p%msg, stored, err)
+               if (err /= CAPNP_OK) return
+            end if
+         end if
+         call capnp_setp(p, int(field_slot_offset(f)), stored, err)
       case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
       end select
