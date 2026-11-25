@@ -2077,7 +2077,7 @@ contains
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t, elem
       integer :: nidx, esize, slot, disc
-      integer(int64) :: doff
+      integer(int64) :: doff, nb
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
@@ -2111,12 +2111,12 @@ contains
       ! check, so a failed init still selects the arm.
       call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_LIST) then
+      select case (type_which(t))
+      case (TYPE_LIST, TYPE_TEXT, TYPE_DATA)
+      case default
          err = CAPNP_ERR_KIND
          return
-      end if
-      elem = type_list_element(t, err)
-      if (err /= CAPNP_OK) return
+      end select
       if (n < 0_int64) then
          err = CAPNP_ERR_ARG
          return
@@ -2126,6 +2126,17 @@ contains
          err = CAPNP_ERR_BOUNDS
          return
       end if
+      if (type_which(t) /= TYPE_LIST) then
+         ! A zeroed blob of n bytes, as initBlob makes. Text adds its NUL.
+         nb = n
+         if (type_which(t) == TYPE_TEXT .and. n < huge(n)) nb = n + 1_int64
+         value = capnp_new_list(p%msg, CAPNP_SZ_BYTE, nb, err)
+         if (err == CAPNP_OK) call capnp_setp(p, slot, value, err)
+         if (err /= CAPNP_OK) value = capnp_ptr_t()
+         return
+      end if
+      elem = type_list_element(t, err)
+      if (err /= CAPNP_OK) return
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          if (nidx == 0) then

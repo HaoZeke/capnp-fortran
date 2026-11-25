@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(39))
+      allocate (testsuite(40))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -113,6 +113,8 @@ contains
       testsuite(38)%test => run_init_order
       testsuite(39)%name = "dynamic-data-anypointer"
       testsuite(39)%test => run_data_anypointer
+      testsuite(40)%name = "dynamic-init-blob"
+      testsuite(40)%test => run_init_blob
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2571,5 +2573,52 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_data_anypointer
+
+   !> capnp_dyn_init_list on Text or Data makes a zeroed blob of n bytes,
+   !> as dynamic.c++ init(field, size) does. Text adds its NUL.
+   subroutine run_init_blob(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: choice, root, made
+      integer(int8), allocatable :: bytes(:), got(:)
+      character(len=:), allocatable :: s
+      integer :: err, cidx, idx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 7_int64, err)
+      made = capnp_dyn_init_list(schema, cidx, choice, 'label', 3_int64, err)
+      call check_(error, err == CAPNP_OK .and. made%kind == CAPNP_PK_LIST .and. &
+                  made%nelem == 4_int64 .and. capnp_which(choice, 2) == 1 .and. &
+                  capnp_get_i32(choice, 0_int64) == 7_int32, &
+                  'init-blob: text of 3 bytes plus NUL selects label')
+      call capnp_dyn_get_text(schema, cidx, choice, 'label', s, err)
+      call check_(error, err == CAPNP_OK .and. s == repeat(achar(0), 3), &
+                  'init-blob: text bytes are zero')
+
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      made = capnp_dyn_init_list(schema, idx, root, 'note', 0_int64, err)
+      call capnp_dyn_get_text(schema, idx, root, 'note', s, err)
+      call check_(error, err == CAPNP_OK .and. made%nelem == 1_int64 .and. len(s) == 0, &
+                  'init-blob: empty text is its NUL')
+      made = capnp_dyn_init_list(schema, idx, root, 'blob', 2_int64, err)
+      call capnp_dyn_get_data(schema, idx, root, 'blob', got, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == 2, 'init-blob: data of 2 bytes')
+      if (allocated(error)) return
+      call check_(error, all(got == 0_int8), 'init-blob: data bytes are zero')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_init_blob
 
 end module test_dynamic
