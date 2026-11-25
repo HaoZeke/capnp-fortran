@@ -20,7 +20,7 @@ program test_gate2
    call execute_command_line('command -v capnp > /dev/null 2>&1', exitstat=rc0, cmdstat=st0)
    if (st0 /= 0 .or. rc0 /= 0) then
       write (*, '(a)') 'test_gate2: capnp is not on PATH, every case skipped'
-      stop 77
+      stop
    end if
    cap = capnpf_path()
    call case_0()
@@ -64,9 +64,9 @@ program test_gate2
    call case_39()
    call case_40()
    call case_41()
+   ! fpm counts any nonzero exit as a failure, so skips are reported only.
    if (skipped > 0) then
       write (*, '(a,i0,a)') 'test_gate2: ', skipped, ' case(s) skipped'
-      stop 77
    end if
 contains
    !> capnpf from the same fpm profile as this test.
@@ -537,6 +537,10 @@ contains
       call gate('case_21', &
          'command -v cc > /dev/null || exit 77' // &
          achar(10) // &
+         '# The ASan runtime must load first, so a preloaded shim cannot run.' // &
+         achar(10) // &
+         'grep -aq __asan_init "$CAP" && exit 77' // &
+         achar(10) // &
          'd=/tmp/g2-eintr-$$; mkdir -p "$d"' // &
          achar(10) // &
          'cat > "$d/shim.c" <<' // &
@@ -571,7 +575,7 @@ contains
          'EOF' // &
          achar(10) // &
          'cc -shared -fPIC -o "$d/shim.so" "$d/shim.c" -ldl || { rm -r' // &
-         'f "$d"; exit 77; }' // &
+         'f "$d"; exit 1; }' // &
          achar(10) // &
          'printf ' // &
          achar(39) // &
@@ -580,16 +584,10 @@ contains
          ' > "$d/in"' // &
          achar(10) // &
          'LD_PRELOAD="$d/shim.so" /bin/true 2> "$d/ld"; if test -s "$d' // &
-         '/ld"; then rm -rf "$d"; exit 77; fi' // &
+         '/ld"; then rm -rf "$d"; exit 1; fi' // &
          achar(10) // &
          'LD_PRELOAD="$d/shim.so" "$CAP" convert text:binary schema/co' // &
          'mmon.capnp Vec3 < "$d/in" > "$d/o" 2> "$d/e"; r=$?' // &
-         achar(10) // &
-         'if grep -q ' // &
-         achar(39) // &
-         'runtime does not come first' // &
-         achar(39) // &
-         ' "$d/e"; then rm -rf "$d"; exit 77; fi' // &
          achar(10) // &
          'capnp convert text:binary schema/common.capnp Vec3 < "$d/in"' // &
          ' > "$d/r"' // &
@@ -709,13 +707,24 @@ contains
          'PKG_CONFIG_PATH="$P/lib/pkgconfig:$P/lib64/pkgconfig${PKG_CO' // &
          'NFIG_PATH:+:$PKG_CONFIG_PATH}"; export PKG_CONFIG_PATH' // &
          achar(10) // &
+         '# What -Drpc_interop=enabled needs to configure the client.' // &
+         achar(10) // &
+         'for t in "${CC:-cc}" "${CXX:-c++}" "${FC:-gfortran}" pkg-conf' // &
+         'ig capnpc-c++ python3; do' // &
+         achar(10) // &
+         '  command -v "${t%% *}" > /dev/null || exit 77' // &
+         achar(10) // &
+         'done' // &
+         achar(10) // &
+         'pkg-config --exists capnp-rpc || exit 77' // &
+         achar(10) // &
          'd=/tmp/g2-mb-$$' // &
          achar(10) // &
-         'meson setup "$d" . > /dev/null 2>&1 || { rm -rf "$d"; exit 7' // &
-         '7; }' // &
+         'meson setup "$d" . -Drpc_interop=enabled > /dev/null 2>&1 ||' // &
+         ' { rm -rf "$d"; exit 1; }' // &
          achar(10) // &
          'ninja -C "$d" -t query interop/rpc_client_f > /dev/null 2>&1' // &
-         ' || { rm -rf "$d"; exit 77; }' // &
+         ' || { rm -rf "$d"; exit 1; }' // &
          achar(10) // &
          'ninja -C "$d" -t query interop/rpc_client_rebuild.f90 2>/dev' // &
          '/null | grep -q ' // &
@@ -777,8 +786,14 @@ contains
          achar(39) // &
          ' > /tmp/g2-big.t' // &
          achar(10) // &
+         '( ulimit -v 400000 && /bin/true ) > /dev/null 2>&1 || exit 77' // &
+         achar(10) // &
+         '# ASan reserves far more address space than the limit allows.' // &
+         achar(10) // &
+         'grep -aq __asan_init "$CAP" && exit 77' // &
+         achar(10) // &
          '( ulimit -v 400000; "$CAP" encode schema/common.capnp Vec3 <' // &
-         ' /tmp/g2-big.t > /dev/null 2>&1 ) || exit 77' // &
+         ' /tmp/g2-big.t > /dev/null 2>&1 ) || exit 1' // &
          achar(10) // &
          'python3 -c ' // &
          achar(39) // &
@@ -948,8 +963,10 @@ contains
          achar(39) // &
          ' > /tmp/g2-vg.t' // &
          achar(10) // &
+         'valgrind -q /bin/true > /dev/null 2>&1 || exit 77' // &
+         achar(10) // &
          'valgrind -q --error-exitcode=99 "$CAP" encode schema/common.' // &
-         'capnp Vec3 < /tmp/g2-vg.t > /dev/null 2>&1 || exit 77' // &
+         'capnp Vec3 < /tmp/g2-vg.t > /dev/null 2>&1 || exit 1' // &
          achar(10) // &
          'printf ' // &
          achar(39) // &
