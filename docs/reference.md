@@ -411,8 +411,13 @@ caller's own message. Writes through a reader handle are refused.
 Run as a `capnp` plugin: `capnp compile -o <path-to-capnpc-fortran>
 file.capnp`, one module per schema file (`<file>_capnp.f90`). A schema in a
 directory, `dir/foo.capnp`, declares `dir__foo_capnp` and a module `foo_capnp`
-that re-exports it while no other schema of the run uses that name; schemas
-under `capnp/` keep the plain name. Generated
+that re-exports it while no other schema of the run uses that name and the
+library provides no module of that name (`stream_capnp`, `rpc_capnp`,
+`rpc_twoparty_capnp`, `rpc_threeparty_capnp`). A schema under a `capnp/`
+directory maps to the library module of its plain name only when its file id
+matches a schema bundled with Cap'n Proto, such as `capnp/stream.capnp`. Any
+other schema at such a path, `capnp/foo.capnp`, gets its own module,
+`capnp__foo_capnp`. Generated
 surface per struct `Foo`: `foo_t` handle type, `FOO_DWORDS`/`FOO_PWORDS`,
 `foo_new`/`foo_new_root`/`foo_read_root`, per-field
 `<field>_get`/`<field>_set` (scalars carry declared defaults),

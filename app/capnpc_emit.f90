@@ -264,19 +264,68 @@ contains
       o = r
    end subroutine replace_all_slash
 
+   !> A schema bundled with Cap'n Proto that this library carries or imports,
+   !> found under a capnp/ directory with its own file id. The trailing
+   !> comments name each id's file under the Cap'n Proto include directory;
+   !> codegen_parity.sh g18 checks them.
+   logical function bundled_capnp_schema(dn, id)
+      character(len=*), intent(in) :: dn
+      integer(int64), intent(in) :: id
+      bundled_capnp_schema = .false.
+      if (index(dn, 'capnp/') /= 1 .and. index(dn, '/capnp/') == 0) return
+      select case (id)
+      case (-4757915035992306047_int64, & ! capnp/c++.capnp
+            -6251061113672404263_int64, & ! capnp/schema.capnp
+            -8736025975804660744_int64, & ! capnp/stream.capnp
+            -5543200948981947824_int64, & ! capnp/rpc.capnp
+            -6808097348190014815_int64, & ! capnp/rpc-twoparty.capnp
+            -8144317271129825740_int64) ! capnp/compat/json.capnp
+         bundled_capnp_schema = .true.
+      end select
+   end function bundled_capnp_schema
+
+   !> True when this library provides a module of this name for another
+   !> schema, so a shim of that name would shadow it. The trailing comments
+   !> name the schema each module comes from; codegen_parity.sh g18 checks
+   !> them.
+   logical function runtime_module_taken(name, id)
+      character(len=*), intent(in) :: name
+      integer(int64), intent(in) :: id
+      select case (name)
+      case ('stream_capnp')
+         runtime_module_taken = id /= -8736025975804660744_int64 ! schema/stream.capnp
+      case ('rpc_capnp')
+         runtime_module_taken = id /= -5543200948981947824_int64 ! schema/rpc.capnp
+      case ('rpc_twoparty_capnp')
+         runtime_module_taken = id /= -6808097348190014815_int64 ! schema/rpc-twoparty.capnp
+      case ('rpc_threeparty_capnp')
+         runtime_module_taken = id /= -2788540437623764463_int64 ! schema/rpc-threeparty.capnp
+      case default
+         runtime_module_taken = .false.
+      end select
+   end function runtime_module_taken
+
    !> The module a file gets from its own display name alone, so a file
    !> compiled by itself and in a larger request agree. Files in a directory
    !> carry the directory in the name. The schemas bundled with Cap'n Proto
    !> (capnp/stream.capnp and the others) keep the plain name, which is the
    !> module this library provides for them.
-   function primary_module(dn) result(o)
+
+   function primary_module(dn, id) result(o)
       character(len=*), intent(in) :: dn
+      integer(int64), intent(in), optional :: id
       character(len=:), allocatable :: o
-      if (index(dn, '/') > 0 .and. index(dn, 'capnp/') /= 1) then
-         o = ident_fit(module_stem(dn, .true.)//'_capnp')
-      else
+      if (index(dn, '/') == 0) then
          o = module_stem(dn, .false.)//'_capnp'
+         return
       end if
+      if (present(id)) then
+         if (bundled_capnp_schema(dn, id)) then
+            o = module_stem(dn, .false.)//'_capnp'
+            return
+         end if
+      end if
+      o = ident_fit(module_stem(dn, .true.)//'_capnp')
    end function primary_module
 
    !> Name every file's module. A name comes from the display name alone.
@@ -304,7 +353,7 @@ contains
          if (err /= CAPNP_OK) return
          dns(i) = dn
          plain(i) = module_stem(dn, .false.)//'_capnp'
-         g_fmod(i) = primary_module(dn)
+         g_fmod(i) = primary_module(dn, g_nodes(i)%id)
       end do
       do i = 1, size(g_nodes)
          if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
@@ -322,6 +371,7 @@ contains
       do i = 1, size(g_nodes)
          if (node_which(g_nodes(i)%p) /= NODE_FILE) cycle
          if (trim(g_fmod(i)) == trim(plain(i))) cycle
+         if (runtime_module_taken(trim(plain(i)), g_nodes(i)%id)) cycle
          clash = .false.
          do j = 1, size(g_nodes)
             if (j == i .or. node_which(g_nodes(j)%p) /= NODE_FILE) cycle
@@ -827,7 +877,8 @@ contains
       character(len=:), allocatable, intent(out) :: o
       integer, intent(out) :: err
       character(len=:), allocatable :: dn
-      integer :: i, fidx
+      integer :: i, k, fidx
+      integer(int64) :: fid
       call node_display_name(np, dn, err)
       if (err /= CAPNP_OK) return
       i = index(dn, ':')
@@ -841,7 +892,20 @@ contains
             end if
          end if
       end if
-      o = primary_module(dn)
+      ! The file node may be absent from the request; the outermost scope
+      ! id is then the file id.
+      if (node_which(np) == NODE_FILE) then
+         fid = node_id(np)
+      else
+         fid = node_scope_id(np)
+         do i = 1, size(g_nodes)
+            k = find_node(fid)
+            if (k == 0) exit
+            if (node_which(g_nodes(k)%p) == NODE_FILE) exit
+            fid = node_scope_id(g_nodes(k)%p)
+         end do
+      end if
+      o = primary_module(dn, fid)
    end subroutine node_module
 
    !> Record a cross-file type reference during pass 1.
@@ -2162,7 +2226,7 @@ contains
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '// &
              ident_fit(upcase(m)//'_'//upcase(an)//'_ANNOTATION_ID')//' = '// &
-             itoa(node_id(np))//'_int64')
+             signed_lit(node_id(np), '_int64'))
       call w('')
    end subroutine emit_annotation_node_decl
 
@@ -2190,13 +2254,13 @@ contains
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, TYPE_ENUM, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
          call w('   integer(int64), parameter :: '//name//' = '// &
-                itoa(const_int_value(v))//'_int64')
+                signed_lit(const_int_value(v), '_int64'))
       case (TYPE_FLOAT32)
          call w('   real(real32), parameter :: '//name//' = transfer('// &
-                itoa(int(cp_f32_bits(value_f32(v)), int64))//'_int32, 1.0_real32)')
+                signed_lit(int(cp_f32_bits(value_f32(v)), int64), '_int32')//', 1.0_real32)')
       case (TYPE_FLOAT64)
          call w('   real(real64), parameter :: '//name//' = transfer('// &
-                itoa(cp_f64_bits(value_f64(v)))//'_int64, 1.0_real64)')
+                signed_lit(cp_f64_bits(value_f64(v)), '_int64')//', 1.0_real64)')
       case (TYPE_TEXT)
          call value_text(v, s, err)
          if (err /= CAPNP_OK) return
@@ -4128,7 +4192,7 @@ contains
       if (err /= CAPNP_OK) return
       call w('   integer(int64), parameter :: '// &
              ident_const(upcase(tn)//'_INTERFACE_ID')//' = '// &
-             itoa(node_id(np))//'_int64')
+             signed_lit(node_id(np), '_int64'))
       ! Annotation values are module data, not type-bound procedure bindings.
       do i = 0_int64, capnp_list_len(ml) - 1_int64
          mp = capnp_list_get_struct(ml, int(i), err)

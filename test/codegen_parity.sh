@@ -274,7 +274,8 @@ g1() {
   cd "$d"
   cat > minmax.capnp << 'EOF'
 @0x8111111111111101;
-struct MinMax {
+annotation floor @0x8111111111111102 (struct) :Int64;
+struct MinMax $floor(-9223372036854775808) {
   i8 @0 :Int8 = -128;
   i16 @1 :Int16 = -32768;
   i32 @2 :Int32 = -2147483648;
@@ -284,6 +285,18 @@ struct MinMax {
 const minI64 :Int64 = -9223372036854775808;
 EOF
   capnp compile "${CAPNP_INC[@]}" -o"$BIN" minmax.capnp
+  cat > annid.capnp << 'EOF'
+@0x8111111111111103;
+annotation minid @0x8000000000000000 (struct) :Int32;
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" annid.capnp
+  fc -std=f2018 -c annid_capnp.f90 -I "$MOD" -J .
+  cat > ifcid.capnp << 'EOF'
+@0x8111111111111104;
+interface MinId @0x8000000000000000 {}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" ifcid.capnp
+  fc -std=f2018 -c ifcid_capnp.f90 -I "$MOD" -J .
   cat > drv.f90 << 'EOF'
 program drv
    use capnp
@@ -329,6 +342,54 @@ EOF
   f=$(tr 'A-F' 'a-f' <<< "$DRV_OUT")
   c=$(./cppdrv | tr 'A-F' 'a-f')
   cmp_out "$f" "$c"
+  # -0.0 has the minimum integer of each kind as its bit pattern.
+  cat > negzero.capnp << 'EOF'
+@0x8111111111111105;
+annotation nz32 @0x8111111111111106 (struct) :Float32;
+annotation nz64 @0x8111111111111107 (struct) :Float64;
+struct NegZero $nz32(-0.0) $nz64(-0.0) {
+  x @0 :Int32;
+}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" negzero.capnp
+  cat > drv.f90 << 'EOF'
+program drv
+   use negzero_capnp
+   implicit none
+   print '(z8.8,1x,z16.16)', transfer(NEG_ZERO_ANNOTATION_NZ32, 0_int32), &
+      transfer(NEG_ZERO_ANNOTATION_NZ64, 0_int64)
+end program drv
+EOF
+  fc negzero_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  capnp compile "${CAPNP_INC[@]}" -oc++ negzero.capnp
+  cat > cpp.cpp << 'EOF'
+#include "negzero.capnp.h"
+#include <capnp/schema.h>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+int main() {
+  std::uint32_t b32 = 0;
+  std::uint64_t b64 = 0;
+  for (auto a : capnp::Schema::from<NegZero>().getProto().getAnnotations()) {
+    auto v = a.getValue();
+    if (v.isFloat32()) {
+      float x = v.getFloat32();
+      std::memcpy(&b32, &x, sizeof(x));
+    } else if (v.isFloat64()) {
+      double x = v.getFloat64();
+      std::memcpy(&b64, &x, sizeof(x));
+    }
+  }
+  std::printf("%08x %016llx\n", (unsigned)b32, (unsigned long long)b64);
+}
+EOF
+  "$CXX" -std=c++17 cpp.cpp negzero.capnp.c++ "${CAPNP_PC[@]}" -o cppdrv
+  run_drv
+  f=$(tr 'A-F' 'a-f' <<< "$DRV_OUT")
+  c=$(./cppdrv | tr 'A-F' 'a-f')
+  cmp_out "$f" "$c"
+  cmp_out "$f" "80000000 8000000000000000"
   echo "g1 ok"
 }
 
@@ -1093,6 +1154,30 @@ g18() {
   local d
   d=$(work)
   cd "$d"
+  python3 - "$ROOT/app/capnpc_emit.f90" "$CAPNP_PREFIX/include" "$ROOT" << 'EOF'
+import re
+import sys
+
+src, inc, root = sys.argv[1:]
+text = open(src).read()
+bad = 0
+for name, base in (("bundled_capnp_schema", inc), ("runtime_module_taken", root)):
+    m = re.search(r"function %s\b(.*?)end function %s" % (name, name), text, re.S)
+    if not m:
+        print("FAIL: %s not found" % name, file=sys.stderr)
+        sys.exit(1)
+    body = m.group(1)
+    pairs = re.findall(r"(-?\d+)_int64\b[^\n!]*!\s*(\S+\.capnp)", body)
+    if not pairs or len(pairs) != len(re.findall(r"-?\d+_int64", body)):
+        print("FAIL: %s lists an id without its schema file" % name, file=sys.stderr)
+        bad = 1
+    for lit, rel in pairs:
+        m = re.search(r"^@0x([0-9a-f]+);", open("%s/%s" % (base, rel)).read(), re.M)
+        if int(lit) % 2**64 != int(m.group(1), 16):
+            print("FAIL: %s id %s is not the id of %s" % (name, lit, rel), file=sys.stderr)
+            bad = 1
+sys.exit(bad)
+EOF
   cat > strm.capnp << 'EOF'
 @0x9100000000000032;
 interface AbcdefghijklmnopqrstuvwxyzA {
@@ -1103,6 +1188,55 @@ EOF
   capnp compile "${CAPNP_INC[@]}" -o"$BIN" strm.capnp
   no_long_lines strm_capnp.f90
   fc -c strm_capnp.f90 -I "$MOD" -J .
+  mkdir -p nested/capnp
+  cat > nested/capnp/stream.capnp << 'EOF'
+@0x9100000000000033;
+struct NestedStream { x @0 :Int32; }
+EOF
+  cxx_ok nested/capnp/stream.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" nested/capnp/stream.capnp
+  if ! grep -q '^module nested__capnp__stream_capnp$' nested/capnp/stream_capnp.f90; then
+    echo 'FAIL: nested schema module name was not qualified' >&2
+    exit 1
+  fi
+  fc -c nested/capnp/stream_capnp.f90 -I "$MOD" -J .
+  if grep -q '^module stream_capnp$' nested/capnp/stream_capnp.f90; then
+    echo 'FAIL: nested schema emitted a runtime module shim' >&2
+    exit 1
+  fi
+  mkdir -p mycapnp
+  cat > mycapnp/foo.capnp << 'EOF'
+@0x9100000000000034;
+struct Foo { x @0 :Int32; }
+EOF
+  cxx_ok mycapnp/foo.capnp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" mycapnp/foo.capnp
+  if ! grep -q '^module mycapnp__foo_capnp$' mycapnp/foo_capnp.f90; then
+    echo 'FAIL: mycapnp schema module name was not qualified' >&2
+    exit 1
+  fi
+  fc -c mycapnp/foo_capnp.f90 -I "$MOD" -J .
+  local p
+  for p in include vendor; do
+    mkdir -p "$p/capnp"
+    cp "$CAPNP_PREFIX/include/capnp/stream.capnp" "$p/capnp/stream.capnp"
+    cat > imports.capnp << EOF
+@0x9100000000000035;
+using Stream = import "$p/capnp/stream.capnp";
+struct Imports { result @0 :Stream.StreamResult; }
+EOF
+    capnp compile "${CAPNP_INC[@]}" -o"$BIN" imports.capnp
+    if ! grep -Eq '^ *use stream_capnp(,|$)' imports_capnp.f90; then
+      echo "FAIL: import of $p/capnp/stream.capnp did not use stream_capnp" >&2
+      exit 1
+    fi
+    fc -c imports_capnp.f90 -I "$MOD" -J .
+  done
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" vendor/capnp/stream.capnp
+  if ! grep -q '^module stream_capnp$' vendor/capnp/stream_capnp.f90; then
+    echo 'FAIL: bundled stream schema was not mapped to its runtime module' >&2
+    exit 1
+  fi
   echo "g18 ok"
 }
 

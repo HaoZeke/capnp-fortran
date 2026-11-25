@@ -714,10 +714,11 @@ contains
 
    !> Zero the object `tag` describes at `base`. The tag's offset is ignored.
    !> layout.c++ zeroObject(segment, capTable, tag, ptr), lines 669-737.
-   recursive subroutine zero_at(msg, seg, base, tag, depth)
-      type(capnp_message_t), intent(inout) :: msg
+   recursive subroutine zero_at(msg, seg, base, tag, depth, q)
+      type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: seg, depth
       integer(int64), intent(in) :: base, tag
+      type(capnp_ptr_t), intent(in), optional :: q
       integer :: es, dwords, pwords, j
       integer(int64) :: cnt, nbytes, child, stride, nelem, i64, ctag, pos
       if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT) return
@@ -729,8 +730,13 @@ contains
          if (.not. span_ok(msg, seg, base, nbytes)) return
          do j = 0, pwords - 1
             child = base + int(dwords, int64)*8_int64 + int(j, int64)*8_int64
-            call zero_pointer_word(msg, seg, child, &
-                                    cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+            if (present(q)) then
+               call zero_pointer_word(msg, seg, child, &
+                                      cp_get_i64(msg%segs(seg)%bytes, child), depth + 1, q)
+            else
+               call zero_pointer_word(msg, seg, child, &
+                                      cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+            end if
          end do
          call zero_bytes(msg, seg, base, nbytes)
       case (CAPNP_WK_LIST)
@@ -742,8 +748,13 @@ contains
             if (.not. span_ok(msg, seg, base, nbytes)) return
             do i64 = 0_int64, cnt - 1_int64
                child = base + i64*8_int64
-               call zero_pointer_word(msg, seg, child, &
-                                       cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+               if (present(q)) then
+                  call zero_pointer_word(msg, seg, child, &
+                                         cp_get_i64(msg%segs(seg)%bytes, child), depth + 1, q)
+               else
+                  call zero_pointer_word(msg, seg, child, &
+                                         cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+               end if
             end do
             call zero_bytes(msg, seg, base, nbytes)
          else if (es == CAPNP_SZ_COMPOSITE) then
@@ -761,8 +772,13 @@ contains
                      pos = base + 8_int64 + i64*stride*8_int64 + int(dwords, int64)*8_int64
                      do j = 0, pwords - 1
                         child = pos + int(j, int64)*8_int64
-                        call zero_pointer_word(msg, seg, child, &
-                           cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+                        if (present(q)) then
+                           call zero_pointer_word(msg, seg, child, &
+                              cp_get_i64(msg%segs(seg)%bytes, child), depth + 1, q)
+                        else
+                           call zero_pointer_word(msg, seg, child, &
+                              cp_get_i64(msg%segs(seg)%bytes, child), depth + 1)
+                        end if
                      end do
                   end do
                end if
@@ -777,17 +793,33 @@ contains
 
    !> Zero the object a pointer word addresses, including a far landing pad.
    !> layout.c++ zeroObject(segment, capTable, ref), lines 625-667.
-   recursive subroutine zero_pointer_word(msg, seg, slot, w, depth)
-      type(capnp_message_t), intent(inout) :: msg
+   recursive subroutine zero_pointer_word(msg, seg, slot, w, depth, q)
+      type(capnp_message_t), intent(inout), target :: msg
       integer, intent(in) :: seg, depth
       integer(int64), intent(in) :: slot, w
-      integer :: tseg, oseg
+      type(capnp_ptr_t), intent(in), optional :: q
+      integer :: tseg, oseg, qseg
       integer(int64) :: base, padoff, pad, cw, w0, tag, tseg64, oseg64
+      integer(int64) :: obase, onbytes, qbase, qnbytes
+      logical :: ok, qok
       if (depth >= CAPNP_DEFAULT_DEPTH_LIMIT .or. w == 0_int64) return
+      if (present(q)) then
+         if (associated(q%msg, msg)) then
+            call locate_body(msg, seg, slot, w, oseg, obase, onbytes, ok)
+            call locate_handle(q, qseg, qbase, qnbytes, qok)
+            if (ok .and. qok .and. oseg == qseg .and. onbytes > 0_int64 .and. qnbytes > 0_int64) then
+               if (obase < qbase + qnbytes .and. qbase < obase + onbytes) return
+            end if
+         end if
+      end if
       select case (wp_kind(w))
       case (CAPNP_WK_STRUCT, CAPNP_WK_LIST)
          base = slot + 8_int64 + int(wp_offset(w), int64)*8_int64
-         call zero_at(msg, seg, base, w, depth)
+         if (present(q)) then
+            call zero_at(msg, seg, base, w, depth, q)
+         else
+            call zero_at(msg, seg, base, w, depth)
+         end if
       case (CAPNP_WK_FAR)
          ! zeroObject follows a landing pad that is itself a far pointer and
          ! a far hop costs no nesting level. Each chained pad is cleared once
@@ -806,7 +838,11 @@ contains
                   oseg64 = wp_far_seg(w0)
                   if (oseg64 >= 0_int64 .and. oseg64 < int(msg%nsegs, int64)) then
                      oseg = int(oseg64) + 1
-                     call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth)
+                     if (present(q)) then
+                        call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth, q)
+                     else
+                        call zero_at(msg, oseg, wp_far_off(w0)*8_int64, tag, depth)
+                     end if
                   end if
                end if
                call zero_bytes(msg, tseg, padoff, 16_int64)
@@ -822,7 +858,11 @@ contains
             if (pad /= 0_int64 .and. &
                 (wp_kind(pad) == CAPNP_WK_STRUCT .or. wp_kind(pad) == CAPNP_WK_LIST)) then
                base = padoff + 8_int64 + int(wp_offset(pad), int64)*8_int64
-               call zero_at(msg, tseg, base, pad, depth)
+               if (present(q)) then
+                  call zero_at(msg, tseg, base, pad, depth, q)
+               else
+                  call zero_at(msg, tseg, base, pad, depth)
+               end if
             end if
             call zero_bytes(msg, tseg, padoff, 8_int64)
             return
@@ -935,20 +975,11 @@ contains
       integer, intent(in) :: seg
       integer(int64), intent(in) :: slot
       type(capnp_ptr_t), intent(in) :: q
-      integer :: oseg, qseg
-      integer(int64) :: w, obase, onbytes, qbase, qnbytes
-      logical :: ok, qok
+      integer(int64) :: w
       if (.not. span_ok(msg, seg, slot, 8_int64)) return
       w = cp_get_i64(msg%segs(seg)%bytes, slot)
       if (w == 0_int64) return
-      call locate_body(msg, seg, slot, w, oseg, obase, onbytes, ok)
-      if (ok .and. associated(q%msg, msg)) then
-         call locate_handle(q, qseg, qbase, qnbytes, qok)
-         if (qok .and. qseg == oseg .and. onbytes > 0_int64 .and. qnbytes > 0_int64) then
-            if (obase < qbase + qnbytes .and. qbase < obase + onbytes) return
-         end if
-      end if
-      call zero_pointer_word(msg, seg, slot, w, 0)
+      call zero_pointer_word(msg, seg, slot, w, 0, q)
    end subroutine zero_slot_target
 
    recursive subroutine write_ptr_slot(msg, sseg, slot, q, err)

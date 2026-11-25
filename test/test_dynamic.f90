@@ -30,7 +30,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(20))
+      allocate (testsuite(21))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -71,6 +71,8 @@ contains
       testsuite(19)%test => run_setp_text_nul
       testsuite(20)%name = "dynamic-node-bomb"
       testsuite(20)%test => run_node_bomb
+      testsuite(21)%name = "dynamic-load-cleans-failure"
+      testsuite(21)%test => run_load_cleanup
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -80,6 +82,19 @@ contains
       if (allocated(error)) return
       call check(error, cond, name)
    end subroutine check_
+
+   subroutine run_load_cleanup(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t) :: schema
+      integer(int8) :: bytes(0:7)
+      integer :: err
+      bytes = 0_int8
+      bytes(4) = 1_int8
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_ERR_FRAMING .and. .not. allocated(schema%cgr%segs) .and. &
+                  .not. allocated(schema%nodes), 'dynamic load: failed request is released')
+      call capnp_dyn_free(schema)
+   end subroutine run_load_cleanup
 
    subroutine run_dynamic(error)
       type(error_type), allocatable, intent(out) :: error

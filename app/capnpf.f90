@@ -566,7 +566,8 @@ contains
       type(c_ptr) :: fp
       integer(c_size_t) :: nread
       integer(c_intptr_t) :: addr
-      integer :: got, cap, stat, st
+      integer(int64) :: got, cap
+      integer :: stat, st
       err = CAPNP_OK
       call to_cchars(shcmd, cmd)
       call to_cchars('r', mode)
@@ -575,35 +576,35 @@ contains
          err = CAPNP_ERR_IO
          return
       end if
-      cap = 65536
-      got = 0
-      allocate (acc(0:cap - 1), stat=stat)
+      cap = 65536_int64
+      got = 0_int64
+      allocate (acc(0:cap - 1_int64), stat=stat)
       if (stat /= 0) then
          st = c_pclose(fp)
          err = CAPNP_ERR_ALLOC
          return
       end if
       do
-         if (got + 4096 > cap) then
+         if (got + 4096_int64 > cap) then
             if (cap > ishft(huge(cap), -1)) then
                st = c_pclose(fp)
                err = CAPNP_ERR_ALLOC
                return
             end if
-            allocate (grown(0:cap*2 - 1), stat=stat)
+            allocate (grown(0:cap*2_int64 - 1_int64), stat=stat)
             if (stat /= 0) then
                st = c_pclose(fp)
                err = CAPNP_ERR_ALLOC
                return
             end if
-            grown(0:got - 1) = acc(0:got - 1)
+            grown(0:got - 1_int64) = acc(0:got - 1_int64)
             call move_alloc(grown, acc)
-            cap = cap*2
+            cap = cap*2_int64
          end if
          addr = transfer(c_loc(acc(got)), addr)
          nread = c_fread(transfer(addr, fp), 1_c_size_t, 4096_c_size_t, fp)
          if (nread == 0_c_size_t) exit
-         got = got + int(nread)
+         got = got + int(nread, int64)
       end do
       if (c_ferror(fp) /= 0) then
          st = c_pclose(fp)
@@ -615,15 +616,15 @@ contains
          err = CAPNP_ERR_IO
          return
       end if
-      if (got <= 0) then
+      if (got <= 0_int64) then
          allocate (bytes(0))
       else
-         allocate (bytes(0:got - 1), stat=stat)
+         allocate (bytes(0:got - 1_int64), stat=stat)
          if (stat /= 0) then
             err = CAPNP_ERR_ALLOC
             return
          end if
-         bytes = acc(0:got - 1)
+         bytes = acc(0:got - 1_int64)
       end if
    end subroutine read_pipe
 
@@ -1005,18 +1006,19 @@ contains
       character(len=11), parameter :: guesses(6) = [character(len=11) :: &
          'binary', 'text', 'packed', 'json', 'flat', 'flat-packed']
       integer, allocatable :: b(:)
-      integer :: i, n, rc
-      n = min(size(raw), 8192)
-      allocate (b(0:n - 1))
-      do i = 0, n - 1
+      integer(int64) :: i, n
+      integer :: g, rc
+      n = capnp_prefix_bytes(size(raw, kind=int64), 8192_int64)
+      allocate (b(0:n - 1_int64))
+      do i = 0_int64, n - 1_int64
          b(i) = iand(int(raw(i)), 255)
       end do
       ok = plausibility(fmt, raw, b) /= P_IMPOSSIBLE
       if (ok) return
-      do i = 1, size(guesses)
-         if (plausibility(trim(guesses(i)), raw, b) >= P_WRONG_TYPE) then
+      do g = 1, size(guesses)
+         if (plausibility(trim(guesses(g)), raw, b) >= P_WRONG_TYPE) then
             call fail('The input is not in "'//fmt//'" format. It looks like it is in "' &
-                      //trim(guesses(i))//'" format. Try that instead.', rc)
+                      //trim(guesses(g))//'" format. Try that instead.', rc)
             return
          end if
       end do
@@ -1205,13 +1207,13 @@ contains
    function text_plausible(raw) result(ok)
       integer(int8), intent(in) :: raw(0:)
       logical :: ok
-      integer :: state, i, c, n
+      integer :: state, c
+      integer(int64) :: i, n
       integer, parameter :: st_pre = 0, st_com = 1, st_body = 2
       ok = .true.
       state = st_pre
-      n = size(raw)
-      if (n > 8192) n = 8192
-      do i = 0, n - 1
+      n = capnp_prefix_bytes(size(raw, kind=int64), 8192_int64)
+      do i = 0_int64, n - 1_int64
          c = int(raw(i))
          if (c < 0) c = c + 256
          select case (state)
@@ -1486,8 +1488,8 @@ contains
             return
          end if
          if (words*8_int64 /= size(raw, kind=int64)) then
-            allocate (chopped(0:int(words*8_int64) - 1))
-            chopped = raw(0:int(words*8_int64) - 1)
+            allocate (chopped(0:words*8_int64 - 1_int64))
+            chopped = raw(0:words*8_int64 - 1_int64)
             wrapped = wrap_flat(chopped)
          else
             wrapped = wrap_flat(raw)
@@ -1753,19 +1755,17 @@ contains
       integer(int8), intent(in), target :: buf(:)
       integer, intent(out) :: err
       integer(c_intptr_t) :: addr
-      integer(c_size_t) :: left
+      integer(int64) :: left
       integer(c_long) :: nw
-      integer :: lb
       type(c_ptr) :: p
       err = CAPNP_OK
-      if (size(buf) <= 0) return
+      left = size(buf, kind=int64)
+      if (left <= 0_int64) return
       if (fd == 1) stdout_writes = stdout_writes + 1_int64
-      lb = lbound(buf, 1)
-      addr = transfer(c_loc(buf(lb)), addr)
-      left = int(size(buf), c_size_t)
-      do while (left > 0_c_size_t)
+      addr = transfer(c_loc(buf(1)), addr)
+      do while (left > 0_int64)
          p = transfer(addr, p)
-         nw = c_write(int(fd, c_int), p, left)
+         nw = c_write(int(fd, c_int), p, int(capnp_write_chunk_bytes(left), c_size_t))
          if (nw < 0_c_long) then
             ! A signal during write is retried, as kj does.
             if (os_errno_value() == os_eintr()) cycle
@@ -1776,7 +1776,7 @@ contains
             return
          end if
          addr = addr + int(nw, c_intptr_t)
-         left = left - int(nw, c_size_t)
+         left = left - int(nw, int64)
       end do
    end subroutine write_fd
 
@@ -1786,14 +1786,15 @@ contains
       character(len=*), intent(in) :: text
       integer, intent(out) :: err
       integer(int8), allocatable, target :: buf(:)
-      integer :: i, n, u, stat
-      n = len(text)
-      allocate (buf(n + 1), stat=stat)
+      integer(int64) :: i, n
+      integer :: u, stat
+      n = len(text, kind=int64)
+      allocate (buf(n + 1_int64), stat=stat)
       if (stat /= 0) then
          err = CAPNP_ERR_ALLOC
          return
       end if
-      do i = 1, n
+      do i = 1_int64, n
          u = iachar(text(i:i))
          if (u >= 128) then
             buf(i) = int(u - 256, int8)
@@ -1801,7 +1802,7 @@ contains
             buf(i) = int(u, int8)
          end if
       end do
-      buf(n + 1) = 10_int8
+      buf(n + 1_int64) = 10_int8
       call write_fd(fd, buf, err)
    end subroutine write_fd_line
 
@@ -2878,7 +2879,7 @@ contains
       n = size(raw, kind=int64)
       allocate (character(len=n) :: s)
       do i = 0_int64, n - 1_int64
-         s(int(i) + 1:int(i) + 1) = char(capnp_u_of_i8(raw(i)))
+         s(i + 1_int64:i + 1_int64) = char(capnp_u_of_i8(raw(i)))
       end do
    end function bytes_to_text
 
