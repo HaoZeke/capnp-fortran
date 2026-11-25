@@ -12,7 +12,8 @@ module test_dynamic
                                 type_list_element, type_type_id, type_anyptr_which, &
                                 type_param_scope_id, ANYPTR_PARAMETER, &
                                 value_which, value_text, node_id, &
-                                node_struct_discriminant_offset
+                                node_struct_discriminant_offset, node_struct_data_words, &
+                                node_struct_pointer_count
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 person_employment_employer_set, &
@@ -34,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(45))
+      allocate (testsuite(46))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -125,6 +126,8 @@ contains
       testsuite(44)%test => run_init_list_handle
       testsuite(45)%name = "dynamic-init-short"
       testsuite(45)%test => run_init_short
+      testsuite(46)%name = "dynamic-set-group"
+      testsuite(46)%test => run_set_group
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2861,5 +2864,124 @@ contains
       call capnp_dyn_free(kit)
       call capnp_dyn_free(dyn)
    end subroutine run_init_short
+
+   !> dynamic.c++ Builder::set on a group (651-666) clears the group, then
+   !> copies the active arm and the members that have a value. Expected
+   !> words come from Cap'n Proto C++ 1.4.0 on the same schema.
+   subroutine run_set_group(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: sm, msg, rm
+      type(capnp_ptr_t) :: src, dst, view, q, sq, rdst
+      integer(int8), allocatable :: bytes(:), before(:)
+      character(len=:), allocatable :: s
+      integer :: err, rc, sidx, square_idx, idx, gidx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sidx = capnp_dyn_find(schema, 'Shape', err)
+      square_idx = capnp_dyn_find(schema, 'Shape.square', err)
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      call capnp_message_init_builder(sm, err)
+      call capnp_message_init_builder(msg, err)
+
+      src = fresh(sm, sidx)
+      sq = capnp_dyn_init_struct(schema, sidx, src, 'square', err)
+      call capnp_dyn_set_f64(schema, square_idx, src, 'width', 4.0_real64, err)
+      dst = fresh(msg, sidx)
+      call capnp_dyn_setp(schema, sidx, dst, 'square', &
+                          capnp_dyn_getp(schema, sidx, src, 'square', err), err)
+      call check_(error, err == CAPNP_OK .and. capnp_which(dst, 4) == 1 .and. &
+                  capnp_get_f64(dst, 0_int64) == 4.0_real64, 'set-group: Shape.square copied')
+
+      src = capnp_dyn_new_root(schema, idx, sm, err)
+      sq = capnp_dyn_init_struct(schema, idx, src, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'hi', err)
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      view = capnp_dyn_getp(schema, idx, src, 'g', err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', view, err)
+      rc = err
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_which(dst, 3) == 1 .and. capnp_get_i32(dst, 0_int64) == 0 .and. &
+                  s == 'hi', 'set-group: inner arm and text copied')
+
+      ! Same message: the text is copied, so the two structs share nothing.
+      src = fresh(msg, idx)
+      sq = capnp_dyn_init_struct(schema, idx, src, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'own', err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      q = capnp_getp(dst, 0, err)
+      sq = capnp_getp(src, 0, err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'changed', err)
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. q%off /= sq%off .and. &
+                  s == 'own', 'set-group: same-message pointer is a copy')
+
+      ! The active arm is set even when null: Text reads as "" and is written.
+      src = fresh(msg, idx)
+      call capnp_set_u16(src, 4_int64, 1_int32, err)
+      call capnp_set_u16(src, 6_int64, 1_int32, err)
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      q = capnp_getp(dst, 0, err)
+      call check_(error, rc == CAPNP_OK .and. capnp_which(dst, 3) == 1 .and. &
+                  q%kind == CAPNP_PK_LIST .and. q%nelem == 1_int64, &
+                  'set-group: null active Text arm becomes empty Text')
+
+      ! A value that is not a struct selects the arm and stores nothing.
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', capnp_ptr_t(), err)
+      call check_(error, err == CAPNP_ERR_KIND .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_get_i32(dst, 0_int64) == 5, 'set-group: non-struct value rejected')
+
+      ! A struct of another type fails after the group is cleared.
+      dst = fresh(msg, idx)
+      sq = capnp_dyn_init_struct(schema, idx, dst, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, dst, 'y', 'old', err)
+      call capnp_set_i32(dst, 0_int64, 9_int32, err)
+      src = fresh(msg, sidx)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_which(dst, 3) == 0 .and. capnp_get_i32(dst, 0_int64) == 0 .and. &
+                  s == 'old', 'set-group: other struct type cleared and rejected')
+
+      ! A reader is not written.
+      call capnp_serialize_bytes(sm, before, err)
+      call capnp_deserialize_bytes(before, rm, err)
+      rdst = capnp_root(rm, err)
+      call capnp_dyn_setp(schema, idx, rdst, 'g', view, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. same_bytes(rm, before), &
+                  'set-group: reader untouched')
+
+      call capnp_message_free(rm)
+      call capnp_message_free(sm)
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      !> A struct of node nidx that is not the root, so a later root
+      !> does not clear it.
+      function fresh(m, nidx) result(h)
+         type(capnp_message_t), intent(inout), target :: m
+         integer, intent(in) :: nidx
+         type(capnp_ptr_t) :: h
+         integer :: e
+         h = capnp_new_struct(m, node_struct_data_words(schema%nodes(nidx)), &
+                              node_struct_pointer_count(schema%nodes(nidx)), e)
+         h%schema_id = node_id(schema%nodes(nidx))
+      end function fresh
+   end subroutine run_set_group
 
 end module test_dynamic
