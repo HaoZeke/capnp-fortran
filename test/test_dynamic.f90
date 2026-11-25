@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(48))
+      allocate (testsuite(49))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -132,6 +132,8 @@ contains
       testsuite(47)%test => run_capability_subtype
       testsuite(48)%name = "dynamic-set-version-skew"
       testsuite(48)%test => run_set_version_skew
+      testsuite(49)%name = "dynamic-iface-visit-limit"
+      testsuite(49)%test => run_iface_visit_limit
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3114,5 +3116,67 @@ contains
       call capnp_message_free(dmsg)
       call capnp_dyn_free(schema)
    end subroutine run_set_version_skew
+
+   !> schema.c++ InterfaceSchema::extends accepts 64 visits and returns
+   !> false on the next one, before the identity check. I63 extends I00
+   !> is the 64th visit. I64 extends I00 is the 65th.
+   subroutine run_iface_visit_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, v, q
+      character(len=80), allocatable :: lines(:)
+      integer :: err, rc, hidx, i
+      logical :: ok
+      allocate (lines(68))
+      lines(1) = '@0xd1f0c3a5b7e90a21;'
+      lines(2) = 'interface I00 {}'
+      do i = 1, 64
+         write (lines(i + 2), '(a,i2.2,a,i2.2,a)') &
+            'interface I', i, ' extends(I', i - 1, ') {}'
+      end do
+      lines(67) = 'interface Loop extends(Loop) {}'
+      lines(68) = 'struct Holder { far @0 :I00; near @1 :I01; other @2 :I00; }'
+      call load_inline_schema(error, 'visit', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      hidx = capnp_dyn_find(schema, 'Holder', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, hidx, msg, err)
+      v = capnp_ptr_t()
+      v%msg => msg
+      v%kind = CAPNP_PK_CAP
+      v%capidx = 7_int64
+
+      v%schema_id = iface_id('I64')
+      call capnp_dyn_setp(schema, hidx, root, 'far', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'extends: 65th visit returns false')
+      v%schema_id = iface_id('I63')
+      call capnp_dyn_setp(schema, hidx, root, 'far', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%kind == CAPNP_PK_CAP .and. q%capidx == 7_int64, &
+                  'extends: 64th visit still matches')
+      v%schema_id = iface_id('I64')
+      v%capidx = 8_int64
+      call capnp_dyn_setp(schema, hidx, root, 'near', v, rc)
+      q = capnp_getp(root, 1, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 8_int64, &
+                  'extends: 64th visit matches a nearer base')
+      v%schema_id = iface_id('Loop')
+      v%capidx = 9_int64
+      call capnp_dyn_setp(schema, hidx, root, 'other', v, rc)
+      q = capnp_getp(root, 2, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'extends: a cycle returns false')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      integer(int64) function iface_id(name)
+         character(len=*), intent(in) :: name
+         integer :: e
+         iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
+      end function iface_id
+   end subroutine run_iface_visit_limit
 
 end module test_dynamic

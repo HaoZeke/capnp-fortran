@@ -2003,49 +2003,51 @@ contains
       end select
    end subroutine capnp_dyn_setp
 
-   !> True when interface id is base or inherits from it, as schema.c++
-   !> InterfaceSchema::extends walks the superclasses. Each node is
-   !> visited once, so a cyclic schema ends.
+   !> True when interface id is base or inherits from it.
+   !> schema.c++ InterfaceSchema::extends (637-644) increments a visit
+   !> counter before the identity check and returns false when that
+   !> counter passes 64.
    function dyn_iface_extends(schema, id, base) result(ok)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer(int64), intent(in) :: id, base
       logical :: ok
+      integer :: visits
+      visits = 0
+      ok = iface_extends_visit(schema, id, base, visits)
+   end function dyn_iface_extends
+
+   !> One extends() call. The counter is shared for the whole walk, so
+   !> a cycle ends once 64 visits have been accepted.
+   recursive function iface_extends_visit(schema, id, base, visits) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id, base
+      integer, intent(inout) :: visits
+      logical :: ok
       type(capnp_ptr_t) :: sl, sc
-      logical, allocatable :: seen(:)
-      integer, allocatable :: work(:)
       integer(int64) :: i
-      integer :: nidx, sidx, n, err
+      integer :: nidx, err
+      integer, parameter :: max_superclasses = 64
+      visits = visits + 1
+      if (visits > max_superclasses) then
+         ok = .false.
+         return
+      end if
       ok = id == base
       if (ok) return
       nidx = dyn_node_by_id(schema, id)
       if (nidx == 0) return
-      allocate (seen(size(schema%nodes)), work(size(schema%nodes)))
-      seen = .false.
-      seen(nidx) = .true.
-      work(1) = nidx
-      n = 1
-      do while (n > 0)
-         nidx = work(n)
-         n = n - 1
-         if (node_which(schema%nodes(nidx)) /= NODE_INTERFACE) cycle
-         sl = node_interface_superclasses(schema%nodes(nidx), err)
+      if (node_which(schema%nodes(nidx)) /= NODE_INTERFACE) return
+      sl = node_interface_superclasses(schema%nodes(nidx), err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(sl) - 1_int64
+         sc = capnp_list_get_struct(sl, int(i), err)
          if (err /= CAPNP_OK) return
-         do i = 0_int64, capnp_list_len(sl) - 1_int64
-            sc = capnp_list_get_struct(sl, int(i), err)
-            if (err /= CAPNP_OK) return
-            if (superclass_id(sc) == base) then
-               ok = .true.
-               return
-            end if
-            sidx = dyn_node_by_id(schema, superclass_id(sc))
-            if (sidx == 0) cycle
-            if (seen(sidx)) cycle
-            seen(sidx) = .true.
-            n = n + 1
-            work(n) = sidx
-         end do
+         if (iface_extends_visit(schema, superclass_id(sc), base, visits)) then
+            ok = .true.
+            return
+         end if
       end do
-   end function dyn_iface_extends
+   end function iface_extends_visit
 
    !> dynamic.c++ Builder::set on a group (651-666): select the arm, clear
    !> the group as init does, then copy the active union member and every
