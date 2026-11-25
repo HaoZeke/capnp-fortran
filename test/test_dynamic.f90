@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(38))
+      allocate (testsuite(39))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -111,6 +111,8 @@ contains
       testsuite(37)%test => run_text_coerce
       testsuite(38)%name = "dynamic-init-order"
       testsuite(38)%test => run_init_order
+      testsuite(39)%name = "dynamic-data-anypointer"
+      testsuite(39)%test => run_data_anypointer
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2536,5 +2538,38 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_init_order
+
+   !> Data written to an AnyPointer field is stored, as dynamic.c++ set
+   !> does. Text fields still reject Data.
+   subroutine run_data_anypointer(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: dyn, root
+      integer(int8), allocatable :: bytes(:), got(:)
+      integer :: err, didx, idx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      didx = capnp_dyn_find(schema, 'Dynamic', err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+      dyn = capnp_dyn_new_root(schema, didx, msg, err)
+      call capnp_dyn_set_data(schema, didx, dyn, 'anyStruct', [1_int8, 2_int8], err)
+      call check_(error, err == CAPNP_OK, 'data-anypointer: AnyStruct takes data')
+      call capnp_get_data(dyn, 1, got, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == 2, 'data-anypointer: stored bytes')
+      if (allocated(error)) return
+      call check_(error, all(got == [1_int8, 2_int8]), 'data-anypointer: byte values')
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_set_data(schema, idx, root, 'note', [1_int8, 2_int8], err)
+      call check_(error, err == CAPNP_ERR_KIND, 'data-anypointer: Text rejects data')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_data_anypointer
 
 end module test_dynamic

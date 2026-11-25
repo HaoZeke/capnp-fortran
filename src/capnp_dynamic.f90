@@ -1762,7 +1762,8 @@ contains
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_DATA) then
+      ! dynamic.c++ Builder::set (607-609) stores Data in AnyPointer too.
+      if (type_which(t) /= TYPE_DATA .and. type_which(t) /= TYPE_ANY_POINTER) then
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
