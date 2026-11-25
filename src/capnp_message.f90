@@ -66,9 +66,9 @@ module capnp_message
       integer :: esize = -1
       integer(int64) :: nelem = 0_int64
       integer(int64) :: capidx = 0_int64
-      !> Schema node id when the type is known: a struct's id, or the
-      !> interface id of a capability. 0 means the handle was not stamped,
-      !> so callers cannot check identity.
+      !> Schema node id when the type is known: a struct's id, the element
+      !> id of a struct list, or the interface id of a capability. 0 means
+      !> the handle was not stamped, so callers cannot check identity.
       integer(int64) :: schema_id = 0_int64
       integer(int64) :: dbits = -1_int64
       integer :: depth = 0

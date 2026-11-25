@@ -1275,7 +1275,11 @@ contains
       call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
-      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call dyn_tag_value(t, q)
+         return
+      end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
@@ -1295,10 +1299,7 @@ contains
       else
          call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
       end if
-      if (err == CAPNP_OK .and. type_which(t) == TYPE_STRUCT .and. &
-          q%kind == CAPNP_PK_STRUCT) then
-         q%schema_id = type_type_id(t)
-      end if
+      if (err == CAPNP_OK) call dyn_tag_value(t, q)
       if (err == CAPNP_OK) then
          if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
             q%frozen = .true.
@@ -1307,6 +1308,25 @@ contains
          end if
       end if
    end function capnp_dyn_getp
+
+   !> Stamp q with the struct id of field type t: a struct with its own id,
+   !> a struct list with its element id. capnp_dyn_setp then checks the
+   !> type by id, as dynamic.c++ Builder::set (577-595) checks the schema.
+   subroutine dyn_tag_value(t, q)
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_ptr_t), intent(inout) :: q
+      type(capnp_ptr_t) :: elem
+      integer :: err
+      select case (type_which(t))
+      case (TYPE_STRUCT)
+         if (q%kind == CAPNP_PK_STRUCT) q%schema_id = type_type_id(t)
+      case (TYPE_LIST)
+         if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_COMPOSITE) return
+         elem = type_list_element(t, err)
+         if (err /= CAPNP_OK) return
+         if (type_which(elem) == TYPE_STRUCT) q%schema_id = type_type_id(elem)
+      end select
+   end subroutine dyn_tag_value
 
    !> Copy a schema default into a reader-owned arena once per field and
    !> freeze the handle. Later reads of the same field reuse that copy.
@@ -1812,7 +1832,7 @@ contains
    end subroutine capnp_dyn_set_data
 
    !> True when value is a struct of the field's schema. A non-zero schema
-   !> id must match the field, and the layout must match the node.
+   !> id must match the field. Without one, the layout must match the node.
    function dyn_struct_ok(schema, t, value) result(ok)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t, value
@@ -1822,7 +1842,12 @@ contains
       ok = .false.
       if (value%kind /= CAPNP_PK_STRUCT) return
       sid = type_type_id(t)
-      if (value%schema_id /= 0_int64 .and. value%schema_id /= sid) return
+      if (value%schema_id /= 0_int64) then
+         ! setStruct copies a struct of any size, so one written by an
+         ! older or newer version of the schema is taken.
+         ok = value%schema_id == sid
+         return
+      end if
       nidx = dyn_node_by_id(schema, sid)
       if (nidx /= 0) then
          if (value%dwords /= node_struct_data_words(schema%nodes(nidx))) return
@@ -1831,7 +1856,8 @@ contains
       ok = .true.
    end function dyn_struct_ok
 
-   !> True when a list's element size matches the field's element type.
+   !> True when a list's element size matches the field's element type. A
+   !> struct list stamped with an element id must name the field's element.
    function dyn_list_ok(schema, elem, value) result(ok)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: elem, value
@@ -1856,6 +1882,10 @@ contains
          ok = value%esize == CAPNP_SZ_PTR
       case (TYPE_STRUCT)
          if (value%esize /= CAPNP_SZ_COMPOSITE) return
+         if (value%schema_id /= 0_int64) then
+            ok = value%schema_id == type_type_id(elem)
+            return
+         end if
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          ok = .true.
          if (nidx /= 0) then
@@ -2408,6 +2438,7 @@ contains
          end if
          value = capnp_new_composite_list(p%msg, n, node_struct_data_words(schema%nodes(nidx)), &
                                           node_struct_pointer_count(schema%nodes(nidx)), err)
+         value%schema_id = type_type_id(elem)
       else
          value = capnp_new_list(p%msg, dyn_list_esize(type_which(elem)), n, err)
       end if

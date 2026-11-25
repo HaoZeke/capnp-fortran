@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(47))
+      allocate (testsuite(48))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -130,6 +130,8 @@ contains
       testsuite(46)%test => run_set_group
       testsuite(47)%name = "dynamic-capability-subtype"
       testsuite(47)%test => run_capability_subtype
+      testsuite(48)%name = "dynamic-set-version-skew"
+      testsuite(48)%test => run_set_version_skew
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3062,5 +3064,55 @@ contains
          iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
       end function iface_id
    end subroutine run_capability_subtype
+
+   !> A struct, or a struct list, written by an older version of the schema
+   !> is read back through capnp_dyn_getp and stored at its own size, as
+   !> dynamic.c++ Builder::set (577-595) checks only the schema.
+   subroutine run_set_version_skew(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: smsg, dmsg
+      type(capnp_ptr_t) :: src, dst, old, q
+      character(len=80), parameter :: lines(4) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a13;', &
+         'struct Inner { a @0 :Int32; b @1 :Int64; t @2 :Text; }', &
+         'struct Twin { a @0 :Int32; b @1 :Int64; t @2 :Text; }', &
+         'struct Outer { inner @0 :Inner; list @1 :List(Inner); twin @2 :Twin; }']
+      integer :: err, rc, oidx
+      logical :: ok
+      call load_inline_schema(error, 'skew', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      oidx = capnp_dyn_find(schema, 'Outer', err)
+      call capnp_message_init_builder(smsg, err)
+      call capnp_message_init_builder(dmsg, err)
+      src = capnp_dyn_new_root(schema, oidx, smsg, err)
+      dst = capnp_dyn_new_root(schema, oidx, dmsg, err)
+      old = capnp_new_struct(smsg, 1, 0, err)
+      call capnp_set_i32(old, 0_int64, 5_int32, err)
+      call capnp_setp(src, 0, old, err)
+      old = capnp_new_composite_list(smsg, 2_int64, 1, 0, err)
+      call capnp_setp(src, 1, old, err)
+
+      q = capnp_dyn_getp(schema, oidx, src, 'inner', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'inner', q, rc)
+      q = capnp_getp(dst, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%dwords == 1 .and. q%pwords == 0 .and. &
+                  capnp_get_i32(q, 0_int64) == 5_int32, 'skew: older struct stored at its size')
+      if (allocated(error)) return
+      q = capnp_dyn_getp(schema, oidx, src, 'list', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'list', q, rc)
+      q = capnp_getp(dst, 1, err)
+      call check_(error, rc == CAPNP_OK .and. q%nelem == 2_int64 .and. q%dwords == 1, &
+                  'skew: older struct list stored')
+      if (allocated(error)) return
+      q = capnp_dyn_init_struct(schema, oidx, src, 'inner', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'twin', q, rc)
+      q = capnp_getp(dst, 2, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'skew: struct of another type with the same layout rejected')
+      call capnp_message_free(smsg)
+      call capnp_message_free(dmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_set_version_skew
 
 end module test_dynamic
