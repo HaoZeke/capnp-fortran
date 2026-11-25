@@ -1684,19 +1684,71 @@ contains
       character(len=*), intent(in) :: fname
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t
+      type(capnp_ptr_t) :: f, t, dv
+      integer :: ord
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_TEXT) then
+      ! dynamic.c++ Builder::set (546-610): an Enum takes the enumerant of
+      ! that name, Data takes the bytes without the NUL, and AnyPointer
+      ! stores the Text.
+      select case (type_which(t))
+      case (TYPE_TEXT, TYPE_ANY_POINTER)
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_text(p, int(field_slot_offset(f)), s, err)
+      case (TYPE_DATA)
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_data(p, int(field_slot_offset(f)), transfer(s, 0_int8, len(s)), err)
+      case (TYPE_ENUM)
+         ord = dyn_enumerant_ordinal(schema, type_type_id(t), s, err)
+         if (err /= CAPNP_OK) return
+         if (ord < 0) then
+            call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
+            return
+         end if
+         dv = field_slot_default(f, err)
+         if (err /= CAPNP_OK) return
+         call dyn_set_in_union(schema, idx, p, f, err)
+         if (err /= CAPNP_OK) return
+         call capnp_set_u16(p, field_slot_offset(f)*2_int64, int(ord, int32), err, &
+                            default=value_u16(dv))
+      case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
-         return
-      end if
-      call dyn_set_in_union(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
-      call capnp_set_text(p, int(field_slot_offset(f)), s, err)
+      end select
    end subroutine capnp_dyn_set_text
+
+   !> Ordinal of the enumerant called name in enum node id, or -1.
+   !> schema.c++ getEnumerantByName matches the whole name.
+   function dyn_enumerant_ordinal(schema, id, name, err) result(ord)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id
+      character(len=*), intent(in) :: name
+      integer, intent(out) :: err
+      integer :: ord, nidx
+      type(capnp_ptr_t) :: enums, en
+      character(len=:), allocatable :: ename
+      integer(int64) :: i
+      ord = -1
+      err = CAPNP_OK
+      nidx = dyn_node_by_id(schema, id)
+      if (nidx == 0) return
+      if (node_which(schema%nodes(nidx)) /= NODE_ENUM) return
+      enums = node_enumerants(schema%nodes(nidx), err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(enums) - 1_int64
+         en = capnp_list_get_struct(enums, int(i), err)
+         if (err /= CAPNP_OK) return
+         call enumerant_name(en, ename, err)
+         if (err /= CAPNP_OK) return
+         if (len(ename) == len(name) .and. ename == name) then
+            ord = int(i)
+            return
+         end if
+      end do
+   end function dyn_enumerant_ordinal
 
    subroutine capnp_dyn_set_data(schema, idx, p, fname, bytes, err)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -1855,11 +1907,8 @@ contains
                   call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
-            case (TYPE_ANY_POINTER)
-               if (.not. any_accepts(t, value%kind)) then
-                  call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
-                  return
-               end if
+            ! dynamic.c++ Builder::set (599-633) stores any pointer value in
+            ! an AnyPointer field without checking whichAnyPointerKind.
             end select
          end if
          call dyn_set_in_union(schema, idx, p, f, err)

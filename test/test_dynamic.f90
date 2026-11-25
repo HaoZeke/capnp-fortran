@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(36))
+      allocate (testsuite(37))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -107,6 +107,8 @@ contains
       testsuite(35)%test => run_union_set_keeps_arm
       testsuite(36)%name = "dynamic-f64-to-int"
       testsuite(36)%test => run_f64_to_int
+      testsuite(37)%name = "dynamic-text-coerce"
+      testsuite(37)%test => run_text_coerce
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -375,13 +377,14 @@ contains
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyList', people, err)
       people = capnp_dyn_get_any_list(aschema, dynamic_idx, q, 'anyList', err)
       call check_(error, err == CAPNP_OK .and. people%kind == CAPNP_PK_LIST, 'dyn: AnyList')
+      ! C++ set stores any pointer in an AnyPointer field.
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyStruct', people, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'dyn: AnyStruct rejects a list')
+      call check_(error, err == CAPNP_OK, 'dyn: AnyStruct takes a list')
       root = capnp_new_struct(amsg, 0, 0, err)
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'anyList', root, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'dyn: AnyList rejects a struct')
+      call check_(error, err == CAPNP_OK, 'dyn: AnyList takes a struct')
       call capnp_dyn_setp(aschema, dynamic_idx, q, 'capability', root, err)
-      call check_(error, err == CAPNP_ERR_KIND, 'dyn: Capability rejects a struct')
+      call check_(error, err == CAPNP_OK, 'dyn: Capability takes a struct')
       root = capnp_dyn_get_any_struct(aschema, dynamic_idx, q, 'anyList', err)
       call check_(error, err == CAPNP_ERR_KIND, 'dyn: get_any_struct rejects AnyList')
       root = capnp_dyn_get_any_list(aschema, dynamic_idx, q, 'anyStruct', err)
@@ -2397,5 +2400,76 @@ contains
                      capnp_dyn_get_int(schema, idx, root, fname, err) == stored, label)
       end subroutine expect
    end subroutine run_f64_to_int
+
+   !> Text written to Enum, Data and AnyPointer fields, and any pointer
+   !> kind written to a constrained AnyPointer, as dynamic.c++ set allows.
+   subroutine run_text_coerce(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, dyn, q, lst, st
+      integer(int8), allocatable :: bytes(:), got(:)
+      character(len=:), allocatable :: s
+      integer :: err, idx, didx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      didx = capnp_dyn_find(schema, 'Dynamic', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+
+      call capnp_dyn_set_text(schema, idx, root, 'hue', 'green', err)
+      call check_(error, err == CAPNP_OK .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'hue', err) == 1_int64, &
+                  'text-coerce: enumerant name stores its ordinal')
+      call capnp_dyn_set_text(schema, idx, root, 'hue', 'purple', err)
+      call check_(error, err == CAPNP_ERR_ARG .and. &
+                  capnp_dyn_get_int(schema, idx, root, 'hue', err) == 1_int64, &
+                  'text-coerce: unknown enumerant rejected')
+      call capnp_dyn_set_text(schema, idx, root, 'hue', 'blue ', err)
+      call check_(error, err == CAPNP_ERR_ARG, 'text-coerce: enumerant name matches exactly')
+
+      call capnp_dyn_set_text(schema, idx, root, 'blob', 'ab', err)
+      call capnp_dyn_get_data(schema, idx, root, 'blob', got, err)
+      call check_(error, err == CAPNP_OK .and. size(got) == 2, 'text-coerce: data has no NUL')
+      if (allocated(error)) return
+      call check_(error, all(got == [int(iachar('a'), int8), int(iachar('b'), int8)]), &
+                  'text-coerce: data bytes')
+      call capnp_dyn_set_text(schema, idx, root, 'blob', '', err)
+      q = capnp_getp(root, 1, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_LIST .and. q%nelem == 0_int64, &
+                  'text-coerce: empty text stores empty data')
+
+      dyn = capnp_dyn_new_root(schema, didx, msg, err)
+      call capnp_dyn_set_text(schema, didx, dyn, 'anyStruct', 'hi', err)
+      call capnp_get_text(dyn, 1, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'hi', 'text-coerce: AnyStruct takes text')
+      call capnp_dyn_set_text(schema, didx, dyn, 'capability', 'hi', err)
+      call capnp_get_text(dyn, 0, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'hi', 'text-coerce: Capability takes text')
+
+      st = capnp_new_struct(msg, 1, 0, err)
+      lst = capnp_new_list(msg, CAPNP_SZ_FOUR, 3_int64, err)
+      call capnp_dyn_setp(schema, didx, dyn, 'anyList', st, err)
+      q = capnp_getp(dyn, 2, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT, &
+                  'text-coerce: AnyList takes a struct')
+      call capnp_dyn_setp(schema, didx, dyn, 'anyStruct', lst, err)
+      q = capnp_getp(dyn, 1, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_LIST, &
+                  'text-coerce: AnyStruct takes a list')
+      call capnp_dyn_setp(schema, didx, dyn, 'capability', st, err)
+      q = capnp_getp(dyn, 0, err)
+      call check_(error, err == CAPNP_OK .and. q%kind == CAPNP_PK_STRUCT, &
+                  'text-coerce: Capability takes a struct')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_text_coerce
 
 end module test_dynamic
