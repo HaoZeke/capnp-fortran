@@ -23,6 +23,8 @@ module test_dynamic
                          dual_secondary_which, DUAL_PRIMARY_VOID_A_TAG, &
                          DUAL_PRIMARY_TEXT_A_TAG, DUAL_SECONDARY_VOID_B_TAG, &
                          DUAL_SECONDARY_INT_B_TAG
+   use dynamic_capnp, only: dynamic_t, dynamic_new_root, dynamic_choice_number_set, &
+                            dynamic_choice_label_set
    use capnp_union, only: capnp_which
    implicit none
    private
@@ -32,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(34))
+      allocate (testsuite(35))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -101,6 +103,8 @@ contains
       testsuite(33)%test => run_init_list_rollback
       testsuite(34)%name = "dynamic-union-rejected-set"
       testsuite(34)%test => run_union_rejected_set
+      testsuite(35)%name = "dynamic-union-set-keeps-arm"
+      testsuite(35)%test => run_union_set_keeps_arm
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -806,6 +810,7 @@ contains
       call capnp_message_init_builder(msg, err)
       choice = capnp_dyn_new_root(schema, choice_idx, msg, err)
       call capnp_dyn_set_text(schema, choice_idx, choice, 'label', 'hello', err)
+      call capnp_dyn_select(schema, choice_idx, choice, 'number', err)
       call capnp_dyn_set_int(schema, choice_idx, choice, 'number', 4_int64, err)
       call capnp_dyn_select(schema, choice_idx, choice, 'label', err)
       call capnp_dyn_get_text(schema, choice_idx, choice, 'label', s, err)
@@ -1723,6 +1728,7 @@ contains
       call check_(error, err == CAPNP_OK .and. &
                   capnp_dyn_get_int(schema, last, root, 'v10', err) == 77_int64, &
                   'deep-groups: write the innermost field')
+      call capnp_dyn_select(schema, idx, root, 'a', err)
       call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
       call check_(error, err == CAPNP_OK, 'deep-groups: another arm replaces the groups')
       call check_(error, capnp_dyn_which(schema, idx, root, err) == 0, &
@@ -1762,6 +1768,7 @@ contains
       tag = capnp_dyn_which(schema, gidx, root, err)
       call check_(error, err == CAPNP_OK .and. tag == 1, &
                   'nested-union: inner y arm active')
+      call capnp_dyn_select(schema, idx, root, 'a', err)
       call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
       call check_(error, err == CAPNP_OK, 'nested-union: switch to outer a')
       call capnp_dyn_select(schema, idx, root, 'g', err)
@@ -2217,5 +2224,84 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_union_rejected_set
+
+   !> A successful union write only moves the discriminant, as dynamic.c++
+   !> setInUnion and the generated setters do. The previous arm's data and
+   !> pointer slots keep their bits.
+   subroutine run_union_set_keeps_arm(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, gmsg
+      type(capnp_ptr_t) :: choice, root, made
+      type(dynamic_t) :: gen
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      character(len=3) :: num
+      integer :: err, cidx, idx, gidx, last, i
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      call capnp_message_init_builder(msg, err)
+
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 7_int64, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'x', err)
+      call check_(error, err == CAPNP_OK .and. capnp_which(choice, 2) == 1 .and. &
+                  capnp_get_i32(choice, 0_int64) == 7_int32, &
+                  'keeps-arm: number bits survive a label write')
+      made = capnp_dyn_init_list(schema, cidx, choice, 'items', 2_int64, err)
+      call check_(error, err == CAPNP_OK .and. capnp_which(choice, 2) == 2 .and. &
+                  capnp_get_i32(choice, 0_int64) == 7_int32, &
+                  'keeps-arm: number bits survive init of items')
+
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 7_int64, err)
+      call capnp_get_text(choice, 3, s, err)
+      call check_(error, err == CAPNP_OK .and. capnp_which(choice, 2) == 0 .and. &
+                  s == 'keep', 'keeps-arm: label pointer survives a number write')
+
+      call capnp_message_init_builder(gmsg, err)
+      gen = dynamic_new_root(gmsg, err)
+      call dynamic_choice_label_set(gen, 'keep', err)
+      call dynamic_choice_number_set(gen, 7_int32, err)
+      call capnp_get_text(gen%p, 3, s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'keep', &
+                  'keeps-arm: generated setters agree')
+      call capnp_message_free(gmsg)
+
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, root, 'y', 'hello', err)
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call capnp_dyn_get_text(schema, gidx, root, 'y', s, err)
+      call check_(error, err == CAPNP_OK .and. capnp_dyn_which(schema, idx, root, err) == 0 .and. &
+                  capnp_dyn_which(schema, gidx, root, err) == 1 .and. s == 'hello', &
+                  'keeps-arm: inner union survives an outer write')
+
+      idx = capnp_dyn_find(schema, 'DeepGroups', err)
+      s = 'DeepGroups'
+      do i = 1, 10
+         write (num, '(i0)') i
+         s = s//'.g'//trim(num)
+      end do
+      last = capnp_dyn_find(schema, s, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_select(schema, idx, root, 'g1', err)
+      call capnp_dyn_set_int(schema, last, root, 'v10', 77_int64, err)
+      call capnp_dyn_set_int(schema, idx, root, 'a', 5_int64, err)
+      call check_(error, capnp_dyn_get_int(schema, last, root, 'v10', err) == 77_int64, &
+                  'keeps-arm: deep group bits survive an outer write')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_union_set_keeps_arm
 
 end module test_dynamic

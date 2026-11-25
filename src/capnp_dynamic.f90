@@ -652,7 +652,7 @@ contains
       end if
       off = int(node_struct_discriminant_offset(schema%nodes(idx)))
       old = capnp_which(p, off)
-      ! C++ DynamicStruct::init clears the previous member. The arm being
+      ! capnp_dyn_select zeroes the previous member. The arm being
       ! selected is left alone so the write that follows can fill it.
       if (old /= disc) then
          call dyn_clear_arm(schema, idx, p, old, err)
@@ -661,23 +661,38 @@ contains
       call capnp_set_which(p, off, disc, err)
    end subroutine dyn_select_field
 
+   !> dynamic.c++ setInUnion (163-171): a union member writes its
+   !> discriminant and nothing else. The previous arm's bits stay.
+   subroutine dyn_set_in_union(schema, idx, p, f, err)
+      use capnp_union, only: capnp_set_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f
+      integer, intent(out) :: err
+      integer :: disc
+      err = CAPNP_OK
+      disc = field_discriminant(f)
+      if (disc == NO_DISCRIMINANT) return
+      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, err)
+   end subroutine dyn_set_in_union
+
    !> Reject a typed write with code. dynamic.c++ Builder::set (509-528)
    !> calls setInUnion before as<T>() can throw, so a union member still
    !> becomes the active arm. Like setInUnion, only the discriminant is
    !> written: no arm is cleared and no value is stored.
    subroutine dyn_reject_set(schema, idx, p, f, code, err)
-      use capnp_union, only: capnp_set_which
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p, f
       integer, intent(in) :: code
       integer, intent(out) :: err
-      integer :: disc, werr
+      integer :: werr
       err = code
-      disc = field_discriminant(f)
-      if (disc == NO_DISCRIMINANT) return
-      if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) return
-      call capnp_set_which(p, int(node_struct_discriminant_offset(schema%nodes(idx))), disc, werr)
+      call dyn_set_in_union(schema, idx, p, f, werr)
    end subroutine dyn_reject_set
 
    !> A field that sits past the data section reads as the default.
@@ -1453,8 +1468,8 @@ contains
       type(capnp_ptr_t) :: f
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
-      ! Setters of ordinary fields also call dyn_select_field, which must
-      ! stay a no-op for them. select itself is only for union arms.
+      ! dyn_select_field is a no-op for ordinary fields. select itself is
+      ! only for union arms.
       if (field_discriminant(f) == NO_DISCRIMINANT) then
          err = CAPNP_ERR_KIND
          return
@@ -1491,7 +1506,7 @@ contains
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
@@ -1565,7 +1580,7 @@ contains
       end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       call capnp_set_bool(p, field_slot_offset(f), v, err, default=value_bool(dv))
    end subroutine capnp_dyn_set_bool
@@ -1591,7 +1606,7 @@ contains
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end select
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       off = field_slot_offset(f)
       select case (type_which(t))
@@ -1620,7 +1635,7 @@ contains
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       call capnp_set_text(p, int(field_slot_offset(f)), s, err)
    end subroutine capnp_dyn_set_text
@@ -1641,7 +1656,7 @@ contains
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       call capnp_set_data(p, int(field_slot_offset(f)), bytes, err)
    end subroutine capnp_dyn_set_data
@@ -1789,7 +1804,7 @@ contains
                end if
             end select
          end if
-         call dyn_select_field(schema, idx, p, f, err)
+         call dyn_set_in_union(schema, idx, p, f, err)
          if (err /= CAPNP_OK) return
          call capnp_setp(p, int(field_slot_offset(f)), value, err)
       case default
@@ -1935,7 +1950,7 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
@@ -2027,7 +2042,7 @@ contains
          value = capnp_ptr_t()
          return
       end if
-      call dyn_select_field(schema, idx, p, f, err)
+      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) then
          value = capnp_ptr_t()
          return
