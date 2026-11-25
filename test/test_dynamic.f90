@@ -34,7 +34,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(37))
+      allocate (testsuite(38))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -109,6 +109,8 @@ contains
       testsuite(36)%test => run_f64_to_int
       testsuite(37)%name = "dynamic-text-coerce"
       testsuite(37)%test => run_text_coerce
+      testsuite(38)%name = "dynamic-init-order"
+      testsuite(38)%test => run_init_order
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -2077,8 +2079,9 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_union_pointer_defaults
 
-   !> capnp_dyn_init_list validates the element struct node id and list
-   !> allocation before switching the union discriminant.
+   !> A capnp_dyn_init_list that fails on the element struct node id or the
+   !> list allocation still selects the arm, as dynamic.c++ init(field, size)
+   !> does, and leaves the previous pointer in place.
    subroutine run_init_list_rollback(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -2158,17 +2161,17 @@ contains
       call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
                   'init-list-rollback: missing struct node rejected')
       tag = capnp_dyn_which(schema, idx, s, err)
-      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
-      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
-                  'init-list-rollback: missing node leaves prior arm intact')
+      call capnp_get_text(s, 0, txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 1 .and. txt == 'keep', &
+                  'init-list-rollback: missing node selects the arm and keeps the pointer')
 
       made = capnp_dyn_init_list(schema, idx, s, 'nums', 2000000000_int64, err)
       call check_(error, err == CAPNP_ERR_ARG .and. made%kind == CAPNP_PK_NULL, &
                   'init-list-rollback: oversize list rejected')
       tag = capnp_dyn_which(schema, idx, s, err)
-      call capnp_dyn_get_text(schema, idx, s, 'label', txt, err)
-      call check_(error, err == CAPNP_OK .and. tag == 0 .and. txt == 'keep', &
-                  'init-list-rollback: failed alloc leaves prior arm intact')
+      call capnp_get_text(s, 0, txt, err)
+      call check_(error, err == CAPNP_OK .and. tag == 2 .and. txt == 'keep', &
+                  'init-list-rollback: failed alloc selects the arm and keeps the pointer')
 
       call capnp_message_free(cgr_msg)
       call capnp_message_free(bmsg)
@@ -2471,5 +2474,67 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_text_coerce
+
+   !> Every init path selects the union arm before it checks the field, as
+   !> dynamic.c++ init does. A failed init stores nothing.
+   subroutine run_init_order(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: choice, shape, root, made
+      integer(int8), allocatable :: bytes(:)
+      character(len=:), allocatable :: s
+      integer :: err, cidx, sidx, circle_idx, idx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      cidx = capnp_dyn_find(schema, 'Dynamic.choice', err)
+      sidx = capnp_dyn_find(schema, 'Shape', err)
+      circle_idx = capnp_dyn_find(schema, 'Shape.circle', err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call capnp_message_init_builder(msg, err)
+
+      choice = capnp_dyn_new_root(schema, cidx, msg, err)
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      made = capnp_dyn_init_list(schema, cidx, choice, 'number', 3_int64, err)
+      call capnp_get_text(choice, 3, s, err)
+      call check_(error, made%kind == CAPNP_PK_NULL .and. capnp_which(choice, 2) == 0 .and. &
+                  s == 'keep', 'init-order: list init of an Int32 selects number')
+      made = capnp_dyn_init_list(schema, cidx, choice, 'items', 536870912_int64, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. capnp_which(choice, 2) == 2, &
+                  'init-order: oversize list init selects items')
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      made = capnp_dyn_init_list(schema, cidx, choice, 'items', -1_int64, err)
+      call capnp_get_text(choice, 3, s, err)
+      call check_(error, capnp_which(choice, 2) == 2 .and. s == 'keep', &
+                  'init-order: negative size selects items')
+      call capnp_dyn_set_text(schema, cidx, choice, 'label', 'keep', err)
+      made = capnp_dyn_init_struct(schema, cidx, choice, 'items', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. made%kind == CAPNP_PK_NULL .and. &
+                  capnp_which(choice, 2) == 2, 'init-order: struct init of a list selects items')
+      call capnp_dyn_set_int(schema, cidx, choice, 'number', 7_int64, err)
+      made = capnp_dyn_init_struct(schema, cidx, choice, 'label', err)
+      call check_(error, err == CAPNP_ERR_KIND .and. capnp_which(choice, 2) == 1 .and. &
+                  capnp_get_i32(choice, 0_int64) == 7_int32, &
+                  'init-order: struct init of text selects label')
+
+      shape = capnp_dyn_new_root(schema, sidx, msg, err)
+      call capnp_dyn_set_f64(schema, circle_idx, shape, 'radius', 3.5_real64, err)
+      made = capnp_dyn_init_list(schema, sidx, shape, 'square', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. capnp_which(shape, 4) == 1 .and. &
+                  capnp_get_f64(shape, 0_int64) == 3.5_real64, &
+                  'init-order: list init of a group selects square')
+
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      made = capnp_dyn_init_list(schema, idx, root, 'i32', 2_int64, err)
+      call check_(error, err == CAPNP_ERR_KIND, 'init-order: list init of a plain Int32')
+
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_init_order
 
 end module test_dynamic

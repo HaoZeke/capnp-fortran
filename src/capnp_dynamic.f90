@@ -2044,6 +2044,13 @@ contains
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
+      if (.not. associated(p%msg)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      ! dynamic.c++ init (672-706) runs setInUnion before any check.
+      call dyn_set_in_union(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
       if (type_which(t) /= TYPE_STRUCT) then
          err = CAPNP_ERR_KIND
          return
@@ -2053,12 +2060,6 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
-      if (.not. associated(p%msg)) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
-      call dyn_set_in_union(schema, idx, p, f, err)
-      if (err /= CAPNP_OK) return
       value = capnp_new_struct(p%msg, node_struct_data_words(schema%nodes(nidx)), &
                                node_struct_pointer_count(schema%nodes(nidx)), err)
       if (err /= CAPNP_OK) return
@@ -2081,16 +2082,6 @@ contains
       if (err /= CAPNP_OK) return
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
-      if (type_which(t) /= TYPE_LIST) then
-         err = CAPNP_ERR_KIND
-         return
-      end if
-      elem = type_list_element(t, err)
-      if (err /= CAPNP_OK) return
-      if (n < 0_int64) then
-         err = CAPNP_ERR_ARG
-         return
-      end if
       if (p%frozen .or. .not. associated(p%msg)) then
          err = CAPNP_ERR_ARG
          return
@@ -2101,11 +2092,6 @@ contains
       end if
       if (p%kind /= CAPNP_PK_STRUCT) then
          err = CAPNP_ERR_KIND
-         return
-      end if
-      slot = int(field_slot_offset(f))
-      if (slot < 0 .or. slot >= p%pwords) then
-         err = CAPNP_ERR_BOUNDS
          return
       end if
       disc = field_discriminant(f)
@@ -2119,6 +2105,25 @@ contains
             err = CAPNP_ERR_BOUNDS
             return
          end if
+      end if
+      ! dynamic.c++ init(field, size) (708-752) runs setInUnion before any
+      ! check, so a failed init still selects the arm.
+      call dyn_set_in_union(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
+      if (type_which(t) /= TYPE_LIST) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      elem = type_list_element(t, err)
+      if (err /= CAPNP_OK) return
+      if (n < 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      slot = int(field_slot_offset(f))
+      if (slot < 0 .or. slot >= p%pwords) then
+         err = CAPNP_ERR_BOUNDS
+         return
       end if
       if (type_which(elem) == TYPE_STRUCT) then
          nidx = dyn_node_by_id(schema, type_type_id(elem))
@@ -2145,11 +2150,6 @@ contains
          end select
          value = capnp_new_list(p%msg, esize, n, err)
       end if
-      if (err /= CAPNP_OK) then
-         value = capnp_ptr_t()
-         return
-      end if
-      call dyn_set_in_union(schema, idx, p, f, err)
       if (err /= CAPNP_OK) then
          value = capnp_ptr_t()
          return
