@@ -21,6 +21,15 @@ jobs:
       # float-comma-locale needs a locale whose radix is a comma.
       - name: generate de_DE.UTF-8
         run: sudo locale-gen de_DE.UTF-8
+      # The runner has no valgrind and the pixi envs do not provide one, so
+      # test_gate2 case_41 would skip its leak check. Valgrind cannot start
+      # without the ld.so symbols in libc6-dbg. The probe resolves valgrind
+      # through pixi's PATH, as test_gate2 does.
+      - name: install valgrind for the test_gate2 leak check
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends valgrind libc6-dbg
+          pixi run -- valgrind -q --error-exitcode=99 /bin/true
       - name: fypp templates are in sync
         run: |
           pixi run gen
