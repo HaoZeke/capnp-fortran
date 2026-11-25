@@ -211,7 +211,7 @@ contains
 
    subroutine holder_svc_set(h, c, err)
       type(holder_t), intent(in) :: h
-      type(echo_client_t), intent(in) :: c
+      class(echo_client_t), intent(in) :: c
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       q = capnp_ptr_t()

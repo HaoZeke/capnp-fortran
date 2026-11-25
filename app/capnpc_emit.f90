@@ -2824,7 +2824,7 @@ contains
       call w('')
       call w('   subroutine '//an//'_set(h, c, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      type('//tn//'_t), intent(in) :: c')
+      call w('      class('//tn//'_t), intent(in) :: c')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: q')
       call emit_disc(gset)
@@ -4212,8 +4212,14 @@ contains
          call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
          if (err /= CAPNP_OK) return
       end do
-      call w('   type :: '//tn//'_client_t')
-      call w('      type(rpc_cap_t) :: cap')
+      ! A subtype client is accepted wherever its first superclass's client
+      ! is, as capnpc-c++.c++ derives each Client from its superclasses.
+      if (len(parent) > 0) then
+         call w('   type, extends('//parent//'_client_t) :: '//tn//'_client_t')
+      else
+         call w('   type :: '//tn//'_client_t')
+         call w('      type(rpc_cap_t) :: cap')
+      end if
       call w('   end type '//tn//'_client_t')
       if (len(parent) > 0) then
          call w('   type, extends('//parent//'_server_t), abstract :: '//tn//'_server_t')

@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g51|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g52|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -2656,6 +2656,72 @@ EOS
   echo "g51 ok"
 }
 
+# A client of an interface that extends another is accepted by the setter of
+# a field of the superclass type, as the C++ setter takes Sub::Client.
+g52() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > a.capnp << 'EOS'
+@0xf0000000000008e1;
+interface Base { a @0 () -> (); }
+struct HoldA { b @0 :Base; }
+EOS
+  cat > b.capnp << 'EOS'
+@0xf0000000000008e2;
+using A = import "a.capnp";
+interface Mid extends(A.Base) { m @0 () -> (); }
+interface Sub extends(Mid) { s @0 () -> (); }
+struct HoldB { b @0 :A.Base; m @1 :Mid; }
+EOS
+  cxx_ok a.capnp b.capnp
+  cat > cpp.cpp << 'EOS'
+#include "a.capnp.h"
+#include "b.capnp.h"
+#include <capnp/message.h>
+void f(HoldA::Builder ha, HoldB::Builder hb) {
+  ha.setB(Sub::Client(nullptr));
+  hb.setB(Sub::Client(nullptr));
+  hb.setM(Sub::Client(nullptr));
+}
+EOS
+  "$CXX" -std=c++17 -fsyntax-only "${CAPNP_PC[@]}" cpp.cpp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" a.capnp b.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use a_capnp
+   use b_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(hold_a_t) :: ha
+   type(hold_b_t) :: hb
+   type(sub_client_t) :: s
+   type(capnp_ptr_t) :: q1, q2, q3
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   ha = hold_a_new_root(m, err)
+   hb = hold_b_new(m, err)
+   s%cap%id = 7_int64
+   call hold_a_b_set(ha, s, err)
+   if (err /= 0) error stop 1
+   call hold_b_b_set(hb, s, err)
+   if (err /= 0) error stop 2
+   call hold_b_m_set(hb, s, err)
+   if (err /= 0) error stop 3
+   q1 = capnp_getp(ha%p, 0, err)
+   q2 = capnp_getp(hb%p, 0, err)
+   q3 = capnp_getp(hb%p, 1, err)
+   print '(i0,1x,i0,1x,i0)', q1%capidx, q2%capidx, q3%capidx
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc a_capnp.f90 b_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "7 7 7"
+  echo "g52 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -2708,11 +2774,12 @@ case "$CASE" in
   g49) g49 ;;
   g50) g50 ;;
   g51) g51 ;;
+  g52) g52 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|all" >&2
     exit 2
     ;;
 esac

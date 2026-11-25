@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(46))
+      allocate (testsuite(47))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -128,6 +128,8 @@ contains
       testsuite(45)%test => run_init_short
       testsuite(46)%name = "dynamic-set-group"
       testsuite(46)%test => run_set_group
+      testsuite(47)%name = "dynamic-capability-subtype"
+      testsuite(47)%test => run_capability_subtype
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1191,33 +1193,52 @@ contains
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_dyn_schema_t), intent(inout) :: schema
       logical, intent(out) :: ok
+      character(len=80), parameter :: lines(5) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a11;', &
+         'struct Leaf { v @0 :UInt32; }', &
+         'struct Mid { leaf @0 :Leaf = (v = 7); }', &
+         'struct Outer { mid @0 :Mid = (); }', &
+         'struct Pick { union { a @0 :Leaf = (v = 1); b @1 :Leaf = (v = 2); } }']
+      call load_inline_schema(error, 'defaults', lines, schema, ok)
+   end subroutine load_defaults_schema
+
+   !> Write lines to build/dyn_inline/<stem>.capnp, compile it with the
+   !> capnp tool and load the result. Skips the test without the tool.
+   subroutine load_inline_schema(error, stem, lines, schema, ok)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: stem
+      character(len=*), intent(in) :: lines(:)
+      type(capnp_dyn_schema_t), intent(inout) :: schema
+      logical, intent(out) :: ok
       character(len=*), parameter :: dir = 'build/dyn_inline'
       integer(int8), allocatable :: bytes(:)
-      integer :: u, ios, stat, cs, err
+      integer :: u, ios, stat, cs, err, i
       ok = .false.
+      stat = 0
+      cs = 0
       call execute_command_line('mkdir -p '//dir, exitstat=stat, cmdstat=cs)
-      open (newunit=u, file=dir//'/defaults.capnp', status='replace', action='write', iostat=ios)
+      open (newunit=u, file=dir//'/'//stem//'.capnp', status='replace', action='write', iostat=ios)
       if (ios /= 0 .or. cs /= 0) then
          call skip_test(error, 'cannot write '//dir)
          return
       end if
-      write (u, '(a)') '@0xd1f0c3a5b7e90a11;'
-      write (u, '(a)') 'struct Leaf { v @0 :UInt32; }'
-      write (u, '(a)') 'struct Mid { leaf @0 :Leaf = (v = 7); }'
-      write (u, '(a)') 'struct Outer { mid @0 :Mid = (); }'
-      write (u, '(a)') 'struct Pick { union { a @0 :Leaf = (v = 1); b @1 :Leaf = (v = 2); } }'
+      do i = 1, size(lines)
+         write (u, '(a)') trim(lines(i))
+      end do
       close (u)
-      call execute_command_line('capnp compile -o- '//dir//'/defaults.capnp > '// &
-                                dir//'/defaults.cgr', exitstat=stat, cmdstat=cs)
+      stat = 0
+      cs = 0
+      call execute_command_line('capnp compile -o- '//dir//'/'//stem//'.capnp > '// &
+                                dir//'/'//stem//'.cgr', exitstat=stat, cmdstat=cs)
       if (cs /= 0 .or. stat /= 0) then
          call skip_test(error, 'capnp compile is not available')
          return
       end if
-      call capnp_read_file(dir//'/defaults.cgr', bytes, err)
+      call capnp_read_file(dir//'/'//stem//'.cgr', bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(schema, bytes, err)
       ok = err == CAPNP_OK
-   end subroutine load_defaults_schema
+   end subroutine load_inline_schema
 
    !> A defaulted pointer inside a frozen default view reads its own
    !> default, as a reader does.
@@ -2983,5 +3004,63 @@ contains
          h%schema_id = node_id(schema%nodes(nidx))
       end function fresh
    end subroutine run_set_group
+
+   !> dynamic.c++ Builder::set (636-644) takes a capability whose interface
+   !> extends the field's and rejects any other. A value without an
+   !> interface id is stored as before.
+   subroutine run_capability_subtype(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, v, q
+      character(len=80), parameter :: lines(6) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a12;', &
+         'interface Base { a @0 () -> (); }', &
+         'interface Side { s @0 () -> (); }', &
+         'interface Sub extends(Side, Base) { b @0 () -> (); }', &
+         'interface Other { c @0 () -> (); }', &
+         'struct Holder { base @0 :Base; }']
+      integer :: err, rc, hidx
+      logical :: ok
+      call load_inline_schema(error, 'ifaces', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      hidx = capnp_dyn_find(schema, 'Holder', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, hidx, msg, err)
+      v = capnp_ptr_t()
+      v%msg => msg
+      v%kind = CAPNP_PK_CAP
+      v%capidx = 3_int64
+
+      v%schema_id = iface_id('Sub')
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%kind == CAPNP_PK_CAP .and. q%capidx == 3_int64, &
+                  'capability: second superclass accepted')
+      v%schema_id = iface_id('Base')
+      v%capidx = 4_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 4_int64, 'capability: same interface accepted')
+      v%schema_id = iface_id('Other')
+      v%capidx = 5_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%capidx == 4_int64, &
+                  'capability: unrelated interface rejected')
+      v%schema_id = 0_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 5_int64, &
+                  'capability: value without an interface id stored')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      integer(int64) function iface_id(name)
+         character(len=*), intent(in) :: name
+         integer :: e
+         iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
+      end function iface_id
+   end subroutine run_capability_subtype
 
 end module test_dynamic

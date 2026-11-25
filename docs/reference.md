@@ -432,7 +432,9 @@ Interfaces emit an `INTERFACE_ID` parameter, a `<iface>_client_t` handle,
 per-method `_begin`/`_wait` helpers over the vat, and an abstract
 `<iface>_server_t` whose generated dispatch routes method ordinals to
 deferred typed procedures. `-> stream` methods pair the generated
-`_begin` with `rpc_stream_send`/`rpc_stream_finish`.
+`_begin` with `rpc_stream_send`/`rpc_stream_finish`. The client handle of an
+interface that extends others extends the client handle of its first
+superclass, so the setter of a field of that superclass type takes it.
 
 Branded generic uses (`Box(Text)`) produce brand-resolved
 instantiations: a `box_text_t` handle plus the generic's accessors with
