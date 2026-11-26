@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(64))
+      allocate (testsuite(65))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -127,6 +127,7 @@ contains
       testsuite(62) = new_unittest("cap-pointers", run_cap_pointers)
       testsuite(63) = new_unittest("plausible-sniff", run_plausible_sniff)
       testsuite(64) = new_unittest("nonstruct-root", run_nonstruct_root)
+      testsuite(65) = new_unittest("shorthand-group-list", run_shorthand_group_list)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -141,6 +142,19 @@ contains
       logical :: y
       y = sh('command -v capnp >/dev/null 2>&1')
    end function have_capnp
+
+   !> One read of `capnp --version` for the whole module.
+   function capnp_at_least_1_3() result(y)
+      logical :: y
+      logical, save :: ready = .false.
+      logical, save :: ge = .false.
+      if (.not. ready) then
+         ready = .true.
+         ge = sh('ver=$(capnp --version | awk ''{print $NF}''); ' &
+            //'[ "$(printf ''%s\n%s\n'' "$ver" 1.3.0 | sort -V | head -n 1)" = 1.3.0 ]')
+      end if
+      y = ge
+   end function capnp_at_least_1_3
 
    function sh(cmd) result(ok)
       character(len=*), intent(in) :: cmd
@@ -3191,8 +3205,10 @@ contains
    end subroutine run_codec_parity
 
    !> Struct, list, enum, and data first fields are not single-value
-   !> shorthand. The recovered text matches capnp 1.4.0, including a
-   !> bool written into a group whose first field is a struct.
+   !> shorthand. The recovered text matches the capnp tool, including a
+   !> bool written into a group whose first field is a struct. A list
+   !> assigned to a group aborts capnp before 1.3.0; that case is
+   !> shorthand-group-list.
    subroutine run_shorthand_first(error)
       type(error_type), allocatable, intent(out) :: error
       character(len=:), allocatable :: src
@@ -3247,7 +3263,6 @@ contains
          'cmp_in text:text Hold "(wd = 0x\"6162\")"'//achar(10)// &
          'cmp_in text:text Hold "(ge = green)"'//achar(10)// &
          'cmp_in text:text Hold "(gd = \"abc\")"'//achar(10)// &
-         'cmp_in text:text Hold "(gl = [1, 2])"'//achar(10)// &
          'cmp_in text:text Hold "(gs = true)"'//achar(10)// &
          'cmp_in text:text Bag "(st = \"ab\")"'//achar(10)// &
          'test "$bad" = 0'//achar(10)// &
@@ -3255,6 +3270,57 @@ contains
          call test_failed(error, 'shorthand first field')
       end if
    end subroutine run_shorthand_first
+
+   !> A list written into a group makes capnp before 1.3.0 execute an
+   !> unreachable branch and print no text. capnp 1.3.0 reports the
+   !> error and prints the group, and capnpf follows that.
+   subroutine run_shorthand_group_list(error)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=:), allocatable :: src
+      integer :: err
+      if (.not. have_capnp()) then
+         call skip_test(error, 'capnp tool not on PATH')
+         return
+      end if
+      if (.not. capnp_at_least_1_3()) then
+         call skip_test(error, 'capnp before 1.3.0 aborts when a list is assigned to a group')
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
+         return
+      end if
+      src = '@0x80112233445566a0;'//achar(10)// &
+            'enum Color { red @0; green @1; blue @2; }'//achar(10)// &
+            'struct WithEnum { c @0 :Color; x @1 :Int32; }'//achar(10)// &
+            'struct WithData { d @0 :Data; x @1 :Int32; }'//achar(10)// &
+            'struct WithBool { b @0 :Bool; x @1 :Int32; }'//achar(10)// &
+            'struct Hold {'//achar(10)// &
+            '  we @0 :WithEnum; wd @1 :WithData;'//achar(10)// &
+            '  ge :group { c @2 :Color; x @3 :Int32; }'//achar(10)// &
+            '  gd :group { d @4 :Data; x @5 :Int32; }'//achar(10)// &
+            '  gl :group { l @6 :List(Int32); x @7 :Int32; }'//achar(10)// &
+            '  gs :group { s @8 :WithBool; x @9 :Int32; }'//achar(10)// &
+            '}'//achar(10)
+      call spit(tmp//'/glist.capnp', src, err)
+      if (err /= CAPNP_OK) then
+         call test_failed(error, 'group-list schema')
+         return
+      end if
+      if (.not. sh(cap_setup()//' && export CAP && bash -s <<''END'''//achar(10)// &
+         'set +e'//achar(10)// &
+         'SCH='//tmp//'/glist.capnp'//achar(10)// &
+         'printf "%s" "(gl = [1, 2])" | capnp convert text:text --short "$SCH" Hold > ' &
+         //tmp//'/ref 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ref.rc'//achar(10)// &
+         'printf "%s" "(gl = [1, 2])" | "$CAP" convert text:text --short "$SCH" Hold > ' &
+         //tmp//'/ours 2>/dev/null'//achar(10)// &
+         'echo $? > '//tmp//'/ours.rc'//achar(10)// &
+         'cmp -s '//tmp//'/ref '//tmp//'/ours && cmp -s '//tmp//'/ref.rc '//tmp//'/ours.rc'//achar(10)// &
+         'END')) then
+         call test_failed(error, 'shorthand group list')
+      end if
+   end subroutine run_shorthand_group_list
 
    !> Empty lists with the wrong element size, a second message after a
    !> bad pointer, and text or data holding the wrong pointer kind.
