@@ -143,18 +143,24 @@ continue to completion, matching capnp-C++ ``allowCancellation``. The
 live C++ interop test cancels an opted-in never-ending method and then
 checks that the C++ promise was dropped.
 
-Membranes are local wrappers, not wire messages.
+Membranes are local wrappers.
 ``rpc_membrane_policy_t`` defines inbound and outbound call checks.
-``rpc_membrane_cap`` applies a policy to an imported client capability,
-while ``rpc_membrane_server_t`` applies it to a local server capability.
-Servers exported through a membraned result are recursively wrapped in
-the same policy. If a wrapper crosses back through that policy in the
-opposite direction it is unwrapped, preserving object identity rather
-than stacking a second membrane. ``rpc_membrane_revoke`` disables all
-wrappers sharing the policy. These are the applicable
+``inbound_redirect`` and ``outbound_redirect`` may hand back a local
+server or a vat client; the call goes to that capability. A redirect
+is outside the membrane: capabilities in its results stay as that
+capability returned them, matching ``MembraneHook::newCall`` and
+``MembraneHook::call`` (``membrane.c++`` lines 413-428 and 445-459,
+``membrane.h`` lines 69-71). A call allowed through still wraps result
+capabilities in the same policy. ``rpc_membrane_cap`` applies a policy
+to an imported client capability, while ``rpc_membrane_server_t``
+applies it to a local server capability. If a wrapper crosses back
+through that policy in the opposite direction it is unwrapped,
+preserving object identity by removing the wrapper.
+``rpc_membrane_revoke`` disables all wrappers sharing the policy.
+On a server dispatch, name the local server. A vat client redirect
+applies to ``rpc_call_begin``. These are the applicable
 ``capnp/membrane.h`` semantics for the runtime's current capability
-surface; C++ interop is not relevant because no membrane state appears
-on the wire.
+surface. No membrane state appears on the wire.
 #+end_export
 
 * Procedure reference
@@ -177,6 +183,8 @@ on the wire.
 | ~rpc_membrane_cap~      | ~(cap, policy, reverse) result(wrapped)~                              | wrap an imported client capability                    |
 | ~rpc_membrane_server_init~ | ~(wrapper, inner, policy, reverse)~                              | wrap a local server capability                        |
 | ~rpc_membrane_revoke~   | ~(policy, reason)~                                                   | revoke every wrapper sharing the policy               |
+| ~inbound_redirect~      | ~(self, interface_id, method_id, server, cap)~                       | optional type-bound redirect; default names nobody    |
+| ~outbound_redirect~     | ~(self, interface_id, method_id, server, cap)~                       | optional type-bound redirect; default names nobody    |
 | ~rpc_pipeline_cap~      | ~(conn, qid, field_indices) result(cap)~                             | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |
