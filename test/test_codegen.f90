@@ -2,7 +2,8 @@
 !> stems, and checked-in modules that drift from the plugin.
 module test_codegen
    use capnp
-   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: unittest_type, error_type, check, test_failed
+   use cli_path, only: schema_skip
    implicit none
    private
    public :: collect_codegen
@@ -141,6 +142,10 @@ contains
          call test_failed(error, what)
          return
       end if
+      if (stat == 77) then
+         call schema_skip(error)
+         return
+      end if
       call check(error, stat == 0, what)
    end subroutine run_mode
 
@@ -266,7 +271,7 @@ contains
       call run_with_capnp(error, 'box-any-tag', 'codegen: longer name leaves the tag default')
    end subroutine run_box_any_tag
 
-   !> Skip the case when capnp is absent from PATH. Script exit 77 fails the case.
+   !> A missing capnp tool follows schema_skip.
    subroutine run_with_capnp(error, mode, what)
       type(error_type), allocatable, intent(out) :: error
       character(len=*), intent(in) :: mode, what
@@ -276,7 +281,7 @@ contains
       call execute_command_line('command -v capnp > /dev/null 2>&1', &
                                 exitstat=rc0, cmdstat=st0)
       if (st0 /= 0 .or. rc0 /= 0) then
-         call skip_test(error, 'capnp is not on PATH')
+         call schema_skip(error)
          return
       end if
       call run_mode(error, mode, what)

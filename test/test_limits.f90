@@ -1,7 +1,6 @@
 !> Depth and stream regressions that must fail on the parent of their fix.
 module test_limits
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, &
-        skip_test
+   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed
    use, intrinsic :: iso_c_binding, only: c_int
    use capnp
    use capnp_dynamic
@@ -104,7 +103,7 @@ contains
          call test_failed(error, 'write '//tname)
          return
       end if
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/'//fname &
          //' > '//tmp//'/'//tname//'.cgr')) then
          call test_failed(error, 'compile '//tname)
@@ -171,7 +170,7 @@ contains
       integer :: err, idx, i, n
       n = 70
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       src = '@0xc1d2e3f405162738;'//achar(10)//'struct DeepG {'//achar(10)
@@ -355,7 +354,7 @@ contains
          return
       end if
       if (.not. sh(capnpf_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" json:text --short '//tmp//'/'//tag//'.capnp '//typ &
          //' < '//tmp//'/'//tag//'.json > '//tmp//'/'//tag//'.ref 2>/dev/null' &
          //'; echo $? > '//tmp//'/'//tag//'.ref.rc' &

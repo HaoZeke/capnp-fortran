@@ -106,7 +106,7 @@ contains
       ! A packaged capnp searches its own include directory, which a conda
       ! build does not. capnpf adds that directory, so the reference must.
       write (u, '(a)') 'if CAPNP_BIN=$(type -P capnp); then capnp() { local sub=$1; shift; ' &
-         //'"$CAPNP_BIN" "$sub" -I"${CAPNP_BIN%/bin/*}/include" "$@"; }; fi'
+         //'"$CAPNP_BIN" "$sub" -I"$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)" "$@"; }; fi'
       write (u, '(a)') trim(cmd)
       close (u)
       call execute_command_line('bash '//trim(path), exitstat=rc, cmdstat=st)
@@ -932,7 +932,7 @@ contains
 
    subroutine case_39()
       call gate('case_39', &
-         'J=$(dirname $(dirname $(type -P capnp)))/include/capnp/co' // &
+         'J=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)/capnp/co' // &
          'mpat/json.capnp' // &
          achar(10) // &
          'test -f "$J" || exit 77' // &

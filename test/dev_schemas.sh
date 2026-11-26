@@ -1,5 +1,6 @@
 #!/bin/sh
 # Exit 0 when capnp is on PATH and the three dev schemas are installed.
+# --include prints the include directory and exits.
 
 # Canonical path of one file. Follow symlinks, then the physical directory.
 resolve_bin() {
@@ -29,6 +30,11 @@ if [ -n "${CAPNP_PREFIX:-}" ]; then
 else
   bin=$(resolve_bin "$bin") || exit 1
   inc=$(dirname "$(dirname "$bin")")/include
+fi
+# --include prints that directory for -I and does not check the schema files.
+if [ "${1:-}" = --include ]; then
+  printf '%s\n' "$inc"
+  exit 0
 fi
 test -f "${inc}/capnp/compat/json.capnp" &&
   test -f "${inc}/capnp/c++.capnp" &&
