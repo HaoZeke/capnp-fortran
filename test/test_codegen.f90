@@ -11,7 +11,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(12))
+      allocate (testsuite(13))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -36,6 +36,8 @@ contains
       testsuite(11)%test => run_implicit_roundtrip
       testsuite(12)%name = "codegen-box-plain"
       testsuite(12)%test => run_box_plain
+      testsuite(13)%name = "codegen-box-default"
+      testsuite(13)%test => run_box_default
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -244,6 +246,11 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_with_capnp(error, 'box-plain', 'codegen: box gains no implicit accessors')
    end subroutine run_box_plain
+
+   subroutine run_box_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'box-default', 'codegen: box pointer default round trip')
+   end subroutine run_box_default
 
    !> Same probe as test_gate2: exit 77 / a missing capnp skips the case.
    subroutine run_with_capnp(error, mode, what)

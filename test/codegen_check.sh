@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
 #   multifile | suffix | annot | longann | fresh | voidconst |
-#   implicit-golden | implicit-roundtrip | box-plain
+#   implicit-golden | implicit-roundtrip | box-plain | box-default
 # The plugin and the module directory come from the environment, set by
 # the unit test to the binary it is running. Searching the build tree
 # would accept a stale profile.
@@ -38,6 +38,84 @@ need_capnp() {
     echo "capnp is not on PATH, skipped" >&2
     exit 77
   fi
+}
+
+# Box(AnyPointer), a method Box(T) parameter, and a pointer default on Box,
+# compiled and executed so the default value comes back.
+box_default_order() {
+  local stem="$1"
+  local label="$2"
+  local gen mod
+  (cd "$out" && capnp compile -o- "$stem.capnp") > "$out/$stem.cgr"
+  "$bin" "$out/$stem.cgr"
+  gen=$(find "$out" -name "${stem}_capnp.f90" | head -1)
+  test -n "$gen"
+  python3 - "$gen" "$label" << 'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+label = sys.argv[2]
+
+def handle(fn):
+    m = re.search(
+        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
+        text)
+    if not m:
+        sys.exit(label + " no handle for " + fn)
+    return m.group(1)
+
+plain = handle("plain_bare_get")
+method = handle("factory_boxy_params_box_get")
+if plain != "box_any_t":
+    sys.exit(label + " plain handle " + plain)
+if method != "box_any_2_t":
+    sys.exit(label + " method handle " + method)
+if "box_any_value_get_text" in text:
+    sys.exit(label + " plain type gained kind accessors")
+if "box_any_2_value_get_text" not in text:
+    sys.exit(label + " method type lost kind accessors")
+if "parameter :: BOX_ANY_TAG_DEFAULT(" not in text:
+    sys.exit(label + " missing plain default blob")
+if "parameter :: BOX_ANY_2_TAG_DEFAULT(" not in text:
+    sys.exit(label + " missing method default blob")
+if "BOX_ANY_2_2_" in text:
+    sys.exit(label + " overlapped blob prefix")
+print(label, plain, method)
+PY
+  mod=$(sed -n 's/^module //p' "$gen" | head -1)
+  test -n "$mod"
+  mkdir -p "$out/rt-$stem"
+  cat > "$out/rt-$stem/drv.f90" << EOF
+program drv
+   use capnp
+   use ${mod}
+   implicit none
+   type(capnp_message_t), target :: msg
+   type(box_any_t) :: plain
+   type(box_any_2_t) :: boxed
+   type(tag_t) :: tg
+   integer(int32) :: n
+   integer :: err
+   call capnp_message_init_builder(msg, err)
+   if (err /= 0) error stop 1
+   plain = box_any_new(msg, err)
+   if (err /= 0) error stop 2
+   tg = box_any_tag_get(plain, err)
+   if (err /= 0) error stop 3
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 4
+   boxed = box_any_2_new(msg, err)
+   if (err /= 0) error stop 5
+   tg = box_any_2_tag_get(boxed, err)
+   if (err /= 0) error stop 6
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 7
+   call capnp_message_free(msg)
+end program drv
+EOF
+  gfortran $san $cov -std=f2018 -ffree-line-length-none \
+    -J"$out/rt-$stem" -I"$out/rt-$stem" -I"$moddir" \
+    "$gen" "$out/rt-$stem/drv.f90" "$lib" -o "$out/rt-$stem/roundtrip"
+  "$out/rt-$stem/roundtrip"
 }
 
 case "${1:-}" in
@@ -280,8 +358,63 @@ if bad:
     sys.exit("box value gained implicit accessors: %s" % bad[:8])
 PY
   ;;
+box-default)
+  need_capnp
+  lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+  test -n "$lib"
+  san=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
+    san="-fsanitize=address,undefined"
+  fi
+  cov=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
+    cov=--coverage
+  fi
+  cat > "$out/plain_first.capnp" << 'EOS'
+@0xb0a1d4e7c3f25801;
+
+struct Tag {
+  n @0 :Int32;
+}
+
+struct Box(T) {
+  value @0 :T;
+  tag @1 :Tag = (n = 7);
+}
+
+struct Plain {
+  bare @0 :Box(AnyPointer);
+}
+
+interface Factory {
+  boxy @0 [T] (box :Box(T)) -> (out :T);
+}
+EOS
+  cat > "$out/method_first.capnp" << 'EOS'
+@0xb0a1d4e7c3f25802;
+
+struct Tag {
+  n @0 :Int32;
+}
+
+struct Box(T) {
+  value @0 :T;
+  tag @1 :Tag = (n = 7);
+}
+
+interface Factory {
+  boxy @0 [T] (box :Box(T)) -> (out :T);
+}
+
+struct Plain {
+  bare @0 :Box(AnyPointer);
+}
+EOS
+  box_default_order plain_first plain-first
+  box_default_order method_first method-first
+  ;;
 *)
-  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst|implicit-golden|implicit-roundtrip|box-plain" >&2
+  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst|implicit-golden|implicit-roundtrip|box-plain|box-default" >&2
   exit 2
   ;;
 esac

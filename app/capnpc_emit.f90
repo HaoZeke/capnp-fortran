@@ -4094,7 +4094,8 @@ contains
    !> Box(AnyPointer) and a method parameter Box(T) share the visible
    !> spelling box_any. The plain instantiation keeps that name, the one an
    !> unbranded walk emits, in either registration order. The method
-   !> instantiation takes the next free name. Default blobs move with it.
+   !> instantiation takes the next free name. Default blobs move with the
+   !> whole instantiation name.
    subroutine prefer_implicit_inst_names()
       integer :: i, j, best
       do i = 1, g_ninsts
@@ -4138,28 +4139,55 @@ contains
 
    subroutine swap_inst_name(i, j)
       integer, intent(in) :: i, j
-      character(len=:), allocatable :: a, b, mark
+      character(len=:), allocatable :: a, b
       a = g_insts(i)%name
       b = g_insts(j)%name
       g_insts(i)%name = b
       g_insts(j)%name = a
-      mark = achar(1)//'INST'//achar(1)
-      call retitle_blobs(upcase(a)//'_', mark)
-      call retitle_blobs(upcase(b)//'_', upcase(a)//'_')
-      call retitle_blobs(mark, upcase(b)//'_')
+      call retitle_blobs(a, b)
    end subroutine swap_inst_name
 
-   subroutine retitle_blobs(src, dst)
-      character(len=*), intent(in) :: src, dst
+   !> Move default blobs with a swapped pair. Each blob is rewritten once.
+   !> The owner is the longest instantiation name that is a whole identifier
+   !> prefix of the blob (that name, then '_').
+   subroutine retitle_blobs(from_a, from_b)
+      character(len=*), intent(in) :: from_a, from_b
+      character(len=:), allocatable :: name, owner, dst
       integer :: i, n
-      n = len(src)
       do i = 1, g_nblobs
          if (.not. allocated(g_blobs(i)%name)) cycle
-         if (len(g_blobs(i)%name) < n) cycle
-         if (g_blobs(i)%name(1:n) /= src) cycle
-         g_blobs(i)%name = dst//g_blobs(i)%name(n + 1:)
+         name = g_blobs(i)%name
+         call blob_owner(name, owner)
+         if (len(owner) == 0) cycle
+         if (owner == upcase(from_a)) then
+            dst = upcase(from_b)
+         else if (owner == upcase(from_b)) then
+            dst = upcase(from_a)
+         else
+            cycle
+         end if
+         n = len(owner)
+         g_blobs(i)%name = dst//name(n + 1:)
       end do
    end subroutine retitle_blobs
+
+   !> Longest instantiation name that prefixes the blob as a whole identifier.
+   subroutine blob_owner(name, owner)
+      character(len=*), intent(in) :: name
+      character(len=:), allocatable, intent(out) :: owner
+      character(len=:), allocatable :: cand
+      integer :: k, n
+      owner = ''
+      do k = 1, g_ninsts
+         if (.not. allocated(g_insts(k)%name)) cycle
+         cand = upcase(g_insts(k)%name)
+         n = len(cand)
+         if (len(name) <= n) cycle
+         if (name(1:n) /= cand) cycle
+         if (name(n + 1:n + 1) /= '_') cycle
+         if (len(cand) > len(owner)) owner = cand
+      end do
+   end subroutine blob_owner
 
    subroutine register_inst(gidx, n, btypes, bctx, sid, o, ol, full, err, plain)
       integer, intent(in) :: gidx, n
