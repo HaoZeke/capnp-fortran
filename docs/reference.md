@@ -436,6 +436,10 @@ deferred typed procedures. `-> stream` methods pair the generated
 `_begin` with `rpc_stream_send`/`rpc_stream_finish`. The client handle of an
 interface that extends others extends the client handle of its first
 superclass, so the setter of a field of that superclass type takes it.
+Each further superclass `S`, transitive parents of those superclasses
+included and duplicates dropped, has `<iface>_as_<S>(client)`. It returns
+an `<S>_client_t` that shares the capability handle, so that superclass's
+methods can be called.
 
 Branded generic uses (`Box(Text)`) produce brand-resolved
 instantiations: a `box_text_t` handle plus the generic's accessors with
