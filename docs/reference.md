@@ -399,6 +399,9 @@ surface (socketpair, TCP listen/accept/connect, poll) as pure
 
 Load a compiled schema (`capnp compile -o-`) with `capnp_dyn_load` and
 read or write fields by name.
+`capnp_dyn_load` returns `CAPNP_ERR_ARG` when a node fails a structural
+check from Cap'n Proto C++ 1.4.0 `SchemaLoader` for a kind this library
+reads.
 Reader pointer lookups store one cached copy of each defaulted field on the schema.
 `capnp_dyn_getp`,
 `capnp_dyn_get_any_struct`, and `capnp_dyn_get_any_list` therefore take the

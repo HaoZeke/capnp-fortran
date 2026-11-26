@@ -2022,7 +2022,7 @@ contains
       integer(int8), allocatable, intent(out) :: bytes(:)
       integer, intent(out) :: err
       type(capnp_message_t), target :: msg
-      type(capnp_ptr_t) :: root, nodes, node, fields, field, typ
+      type(capnp_ptr_t) :: root, nodes, node, fields, field, typ, val
       character(len=16) :: name
       integer :: i, nfields
       call capnp_message_init_builder(msg, err)
@@ -2054,13 +2054,19 @@ contains
          if (err /= CAPNP_OK) exit
          call capnp_set_text(field, 0, 'v', err)
          if (err /= CAPNP_OK) exit
-         call capnp_set_u16(field, 2_int64, 65535, err)
+         call capnp_set_u16(field, 2_int64, 65535, err, default=65535)
          if (err /= CAPNP_OK) exit
          typ = capnp_new_struct(msg, 3, 1, err)
          if (err /= CAPNP_OK) exit
          call capnp_set_u16(typ, 0_int64, 4, err)
          if (err /= CAPNP_OK) exit
          call capnp_setp(field, 2, typ, err)
+         if (err /= CAPNP_OK) exit
+         val = capnp_new_struct(msg, 1, 1, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_set_u16(val, 0_int64, 4, err)
+         if (err /= CAPNP_OK) exit
+         call capnp_setp(field, 3, val, err)
          if (err /= CAPNP_OK) exit
          if (nfields == 2) then
             field = capnp_list_get_struct(fields, 1, err)
@@ -2069,7 +2075,7 @@ contains
             if (err /= CAPNP_OK) exit
             call capnp_set_text(field, 0, 'next', err)
             if (err /= CAPNP_OK) exit
-            call capnp_set_u16(field, 2_int64, 65535, err)
+            call capnp_set_u16(field, 2_int64, 65535, err, default=65535)
             if (err /= CAPNP_OK) exit
             typ = capnp_new_struct(msg, 3, 1, err)
             if (err /= CAPNP_OK) exit
@@ -2078,6 +2084,12 @@ contains
             call capnp_set_i64(typ, 8_int64, 1000_int64 + int(i + 1, int64), err)
             if (err /= CAPNP_OK) exit
             call capnp_setp(field, 2, typ, err)
+            if (err /= CAPNP_OK) exit
+            val = capnp_new_struct(msg, 1, 1, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_set_u16(val, 0_int64, 16, err)
+            if (err /= CAPNP_OK) exit
+            call capnp_setp(field, 3, val, err)
             if (err /= CAPNP_OK) exit
          end if
          call capnp_setp(node, 3, fields, err)

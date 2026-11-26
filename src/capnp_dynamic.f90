@@ -49,6 +49,10 @@ module capnp_dynamic
    integer, parameter :: CAPNP_HAS_NON_NULL = 0
    integer, parameter :: CAPNP_HAS_NON_DEFAULT = 1
 
+   type :: dyn_nm
+      character(len=:), allocatable :: s
+   end type dyn_nm
+
    !> A loaded compiled schema: the CGR message plus a node index.
    type :: capnp_dyn_schema_t
       type(capnp_message_t) :: cgr
@@ -2633,27 +2637,60 @@ contains
    !> node kinds this library reads. A failed check is CAPNP_ERR_ARG.
    !> Reader failures keep their own codes. A group that is larger than
    !> its parent is not a failure: C++ rewrites the parent larger.
+   subroutine dyn_reject_kind_ids(nodes, err)
+      type(capnp_ptr_t), intent(in) :: nodes(:)
+      integer, intent(out) :: err
+      integer(int64), allocatable :: ids(:)
+      integer, allocatable :: kinds(:), ord(:)
+      integer :: n, i, j, k, stat
+      integer(int64) :: idk
+      err = CAPNP_OK
+      n = size(nodes)
+      if (n < 2) return
+      allocate (ids(n), kinds(n), ord(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 1, n
+         ids(i) = node_id(nodes(i))
+         kinds(i) = node_which(nodes(i))
+         ord(i) = i
+      end do
+      do i = 2, n
+         k = ord(i)
+         idk = ids(k)
+         j = i
+         do while (j > 1)
+            if (ids(ord(j - 1)) <= idk) exit
+            ord(j) = ord(j - 1)
+            j = j - 1
+         end do
+         ord(j) = k
+      end do
+      do i = 2, n
+         if (ids(ord(i - 1)) == ids(ord(i))) then
+            if (kinds(ord(i - 1)) /= kinds(ord(i))) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+         end if
+      end do
+   end subroutine dyn_reject_kind_ids
+
    subroutine dyn_validate_nodes(schema, err)
       type(capnp_dyn_schema_t), intent(in), target :: schema
       integer, intent(out) :: err
       type(dyn_check_t) :: chk
-      integer :: i, j, k
-      integer(int64) :: id
+      integer :: i
       err = CAPNP_OK
       if (.not. allocated(schema%nodes)) return
       chk%nodes => schema%nodes
+      call dyn_reject_kind_ids(schema%nodes, err)
+      if (err /= CAPNP_OK) return
       do i = 1, size(schema%nodes)
-         id = node_id(schema%nodes(i))
-         k = node_which(schema%nodes(i))
-         do j = 1, i - 1
-            if (node_id(schema%nodes(j)) == id .and. &
-                node_which(schema%nodes(j)) /= k) then
-               err = CAPNP_ERR_ARG
-               return
-            end if
-         end do
-      end do
-      do i = 1, size(schema%nodes)
+         call dyn_check_generic(schema%nodes(i), err)
+         if (err /= CAPNP_OK) return
          select case (node_which(schema%nodes(i)))
          case (NODE_STRUCT)
             call dyn_check_struct(chk, schema%nodes(i), err)
@@ -2661,10 +2698,26 @@ contains
             call dyn_check_enum(schema%nodes(i), err)
          case (NODE_INTERFACE)
             call dyn_check_interface(chk, schema%nodes(i), err)
+         case (NODE_CONST)
+            call dyn_check_const(chk, schema%nodes(i), err)
+         case (NODE_ANNOTATION)
+            call dyn_check_annotation(chk, schema%nodes(i), err)
          end select
          if (err /= CAPNP_OK) return
       end do
    end subroutine dyn_validate_nodes
+
+   subroutine dyn_check_generic(node, err)
+      type(capnp_ptr_t), intent(in) :: node
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: params
+      integer :: n
+      params = node_parameters(node, err)
+      if (err /= CAPNP_OK) return
+      call dyn_bounded_list(params, n, err)
+      if (err /= CAPNP_OK) return
+      if (n > 0 .and. .not. node_is_generic(node)) err = CAPNP_ERR_ARG
+   end subroutine dyn_check_generic
 
    subroutine dyn_check_struct(chk, node, err)
       type(dyn_check_t), intent(inout) :: chk
@@ -2676,7 +2729,6 @@ contains
       integer :: explicit_ord, next_ord, stat
       integer(int64) :: dbits, off1, prod, doff
       logical :: is_ptr
-      character(len=:), allocatable :: name
       err = CAPNP_OK
       dbits = int(node_struct_data_words(node), int64)*64_int64
       dc = node_struct_discriminant_count(node)
@@ -2713,14 +2765,12 @@ contains
       end if
       disc_pos = 0
       next_ord = 0
+      call dyn_reject_dup_names(1, fields, n, err)
+      if (err /= CAPNP_OK) return
       do i = 0, n - 1
          f = capnp_list_get_struct(fields, i, err)
          if (err /= CAPNP_OK) return
          call struct_or_null(f, err)
-         if (err /= CAPNP_OK) return
-         call field_name(f, name, err)
-         if (err /= CAPNP_OK) return
-         call dyn_reject_dup_name(1, fields, i, name, err)
          if (err /= CAPNP_OK) return
          co = field_code_order(f)
          call dyn_reject_code_order(co, n, saw_order, err)
@@ -2773,6 +2823,13 @@ contains
          end select
       end do
       if (disc_pos /= dc) err = CAPNP_ERR_ARG
+      if (err /= CAPNP_OK) return
+      if (.not. node_struct_is_group(node)) return
+      if (node_scope_id(node) == 0_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call dyn_note_kind(chk, node_scope_id(node), NODE_STRUCT, err)
    end subroutine dyn_check_struct
 
    subroutine dyn_check_enum(node, err)
@@ -2781,7 +2838,6 @@ contains
       type(capnp_ptr_t) :: items, item
       logical, allocatable :: saw(:)
       integer :: n, i, co, stat
-      character(len=:), allocatable :: name
       err = CAPNP_OK
       items = node_enumerants(node, err)
       if (err /= CAPNP_OK) return
@@ -2793,12 +2849,10 @@ contains
          return
       end if
       saw = .false.
+      call dyn_reject_dup_names(2, items, n, err)
+      if (err /= CAPNP_OK) return
       do i = 0, n - 1
          item = capnp_list_get_struct(items, i, err)
-         if (err /= CAPNP_OK) return
-         call enumerant_name(item, name, err)
-         if (err /= CAPNP_OK) return
-         call dyn_reject_dup_name(2, items, i, name, err)
          if (err /= CAPNP_OK) return
          co = int(capnp_get_u16(item, 0_int64))
          call dyn_reject_code_order(co, n, saw, err)
@@ -2813,7 +2867,6 @@ contains
       type(capnp_ptr_t) :: items, item, brand
       logical, allocatable :: saw(:)
       integer :: n, i, co, stat
-      character(len=:), allocatable :: name
       err = CAPNP_OK
       items = node_interface_superclasses(node, err)
       if (err /= CAPNP_OK) return
@@ -2839,12 +2892,10 @@ contains
          return
       end if
       saw = .false.
+      call dyn_reject_dup_names(3, items, n, err)
+      if (err /= CAPNP_OK) return
       do i = 0, n - 1
          item = capnp_list_get_struct(items, i, err)
-         if (err /= CAPNP_OK) return
-         call method_name(item, name, err)
-         if (err /= CAPNP_OK) return
-         call dyn_reject_dup_name(3, items, i, name, err)
          if (err /= CAPNP_OK) return
          co = int(capnp_get_u16(item, 0_int64))
          call dyn_reject_code_order(co, n, saw, err)
@@ -2863,6 +2914,30 @@ contains
          if (err /= CAPNP_OK) return
       end do
    end subroutine dyn_check_interface
+
+   subroutine dyn_check_const(chk, node, err)
+      type(dyn_check_t), intent(inout) :: chk
+      type(capnp_ptr_t), intent(in) :: node
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: typ, val
+      integer :: bits
+      logical :: is_ptr
+      typ = node_const_type(node, err)
+      if (err /= CAPNP_OK) return
+      val = node_const_value(node, err)
+      if (err /= CAPNP_OK) return
+      call dyn_check_typed_value(chk, typ, val, bits, is_ptr, err)
+   end subroutine dyn_check_const
+
+   subroutine dyn_check_annotation(chk, node, err)
+      type(dyn_check_t), intent(inout) :: chk
+      type(capnp_ptr_t), intent(in) :: node
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: typ
+      typ = capnp_getp(node, 3, err)
+      if (err /= CAPNP_OK) return
+      call dyn_check_type(chk, typ, err)
+   end subroutine dyn_check_annotation
 
    recursive subroutine dyn_check_typed_value(chk, typ, val, bits, is_ptr, err)
       type(dyn_check_t), intent(inout) :: chk
@@ -3035,26 +3110,77 @@ contains
       end if
    end subroutine struct_or_null
 
-   subroutine dyn_reject_dup_name(tag, list, idx, name, err)
-      integer, intent(in) :: tag, idx
+   pure function dyn_bytes_eq(a, b) result(y)
+      character(len=*), intent(in) :: a, b
+      logical :: y
+      y = len(a) == len(b)
+      if (y) y = a == b
+   end function dyn_bytes_eq
+
+   pure function dyn_bytes_gt(a, b) result(y)
+      character(len=*), intent(in) :: a, b
+      logical :: y
+      integer :: i, n, ca, cb
+      n = min(len(a), len(b))
+      do i = 1, n
+         ca = iachar(a(i:i))
+         cb = iachar(b(i:i))
+         if (ca /= cb) then
+            y = ca > cb
+            return
+         end if
+      end do
+      y = len(a) > len(b)
+   end function dyn_bytes_gt
+
+   ! Read each member name once, sort by bytes, and reject adjacent equals.
+   subroutine dyn_reject_dup_names(tag, list, n, err)
+      integer, intent(in) :: tag, n
       type(capnp_ptr_t), intent(in) :: list
-      character(len=*), intent(in) :: name
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: other
-      character(len=:), allocatable :: prev
-      integer :: j
+      type(capnp_ptr_t) :: item
+      type(dyn_nm), allocatable :: names(:)
+      integer, allocatable :: ord(:)
+      integer :: i, j, k, stat
       err = CAPNP_OK
-      do j = 0, idx - 1
-         other = capnp_list_get_struct(list, j, err)
+      if (n < 1) return
+      allocate (names(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 1, n
+         item = capnp_list_get_struct(list, i - 1, err)
          if (err /= CAPNP_OK) return
-         call dyn_member_name(tag, other, prev, err)
+         call dyn_member_name(tag, item, names(i)%s, err)
          if (err /= CAPNP_OK) return
-         if (prev == name) then
+      end do
+      if (n < 2) return
+      allocate (ord(n), stat=stat)
+      if (stat /= 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      do i = 1, n
+         ord(i) = i
+      end do
+      do i = 2, n
+         k = ord(i)
+         j = i
+         do while (j > 1)
+            if (.not. dyn_bytes_gt(names(ord(j - 1))%s, names(k)%s)) exit
+            ord(j) = ord(j - 1)
+            j = j - 1
+         end do
+         ord(j) = k
+      end do
+      do i = 2, n
+         if (dyn_bytes_eq(names(ord(i - 1))%s, names(ord(i))%s)) then
             err = CAPNP_ERR_ARG
             return
          end if
       end do
-   end subroutine dyn_reject_dup_name
+   end subroutine dyn_reject_dup_names
 
    subroutine dyn_member_name(tag, p, s, err)
       integer, intent(in) :: tag

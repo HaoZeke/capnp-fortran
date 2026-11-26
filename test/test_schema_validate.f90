@@ -13,11 +13,15 @@ contains
 
    subroutine collect_schema_validate(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(2))
+      allocate (testsuite(4))
       testsuite(1)%name = "offsets"
       testsuite(1)%test => run_offsets
       testsuite(2)%name = "members"
       testsuite(2)%test => run_members
+      testsuite(3)%name = "kinds"
+      testsuite(3)%test => run_kinds
+      testsuite(4)%name = "fixtures"
+      testsuite(4)%test => run_fixtures
    end subroutine collect_schema_validate
 
    subroutine check_(error, cond, name)
@@ -39,24 +43,12 @@ contains
       call capnp_dyn_load(schema, bytes, err)
    end subroutine load_fix
 
-   subroutine reload(schema, label, err)
+   subroutine reload(schema, err)
       type(capnp_dyn_schema_t), intent(inout) :: schema
-      character(len=*), intent(in) :: label
       integer, intent(out) :: err
       integer(int8), allocatable :: bytes(:)
-      character(len=1024) :: dump
-      integer :: n, u, ios, st
       call capnp_serialize_bytes(schema%cgr, bytes, err)
       if (err /= CAPNP_OK) return
-      call get_environment_variable('CAPNP_VALIDATE_DUMP', dump, length=n, status=st)
-      if (st == 0 .and. n > 0) then
-         open (newunit=u, file=trim(dump)//'/'//trim(label)//'.bin', &
-               access='stream', form='unformatted', status='replace', iostat=ios)
-         if (ios == 0) then
-            write (u) bytes
-            close (u)
-         end if
-      end if
       call capnp_dyn_free(schema)
       call capnp_dyn_load(schema, bytes, err)
    end subroutine reload
@@ -81,7 +73,7 @@ contains
          if (err /= CAPNP_OK) return
          call field_name(f, got, err)
          if (err /= CAPNP_OK) return
-         if (got == name) then
+         if (len(got) == len(name) .and. got == name) then
             field = f
             found = .true.
             return
@@ -112,7 +104,7 @@ contains
       character(len=*), intent(in) :: label
       integer :: err
       if (allocated(error)) return
-      call reload(schema, label, err)
+      call reload(schema, err)
       call check_(error, err == CAPNP_ERR_ARG .and. .not. schema%loaded, label)
    end subroutine expect_arg
 
@@ -122,7 +114,7 @@ contains
       character(len=*), intent(in) :: label
       integer :: err
       if (allocated(error)) return
-      call reload(schema, label, err)
+      call reload(schema, err)
       call check_(error, err == CAPNP_OK .and. schema%loaded, label)
    end subroutine expect_ok
 
@@ -202,6 +194,74 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_offsets
 
+
+   subroutine put_named(item, name, ord, err)
+      type(capnp_ptr_t), intent(in) :: item
+      character(len=*), intent(in) :: name
+      integer(int32), intent(in) :: ord
+      integer, intent(inout) :: err
+      if (err /= CAPNP_OK) return
+      call capnp_set_text(item, 0, name, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u16(item, 0_int64, ord, err)
+   end subroutine put_named
+
+   subroutine load_blank_names(error, schema)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(inout) :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, nodes, node, members, item
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (allocated(error)) return
+      call capnp_message_init_builder(msg, err)
+      if (err == CAPNP_OK) root = capnp_new_struct(msg, 0, 4, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, root, err)
+      if (err == CAPNP_OK) nodes = capnp_new_composite_list(msg, 3_int64, 6, 6, err)
+      if (err == CAPNP_OK) call capnp_setp(root, 0, nodes, err)
+
+      if (err == CAPNP_OK) node = capnp_list_get_struct(nodes, 0, err)
+      if (err == CAPNP_OK) call capnp_set_i64(node, 0_int64, 11_int64, err)
+      if (err == CAPNP_OK) call capnp_set_u16(node, 12_int64, 1_int32, err)
+      if (err == CAPNP_OK) members = capnp_new_composite_list(msg, 2_int64, 3, 4, err)
+      if (err == CAPNP_OK) call capnp_setp(node, 3, members, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 0, err)
+      if (err == CAPNP_OK) call put_named(item, 'a', 0_int32, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 1, err)
+      if (err == CAPNP_OK) call put_named(item, 'a ', 1_int32, err)
+
+      if (err == CAPNP_OK) node = capnp_list_get_struct(nodes, 1, err)
+      if (err == CAPNP_OK) call capnp_set_i64(node, 0_int64, 12_int64, err)
+      if (err == CAPNP_OK) call capnp_set_u16(node, 12_int64, 2_int32, err)
+      if (err == CAPNP_OK) members = capnp_new_composite_list(msg, 2_int64, 1, 2, err)
+      if (err == CAPNP_OK) call capnp_setp(node, 3, members, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 0, err)
+      if (err == CAPNP_OK) call put_named(item, 'a', 0_int32, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 1, err)
+      if (err == CAPNP_OK) call put_named(item, 'a ', 1_int32, err)
+
+      if (err == CAPNP_OK) node = capnp_list_get_struct(nodes, 2, err)
+      if (err == CAPNP_OK) call capnp_set_i64(node, 0_int64, 13_int64, err)
+      if (err == CAPNP_OK) call capnp_set_u16(node, 12_int64, 3_int32, err)
+      if (err == CAPNP_OK) members = capnp_new_composite_list(msg, 2_int64, 3, 4, err)
+      if (err == CAPNP_OK) call capnp_setp(node, 3, members, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 0, err)
+      if (err == CAPNP_OK) call put_named(item, 'a', 0_int32, err)
+      if (err == CAPNP_OK) item = capnp_list_get_struct(members, 1, err)
+      if (err == CAPNP_OK) call put_named(item, 'a ', 1_int32, err)
+
+      if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call check_(error, err == CAPNP_OK, 'blank: build')
+      if (allocated(error)) return
+      call capnp_dyn_free(schema)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_OK .and. schema%loaded, 'blank: load')
+      if (allocated(error)) return
+      call expect_ok(error, schema, 'blank-names')
+      call capnp_dyn_free(schema)
+   end subroutine load_blank_names
+
    subroutine run_members(error)
       type(error_type), allocatable, intent(out) :: error
       type(capnp_dyn_schema_t), target :: schema
@@ -263,6 +323,176 @@ contains
       call capnp_set_u16(item, 0_int64, 5_int32, err)
       call expect_arg(error, schema, 'method-order')
       call capnp_dyn_free(schema)
+
+      call load_blank_names(error, schema)
    end subroutine run_members
+
+   subroutine run_kinds(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_ptr_t) :: node, field, typ, val, brand, scopes, scope
+      type(capnp_ptr_t) :: binds, binding, btype, items, item
+      logical :: found
+      integer :: err, idx, hue, n
+      integer(int64) :: hue_id
+      call load_fix(schema, 'test/fixtures/kitchen.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'answer', err)
+      call check_(error, idx > 0, 'kinds: answer')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      val = node_const_value(node, err)
+      call capnp_set_u16(val, 0_int64, TYPE_BOOL, err)
+      call expect_arg(error, schema, 'const-value')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      hue = capnp_dyn_find(schema, 'Hue', err)
+      call check_(error, hue > 0, 'kinds: Hue id')
+      if (allocated(error)) return
+      hue_id = node_id(schema%nodes(hue))
+      idx = capnp_dyn_find(schema, 'methodNote', err)
+      call check_(error, idx > 0, 'kinds: methodNote')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      typ = capnp_getp(node, 3, err)
+      call capnp_set_u16(typ, 0_int64, TYPE_STRUCT, err)
+      call capnp_set_i64(typ, 8_int64, hue_id, err)
+      call expect_arg(error, schema, 'annotation-type')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/box.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Box', err)
+      call check_(error, idx > 0 .and. node_is_generic(schema%nodes(idx)), 'kinds: Box generic')
+      if (allocated(error)) return
+      call capnp_set_bool(schema%nodes(idx), 288_int64, .false., err)
+      call expect_arg(error, schema, 'generic-flag')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/box.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'BoxUse', err)
+      node = schema%nodes(idx)
+      call field_by_name(node, 'textBox', field, found, err)
+      call check_(error, found, 'kinds: textBox')
+      if (allocated(error)) return
+      typ = field_slot_type(field, err)
+      brand = type_brand(typ, err)
+      scopes = brand_scopes(brand, err)
+      n = int(capnp_list_len(scopes))
+      call check_(error, n > 0, 'kinds: brand scopes')
+      if (allocated(error)) return
+      scope = capnp_list_get_struct(scopes, 0, err)
+      binds = scope_bindings(scope, err)
+      binding = capnp_list_get_struct(binds, 0, err)
+      btype = binding_type(binding, err)
+      call capnp_set_u16(btype, 0_int64, TYPE_INT32, err)
+      call expect_arg(error, schema, 'brand-pointer')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Shape.circle', err)
+      call check_(error, idx > 0 .and. node_struct_is_group(schema%nodes(idx)), &
+                  'kinds: circle group')
+      if (allocated(error)) return
+      call capnp_set_i64(schema%nodes(idx), 16_int64, 0_int64, err)
+      call expect_arg(error, schema, 'group-scope')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      hue = capnp_dyn_find(schema, 'Hue', err)
+      hue_id = node_id(schema%nodes(hue))
+      idx = capnp_dyn_find(schema, 'Shape', err)
+      node = schema%nodes(idx)
+      call field_by_name(node, 'circle', field, found, err)
+      call check_(error, found .and. field_which(field) == FIELD_GROUP, 'kinds: circle field')
+      if (allocated(error)) return
+      call capnp_set_i64(field, 16_int64, hue_id, err)
+      call expect_arg(error, schema, 'group-kind')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      hue = capnp_dyn_find(schema, 'Hue', err)
+      hue_id = node_id(schema%nodes(hue))
+      idx = capnp_dyn_find(schema, 'AnnotatedService', err)
+      items = node_interface_methods(schema%nodes(idx), err)
+      item = capnp_list_get_struct(items, 0, err)
+      call capnp_set_i64(item, 8_int64, hue_id, err)
+      call expect_arg(error, schema, 'method-param')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Shape.circle', err)
+      call capnp_set_u16(schema%nodes(idx), 14_int64, 40_int32, err)
+      call expect_ok(error, schema, 'group-larger')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      node = schema%nodes(idx)
+      call field_by_name(node, 'note', field, found, err)
+      typ = field_slot_type(field, err)
+      val = field_slot_default(field, err)
+      call capnp_set_u16(typ, 0_int64, TYPE_STRUCT, err)
+      call capnp_set_i64(typ, 8_int64, 42_int64, err)
+      call capnp_set_u16(val, 0_int64, TYPE_STRUCT, err)
+      call expect_ok(error, schema, 'missing-type')
+      call capnp_dyn_free(schema)
+
+      call load_two_kinds(error, schema)
+   end subroutine run_kinds
+
+   subroutine load_two_kinds(error, schema)
+      type(error_type), allocatable, intent(inout) :: error
+      type(capnp_dyn_schema_t), intent(inout) :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, nodes, node
+      integer(int8), allocatable :: bytes(:)
+      integer :: err
+      if (allocated(error)) return
+      call capnp_message_init_builder(msg, err)
+      if (err == CAPNP_OK) root = capnp_new_struct(msg, 0, 4, err)
+      if (err == CAPNP_OK) call capnp_set_root(msg, root, err)
+      if (err == CAPNP_OK) nodes = capnp_new_composite_list(msg, 2_int64, 6, 6, err)
+      if (err == CAPNP_OK) call capnp_setp(root, 0, nodes, err)
+      if (err == CAPNP_OK) node = capnp_list_get_struct(nodes, 0, err)
+      if (err == CAPNP_OK) call capnp_set_i64(node, 0_int64, 11_int64, err)
+      if (err == CAPNP_OK) call capnp_set_u16(node, 12_int64, int(NODE_STRUCT, int32), err)
+      if (err == CAPNP_OK) node = capnp_list_get_struct(nodes, 1, err)
+      if (err == CAPNP_OK) call capnp_set_i64(node, 0_int64, 11_int64, err)
+      if (err == CAPNP_OK) call capnp_set_u16(node, 12_int64, int(NODE_ENUM, int32), err)
+      if (err == CAPNP_OK) call capnp_serialize_bytes(msg, bytes, err)
+      call capnp_message_free(msg)
+      call check_(error, err == CAPNP_OK, 'two-kinds: build')
+      if (allocated(error)) return
+      call capnp_dyn_free(schema)
+      call capnp_dyn_load(schema, bytes, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. .not. schema%loaded, 'two-kinds')
+      call capnp_dyn_free(schema)
+   end subroutine load_two_kinds
+
+   subroutine run_fixtures(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t) :: schema
+      character(len=48) :: files(13)
+      integer :: i, err
+      files(1) = 'test/fixtures/adder.cgr.bin'
+      files(2) = 'test/fixtures/addressbook.cgr.bin'
+      files(3) = 'test/fixtures/box.cgr.bin'
+      files(4) = 'test/fixtures/dual.cgr.bin'
+      files(5) = 'test/fixtures/dynamic.cgr.bin'
+      files(6) = 'test/fixtures/holder.cgr.bin'
+      files(7) = 'test/fixtures/kitchen.cgr.bin'
+      files(8) = 'test/fixtures/null_structlist.cgr.bin'
+      files(9) = 'test/fixtures/rpc.cgr.bin'
+      files(10) = 'test/fixtures/rpc-threeparty.cgr.bin'
+      files(11) = 'test/fixtures/schema.cgr.bin'
+      files(12) = 'test/fixtures/stream.cgr.bin'
+      files(13) = 'test/fixtures/streamer.cgr.bin'
+      do i = 1, size(files)
+         call load_fix(schema, trim(files(i)), err)
+         call check_(error, err == CAPNP_OK .and. schema%loaded, 'fixture '//trim(files(i)))
+         call capnp_dyn_free(schema)
+         if (allocated(error)) return
+      end do
+   end subroutine run_fixtures
 
 end module test_schema_validate
