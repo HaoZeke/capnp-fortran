@@ -23,7 +23,7 @@ jobs:
       actions: read
 
     steps:
-      - uses: HaoZeke/doc-previewer@0e1094735b4f7ee9a2c60a18a34d7a7e5bc6bb63 # v0.0.1
+      - uses: HaoZeke/doc-previewer@c1305a59e9ac4c92adc015f76ebfa67554f83655 # v1.0.0
         with:
           workflow_run_id: ${{ github.event.workflow_run.id }}
           head_sha: ${{ github.event.workflow_run.head_sha }}
