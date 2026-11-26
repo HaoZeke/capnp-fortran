@@ -145,9 +145,7 @@ contains
 
    function have_capnp() result(y)
       logical :: y
-      y = sh('bin=$(command -v capnp) && test -n "$bin" && ' &
-         // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
-         // 'test -f "$inc/capnp/compat/json.capnp"')
+      y = sh('bash test/dev_schemas.sh')
    end function have_capnp
 
    !> One read of `capnp --version` for the whole module.

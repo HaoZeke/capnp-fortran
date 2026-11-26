@@ -24,8 +24,9 @@ die() {
   exit 1
 }
 
-# Exit 77 asks the Fortran runner to skip the case. That covers a missing
-# C++ toolchain and a capnp install without its standard schemas.
+# Exit 77 asks the Fortran runner to skip the case. A missing C++ compiler,
+# pkg-config, or python3 skips only when CI is unset. A capnp install without
+# its standard schemas still skips.
 skip_dev() {
   echo "codegen parity: $*" >&2
   exit 77
@@ -34,7 +35,12 @@ skip_dev() {
 command -v "$FC" > /dev/null || die "$FC not found on PATH"
 command -v capnp > /dev/null || skip_dev "capnp is not on PATH"
 for tool in "$CXX" pkg-config python3; do
-  command -v "$tool" > /dev/null || skip_dev "$tool is not on PATH"
+  if ! command -v "$tool" > /dev/null; then
+    if [[ -n "${CI:-}" ]]; then
+      die "$tool is not on PATH"
+    fi
+    skip_dev "$tool is not on PATH"
+  fi
 done
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/codegen-parity.XXXXXX")
@@ -51,7 +57,8 @@ join_path() {
 # C++ headers and capnp.pc under its own prefix, which neither `capnp` nor the
 # system `pkg-config` search by default. Some layouts use lib64.
 if [[ -z "${CAPNP_PREFIX:-}" ]]; then
-  CAPNP_PREFIX=$(cd "$(dirname "$(command -v capnp)")/.." && pwd)
+  capnp_bin=$(realpath "$(command -v capnp)")
+  CAPNP_PREFIX=$(cd "$(dirname "$capnp_bin")/.." && pwd)
 fi
 CAPNP_INC=()
 if [[ -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
@@ -84,9 +91,7 @@ fi
 CAPNP_PC=()
 
 dev_schemas() {
-  [[ -f "$CAPNP_PREFIX/include/capnp/compat/json.capnp" && \
-     -f "$CAPNP_PREFIX/include/capnp/c++.capnp" && \
-     -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]
+  bash "$ROOT/test/dev_schemas.sh"
 }
 
 # A distro may install the capnp binary without the standard schemas. An import
