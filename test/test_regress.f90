@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(66))
+      allocate (testsuite(67))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -129,6 +129,7 @@ contains
       testsuite(64) = new_unittest("nonstruct-root", run_nonstruct_root)
       testsuite(65) = new_unittest("shorthand-group-list", run_shorthand_group_list)
       testsuite(66) = new_unittest("version-gate", run_version_gate)
+      testsuite(67) = new_unittest("unused-decl", run_unused_decl)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -3863,6 +3864,29 @@ contains
          call test_failed(error, 'schema-request beside the executable')
       end if
    end subroutine run_request_beside_exe
+
+   !> A requested type beside an unused broken declaration still converts.
+   subroutine run_unused_decl(error)
+      type(error_type), allocatable, intent(out) :: error
+      if (.not. capnp_bin()) then
+         call schema_skip(error)
+         return
+      end if
+      if (.not. sh('mkdir -p '//tmp//'/unused/bin && '//cap_setup() &
+         //' && unset CAPNP_SCHEMA_REQUEST && d='//tmp//'/unused' &
+         //' && cp "$CAP" "$d/bin/capnpf"' &
+         //' && printf ''@0x8011223344556677;\nstruct Good { x @0 :Int32; }\n''' &
+         //' > "$d/unused.capnp"' &
+         //' && printf ''struct Bad { y @0 :NoSuchType; }\n'' >> "$d/unused.capnp"' &
+         //' && printf ''(x = 1)\n'' > "$d/in.txt"' &
+         //' && ( cd "$d" && ./bin/capnpf convert text:text --short unused.capnp Good' &
+         //' < in.txt > f.out )' &
+         //' && capnp convert text:text --short "$d/unused.capnp" Good' &
+         //' < "$d/in.txt" > "$d/c.out"' &
+         //' && cmp -s "$d/f.out" "$d/c.out"')) then
+         call test_failed(error, 'unused declaration')
+      end if
+   end subroutine run_unused_decl
 
    !> A generic root expression matches capnp 1.4.0, with and without the helper.
    subroutine run_generic_root(error)

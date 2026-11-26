@@ -424,8 +424,8 @@ contains
       integer(int8), allocatable :: bytes(:)
       ! User -I directories come before the install include, matching
       ! capnp 1.4.0. schema-request compiles only the requested type, so
-      ! an error in some other declaration is ignored. Without the
-      ! helper, `capnp compile` still sees user paths first.
+      ! an error in some other declaration is ignored. The fallback
+      ! wrapper does the same for a plain type name.
       if (annotations) then
          ann = 'keep'
       else
@@ -474,13 +474,36 @@ contains
             shcmd = shcmd//extra_inc//' -I"$INC"'
          end if
          shcmd = shcmd//' -I/ -o- "$W" "$ABS"; rc=$?; rm -f "$W"; exit $rc'
-      else if (no_std) then
-         shcmd = shcmd//'capnp compile --no-standard-import'//extra_inc//' -o- ' &
-                 //shell_quote(trim(path))
       else
-         shcmd = shcmd//std_include_sh()//' && ' &
-                 //'capnp compile'//extra_inc//' -I"$INC" -o- ' &
-                 //shell_quote(trim(path))
+         ! A wrapper names only the requested type, so an unused
+         ! declaration in the imported file stays uncompiled. A const
+         ! or other value name fails that compile, and the whole file
+         ! is compiled afterwards.
+         shcmd = shcmd//'dir=$(mktemp -d) || exit 1; ' &
+                 //'trap ''rm -rf "$dir"'' EXIT INT TERM; ' &
+                 //'ABS=$(readlink -f '//shell_quote(trim(path))//') || exit 1; ' &
+                 //'W=$dir/capnpf-lazy.capnp; ' &
+                 //'O=$dir/capnpf-lazy.bin; E=$dir/capnpf-lazy.err; ' &
+                 //'printf ''%s\n'' ''@0x8e1e4a11b22c3d4f;'' ' &
+                 //'"using CapnpfOrig = import \"$ABS\";" ' &
+                 //'''struct CapnpfBrandHost {'' ' &
+                 //shell_quote('  branded @0 :'//brand_expr(type_name)//';') &
+                 //' ''}'' > "$W"; if capnp compile'
+         if (no_std) then
+            shcmd = shcmd//' --no-standard-import'//extra_inc
+         else
+            shcmd = shcmd//extra_inc//' -I"$INC"'
+         end if
+         shcmd = shcmd//' -I/ -o- "$W" >"$O" 2>"$E"; then cat "$E" >&2; ' &
+                 //'cat "$O"; rc=0; else '
+         if (no_std) then
+            shcmd = shcmd//'capnp compile --no-standard-import'//extra_inc//' -o- ' &
+                    //shell_quote(trim(path))
+         else
+            shcmd = shcmd//'capnp compile'//extra_inc//' -I"$INC" -o- ' &
+                    //shell_quote(trim(path))
+         end if
+         shcmd = shcmd//'; rc=$?; fi; exit $rc'
       end if
       call read_pipe(shcmd, bytes, err)
       if (err /= CAPNP_OK) return
