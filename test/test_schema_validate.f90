@@ -13,9 +13,11 @@ contains
 
    subroutine collect_schema_validate(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(1))
+      allocate (testsuite(2))
       testsuite(1)%name = "offsets"
       testsuite(1)%test => run_offsets
+      testsuite(2)%name = "members"
+      testsuite(2)%test => run_members
    end subroutine collect_schema_validate
 
    subroutine check_(error, cond, name)
@@ -200,5 +202,67 @@ contains
       call capnp_dyn_free(schema)
    end subroutine run_offsets
 
+   subroutine run_members(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_ptr_t) :: node, field, items, item
+      logical :: found
+      integer :: err, idx, which
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Scalars', err)
+      call check_(error, idx > 0, 'members: Scalars')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      call field_by_name(node, 'u8', field, found, err)
+      call check_(error, found, 'members: u8')
+      if (allocated(error)) return
+      call rename_field(field, 'i8', err)
+      call check_(error, err == CAPNP_OK, 'members: rename u8')
+      call expect_arg(error, schema, 'dup-name')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/kitchen.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Sink', err)
+      node = schema%nodes(idx)
+      call field_by_name(node, 'count', field, found, err)
+      call check_(error, found, 'members: count')
+      if (allocated(error)) return
+      call capnp_set_u16(field, 0_int64, 0_int32, err)
+      call expect_arg(error, schema, 'code-order')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/kitchen.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Sink', err)
+      node = schema%nodes(idx)
+      call field_by_name(node, 'count', field, found, err)
+      which = int(capnp_get_u16(field, 10_int64))
+      call check_(error, which == 1, 'members: explicit ordinal')
+      if (allocated(error)) return
+      call capnp_set_u16(field, 12_int64, 0_int32, err)
+      call expect_arg(error, schema, 'ordinal')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Hue', err)
+      call check_(error, idx > 0, 'members: Hue')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      items = node_enumerants(node, err)
+      item = capnp_list_get_struct(items, 1, err)
+      call capnp_set_u16(item, 0_int64, 0_int32, err)
+      call expect_arg(error, schema, 'enum-order')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'AnnotatedService', err)
+      call check_(error, idx > 0, 'members: AnnotatedService')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      items = node_interface_methods(node, err)
+      item = capnp_list_get_struct(items, 0, err)
+      call capnp_set_u16(item, 0_int64, 5_int32, err)
+      call expect_arg(error, schema, 'method-order')
+      call capnp_dyn_free(schema)
+   end subroutine run_members
 
 end module test_schema_validate
