@@ -133,12 +133,21 @@ module capnp_rpc
    !> Policy shared by every wrapper belonging to one membrane. Reusing
    !> the same object gives all wrapped capabilities one revocation
    !> switch, matching capnp-C++ MembranePolicy identity.
+   !> `inbound_call` and `outbound_call` allow or reject a call.
+   !> `inbound_redirect` and `outbound_redirect` may name another
+   !> capability; the call then goes to that capability. A null server
+   !> and an `RPC_CAP_NONE` cap leave the call on its original target.
+   !> When both are set, the server is the redirect target. Result
+   !> capabilities of a redirect stay as that capability returned them
+   !> (capnp `membrane.h` lines 69-71).
    type, abstract :: rpc_membrane_policy_t
       logical :: revoked = .false.
       character(len=:), allocatable :: revoke_reason
    contains
       procedure(rpc_membrane_check_ifc), deferred :: inbound_call
       procedure(rpc_membrane_check_ifc), deferred :: outbound_call
+      procedure :: inbound_redirect => membrane_policy_no_redirect
+      procedure :: outbound_redirect => membrane_policy_no_redirect
    end type rpc_membrane_policy_t
 
    !> Client-side reference to a remote capability.
@@ -189,8 +198,9 @@ module capnp_rpc
    end type rpc_server_t
 
    !> Server capability crossing a membrane. Calls are checked in the
-   !> crossing direction and capabilities staged in results are wrapped
-   !> recursively in the same membrane.
+   !> crossing direction. A pass-through call wraps capabilities staged
+   !> in results recursively in the same membrane. A redirect sends the
+   !> call to the capability the policy named.
    type, extends(rpc_server_t) :: rpc_membrane_server_t
       class(rpc_server_t), pointer :: inner => null()
       class(rpc_membrane_policy_t), pointer :: policy => null()
@@ -338,6 +348,8 @@ module capnp_rpc
       type(capnp_message_t), pointer :: retmsg => null()
       class(rpc_membrane_policy_t), pointer :: membrane => null()
       logical :: membrane_reverse = .false.
+      !> Local server a membrane redirect sends this question to.
+      class(rpc_server_t), pointer :: membrane_redirect => null()
    end type rpc_question_slot_t
 
    type :: rpc_answer_slot_t
@@ -892,6 +904,132 @@ contains
       end if
    end subroutine rpc_membrane_revoke
 
+   !> Default redirect: the call stays on its original target.
+   subroutine membrane_policy_no_redirect(self, interface_id, method_id, server, cap)
+      class(rpc_membrane_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      class(rpc_server_t), pointer, intent(inout) :: server
+      type(rpc_cap_t), intent(inout) :: cap
+      if (interface_id < 0_int64 .and. method_id < 0) cap%kind = RPC_CAP_NONE
+      server => null()
+      cap = rpc_cap_t()
+   end subroutine membrane_policy_no_redirect
+
+   subroutine membrane_offer(policy, reverse, interface_id, method_id, server, &
+                             cap_kind, cap_id, cap_nops, cap_ops, cap_reverse, cap_mem)
+      class(rpc_membrane_policy_t), intent(inout) :: policy
+      logical, intent(in) :: reverse
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      class(rpc_server_t), pointer, intent(inout) :: server
+      integer, intent(out) :: cap_kind
+      integer(int64), intent(out) :: cap_id
+      integer, intent(out) :: cap_nops
+      integer, intent(out) :: cap_ops(0:MAXOPS - 1)
+      logical, intent(out) :: cap_reverse
+      class(rpc_membrane_policy_t), pointer, intent(out) :: cap_mem
+      type(rpc_cap_t) :: scratch
+      server => null()
+      scratch = rpc_cap_t()
+      if (reverse) then
+         call policy%outbound_redirect(interface_id, method_id, server, scratch)
+      else
+         call policy%inbound_redirect(interface_id, method_id, server, scratch)
+      end if
+      ! Read the redirect here. The capability value is then copied
+      ! field by field onto the call target.
+      cap_kind = scratch%kind
+      cap_id = scratch%id
+      cap_nops = scratch%nops
+      cap_ops = scratch%ops
+      cap_reverse = scratch%membrane_reverse
+      cap_mem => scratch%membrane
+   end subroutine membrane_offer
+
+   !> Apply allow/deny, then follow a redirect chain. `server` is a local
+   !> capability the caller invokes directly. A returned vat client is
+   !> reported through the `out_*` fields; the caller stores them on its
+   !> capability. membrane.c++:413-428 and :445-459.
+   subroutine membrane_retarget(cap, interface_id, method_id, server, err, &
+                                out_kind, out_id, out_nops, out_ops, &
+                                out_reverse, out_mem)
+      type(rpc_cap_t), intent(in) :: cap
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      class(rpc_server_t), pointer, intent(out) :: server
+      integer, intent(out) :: err
+      integer, intent(out) :: out_kind
+      integer(int64), intent(out) :: out_id
+      integer, intent(out) :: out_nops
+      integer, intent(out) :: out_ops(0:MAXOPS - 1)
+      logical, intent(out) :: out_reverse
+      class(rpc_membrane_policy_t), pointer, intent(out) :: out_mem
+      class(rpc_server_t), pointer :: srv
+      class(rpc_membrane_policy_t), pointer :: cap_mem, cur_mem
+      integer :: steps, cap_kind, cap_nops, cap_ops(0:MAXOPS - 1)
+      integer :: cur_kind, cur_nops, cur_ops(0:MAXOPS - 1)
+      integer(int64) :: cap_id, cur_id
+      logical :: cap_reverse, cur_reverse
+      server => null()
+      err = CAPNP_OK
+      cur_kind = cap%kind
+      cur_id = cap%id
+      cur_nops = cap%nops
+      cur_ops = cap%ops
+      cur_reverse = cap%membrane_reverse
+      cur_mem => cap%membrane
+      steps = 0
+      do
+         if (.not. associated(cur_mem)) exit
+         call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
+         if (err /= CAPNP_OK) exit
+         srv => null()
+         cap_mem => null()
+         call membrane_offer(cur_mem, cur_reverse, interface_id, method_id, srv, &
+                             cap_kind, cap_id, cap_nops, cap_ops, cap_reverse, cap_mem)
+         if (associated(srv)) then
+            server => srv
+            cur_mem => null()
+            cur_reverse = .false.
+            exit
+         end if
+         if (cap_kind == RPC_CAP_NONE) exit
+         if (cap_kind == cur_kind) then
+            if (cap_id == cur_id .and. cap_nops == cur_nops .and. &
+                (cap_reverse .eqv. cur_reverse)) then
+               if (associated(cap_mem)) then
+                  if (associated(cap_mem, cur_mem)) then
+                     if (cap_nops <= 0) exit
+                     if (all(cap_ops(0:cap_nops - 1) == cur_ops(0:cap_nops - 1))) exit
+                  end if
+               else if (.not. associated(cur_mem)) then
+                  if (cap_nops <= 0) exit
+                  if (all(cap_ops(0:cap_nops - 1) == cur_ops(0:cap_nops - 1))) exit
+               end if
+            end if
+         end if
+         cur_kind = cap_kind
+         cur_id = cap_id
+         cur_nops = cap_nops
+         cur_ops = cap_ops
+         cur_mem => cap_mem
+         cur_reverse = cap_reverse
+         steps = steps + 1
+         if (steps >= 8) then
+            if (associated(cur_mem)) &
+               call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
+            exit
+         end if
+      end do
+      out_kind = cur_kind
+      out_id = cur_id
+      out_nops = cur_nops
+      out_ops = cur_ops
+      out_reverse = cur_reverse
+      out_mem => cur_mem
+   end subroutine membrane_retarget
+
    subroutine membrane_check(policy, reverse, interface_id, method_id, err)
       class(rpc_membrane_policy_t), pointer, intent(in) :: policy
       logical, intent(in) :: reverse
@@ -918,7 +1056,12 @@ contains
          class(*), pointer :: p => null()
       end type staged_ptr_t
       type(staged_ptr_t), allocatable :: orig(:)
-      integer :: i, j
+      class(rpc_server_t), pointer :: redir_srv
+      class(rpc_membrane_policy_t), pointer :: cap_mem
+      type(rpc_cap_t) :: redir_cap
+      integer :: i, j, cap_kind, cap_nops, cap_ops(0:MAXOPS - 1)
+      integer(int64) :: cap_id
+      logical :: cap_reverse
       logical :: dup
       if (.not. associated(self%inner) .or. .not. associated(self%policy)) then
          err = CAPNP_ERR_ARG
@@ -927,6 +1070,29 @@ contains
       call membrane_check(self%policy, self%reverse, ctx%interface_id, &
                           ctx%method_id, err)
       if (err /= CAPNP_OK) return
+      ! membrane.c++:459 forwards the original context to the redirect
+      ! client. membrane.h:69-71 leaves that client's result capabilities
+      ! as it returned them.
+      redir_srv => null()
+      cap_mem => null()
+      call membrane_offer(self%policy, self%reverse, ctx%interface_id, &
+                          ctx%method_id, redir_srv, cap_kind, cap_id, &
+                          cap_nops, cap_ops, cap_reverse, cap_mem)
+      if (associated(redir_srv)) then
+         call ctx_reserve(ctx, MAXCAPS)
+         call redir_srv%dispatch(ctx, err)
+         return
+      end if
+      redir_cap%kind = cap_kind
+      redir_cap%id = cap_id
+      redir_cap%nops = cap_nops
+      redir_cap%ops = cap_ops
+      redir_cap%membrane => cap_mem
+      redir_cap%membrane_reverse = cap_reverse
+      if (redir_cap%kind /= RPC_CAP_NONE) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       call ctx_reserve(ctx, MAXCAPS)
       call self%inner%dispatch(ctx, err)
       if (err /= CAPNP_OK) return
@@ -1264,6 +1430,7 @@ contains
             conn%questions(k)%import_handle = -1_int64
             conn%questions(k)%membrane => null()
             conn%questions(k)%membrane_reverse = .false.
+            conn%questions(k)%membrane_redirect => null()
             conn%next_qid = int(k + 1, int64)
             qid = int(k, int64)
             return
@@ -1429,24 +1596,48 @@ contains
       integer(int64) :: target_id, wire_id
       logical :: broken
       character(len=:), allocatable :: breason
+      type(rpc_cap_t) :: effective
+      class(rpc_server_t), pointer :: redir_srv
       err = CAPNP_OK
-      target_id = target%id
-      if (target%kind == RPC_CAP_IMPORT) then
-         call import_follow(conn, target%id, target_id, broken, breason)
+      ! Field by field, so clearing a redirect's membrane cannot clear
+      ! the caller's capability.
+      effective%kind = target%kind
+      effective%id = target%id
+      effective%nops = target%nops
+      effective%ops = target%ops
+      effective%membrane => target%membrane
+      effective%membrane_reverse = target%membrane_reverse
+      redir_srv => null()
+      block
+         integer :: k, nops, ops(0:MAXOPS - 1)
+         integer(int64) :: id
+         logical :: rev
+         class(rpc_membrane_policy_t), pointer :: mem
+         mem => null()
+         call membrane_retarget(effective, interface_id, method_id, redir_srv, err, &
+                                k, id, nops, ops, rev, mem)
+         effective%kind = k
+         effective%id = id
+         effective%nops = nops
+         effective%ops = ops
+         effective%membrane => mem
+         effective%membrane_reverse = rev
+      end block
+      if (err /= CAPNP_OK) then
+         if (associated(effective%membrane)) then
+            if (effective%membrane%revoked .and. &
+                allocated(effective%membrane%revoke_reason)) &
+               conn%abort_reason = effective%membrane%revoke_reason
+         end if
+         qid = -1_int64
+         return
+      end if
+      target_id = effective%id
+      if (.not. associated(redir_srv) .and. effective%kind == RPC_CAP_IMPORT) then
+         call import_follow(conn, effective%id, target_id, broken, breason)
          if (broken) then
             if (allocated(breason)) conn%abort_reason = breason
             err = RPC_ERR_EXCEPTION
-            qid = -1_int64
-            return
-         end if
-      end if
-      if (associated(target%membrane)) then
-         call membrane_check(target%membrane, target%membrane_reverse, &
-                             interface_id, method_id, err)
-         if (err /= CAPNP_OK) then
-            if (target%membrane%revoked .and. &
-                allocated(target%membrane%revoke_reason)) &
-               conn%abort_reason = target%membrane%revoke_reason
             qid = -1_int64
             return
          end if
@@ -1456,13 +1647,20 @@ contains
          err = CAPNP_ERR_ALLOC
          return
       end if
-      if (target%kind == RPC_CAP_IMPORT) then
+      if (.not. associated(redir_srv) .and. effective%kind == RPC_CAP_IMPORT) then
          conn%questions(int(qid))%import_handle = target_id
          call import_wire_id(conn, target_id, wire_id)
          target_id = wire_id
       end if
-      conn%questions(int(qid))%membrane => target%membrane
-      conn%questions(int(qid))%membrane_reverse = target%membrane_reverse
+      if (associated(redir_srv)) then
+         conn%questions(int(qid))%membrane => null()
+         conn%questions(int(qid))%membrane_reverse = .false.
+         conn%questions(int(qid))%membrane_redirect => redir_srv
+      else
+         conn%questions(int(qid))%membrane => effective%membrane
+         conn%questions(int(qid))%membrane_reverse = effective%membrane_reverse
+         conn%questions(int(qid))%membrane_redirect => null()
+      end if
       call capnp_message_init_builder(m, err)
       if (err == CAPNP_OK) msg = message_new_root(m, err)
       if (err == CAPNP_OK) c = message_call_init(msg, err)
@@ -1472,25 +1670,25 @@ contains
       if (err == CAPNP_OK) call call_send_results_to_caller_set(c, err)
       if (err == CAPNP_OK) tgt = call_target_init(c, err)
       if (err == CAPNP_OK) then
-         select case (target%kind)
+         select case (effective%kind)
          case (RPC_CAP_IMPORT)
             call message_target_imported_cap_set(tgt, target_id, err)
          case (RPC_CAP_LOCAL)
             ! The call never leaves this vat. The imported-cap slot is
             ! only here so the message is well formed until send.
-            call message_target_imported_cap_set(tgt, target%id, err)
-            conn%questions(int(qid))%local_export = int(target%id)
+            call message_target_imported_cap_set(tgt, effective%id, err)
+            conn%questions(int(qid))%local_export = int(effective%id)
             conn%questions(int(qid))%local_call = .true.
          case (RPC_CAP_PIPELINE)
             pa = message_target_promised_answer_init(tgt, err)
             if (err == CAPNP_OK) &
-               call promised_answer_question_id_set(pa, qwire(conn, target%id), err)
-            if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(target%nops, int64), err)
+               call promised_answer_question_id_set(pa, qwire(conn, effective%id), err)
+            if (err == CAPNP_OK) ops = promised_answer_transform_init(pa, int(effective%nops, int64), err)
             if (err == CAPNP_OK) then
-               do i = 0, target%nops - 1
+               do i = 0, effective%nops - 1
                   op%p = capnp_list_get_struct(ops, i, err)
                   if (err /= CAPNP_OK) exit
-                  call promised_answer_op_get_pointer_field_set(op, target%ops(i), err)
+                  call promised_answer_op_get_pointer_field_set(op, effective%ops(i), err)
                   if (err /= CAPNP_OK) exit
                end do
             end if
@@ -1526,6 +1724,16 @@ contains
                conn%questions(int(qid))%tail_call = &
                   call_send_results_to_which(c) == CALL_SEND_RESULTS_TO_YOURSELF_TAG
             end if
+         end if
+      end if
+      ! A membrane redirect is a local call on the capability the policy
+      ! returned (membrane.c++:428 and :459).
+      if (qslot_ok(conn, qid)) then
+         if (associated(conn%questions(int(qid))%membrane_redirect)) then
+            call fulfill_local_call(conn, -1, m, qid, err, &
+                                    conn%questions(int(qid))%membrane_redirect)
+            call capnp_message_free(m)
+            return
          end if
       end if
       ! A call on a capability this vat hosts never goes on the wire.
@@ -1696,12 +1904,13 @@ contains
    !> Run a saved Call against a local export and store the Return on
    !> the question. Nothing is written to the peer. A local answer can
    !> start another local call before this one returns.
-   recursive subroutine fulfill_local_call(conn, export_id, callmsg, qid, err)
+   recursive subroutine fulfill_local_call(conn, export_id, callmsg, qid, err, redirect)
       type(rpc_conn_t), intent(inout), target :: conn
       integer, intent(in) :: export_id
       type(capnp_message_t), intent(inout), target :: callmsg
       integer(int64), intent(in) :: qid
       integer, intent(out) :: err
+      class(rpc_server_t), pointer, intent(in), optional :: redirect
       type(capnp_message_t), target :: rm
       type(message_t) :: cmsg, rmsg
       type(call_t) :: c
@@ -1709,7 +1918,7 @@ contains
       type(payload_t) :: params
       type(rpc_call_ctx_t) :: ctx
       integer :: derr, at
-      logical :: dispatched
+      logical :: dispatched, direct, missing
       integer(int8), allocatable :: bytes(:)
       call ctx_reserve(ctx, MAXCAPS)
       err = CAPNP_OK
@@ -1737,9 +1946,16 @@ contains
       end if
       c = message_call_get(cmsg, err)
       params = call_params_get(c, err)
-      if (.not. eslot_ok(conn, int(export_id, int64))) then
-         call fill_exception(r, 'no such capability', err)
-      else if (.not. conn%exports(export_id)%used) then
+      direct = .false.
+      if (present(redirect)) direct = associated(redirect)
+      missing = .false.
+      if (.not. direct) then
+         if (.not. eslot_ok(conn, int(export_id, int64))) missing = .true.
+         if (.not. missing) then
+            if (.not. conn%exports(export_id)%used) missing = .true.
+         end if
+      end if
+      if (missing) then
          call fill_exception(r, 'no such capability', err)
       else
          ctx%interface_id = call_interface_id_get(c)
@@ -1749,18 +1965,26 @@ contains
          ctx%results = return_results_init(r, err)
          dispatched = .false.
          derr = CAPNP_ERR_KIND
-         ! Match wire dispatch: keep the export alive while application code
-         ! pumps the connection and may receive Release or close it.
-         at = export_id
-         call pin_export(conn, at)
-         call dispatch_enter(conn, at)
-         select type (s => conn%exports(at)%srv)
-         class is (rpc_server_t)
-            call s%dispatch(ctx, derr)
-            dispatched = .true.
-         end select
-         call dispatch_leave(conn, at)
-         call drop_export_pin(conn, at)
+         if (present(redirect)) then
+            if (associated(redirect)) then
+               call redirect%dispatch(ctx, derr)
+               dispatched = .true.
+            end if
+         end if
+         if (.not. dispatched) then
+            ! Match wire dispatch: keep the export alive while application code
+            ! pumps the connection and may receive Release or close it.
+            at = export_id
+            call pin_export(conn, at)
+            call dispatch_enter(conn, at)
+            select type (s => conn%exports(at)%srv)
+            class is (rpc_server_t)
+               call s%dispatch(ctx, derr)
+               dispatched = .true.
+            end select
+            call dispatch_leave(conn, at)
+            call drop_export_pin(conn, at)
+         end if
          if (conn%dead .or. .not. associated(conn%transport)) then
             call rollback_staged(conn, ctx)
             call capnp_message_free(rm)
@@ -3169,6 +3393,7 @@ contains
       if (allocated(slot%result_released)) deallocate (slot%result_released)
       slot%membrane => null()
       slot%membrane_reverse = .false.
+      slot%membrane_redirect => null()
       if (associated(slot%retmsg)) then
          call capnp_message_free(slot%retmsg)
          deallocate (slot%retmsg)

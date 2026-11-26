@@ -76,7 +76,7 @@ and capnp-C++:
 | RPC level 3 (three-party: `Provide`/`Accept`, vines, embargo) | no | post-1.4.0 only | yes (`rpc-threeparty.capnp`, VatId dialing, live three-vat TCP handoff) |
 | RPC level 4 (`Join`, reference equality) | no | no | yes (two-party sender and receiver; C++ replies unimplemented) |
 | `-> stream` flow control and cancellation | no | yes | yes (`rpc_stream_t`, windowed, Finish cancellation) |
-| Capability membranes | no | yes | partial (call checks, shared revocation, recursive result caps, unwrap on return) |
+| Capability membranes | no | yes | partial (call checks, redirect, shared revocation, recursive result caps, unwrap on return) |
 | Typed interface stubs in generated code | no | yes | partial (client helpers + abstract server base) |
 | Generics in generated code | no | yes | partial (tested brand-resolved instantiations) |
 | Dynamic reflection API | no | yes | partial (named scalar, text, and pointer operations) |
@@ -207,16 +207,21 @@ annotation. The live C++ interop peer includes an opted-in method whose
 never-ending promise is dropped by the Fortran cancellation request.
 
 Membranes cover part of `capnp/membrane.h`. A policy can allow or reject
-an inbound or outbound call. Wrappers that share a policy share one
-revocation flag. Result capabilities are wrapped recursively, and a
-wrapper that crosses back through the same policy is unwrapped.
+an inbound or outbound call. `inbound_redirect` and `outbound_redirect`
+may name another capability, and the call goes to that capability.
+The redirect capability is outside the membrane, so capabilities it
+places in results stay as it returned them (`membrane.h` lines 69-71,
+`MembraneHook::newCall` and `MembraneHook::call` in `membrane.c++`).
+A call that is allowed through still wraps result capabilities
+recursively, and a wrapper that crosses back through the same policy
+is unwrapped. Wrappers that share a policy share one revocation flag.
 `rpc_membrane_cap` wraps an imported client capability and
-`rpc_membrane_server_t` wraps a local server. Redirecting to another
-capability, an onRevoked promise that cancels in-flight calls, addRef
-policy ownership, parameter-capability membranes, and
-shouldResolveBeforeRedirecting are not implemented. Membranes are local
-capability machinery, not an RPC wire extension, so their tests run
-between Fortran vats rather than against a C++ peer.
+`rpc_membrane_server_t` wraps a local server. An onRevoked promise
+that cancels in-flight calls, addRef policy ownership,
+parameter-capability membranes, and shouldResolveBeforeRedirecting
+are not implemented. Membranes are local capability machinery. Their
+tests run between Fortran vats, because no membrane state appears
+on the wire.
 
 ## Changelog
 
