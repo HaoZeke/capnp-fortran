@@ -950,10 +950,12 @@ contains
    !> Apply allow/deny, then follow a redirect chain. `server` is a local
    !> capability the caller invokes directly. A returned vat client is
    !> reported through the `out_*` fields; the caller stores them on its
-   !> capability. membrane.c++:413-428 and :445-459.
+   !> capability. A revoked policy is consulted the same way
+   !> (membrane.h lines 116-118). With no redirect the call fails and
+   !> `revoke_fail` is true. membrane.c++ lines 413-428 and 445-459.
    subroutine membrane_retarget(cap, interface_id, method_id, server, err, &
                                 out_kind, out_id, out_nops, out_ops, &
-                                out_reverse, out_mem)
+                                out_reverse, out_mem, revoke_fail)
       type(rpc_cap_t), intent(in) :: cap
       integer(int64), intent(in) :: interface_id
       integer, intent(in) :: method_id
@@ -965,6 +967,7 @@ contains
       integer, intent(out) :: out_ops(0:MAXOPS - 1)
       logical, intent(out) :: out_reverse
       class(rpc_membrane_policy_t), pointer, intent(out) :: out_mem
+      logical, intent(out) :: revoke_fail
       class(rpc_server_t), pointer :: srv
       class(rpc_membrane_policy_t), pointer :: cap_mem, cur_mem
       integer :: steps, cap_kind, cap_nops, cap_ops(0:MAXOPS - 1)
@@ -973,6 +976,7 @@ contains
       logical :: cap_reverse, cur_reverse
       server => null()
       err = CAPNP_OK
+      revoke_fail = .false.
       cur_kind = cap%kind
       cur_id = cap%id
       cur_nops = cap%nops
@@ -994,7 +998,15 @@ contains
             cur_reverse = .false.
             exit
          end if
-         if (cap_kind == RPC_CAP_NONE) exit
+         if (cap_kind == RPC_CAP_NONE) then
+            if (associated(cur_mem)) then
+               if (cur_mem%revoked) then
+                  err = RPC_ERR_EXCEPTION
+                  revoke_fail = .true.
+               end if
+            end if
+            exit
+         end if
          if (cap_kind == cur_kind) then
             if (cap_id == cur_id .and. cap_nops == cur_nops .and. &
                 (cap_reverse .eqv. cur_reverse)) then
@@ -1017,8 +1029,13 @@ contains
          cur_reverse = cap_reverse
          steps = steps + 1
          if (steps >= 8) then
-            if (associated(cur_mem)) &
+            if (associated(cur_mem)) then
                call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
+               if (err == CAPNP_OK .and. cur_mem%revoked) then
+                  err = RPC_ERR_EXCEPTION
+                  revoke_fail = .true.
+               end if
+            end if
             exit
          end if
       end do
@@ -1038,8 +1055,6 @@ contains
       integer, intent(out) :: err
       if (.not. associated(policy)) then
          err = CAPNP_ERR_ARG
-      else if (policy%revoked) then
-         err = RPC_ERR_EXCEPTION
       else if (reverse) then
          call policy%outbound_call(interface_id, method_id, err)
       else
@@ -1091,6 +1106,16 @@ contains
       redir_cap%membrane_reverse = cap_reverse
       if (redir_cap%kind /= RPC_CAP_NONE) then
          err = CAPNP_ERR_ARG
+         return
+      end if
+      if (self%policy%revoked) then
+         if (allocated(self%policy%revoke_reason)) then
+            ctx%exc_reason = self%policy%revoke_reason
+         else
+            ctx%exc_reason = 'membrane revoked'
+         end if
+         ctx%exc_type = EXCEPTION_TYPE_DISCONNECTED_E
+         err = RPC_ERR_EXCEPTION
          return
       end if
       call ctx_reserve(ctx, MAXCAPS)
@@ -1594,7 +1619,7 @@ contains
       type(capnp_ptr_t) :: ops
       integer :: i
       integer(int64) :: target_id, wire_id
-      logical :: broken
+      logical :: broken, revoke_fail
       character(len=:), allocatable :: breason
       type(rpc_cap_t) :: effective
       class(rpc_server_t), pointer :: redir_srv
@@ -1614,8 +1639,9 @@ contains
          logical :: rev
          class(rpc_membrane_policy_t), pointer :: mem
          mem => null()
+         revoke_fail = .false.
          call membrane_retarget(effective, interface_id, method_id, redir_srv, err, &
-                                k, id, nops, ops, rev, mem)
+                                k, id, nops, ops, rev, mem, revoke_fail)
          effective%kind = k
          effective%id = id
          effective%nops = nops
@@ -1624,9 +1650,8 @@ contains
          effective%membrane_reverse = rev
       end block
       if (err /= CAPNP_OK) then
-         if (associated(effective%membrane)) then
-            if (effective%membrane%revoked .and. &
-                allocated(effective%membrane%revoke_reason)) &
+         if (revoke_fail .and. associated(effective%membrane)) then
+            if (allocated(effective%membrane%revoke_reason)) &
                conn%abort_reason = effective%membrane%revoke_reason
          end if
          qid = -1_int64
