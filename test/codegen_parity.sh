@@ -57,7 +57,8 @@ join_path() {
 # C++ headers and capnp.pc under its own prefix, which neither `capnp` nor the
 # system `pkg-config` search by default. Some layouts use lib64.
 if [[ -z "${CAPNP_PREFIX:-}" ]]; then
-  CAPNP_PREFIX=$(cd "$(dirname "$(command -v capnp)")/.." && pwd)
+  capnp_bin=$(realpath "$(command -v capnp)")
+  CAPNP_PREFIX=$(cd "$(dirname "$capnp_bin")/.." && pwd)
 fi
 CAPNP_INC=()
 if [[ -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
@@ -90,9 +91,7 @@ fi
 CAPNP_PC=()
 
 dev_schemas() {
-  [[ -f "$CAPNP_PREFIX/include/capnp/compat/json.capnp" && \
-     -f "$CAPNP_PREFIX/include/capnp/c++.capnp" && \
-     -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]
+  bash "$ROOT/test/dev_schemas.sh"
 }
 
 # A distro may install the capnp binary without the standard schemas. An import

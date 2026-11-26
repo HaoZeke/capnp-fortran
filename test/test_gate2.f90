@@ -22,9 +22,7 @@ program test_gate2
       write (*, '(a)') 'test_gate2: capnp is not on PATH, every case skipped'
       stop
    end if
-   call execute_command_line('bin=$(command -v capnp) && ' &
-      // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
-      // 'test -f "$inc/capnp/compat/json.capnp"', exitstat=rc0, cmdstat=st0)
+   call execute_command_line('bash test/dev_schemas.sh', exitstat=rc0, cmdstat=st0)
    if (st0 /= 0 .or. rc0 /= 0) then
       write (*, '(a)') 'test_gate2: capnp standard schemas are not installed, every case skipped'
       stop
