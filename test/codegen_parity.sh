@@ -24,8 +24,17 @@ die() {
   exit 1
 }
 
-for tool in capnp "$FC" "$CXX" pkg-config python3; do
-  command -v "$tool" > /dev/null || die "$tool not found on PATH (Cap'n Proto 1.4.0 and a Fortran and C++ compiler are required)"
+# Exit 77 asks the Fortran runner to skip the case. That covers a missing
+# C++ toolchain and a capnp install without its standard schemas.
+skip_dev() {
+  echo "codegen parity: $*" >&2
+  exit 77
+}
+
+command -v "$FC" > /dev/null || die "$FC not found on PATH"
+command -v capnp > /dev/null || skip_dev "capnp is not on PATH"
+for tool in "$CXX" pkg-config python3; do
+  command -v "$tool" > /dev/null || skip_dev "$tool is not on PATH"
 done
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/codegen-parity.XXXXXX")
@@ -73,13 +82,38 @@ fi
 # prefix containing spaces in --cflags or --libs, so the two directories come
 # from variables, and only -l, -D and -pthread words are kept from the rest.
 CAPNP_PC=()
+
+dev_schemas() {
+  [[ -f "$CAPNP_PREFIX/include/capnp/compat/json.capnp" && \
+     -f "$CAPNP_PREFIX/include/capnp/c++.capnp" && \
+     -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]
+}
+
+# A distro may install the capnp binary without the standard schemas. An import
+# error is a skip only in that case. When the schemas are installed, the same
+# error stays a failure.
+capnp() {
+  local err rc
+  err=$(mktemp)
+  command capnp "$@" 2>"$err" && rc=0 || rc=$?
+  if [[ -s "$err" ]]; then
+    cat "$err" >&2
+  fi
+  if [[ $rc -ne 0 ]] && ! dev_schemas && grep -q -e 'Import failed' -e 'not found in the import path' "$err"; then
+    rm -f "$err"
+    skip_dev "standard schemas are not installed"
+  fi
+  rm -f "$err"
+  return "$rc"
+}
+
 capnp_cxx_flags() {
   local inc lib others word
   if ((${#CAPNP_PC[@]})); then
     return 0
   fi
   pkg-config "${PC_DEFS[@]}" --exists capnp \
-    || die "pkg-config cannot find capnp.pc; install the Cap'n Proto development files or set CAPNP_PREFIX"
+    || skip_dev "pkg-config cannot find capnp.pc; install the Cap'n Proto development files or set CAPNP_PREFIX"
   inc=$(pkg-config "${PC_DEFS[@]}" --variable=includedir capnp)
   lib=$(pkg-config "${PC_DEFS[@]}" --variable=libdir capnp)
   others=$(pkg-config "${PC_DEFS[@]}" --cflags-only-other --libs-only-l --libs-only-other capnp)
@@ -1154,6 +1188,9 @@ g18() {
   local d
   d=$(work)
   cd "$d"
+  if [[ ! -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
+    skip_dev "standard schemas are not installed"
+  fi
   python3 - "$ROOT/app/capnpc_emit.f90" "$CAPNP_PREFIX/include" "$ROOT" << 'EOF'
 import re
 import sys

@@ -138,9 +138,16 @@ contains
       call check(error, cond, name)
    end subroutine check_
 
-   function have_capnp() result(y)
+   function capnp_bin() result(y)
       logical :: y
       y = sh('command -v capnp >/dev/null 2>&1')
+   end function capnp_bin
+
+   function have_capnp() result(y)
+      logical :: y
+      y = sh('bin=$(command -v capnp) && test -n "$bin" && ' &
+         // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
+         // 'test -f "$inc/capnp/compat/json.capnp"')
    end function have_capnp
 
    !> One read of `capnp --version` for the whole module.
@@ -234,7 +241,7 @@ contains
       close (u)
       call check_(error, err == CAPNP_ERR_TRAVERSAL .or. err == CAPNP_ERR_FRAMING, &
                   'bomb: plain stream rejects')
-      if (.not. have_capnp()) return
+      if (.not. capnp_bin()) return
       call check_(error, sh(cap_setup()//' && printf "\360\377\377\377\377" | "$CAP" decode' &
          //' schema/common.capnp Vec3 >/dev/null 2>'//tmp//'/bomb.err; test $? -ne 0'), &
          'bomb: cli packed header exits')
@@ -244,7 +251,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: got(:), ref(:)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -288,7 +295,7 @@ contains
       integer :: err, idx
       integer(int64) :: c1, c2, rate, n
       real :: elapsed
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -381,7 +388,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -446,7 +453,7 @@ contains
       integer :: err, idx
       integer(int64) :: count
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -505,7 +512,7 @@ contains
       integer :: err, idx
       integer, allocatable :: got(:)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -561,7 +568,7 @@ contains
       integer(int64) :: v
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -646,7 +653,7 @@ contains
       integer(int64) :: seq, tail
       integer :: err, uidx, tidx, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -705,7 +712,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: n
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -1089,7 +1096,7 @@ contains
    subroutine run_eval_annotations(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/eval-annotations && '//cap_setup() &
@@ -1158,7 +1165,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: got(:), ref(:)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -1221,7 +1228,7 @@ contains
       integer, parameter :: ntext = 640000
       integer, parameter :: nbytes = 640000
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -1322,7 +1329,7 @@ contains
       integer :: err, idx, i
       character(len=*), parameter :: sch = &
          '@0x8c1e4a7b2d9056f3;'//achar(10)//'struct F { x @0 :Float32; }'//achar(10)
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -1502,7 +1509,7 @@ contains
    subroutine run_write_error(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('test -e /dev/full && test -w /dev/full')) then
@@ -1879,7 +1886,7 @@ contains
       integer :: err, idx, i, iidx
       integer(int64) :: aval
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -1946,7 +1953,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx, i
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2127,7 +2134,7 @@ contains
       character(len=:), allocatable :: src
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx, i
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -2208,7 +2215,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2296,7 +2303,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2402,7 +2409,7 @@ contains
       character(len=:), allocatable :: out
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2446,7 +2453,7 @@ contains
       character(len=:), allocatable :: js
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2486,7 +2493,7 @@ contains
    subroutine run_cli_json_stream(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2522,7 +2529,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=*), parameter :: nl = achar(10), nul = achar(0)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2563,7 +2570,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema, book, extra
       integer :: sample, garm, people, place, onefield, deepi, holdi, wrapi, bagi
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2731,7 +2738,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: sample, garm, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2793,7 +2800,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2828,7 +2835,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call load_codec(error, schema)
@@ -2935,7 +2942,7 @@ contains
       integer(int8) :: raw(0:31)
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
@@ -2964,7 +2971,7 @@ contains
       integer(int8) :: raw(0:31)
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
@@ -2999,7 +3006,7 @@ contains
          '0000000005000000000000000000030001000000000000000400000001000000' &
          //'00000000010000000000000000000000'
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3051,7 +3058,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=:), allocatable :: src, diag
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3213,7 +3220,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=:), allocatable :: src
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3279,7 +3286,7 @@ contains
       character(len=:), allocatable :: src
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. capnp_at_least_1_3()) then
@@ -3329,7 +3336,7 @@ contains
       character(len=:), allocatable :: src
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3477,7 +3484,7 @@ contains
    subroutine run_quiet_empty(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3523,7 +3530,7 @@ contains
    subroutine run_json_value(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3562,7 +3569,7 @@ contains
    subroutine run_void_list_json(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3587,7 +3594,7 @@ contains
    subroutine run_schema_lenient(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('test -x ./build/schema-request')) then
@@ -3629,7 +3636,7 @@ contains
    subroutine run_flat_tail(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3655,7 +3662,7 @@ contains
    subroutine run_null_root_wire(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3685,7 +3692,7 @@ contains
    !> A shallow copy of the child frees that array twice.
    subroutine run_json_value_object(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3713,7 +3720,7 @@ contains
    subroutine run_json_value_depth(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3744,7 +3751,7 @@ contains
    !> --quiet parses it. A plausible fragment still prints the recovered value.
    subroutine run_text_plausible(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3772,7 +3779,7 @@ contains
    !> canonical input that is not canonical exits 1 with an empty stdout.
    subroutine run_canonical_reject(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3799,7 +3806,7 @@ contains
    subroutine run_request_beside_exe(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('test -x ./build/schema-request')) then
@@ -3823,7 +3830,7 @@ contains
    !> A generic root expression matches capnp 1.4.0, with and without the helper.
    subroutine run_generic_root(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3897,7 +3904,7 @@ contains
    !> Options, values and positionals parse the way kj::MainBuilder does.
    subroutine run_cli_options(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -3959,7 +3966,7 @@ contains
    !> A capability pointer fails the way capnp 1.4.0 fails without a cap table.
    subroutine run_cap_pointers(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -4009,7 +4016,7 @@ contains
    !> Without --quiet, input that cannot be in the named format is rejected.
    subroutine run_plausible_sniff(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -4070,7 +4077,7 @@ contains
    !> A root that is not a struct pointer reads as the default struct.
    subroutine run_nonstruct_root(error)
       type(error_type), allocatable, intent(out) :: error
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if

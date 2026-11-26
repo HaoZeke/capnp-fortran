@@ -62,9 +62,16 @@ contains
       call check(error, cond, name)
    end subroutine check_
 
-   function have_capnp() result(y)
+   function capnp_bin() result(y)
       logical :: y
       y = sh('command -v capnp >/dev/null 2>&1')
+   end function capnp_bin
+
+   function have_capnp() result(y)
+      logical :: y
+      y = sh('bin=$(command -v capnp) && test -n "$bin" && ' &
+         // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
+         // 'test -f "$inc/capnp/compat/json.capnp"')
    end function have_capnp
 
    function sh(cmd) result(ok)
@@ -125,7 +132,7 @@ contains
       integer :: err, idx, i, n
       n = 135
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       src = '@0xb1a2c3d4e5f60718;'//achar(10)// &
@@ -169,7 +176,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx, i, n
       n = 70
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -234,7 +241,7 @@ contains
       integer :: err, idx, i, n
       n = 70
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       src = '@0x9c8b7a6f5e4d3c2b;'//achar(10)// &
@@ -291,7 +298,7 @@ contains
       integer :: i
       if (allocated(error)) return
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       src = '@0xd1e2f30415263748;'//achar(10)// &
@@ -322,7 +329,7 @@ contains
       character(len=8) :: buf
       integer :: i
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       src = '@0xe2f3041526374859;'//achar(10)// &

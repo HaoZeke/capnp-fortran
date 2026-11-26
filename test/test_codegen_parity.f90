@@ -1,7 +1,7 @@
 !> Schema compiler parity with Cap'n Proto C++ 1.4.0. Each case shells out
 !> to test/codegen_parity.sh, which fails on the base emitter.
 module test_codegen_parity
-   use testdrive, only: unittest_type, error_type, check
+   use testdrive, only: unittest_type, error_type, check, skip_test
    implicit none
 
    private
@@ -135,6 +135,10 @@ contains
       integer :: stat, cs
       call execute_command_line('bash test/codegen_parity.sh '//gap, &
          exitstat=stat, cmdstat=cs)
+      if (cs == 0 .and. stat == 77) then
+         call skip_test(error, 'Cap''n Proto development files are not installed')
+         return
+      end if
       call check(error, cs == 0 .and. stat == 0, gap)
    end subroutine run_gap
 

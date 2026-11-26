@@ -7,8 +7,11 @@ local development; the full tutorial lives in the README and Sphinx docs.
 
 - Fortran 2018 compiler (`gfortran` 12+ recommended)
 - [fpm](https://fpm.fortran-lang.org/) and/or [pixi](https://pixi.sh/)
-- Optional: [Cap'n Proto](https://capnproto.org/) `capnp` for schema compile
-  and interop tiers; C compiler for the cmocka/c-capnproto interop suite
+- [Cap'n Proto](https://capnproto.org/) `capnp` with its standard schemas
+  (`libcapnp-dev` on Debian and Ubuntu) for codec and codegen comparisons.
+  `g++`, `pkg-config`, and `python3` run the C++ parity cases. Without the
+  schemas, comparisons that import them are skipped. A C compiler is required for the
+  cmocka/c-capnproto interop suite.
 
 If Pixi is not installed, follow its
 [installation instructions](https://pixi.sh/latest/installation/) before

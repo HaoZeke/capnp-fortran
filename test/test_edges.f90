@@ -64,9 +64,16 @@ contains
       ok = cs == 0 .and. st == 0
    end function sh
 
-   function have_capnp() result(y)
+   function capnp_bin() result(y)
       logical :: y
       y = sh('command -v capnp >/dev/null 2>&1')
+   end function capnp_bin
+
+   function have_capnp() result(y)
+      logical :: y
+      y = sh('bin=$(command -v capnp) && test -n "$bin" && ' &
+         // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
+         // 'test -f "$inc/capnp/compat/json.capnp"')
    end function have_capnp
 
    subroutine spit(path, text, err)
@@ -98,7 +105,7 @@ contains
          'enum Color { red @0; blue @1; }'//achar(10)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -197,7 +204,7 @@ contains
          'struct Two { a @0 :Text; b @1 :Text; }'//achar(10)
       integer :: err
       character(len=:), allocatable :: cmd
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -232,7 +239,7 @@ contains
          '@0x8e7d6c5b4a392817;'//achar(10)// &
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -257,7 +264,7 @@ contains
          '@0x8e7d6c5b4a392817;'//achar(10)// &
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -351,7 +358,7 @@ contains
          '@0x8e7d6c5b4a392817;'//achar(10)// &
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -399,7 +406,7 @@ contains
    subroutine run_corrupt_input(error)
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: raw(:)
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -519,7 +526,7 @@ contains
          //'"li32":[1,2,3,4,5,6,7,8,9,10,11,12]}'
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -551,7 +558,7 @@ contains
          '@0xa1b2c3d4e5f60718;'//achar(10)// &
          'struct Pad { txt @0 :Text; }'//achar(10)
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -582,7 +589,7 @@ contains
       character(len=*), parameter :: sch = &
          '@0x8f0c3d2b1a947e66;'//achar(10)// &
          'struct IntList { xs @0 :List(Int32); }'//achar(10)
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -634,7 +641,7 @@ contains
       integer(int64), parameter :: nwords = 8388609_int64
       integer(int64) :: nbytes
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
