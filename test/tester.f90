@@ -29,6 +29,7 @@ program tester
    use test_regress, only: collect_regress, release_regress_tmp
    use test_edges, only: collect_edges, release_edges_tmp
    use test_limits, only: collect_limits, release_limits_tmp
+   use test_schema_validate, only: collect_schema_validate
    use cli_path, only: publish_cli_paths
    implicit none
    integer :: stat, is
@@ -40,7 +41,7 @@ program tester
    stat = 0
    ! Each name is allocated in the element that owns it. A constructor
    ! of new_testsuite() leaks those strings on this compiler.
-   allocate (testsuites(25))
+   allocate (testsuites(26))
    testsuites(1)%name = "wire"
    testsuites(1)%collect => collect_wire
    testsuites(2)%name = "addressbook"
@@ -91,6 +92,8 @@ program tester
    testsuites(24)%collect => collect_edges
    testsuites(25)%name = "limits"
    testsuites(25)%collect => collect_limits
+   testsuites(26)%name = "schema_validate"
+   testsuites(26)%collect => collect_schema_validate
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)
