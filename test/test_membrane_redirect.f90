@@ -161,6 +161,10 @@ contains
       integer(int64), intent(in) :: interface_id
       integer, intent(in) :: method_id
       integer, intent(out) :: err
+      associate (unused_self => self)
+      end associate
+      associate (unused_interface_id => interface_id)
+      end associate
       if (method_id == 2) then
          err = RPC_ERR_EXCEPTION
       else
@@ -190,6 +194,8 @@ contains
       integer(int64), intent(in) :: interface_id
       integer, intent(in) :: method_id
       integer, intent(out) :: err
+      associate (unused_interface_id => interface_id)
+      end associate
       if (method_id == 2) then
          self%reject_reason = 'nope denied'
          err = RPC_ERR_EXCEPTION
