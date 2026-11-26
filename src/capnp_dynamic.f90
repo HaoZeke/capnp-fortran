@@ -3205,7 +3205,11 @@ contains
       logical, intent(inout) :: saw(0:)
       integer, intent(out) :: err
       err = CAPNP_OK
-      if (n <= 0 .or. co < 0 .or. co >= n .or. saw(co)) then
+      if (n <= 0 .or. co < 0 .or. co >= n) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (saw(co)) then
          err = CAPNP_ERR_ARG
          return
       end if

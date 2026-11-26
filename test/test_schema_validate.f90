@@ -267,7 +267,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       type(capnp_ptr_t) :: node, field, items, item
       logical :: found
-      integer :: err, idx, which
+      integer :: err, idx, which, n
       call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
       idx = capnp_dyn_find(schema, 'Scalars', err)
       call check_(error, idx > 0, 'members: Scalars')
@@ -289,6 +289,23 @@ contains
       if (allocated(error)) return
       call capnp_set_u16(field, 0_int64, 0_int32, err)
       call expect_arg(error, schema, 'code-order')
+      call capnp_dyn_free(schema)
+
+      call load_fix(schema, 'test/fixtures/kitchen.cgr.bin', err)
+      idx = capnp_dyn_find(schema, 'Sink', err)
+      call check_(error, idx > 0, 'members: Sink span')
+      if (allocated(error)) return
+      node = schema%nodes(idx)
+      items = node_struct_fields(node, err)
+      call check_(error, err == CAPNP_OK, 'members: Sink fields')
+      if (allocated(error)) return
+      n = int(capnp_list_len(items))
+      call field_by_name(node, 'count', field, found, err)
+      call check_(error, found .and. n > 0, 'members: count span')
+      if (allocated(error)) return
+      call capnp_set_u16(field, 0_int64, int(n, int32), err)
+      call check_(error, err == CAPNP_OK, 'members: set codeOrder')
+      call expect_arg(error, schema, 'code-order-past')
       call capnp_dyn_free(schema)
 
       call load_fix(schema, 'test/fixtures/kitchen.cgr.bin', err)
@@ -362,7 +379,9 @@ contains
 
       call load_fix(schema, 'test/fixtures/box.cgr.bin', err)
       idx = capnp_dyn_find(schema, 'Box', err)
-      call check_(error, idx > 0 .and. node_is_generic(schema%nodes(idx)), 'kinds: Box generic')
+      call check_(error, idx > 0, 'kinds: Box generic')
+      if (allocated(error)) return
+      call check_(error, node_is_generic(schema%nodes(idx)), 'kinds: Box generic')
       if (allocated(error)) return
       call capnp_set_bool(schema%nodes(idx), 288_int64, .false., err)
       call expect_arg(error, schema, 'generic-flag')
@@ -390,8 +409,9 @@ contains
 
       call load_fix(schema, 'test/fixtures/dynamic.cgr.bin', err)
       idx = capnp_dyn_find(schema, 'Shape.circle', err)
-      call check_(error, idx > 0 .and. node_struct_is_group(schema%nodes(idx)), &
-                  'kinds: circle group')
+      call check_(error, idx > 0, 'kinds: circle group')
+      if (allocated(error)) return
+      call check_(error, node_struct_is_group(schema%nodes(idx)), 'kinds: circle group')
       if (allocated(error)) return
       call capnp_set_i64(schema%nodes(idx), 16_int64, 0_int64, err)
       call expect_arg(error, schema, 'group-scope')
