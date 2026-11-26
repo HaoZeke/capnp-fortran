@@ -36,7 +36,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(53))
+      allocate (testsuite(54))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -143,6 +143,8 @@ contains
       testsuite(52)%test => run_setcap_iface
       testsuite(53)%name = "dynamic-has"
       testsuite(53)%test => run_dyn_has
+      testsuite(54)%name = "dyn-text-default"
+      testsuite(54)%test => run_dyn_text_default
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3447,7 +3449,7 @@ contains
       call capnp_dyn_get_text(schema, nidx, root, 's', s, err)
       call check_(error, err == CAPNP_OK .and. .not. has .and. s == 'def', &
                   'has: null text default is absent')
-      call want(root, nidx, 's', CAPNP_HAS_NON_DEFAULT, .false., 'has: null text non-default')
+      call want(root, nidx, 's', CAPNP_HAS_NON_DEFAULT, .true., 'has: get stores text default')
       call capnp_dyn_set_text(schema, nidx, root, 's', 'def', err)
       call want(root, nidx, 's', CAPNP_HAS_NON_NULL, .true., 'has: set text non-null')
       call want(root, nidx, 's', CAPNP_HAS_NON_DEFAULT, .true., 'has: set text non-default')
@@ -3569,5 +3571,135 @@ contains
          call want(root, nidx, field, CAPNP_HAS_NON_DEFAULT, .true., 'has: '//field//' nan non-default')
       end subroutine check_float
    end subroutine run_dyn_has
+
+   !> Builder get of a null Text copies the schema default into the message,
+   !> so canonical bytes match Cap'n Proto. A reader get does not write.
+   !> Data uses the same rule.
+   subroutine run_dyn_text_default(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, built, reader, bmsg
+      type(capnp_ptr_t) :: root, rroot, broot, lst, bl, items, el, one
+      character(len=80), parameter :: lines(21) = [character(len=80) :: &
+         '@0xaaaaaaaaaaaaaaaa;', &
+         'enum Hue { red @0; green @1; blue @2; }', &
+         'struct Item { n @0 :Int32; }', &
+         'struct S {', &
+         '  n @0 :Int32 = 5;', &
+         '  b @1 :Bool = true;', &
+         '  t @2 :Text = "def";', &
+         '  e @3 :Hue = green;', &
+         '  union {', &
+         '    ua @4 :Int32;', &
+         '    ub @5 :Text;', &
+         '  }', &
+         '  lst @6 :List(Int32);', &
+         '  bl @7 :List(Bool);', &
+         '  items @8 :List(Item);', &
+         '  el @9 :List(Hue);', &
+         '  g :group {', &
+         '    x @10 :Int32 = 3;', &
+         '  }', &
+         '}', &
+         'struct Blob { d @0 :Data = 0x"ab"; }']
+      character(len=*), parameter :: cpp_s = &
+         '000000000200060000000000000008000400000000000000' // &
+         '15000000220000000000000000000000110000001c000000' // &
+         '150000001900000015000000170000001d00000013000000' // &
+         '64656600000000000a000000140000001e00000000000000' // &
+         '050000000000000008000000010000000700000000000000' // &
+         '08000000000000000200090000000000'
+      character(len=*), parameter :: cpp_d = &
+         '0000000000000100010000000a000000ab00000000000000'
+      character(len=:), allocatable :: text, got
+      integer(int8), allocatable :: canon(:), before(:), after(:), raw(:)
+      integer :: err, idx, bidx
+      logical :: ok
+
+      call load_inline_schema(error, 'dyntext', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      idx = capnp_dyn_find(schema, 'S', err)
+      bidx = capnp_dyn_find(schema, 'Blob', err)
+      call check_(error, err == CAPNP_OK .and. idx > 0 .and. bidx > 0, &
+                  'dyn-text-default: nodes')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, idx, msg, err)
+      call capnp_dyn_get_text(schema, idx, root, 't', text, err)
+      call check_(error, err == CAPNP_OK .and. text == 'def', 'dyn-text-default: get text')
+      call capnp_dyn_set_int(schema, idx, root, 'ua', 4_int64, err)
+      lst = capnp_dyn_init_list(schema, idx, root, 'lst', 3_int64, err)
+      call capnp_list_set_i32(lst, 0_int64, 10_int32, err)
+      call capnp_list_set_i32(lst, 1_int64, 20_int32, err)
+      call capnp_list_set_i32(lst, 2_int64, 30_int32, err)
+      bl = capnp_dyn_init_list(schema, idx, root, 'bl', 3_int64, err)
+      call capnp_list_set_bool(bl, 0_int64, .true., err)
+      call capnp_list_set_bool(bl, 1_int64, .false., err)
+      call capnp_list_set_bool(bl, 2_int64, .true., err)
+      items = capnp_dyn_init_list(schema, idx, root, 'items', 2_int64, err)
+      one = capnp_list_get_struct(items, 0, err)
+      call capnp_set_i32(one, 0_int64, 7_int32, err)
+      one = capnp_list_get_struct(items, 1, err)
+      call capnp_set_i32(one, 0_int64, 8_int32, err)
+      el = capnp_dyn_init_list(schema, idx, root, 'el', 2_int64, err)
+      call capnp_list_set_i16(el, 0_int64, 2_int16, err)
+      call capnp_list_set_i16(el, 1_int64, 9_int16, err)
+      call capnp_dyn_set_int(schema, idx, root, 'e', 9_int64, err)
+      call capnp_canonicalize(msg, canon, err)
+      got = ''
+      if (err == CAPNP_OK .and. allocated(canon)) got = hex_of(canon)
+      call check_(error, got == cpp_s, 'dyn-text-default: canonical bytes')
+
+      call capnp_message_init_builder(bmsg, err)
+      broot = capnp_dyn_new_root(schema, bidx, bmsg, err)
+      call capnp_dyn_get_data(schema, bidx, broot, 'd', raw, err)
+      call capnp_canonicalize(bmsg, canon, err)
+      got = ''
+      if (err == CAPNP_OK .and. allocated(canon)) got = hex_of(canon)
+      call check_(error, got == cpp_d, 'dyn-text-default: data canonical bytes')
+
+      call capnp_message_init_builder(built, err)
+      root = capnp_dyn_new_root(schema, idx, built, err)
+      call capnp_canonicalize(built, before, err)
+      call capnp_serialize_bytes(built, raw, err)
+      call capnp_deserialize_bytes(raw, reader, err)
+      rroot = capnp_root(reader, err)
+      call capnp_dyn_get_text(schema, idx, rroot, 't', text, err)
+      ok = err == CAPNP_OK .and. allocated(text)
+      if (ok) ok = text == 'def'
+      call capnp_canonicalize(reader, after, err)
+      if (ok) ok = err == CAPNP_OK .and. allocated(before) .and. allocated(after)
+      if (ok) ok = same_bytes(before, after)
+      call check_(error, ok, 'dyn-text-default: reader does not write')
+
+      call capnp_message_free(msg)
+      call capnp_message_free(built)
+      call capnp_message_free(reader)
+      call capnp_message_free(bmsg)
+      call capnp_dyn_free(schema)
+   contains
+      function hex_of(b) result(s)
+         integer(int8), intent(in) :: b(:)
+         character(len=:), allocatable :: s
+         character(len=16), parameter :: hexd = '0123456789abcdef'
+         integer :: i, v
+         allocate (character(len=2*size(b)) :: s)
+         do i = 1, size(b)
+            v = iand(int(b(i)), 255)
+            s(2*i - 1:2*i - 1) = hexd(v/16 + 1:v/16 + 1)
+            s(2*i:2*i) = hexd(mod(v, 16) + 1:mod(v, 16) + 1)
+         end do
+      end function hex_of
+
+      logical function same_bytes(a, b)
+         integer(int8), intent(in) :: a(:), b(:)
+         same_bytes = size(a) == size(b)
+         if (same_bytes .and. size(a) > 0) same_bytes = all(a == b)
+      end function same_bytes
+   end subroutine run_dyn_text_default
 
 end module test_dynamic
