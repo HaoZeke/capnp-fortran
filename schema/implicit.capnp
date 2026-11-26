@@ -20,6 +20,10 @@ struct Pick(T) {
   }
 }
 
+struct Plain {
+  bare @0 :Box(AnyPointer);
+}
+
 interface Factory {
   make @0 [T] (value :T) -> (ok :Bool, out :T);
   pair @1 [A, B] (left :A, right :B, blob :Data) -> (left :A, right :B, items :List(Row(A)));

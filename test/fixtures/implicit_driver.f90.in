@@ -94,8 +94,16 @@ contains
          err = CAPNP_ERR_ARG
          return
       end if
+      if (size(raw) /= 2) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
       lb = lbound(raw, 1)
-      if (size(raw) /= 2 .or. raw(lb) /= 9_int8 .or. raw(lb + 1) /= 8_int8) then
+      if (raw(lb) /= 9_int8) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (raw(lb + 1) /= 8_int8) then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -120,7 +128,19 @@ contains
       if (err /= CAPNP_OK) return
       call factory_boxy_params_note_get(params, note, err)
       if (err /= CAPNP_OK) return
-      if (note /= 'kept' .or. s /= 'boxed') then
+      if (.not. allocated(note)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (.not. allocated(s)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (note /= 'kept') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (s /= 'boxed') then
          err = CAPNP_ERR_ARG
          return
       end if
@@ -237,7 +257,8 @@ program implicit_roundtrip
    call factory_make_params_value_set_text(mparams, 'implicit text', err)
    if (err /= CAPNP_OK) error stop 'text set'
    q = factory_make_params_value_get(mparams, err)
-   if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) error stop 'untyped text pointer'
+   if (err /= CAPNP_OK) error stop 'untyped text pointer'
+   if (q%kind == CAPNP_PK_NULL) error stop 'untyped text pointer'
    call rpc_call_send(cli, m, err)
    if (err /= CAPNP_OK) error stop 'text send'
    call rpc_pump_once(srv, err)
@@ -246,7 +267,9 @@ program implicit_roundtrip
    if (err /= CAPNP_OK) error stop 'text wait'
    if (.not. factory_make_results_ok_get(mresults)) error stop 'text ok'
    call factory_make_results_out_get_text(mresults, s, err)
-   if (err /= CAPNP_OK .or. s /= 'implicit text') error stop 'text round trip'
+   if (err /= CAPNP_OK) error stop 'text round trip'
+   if (.not. allocated(s)) error stop 'text round trip'
+   if (s /= 'implicit text') error stop 'text round trip'
 
    call factory_make_request(cli, client, m, mparams, qid, err)
    if (err /= CAPNP_OK) error stop 'struct request'
@@ -268,8 +291,11 @@ program implicit_roundtrip
    if (err /= CAPNP_OK) error stop 'struct get'
    item%p = slot%p
    call item_name_get(item, s, err)
+   if (err /= CAPNP_OK) error stop 'struct round trip'
+   if (.not. allocated(s)) error stop 'struct round trip'
    n = item_n_get(item)
-   if (err /= CAPNP_OK .or. s /= 'bolt' .or. n /= 7_int32) error stop 'struct round trip'
+   if (s /= 'bolt') error stop 'struct round trip'
+   if (n /= 7_int32) error stop 'struct round trip'
 
    raw = [1_int8, 2_int8, 3_int8]
    blob = [9_int8, 8_int8]
@@ -278,16 +304,23 @@ program implicit_roundtrip
    call factory_pair_params_left_set_data(pparams, raw, err)
    if (err /= CAPNP_OK) error stop 'data set'
    call factory_pair_params_left_get_data(pparams, got, err)
-   if (err /= CAPNP_OK .or. .not. allocated(got)) error stop 'data get'
+   if (err /= CAPNP_OK) error stop 'data get'
+   if (.not. allocated(got)) error stop 'data get'
+   if (size(got) /= 3) error stop 'data bytes'
    lb = lbound(got, 1)
-   if (size(got) /= 3 .or. got(lb) /= 1_int8 .or. got(lb + 2) /= 3_int8) error stop 'data bytes'
+   if (got(lb) /= 1_int8) error stop 'data bytes'
+   if (got(lb + 2) /= 3_int8) error stop 'data bytes'
    call factory_pair_params_blob_set(pparams, blob, err)
    if (err /= CAPNP_OK) error stop 'blob set'
    call factory_pair_params_blob_get(pparams, got, err)
+   if (err /= CAPNP_OK) error stop 'blob accessor'
+   if (.not. allocated(got)) error stop 'blob accessor'
+   if (size(got) /= 2) error stop 'blob accessor'
    lb = lbound(got, 1)
-   if (err /= CAPNP_OK .or. size(got) /= 2 .or. got(lb) /= 9_int8) error stop 'blob accessor'
+   if (got(lb) /= 9_int8) error stop 'blob accessor'
    lst = factory_pair_params_right_init_list(pparams, 4_int64, CAPNP_SZ_BYTE, err)
-   if (err /= CAPNP_OK .or. capnp_list_len(lst%p) /= 4_int64) error stop 'list init'
+   if (err /= CAPNP_OK) error stop 'list init'
+   if (capnp_list_len(lst%p) /= 4_int64) error stop 'list init'
    call rpc_call_send(cli, m, err)
    if (err /= CAPNP_OK) error stop 'pair send'
    call rpc_pump_once(srv, err)
@@ -295,19 +328,26 @@ program implicit_roundtrip
    call factory_pair_wait(cli, qid, presults, err)
    if (err /= CAPNP_OK) error stop 'pair wait'
    call factory_pair_results_left_get_data(presults, got, err)
+   if (err /= CAPNP_OK) error stop 'data round trip'
+   if (.not. allocated(got)) error stop 'data round trip'
+   if (size(got) /= 3) error stop 'data round trip'
    lb = lbound(got, 1)
-   if (err /= CAPNP_OK .or. size(got) /= 3 .or. got(lb + 1) /= 2_int8) error stop 'data round trip'
+   if (got(lb + 1) /= 2_int8) error stop 'data round trip'
    lst = factory_pair_results_right_get_list(presults, err)
-   if (err /= CAPNP_OK .or. capnp_list_len(lst%p) /= 4_int64) error stop 'list round trip'
+   if (err /= CAPNP_OK) error stop 'list round trip'
+   if (capnp_list_len(lst%p) /= 4_int64) error stop 'list round trip'
    q = factory_pair_results_items_get(presults, err)
-   if (err /= CAPNP_OK .or. capnp_list_len(q) /= 2_int64) error stop 'List(T) accessor'
+   if (err /= CAPNP_OK) error stop 'List(T) accessor'
+   if (capnp_list_len(q) /= 2_int64) error stop 'List(T) accessor'
 
    call factory_boxy_request(cli, client, m, bparams, qid, err)
    if (err /= CAPNP_OK) error stop 'boxy request'
    call factory_boxy_params_note_set(bparams, 'kept', err)
    if (err /= CAPNP_OK) error stop 'note set'
    call factory_boxy_params_note_get(bparams, s, err)
-   if (err /= CAPNP_OK .or. s /= 'kept') error stop 'note accessor'
+   if (err /= CAPNP_OK) error stop 'note accessor'
+   if (.not. allocated(s)) error stop 'note accessor'
+   if (s /= 'kept') error stop 'note accessor'
    bx = factory_boxy_params_box_init(bparams, err)
    if (err /= CAPNP_OK) error stop 'box init'
    call box_any_value_set_text(bx, 'boxed', err)
@@ -319,7 +359,9 @@ program implicit_roundtrip
    call factory_boxy_wait(cli, qid, bresults, err)
    if (err /= CAPNP_OK) error stop 'boxy wait'
    call factory_boxy_results_out_get_text(bresults, s, err)
-   if (err /= CAPNP_OK .or. s /= 'boxed') error stop 'box round trip'
+   if (err /= CAPNP_OK) error stop 'box round trip'
+   if (.not. allocated(s)) error stop 'box round trip'
+   if (s /= 'boxed') error stop 'box round trip'
 
    call factory_talk_request(cli, client, m, tparams, qid, err)
    if (err /= CAPNP_OK) error stop 'talk request'
@@ -328,7 +370,9 @@ program implicit_roundtrip
    call factory_talk_params_peer_set_iface(tparams, cap, err)
    if (err /= CAPNP_OK) error stop 'iface set'
    cap = factory_talk_params_peer_get_iface(tparams, err)
-   if (err /= CAPNP_OK .or. cap%kind /= 1 .or. cap%id /= 7_int64) error stop 'iface get'
+   if (err /= CAPNP_OK) error stop 'iface get'
+   if (cap%kind /= 1) error stop 'iface get'
+   if (cap%id /= 7_int64) error stop 'iface get'
    q = capnp_ptr_t()
    call factory_talk_params_peer_set(tparams, q, err)
    if (err /= CAPNP_OK) error stop 'iface clear'
@@ -339,7 +383,8 @@ program implicit_roundtrip
    call factory_talk_wait(cli, qid, tresults, err)
    if (err /= CAPNP_OK) error stop 'talk wait'
    cap = factory_talk_results_peer_get_iface(tresults, err)
-   if (err /= CAPNP_OK .or. cap%kind /= 1) error stop 'iface round trip'
+   if (err /= CAPNP_OK) error stop 'iface round trip'
+   if (cap%kind /= 1) error stop 'iface round trip'
 
    call rpc_conn_close(cli)
    call rpc_conn_close(srv)
@@ -359,7 +404,8 @@ program implicit_roundtrip
    call capnp_set_text(hparams%p, 0, 'brand', err)
    if (err /= CAPNP_OK) error stop 'brand text'
    q = holder_put_params_value_get(hparams, err)
-   if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) error stop 'brand get'
+   if (err /= CAPNP_OK) error stop 'brand get'
+   if (q%kind == CAPNP_PK_NULL) error stop 'brand get'
    call holder_put_params_value_set(hparams, q, err)
    if (err /= CAPNP_OK) error stop 'brand set'
    call holder_put_params_extra_set_data(hparams, raw, err)
@@ -371,10 +417,14 @@ program implicit_roundtrip
    call holder_put_wait(cli, qid, hresults, err)
    if (err /= CAPNP_OK) error stop 'holder wait'
    q = holder_put_results_kept_get(hresults, err)
-   if (err /= CAPNP_OK .or. q%nelem /= 6_int64) error stop 'brand kept'
+   if (err /= CAPNP_OK) error stop 'brand kept'
+   if (q%nelem /= 6_int64) error stop 'brand kept'
    call holder_put_results_out_get_data(hresults, got, err)
+   if (err /= CAPNP_OK) error stop 'extra round trip'
+   if (.not. allocated(got)) error stop 'extra round trip'
+   if (size(got) /= 3) error stop 'extra round trip'
    lb = lbound(got, 1)
-   if (err /= CAPNP_OK .or. size(got) /= 3 .or. got(lb) /= 1_int8) error stop 'extra round trip'
+   if (got(lb) /= 1_int8) error stop 'extra round trip'
 
    call rpc_conn_close(cli)
    call rpc_conn_close(srv)

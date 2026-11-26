@@ -158,8 +158,8 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      !> Identifies the instantiation: the generic node and the node id of
-      !> every binding, so two nodes that share a name stay apart.
+      !> Identifies the instantiation: the generic node and each binding.
+      !> An implicit method parameter is not the same binding as AnyPointer.
       character(len=:), allocatable :: full
       !> 0-based binding list. Sized to the brand, so arity is not capped.
       type(capnp_ptr_t), allocatable :: bindings(:)
@@ -1177,6 +1177,7 @@ contains
          call emit_inst_procs(i, err)
          i = i + 1
       end do
+      if (err == CAPNP_OK) call prefer_implicit_inst_names()
       ! Annotation Data values are blobs. Record them while collection
       ! is open, before emit_blob_params writes the parameters.
       if (err == CAPNP_OK .and. .not. g_probe) &
@@ -4090,6 +4091,74 @@ contains
    !> A long name truncates deterministically, a second sighting of the
    !> same instantiation finds its entry, and a different instantiation
    !> that truncates to a taken name gets a counter.
+   !> Box(AnyPointer) and a method parameter Box(T) share the visible name
+   !> box_any. The method instantiation keeps that short name. Default blobs
+   !> collected under the earlier spelling move with the name.
+   subroutine prefer_implicit_inst_names()
+      integer :: i, j, best
+      do i = 1, g_ninsts
+         if (.not. inst_bindings_implicit(i)) cycle
+         best = 0
+         do j = 1, g_ninsts
+            if (j == i) cycle
+            if (g_insts(j)%gidx /= g_insts(i)%gidx) cycle
+            if (g_insts(j)%fresh .neqv. g_insts(i)%fresh) cycle
+            if (inst_bindings_implicit(j)) cycle
+            if (.not. allocated(g_insts(i)%plain)) cycle
+            if (.not. allocated(g_insts(j)%plain)) cycle
+            if (g_insts(i)%plain /= g_insts(j)%plain) cycle
+            if (.not. allocated(g_insts(j)%name)) cycle
+            if (.not. allocated(g_insts(i)%name)) cycle
+            if (len(g_insts(j)%name) >= len(g_insts(i)%name)) cycle
+            if (best == 0) then
+               best = j
+            else if (len(g_insts(j)%name) < len(g_insts(best)%name)) then
+               best = j
+            end if
+         end do
+         if (best /= 0) call swap_inst_name(i, best)
+      end do
+   end subroutine prefer_implicit_inst_names
+
+   function inst_bindings_implicit(k) result(yes)
+      integer, intent(in) :: k
+      logical :: yes
+      integer :: i
+      yes = .false.
+      if (.not. allocated(g_insts(k)%bindings)) return
+      do i = 0, g_insts(k)%nbind - 1
+         if (implicit_method_slot(g_insts(k)%bindings(i))) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function inst_bindings_implicit
+
+   subroutine swap_inst_name(i, j)
+      integer, intent(in) :: i, j
+      character(len=:), allocatable :: a, b, mark
+      a = g_insts(i)%name
+      b = g_insts(j)%name
+      g_insts(i)%name = b
+      g_insts(j)%name = a
+      mark = achar(1)//'INST'//achar(1)
+      call retitle_blobs(upcase(a)//'_', mark)
+      call retitle_blobs(upcase(b)//'_', upcase(a)//'_')
+      call retitle_blobs(mark, upcase(b)//'_')
+   end subroutine swap_inst_name
+
+   subroutine retitle_blobs(src, dst)
+      character(len=*), intent(in) :: src, dst
+      integer :: i, n
+      n = len(src)
+      do i = 1, g_nblobs
+         if (.not. allocated(g_blobs(i)%name)) cycle
+         if (len(g_blobs(i)%name) < n) cycle
+         if (g_blobs(i)%name(1:n) /= src) cycle
+         g_blobs(i)%name = dst//g_blobs(i)%name(n + 1:)
+      end do
+   end subroutine retitle_blobs
+
    subroutine register_inst(gidx, n, btypes, bctx, sid, o, ol, full, err, plain)
       integer, intent(in) :: gidx, n
       type(capnp_ptr_t), intent(in) :: btypes(0:)
@@ -4330,6 +4399,18 @@ contains
          part = 'text'
       case (TYPE_DATA)
          part = 'data'
+      case (TYPE_ANY_POINTER)
+         part = 'any'
+         ! An implicit method parameter and unconstrained AnyPointer both
+         ! spell "any". The key keeps them apart so each keeps its bindings.
+         if (implicit_method_slot(bt)) then
+            key = 'impl'//itoa(type_param_scope_id(bt))//'_'// &
+                  itoa(int(type_param_index(bt), int64))
+         else
+            key = part
+         end if
+         if (present(mpart)) mpart = part
+         return
       case (TYPE_LIST)
          et = type_list_element(bt, err)
          if (err /= CAPNP_OK) return

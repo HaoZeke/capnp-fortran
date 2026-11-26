@@ -149,6 +149,9 @@ need = [
     "factory_pair_results_items_get",
     "holder_put_params_extra_get_text_f",
     "box_value_get",
+    "box_any_value_get_text",
+    "plain_bare_get",
+    "type(box_any_2_t)",
     "pick_any_value_get_text",
     "factory_pick_request",
     "if (pick_any_which(h) /= 0) then",
@@ -170,6 +173,7 @@ bad = [
     "box_value_set_struct",
     "box_value_get_iface",
     "pick_value_get_text",
+    "box_any_2_value_get_text",
     "holder_put_params_extra_get_text(",
 ]
 present = [n for n in bad if n in text]
