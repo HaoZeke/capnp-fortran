@@ -62,7 +62,7 @@ contains
       call init_tmp()
       ! One assignment per case. An array constructor of these values
       ! leaves the case-name temporaries allocated on gfortran.
-      allocate (testsuite(66))
+      allocate (testsuite(67))
       testsuite(1) = new_unittest("comment-eof", run_comment_eof)
       testsuite(2) = new_unittest("segment-bomb", run_segment_bomb)
       testsuite(3) = new_unittest("binary-stdout", run_binary_stdout)
@@ -128,7 +128,8 @@ contains
       testsuite(63) = new_unittest("plausible-sniff", run_plausible_sniff)
       testsuite(64) = new_unittest("nonstruct-root", run_nonstruct_root)
       testsuite(65) = new_unittest("shorthand-group-list", run_shorthand_group_list)
-      testsuite(66) = new_unittest("unused-decl", run_unused_decl)
+      testsuite(66) = new_unittest("version-gate", run_version_gate)
+      testsuite(67) = new_unittest("unused-decl", run_unused_decl)
    end subroutine collect_regress
 
    subroutine check_(error, cond, name)
@@ -146,17 +147,59 @@ contains
 
 
    !> One read of `capnp --version` for the whole module.
+   !> A suffix on 1.3.0, such as -rc or -dev, is older than 1.3.0.
    function capnp_at_least_1_3() result(y)
       logical :: y
       logical, save :: ready = .false.
       logical, save :: ge = .false.
       if (.not. ready) then
          ready = .true.
-         ge = sh('ver=$(capnp --version | awk ''{print $NF}''); ' &
-            //'[ "$(printf ''%s\n%s\n'' "$ver" 1.3.0 | sort -V | head -n 1)" = 1.3.0 ]')
+         ge = sh(ge13_cmd('ver=$(capnp --version | awk ''{print $NF}''); '))
       end if
       y = ge
    end function capnp_at_least_1_3
+
+   !> True when ver is 1.3.0 or newer. A suffix on 1.3.0 is older.
+   function version_at_least_1_3(ver) result(y)
+      character(len=*), intent(in) :: ver
+      logical :: y
+      y = sh(ge13_cmd("ver='"//ver//"'; "))
+   end function version_at_least_1_3
+
+   function ge13_cmd(prefix) result(cmd)
+      character(len=*), intent(in) :: prefix
+      character(len=:), allocatable :: cmd
+      cmd = prefix//ge13_body()
+   end function ge13_cmd
+
+   function ge13_body() result(s)
+      character(len=:), allocatable :: s
+      s = 'core=${ver%%[-+]*}; suf=${ver#"$core"}; ' &
+         //'maj=${core%%.*}; rest=${core#*.}; min=${rest%%.*}; ' &
+         //'pat=${rest#*.}; pat=${pat%%.*}; ' &
+         //'case x$maj in x*[!0123456789]*|x) exit 1 ;; esac; ' &
+         //'case x$min in x*[!0123456789]*|x) exit 1 ;; esac; ' &
+         //'case x$pat in x*[!0123456789]*|x) exit 1 ;; esac; ' &
+         //'while case $maj in 0?*) ;; *) false ;; esac; do maj=${maj#0}; done; ' &
+         //'while case $min in 0?*) ;; *) false ;; esac; do min=${min#0}; done; ' &
+         //'while case $pat in 0?*) ;; *) false ;; esac; do pat=${pat#0}; done; ' &
+         //'if [ "$maj" -gt 1 ]; then exit 0; fi; ' &
+         //'if [ "$maj" -lt 1 ]; then exit 1; fi; ' &
+         //'if [ "$min" -gt 3 ]; then exit 0; fi; ' &
+         //'if [ "$min" -lt 3 ]; then exit 1; fi; ' &
+         //'if [ "$pat" -gt 0 ]; then exit 0; fi; ' &
+         //'if [ -n "$suf" ]; then exit 1; fi; exit 0'
+   end function ge13_body
+
+   subroutine run_version_gate(error)
+      type(error_type), allocatable, intent(out) :: error
+      call check_(error, .not. version_at_least_1_3('1.2.0'), '1.2.0')
+      call check_(error, .not. version_at_least_1_3('1.3.0-rc1'), '1.3.0-rc1')
+      call check_(error, version_at_least_1_3('1.3.0'), '1.3.0')
+      call check_(error, version_at_least_1_3('1.3.1'), '1.3.1')
+      call check_(error, version_at_least_1_3('1.4.0'), '1.4.0')
+      call check_(error, version_at_least_1_3('2.0.0-dev'), '2.0.0-dev')
+   end subroutine run_version_gate
 
    function sh(cmd) result(ok)
       character(len=*), intent(in) :: cmd

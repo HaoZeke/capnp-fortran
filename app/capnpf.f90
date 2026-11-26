@@ -871,7 +871,7 @@ contains
       case ('verbose')
          continue
       case ('version')
-         call write_fd_line(1, "Cap'n Proto (capnpf) version 0.3.1", err)
+         call write_fd_line(1, "Cap'n Proto (capnpf) version 0.4.0", err)
          rc = 0
          done = .true.
       case ('short')
