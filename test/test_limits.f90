@@ -7,7 +7,7 @@ module test_limits
    use capnp_dynamic
    use capnp_text
    use capnp_json
-   use cli_path, only: capnpf_setup
+   use cli_path, only: capnpf_setup, have_capnp, schema_skip
    implicit none
    private
    public :: collect_limits, release_limits_tmp
@@ -67,10 +67,6 @@ contains
       y = sh('command -v capnp >/dev/null 2>&1')
    end function capnp_bin
 
-   function have_capnp() result(y)
-      logical :: y
-      y = sh('bash test/dev_schemas.sh')
-   end function have_capnp
 
    function sh(cmd) result(ok)
       character(len=*), intent(in) :: cmd
@@ -130,7 +126,7 @@ contains
       integer :: err, idx, i, n
       n = 135
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       src = '@0xb1a2c3d4e5f60718;'//achar(10)// &
@@ -239,7 +235,7 @@ contains
       integer :: err, idx, i, n
       n = 70
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       src = '@0x9c8b7a6f5e4d3c2b;'//achar(10)// &
@@ -296,7 +292,7 @@ contains
       integer :: i
       if (allocated(error)) return
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       src = '@0xd1e2f30415263748;'//achar(10)// &
@@ -327,7 +323,7 @@ contains
       character(len=8) :: buf
       integer :: i
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       src = '@0xe2f3041526374859;'//achar(10)// &

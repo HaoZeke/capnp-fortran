@@ -7,7 +7,7 @@ module test_codecs
    use capnp_dynamic
    use capnp_text
    use capnp_json
-   use cli_path, only: capnpf_setup
+   use cli_path, only: capnpf_setup, have_capnp, schema_skip
    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_ptr, c_double, c_float, &
       c_null_char, c_loc, c_associated
    implicit none
@@ -212,7 +212,7 @@ contains
       character(len=:), allocatable :: src, text
       integer :: err, idx, uidx, beg, topos, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -466,7 +466,7 @@ contains
          '  where = (city = "Pune", zip = 411),'//achar(10)// &
          '  scores = [1, -1] )'//achar(10)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -511,7 +511,7 @@ contains
       character(len=:), allocatable :: text, js
       integer :: err, idx, uidx, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -583,7 +583,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -613,7 +613,7 @@ contains
       character(len=8) :: label
       integer :: idx, err, b
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -939,7 +939,7 @@ contains
       type(capnp_message_t), target :: decoded
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call compile_codec_schema(error, schema)
@@ -1378,7 +1378,7 @@ contains
       integer(int8), allocatable :: b_got(:), b_exp(:)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
 
@@ -1715,10 +1715,6 @@ contains
       y = sh('command -v capnp >/dev/null 2>&1')
    end function capnp_bin
 
-   function have_capnp() result(y)
-      logical :: y
-      y = sh('bash test/dev_schemas.sh')
-   end function have_capnp
 
    function sh(cmd) result(ok)
       character(len=*), intent(in) :: cmd

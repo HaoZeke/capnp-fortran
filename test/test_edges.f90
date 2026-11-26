@@ -6,7 +6,7 @@ module test_edges
    use, intrinsic :: iso_c_binding, only: c_int
    use capnp
    use capnp_dynamic
-   use cli_path, only: capnpf_setup
+   use cli_path, only: capnpf_setup, have_capnp, schema_skip
    implicit none
    private
    public :: collect_edges, release_edges_tmp
@@ -69,10 +69,6 @@ contains
       y = sh('command -v capnp >/dev/null 2>&1')
    end function capnp_bin
 
-   function have_capnp() result(y)
-      logical :: y
-      y = sh('bash test/dev_schemas.sh')
-   end function have_capnp
 
    subroutine spit(path, text, err)
       character(len=*), intent(in) :: path, text
@@ -103,7 +99,7 @@ contains
          'enum Color { red @0; blue @1; }'//achar(10)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -524,7 +520,7 @@ contains
          //'"li32":[1,2,3,4,5,6,7,8,9,10,11,12]}'
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then

@@ -25,15 +25,22 @@ die() {
 }
 
 # Exit 77 asks the Fortran runner to skip the case. A missing C++ compiler,
-# pkg-config, or python3 skips only when CI is unset. A capnp install without
-# its standard schemas still skips.
+# pkg-config, python3, capnp, or the dev schemas skips only when CI is unset.
 skip_dev() {
   echo "codegen parity: $*" >&2
   exit 77
 }
 
 command -v "$FC" > /dev/null || die "$FC not found on PATH"
-command -v capnp > /dev/null || skip_dev "capnp is not on PATH"
+if ! command -v capnp > /dev/null; then
+  if [[ -n "${CI:-}" ]]; then
+    die "capnp is not on PATH"
+  fi
+  skip_dev "capnp is not on PATH"
+fi
+if [[ -n "${CI:-}" ]] && ! bash "$ROOT/test/dev_schemas.sh"; then
+  die "standard schemas are not installed"
+fi
 for tool in "$CXX" pkg-config python3; do
   if ! command -v "$tool" > /dev/null; then
     if [[ -n "${CI:-}" ]]; then
@@ -95,8 +102,8 @@ dev_schemas() {
 }
 
 # A distro may install the capnp binary without the standard schemas. An import
-# error is a skip only in that case. When the schemas are installed, the same
-# error stays a failure.
+# error is a skip only in that case, and only when CI is unset. When the
+# schemas are installed, the same error stays a failure.
 capnp() {
   local err rc
   err=$(mktemp)
@@ -106,6 +113,9 @@ capnp() {
   fi
   if [[ $rc -ne 0 ]] && ! dev_schemas && grep -q -e 'Import failed' -e 'not found in the import path' "$err"; then
     rm -f "$err"
+    if [[ -n "${CI:-}" ]]; then
+      die "standard schemas are not installed"
+    fi
     skip_dev "standard schemas are not installed"
   fi
   rm -f "$err"
@@ -1194,6 +1204,9 @@ g18() {
   d=$(work)
   cd "$d"
   if [[ ! -f "$CAPNP_PREFIX/include/capnp/stream.capnp" ]]; then
+    if [[ -n "${CI:-}" ]]; then
+      die "standard schemas are not installed"
+    fi
     skip_dev "standard schemas are not installed"
   fi
   python3 - "$ROOT/app/capnpc_emit.f90" "$CAPNP_PREFIX/include" "$ROOT" << 'EOF'

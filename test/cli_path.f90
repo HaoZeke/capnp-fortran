@@ -4,9 +4,10 @@
 !> that built the test, including a release or sanitized build.
 module cli_path
    use iso_c_binding, only: c_char, c_int, c_ptr, c_size_t, c_null_char, c_associated
+   use testdrive, only: error_type, test_failed, skip_test
    implicit none
    private
-   public :: capnpf_setup, capnpc_setup, publish_cli_paths
+   public :: capnpf_setup, capnpc_setup, publish_cli_paths, have_capnp, schema_skip
 
    interface
       function c_setenv(name, value, overwrite) bind(c, name='setenv') result(rc)
@@ -171,5 +172,43 @@ contains
       logical :: yes
       inquire (file=path, exist=yes)
    end function is_file
+
+   !> True when capnp and the three dev schemas are installed.
+   !> CAPNP_FORTRAN_ROOT, when set, is the repo root. With it unset the
+   !> script is test/dev_schemas.sh in the working directory.
+   function have_capnp() result(y)
+      logical :: y
+      character(len=:), allocatable :: root, script
+      integer :: n, st, cs
+      call get_environment_variable('CAPNP_FORTRAN_ROOT', length=n)
+      if (n > 0) then
+         allocate (character(len=n) :: root)
+         call get_environment_variable('CAPNP_FORTRAN_ROOT', root)
+         root = trim(root)
+      else
+         root = ''
+      end if
+      if (len(root) > 0) then
+         script = root//'/test/dev_schemas.sh'
+      else
+         script = 'test/dev_schemas.sh'
+      end if
+      st = 0
+      cs = 0
+      call execute_command_line('bash '//shell_quote(script), exitstat=st, cmdstat=cs, &
+         wait=.true.)
+      y = cs == 0 .and. st == 0
+   end function have_capnp
+
+   subroutine schema_skip(error)
+      type(error_type), allocatable, intent(inout) :: error
+      integer :: n
+      call get_environment_variable('CI', length=n)
+      if (n > 0) then
+         call test_failed(error, 'capnp standard schemas are not available')
+      else
+         call skip_test(error, 'capnp standard schemas are not available')
+      end if
+   end subroutine schema_skip
 
 end module cli_path

@@ -8,7 +8,7 @@ module test_regress
    use capnp_text
    use capnp_json
    use capnp_codec, only: capnp_brand_env_t, capnp_codec_find_field
-   use cli_path, only: capnpf_setup, capnpc_setup
+   use cli_path, only: capnpf_setup, capnpc_setup, have_capnp, schema_skip
    implicit none
    private
    public :: collect_regress, release_regress_tmp
@@ -143,10 +143,6 @@ contains
       y = sh('command -v capnp >/dev/null 2>&1')
    end function capnp_bin
 
-   function have_capnp() result(y)
-      logical :: y
-      y = sh('bash test/dev_schemas.sh')
-   end function have_capnp
 
    !> One read of `capnp --version` for the whole module.
    function capnp_at_least_1_3() result(y)
@@ -386,7 +382,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -451,7 +447,7 @@ contains
       integer :: err, idx
       integer(int64) :: count
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -510,7 +506,7 @@ contains
       integer :: err, idx
       integer, allocatable :: got(:)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -566,7 +562,7 @@ contains
       integer(int64) :: v
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -651,7 +647,7 @@ contains
       integer(int64) :: seq, tail
       integer :: err, uidx, tidx, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -710,7 +706,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: n
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -1094,7 +1090,7 @@ contains
    subroutine run_eval_annotations(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/eval-annotations && '//cap_setup() &
@@ -1226,7 +1222,7 @@ contains
       integer, parameter :: ntext = 640000
       integer, parameter :: nbytes = 640000
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -1507,7 +1503,7 @@ contains
    subroutine run_write_error(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('test -e /dev/full && test -w /dev/full')) then
@@ -1884,7 +1880,7 @@ contains
       integer :: err, idx, i, iidx
       integer(int64) :: aval
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -1951,7 +1947,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx, i
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2213,7 +2209,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2301,7 +2297,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2407,7 +2403,7 @@ contains
       character(len=:), allocatable :: out
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2451,7 +2447,7 @@ contains
       character(len=:), allocatable :: js
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2491,7 +2487,7 @@ contains
    subroutine run_cli_json_stream(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2527,7 +2523,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=*), parameter :: nl = achar(10), nul = achar(0)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2568,7 +2564,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema, book, extra
       integer :: sample, garm, people, place, onefield, deepi, holdi, wrapi, bagi
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2736,7 +2732,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: sample, garm, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2798,7 +2794,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2833,7 +2829,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       call load_codec(error, schema)
@@ -2940,7 +2936,7 @@ contains
       integer(int8) :: raw(0:31)
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
@@ -2969,7 +2965,7 @@ contains
       integer(int8) :: raw(0:31)
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       raw = [0_int8, 0_int8, 0_int8, 0_int8, 3_int8, 0_int8, 0_int8, 0_int8, &
@@ -3004,7 +3000,7 @@ contains
          '0000000005000000000000000000030001000000000000000400000001000000' &
          //'00000000010000000000000000000000'
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3284,7 +3280,7 @@ contains
       character(len=:), allocatable :: src
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. capnp_at_least_1_3()) then
@@ -3334,7 +3330,7 @@ contains
       character(len=:), allocatable :: src
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3482,7 +3478,7 @@ contains
    subroutine run_quiet_empty(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3528,7 +3524,7 @@ contains
    subroutine run_json_value(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3567,7 +3563,7 @@ contains
    subroutine run_void_list_json(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3592,7 +3588,7 @@ contains
    subroutine run_schema_lenient(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('test -x ./build/schema-request')) then
@@ -3634,7 +3630,7 @@ contains
    subroutine run_flat_tail(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3660,7 +3656,7 @@ contains
    subroutine run_null_root_wire(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3718,7 +3714,7 @@ contains
    subroutine run_json_value_depth(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3804,7 +3800,7 @@ contains
    subroutine run_request_beside_exe(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp standard schemas are not available')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('test -x ./build/schema-request')) then
