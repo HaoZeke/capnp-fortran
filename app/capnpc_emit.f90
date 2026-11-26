@@ -2060,6 +2060,9 @@ contains
          ! Pass 1 serializes the value into a <CN>_DEFAULT blob; the accessor
          ! function lands in the procedures section (emit_const_proc).
          has = register_default_blob(cn, v)
+      case (TYPE_VOID)
+         ! A void field stores no bits. The named constant is that zero.
+         call w('   integer, parameter :: '//upcase(cn)//' = 0')
       case default
          call w('   ! const '//cn//': unsupported value kind '// &
                 itoa(int(value_which(v), int64)))

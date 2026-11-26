@@ -11,7 +11,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(8))
+      allocate (testsuite(9))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -28,6 +28,8 @@ contains
       testsuite(7)%test => run_longann
       testsuite(8)%name = "codegen-wire-count"
       testsuite(8)%test => run_wire_count
+      testsuite(9)%name = "codegen-void-const"
+      testsuite(9)%test => run_voidconst
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -215,6 +217,12 @@ contains
       moddir = trim(line)
       ok = len(moddir) > 0
    end subroutine newest_module_dir
+
+   !> A Void constant is a named integer parameter equal to 0.
+   subroutine run_voidconst(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_mode(error, 'voidconst', 'codegen: void constant is a named integer')
+   end subroutine run_voidconst
 
    !> A 4096-node zero-sized table loads as in C++ 1.4.0, charged against
    !> the plugin's 2**30-word budget. Zero-sized requested files reach

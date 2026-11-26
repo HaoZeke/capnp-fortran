@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
-#   multifile | suffix | annot | longann | fresh
+#   multifile | suffix | annot | longann | fresh | voidconst
 # The plugin and the module directory come from the environment, set by
 # the unit test to the binary it is running. Searching the build tree
 # would accept a stale profile.
@@ -95,8 +95,25 @@ fresh)
   "$bin" "$root/test/fixtures/adder.cgr.bin"
   diff -q "$out/schema/adder_capnp.f90" "$root/test/generated/adder_capnp.f90"
   ;;
+voidconst)
+  (cd "$root" && capnp compile -o- schema/voidconst.capnp) > "$out/v.cgr"
+  "$bin" "$out/v.cgr"
+  diff -u "$root/test/generated/voidconst_capnp.f90" "$out/schema/voidconst_capnp.f90"
+  cat > "$out/drv.f90" << 'EOF'
+program drv
+   use voidconst_capnp, only: nothing
+   implicit none
+   integer, parameter :: seen = nothing
+   integer :: x
+   x = seen
+   if (x /= 0) stop 1
+end program
+EOF
+  gfortran -std=f2018 -fsyntax-only -I"$moddir" -J"$out" \
+    "$out/schema/voidconst_capnp.f90" "$out/drv.f90"
+  ;;
 *)
-  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh" >&2
+  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst" >&2
   exit 2
   ;;
 esac
