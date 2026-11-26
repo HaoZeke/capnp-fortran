@@ -1517,7 +1517,12 @@ contains
    end subroutine run_codec_tmp
 
    !> Without the capnp tool (emulated big-endian CI) the checked-in
-   !> fixture stands in. With it, the fixture must match a fresh compile.
+   !> fixture stands in. With it, a fresh compile must decode to the same
+   !> schema. capnp 1.4.0 stores declaration spans on each node and
+   !> requestedFiles.fileSourceInfo, so schema/codec.capnp compiles to
+   !> 32160 bytes; capnp 1.0.1 has no such fields and writes 26208 bytes.
+   !> capnpVersion names the compiler. Drop that field and compare the
+   !> decoded requests.
    subroutine compile_codec_schema(error, schema)
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_dyn_schema_t), intent(inout), target :: schema
@@ -1532,17 +1537,30 @@ contains
          call check_(error, err == CAPNP_OK, 'load '//fixture)
          return
       end if
-      if (.not. sh('mkdir -p '//tmp// &
-         ' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
-         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
-         call test_failed(error, 'capnp compile codec schema')
+      if (.not. sh('mkdir -p '//tmp)) then
+         call test_failed(error, 'mkdir')
          return
       end if
-      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
       call read_hex_file(fixture, kept, err)
       call check_(error, err == CAPNP_OK, 'read '//fixture)
       if (allocated(error)) return
-      call check_bytes(error, bytes, kept, fixture//' matches schema/codec.capnp')
+      call capnp_write_file(tmp//'/codec.fixture.cgr', kept, err)
+      call check_(error, err == CAPNP_OK, 'write '//fixture)
+      if (allocated(error)) return
+      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr' &
+         //' && capnp decode "$INC/capnp/schema.capnp" CodeGeneratorRequest < ' &
+         //tmp//'/codec.cgr > '//tmp//'/codec.cgr.txt' &
+         //' && capnp decode "$INC/capnp/schema.capnp" CodeGeneratorRequest < ' &
+         //tmp//'/codec.fixture.cgr > '//tmp//'/codec.fix.txt' &
+         //' && sed "/^  capnpVersion = /d" '//tmp//'/codec.cgr.txt > '//tmp//'/codec.cgr.sem' &
+         //' && sed "/^  capnpVersion = /d" '//tmp//'/codec.fix.txt > '//tmp//'/codec.fix.sem' &
+         //' && cmp -s '//tmp//'/codec.cgr.sem '//tmp//'/codec.fix.sem')) then
+         call test_failed(error, fixture//' schema differs from capnp compile')
+         return
+      end if
+      call capnp_read_file(tmp//'/codec.cgr', bytes, err)
+      call check_(error, err == CAPNP_OK, 'read codec.cgr')
       if (allocated(error)) return
       call capnp_dyn_load(schema, bytes, err)
       call check_(error, err == CAPNP_OK, 'load codec.cgr')
