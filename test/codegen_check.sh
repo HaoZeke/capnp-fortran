@@ -120,14 +120,18 @@ EOF
 }
 
 load_runtime() {
+  local syms
   lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
   test -n "$lib"
+  # Finish nm before searching. A pipe into grep -q closes early, nm dies
+  # with SIGPIPE, and pipefail then reports a symbol that is present as absent.
+  syms=$(nm -g "$lib" 2>/dev/null || true)
   san=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
+  if grep -q ' __asan' <<< "$syms"; then
     san="-fsanitize=address,undefined"
   fi
   cov=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
+  if grep -q ' __gcov_init' <<< "$syms"; then
     cov=--coverage
   fi
 }
@@ -354,16 +358,7 @@ implicit-roundtrip)
   "$bin" "$out/i.cgr"
   gen=$(find "$out" -name 'implicit_capnp.f90' | head -1)
   test -n "$gen"
-  lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-  test -n "$lib"
-  san=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
-    san="-fsanitize=address,undefined"
-  fi
-  cov=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
-    cov=--coverage
-  fi
+  load_runtime
   mkdir -p "$out/rt"
   cp "$root/test/fixtures/implicit_driver.f90.in" "$out/rt/implicit_driver.f90"
   gfortran $san $cov -std=f2018 -ffree-line-length-none -J"$out/rt" -I"$out/rt" -I"$moddir" \
@@ -390,16 +385,7 @@ PY
   ;;
 box-default)
   need_capnp
-  lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-  test -n "$lib"
-  san=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
-    san="-fsanitize=address,undefined"
-  fi
-  cov=
-  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
-    cov=--coverage
-  fi
+  load_runtime
   cat > "$out/plain_first.capnp" << 'EOS'
 @0xb0a1d4e7c3f25801;
 
