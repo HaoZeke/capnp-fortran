@@ -2528,6 +2528,123 @@ contains
       call w('      if (err /= CAPNP_OK) return')
    end subroutine emit_disc
 
+   !> Zero every slot of group node np, nested groups and inner
+   !> discriminants included, as capnpc-c++.c++ init<Group> (1243-1259)
+   !> does over getSortedSlots (1068-1121). A slot inside a wider one
+   !> already listed is skipped.
+   subroutine emit_group_zero(np, err, depth)
+      type(capnp_ptr_t), intent(in) :: np
+      integer, intent(out) :: err
+      integer, intent(in) :: depth
+      integer(int64), allocatable :: sec(:), at(:), wid(:)
+      integer(int64) :: ts, ta, tw, ps, pa, pw
+      integer :: n, i, j
+      allocate (sec(16), at(16), wid(16))
+      n = 0
+      call collect_group_slots(np, sec, at, wid, n, err, depth)
+      if (err /= CAPNP_OK) return
+      do i = 2, n
+         ts = sec(i); ta = at(i); tw = wid(i)
+         j = i - 1
+         do while (j >= 1)
+            if (sec(j) < ts) exit
+            if (sec(j) == ts .and. at(j) < ta) exit
+            if (sec(j) == ts .and. at(j) == ta .and. wid(j) >= tw) exit
+            sec(j + 1) = sec(j); at(j + 1) = at(j); wid(j + 1) = wid(j)
+            j = j - 1
+         end do
+         sec(j + 1) = ts; at(j + 1) = ta; wid(j + 1) = tw
+      end do
+      ps = -1_int64; pa = 0_int64; pw = 0_int64
+      do i = 1, n
+         if (wid(i) == 0_int64) cycle
+         if (sec(i) == ps .and. at(i) >= pa .and. at(i) + wid(i) <= pa + pw) cycle
+         ps = sec(i); pa = at(i); pw = wid(i)
+         if (sec(i) == 1_int64) then
+            call w('      call capnp_setp(h%p, '//itoa(at(i))//', capnp_ptr_t(), err)')
+         else
+            select case (wid(i))
+            case (1_int64)
+               call w('      call capnp_set_bool(h%p, '//itoa(at(i))//'_int64, .false., err)')
+            case (8_int64)
+               call w('      call capnp_set_u8(h%p, '//itoa(at(i)/8_int64)//'_int64, 0_int16, err)')
+            case (16_int64)
+               call w('      call capnp_set_u16(h%p, '//itoa(at(i)/8_int64)//'_int64, 0_int32, err)')
+            case (32_int64)
+               call w('      call capnp_set_u32(h%p, '//itoa(at(i)/8_int64)//'_int64, 0_int64, err)')
+            case default
+               call w('      call capnp_set_i64(h%p, '//itoa(at(i)/8_int64)//'_int64, 0_int64, err)')
+            end select
+         end if
+         call w('      if (err /= CAPNP_OK) return')
+      end do
+   end subroutine emit_group_zero
+
+   !> Slots of struct or group node np as (section, start, width): section
+   !> 0 is data with bit start and width, section 1 is a pointer index of
+   !> width 1. Void fields have width 0.
+   recursive subroutine collect_group_slots(np, sec, at, wid, n, err, depth)
+      type(capnp_ptr_t), intent(in) :: np
+      integer(int64), allocatable, intent(inout) :: sec(:), at(:), wid(:)
+      integer, intent(inout) :: n
+      integer, intent(out) :: err
+      integer, intent(in) :: depth
+      type(capnp_ptr_t) :: fl, f, t
+      integer(int64) :: i, bits
+      integer :: gidx
+      err = CAPNP_OK
+      if (depth > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      if (node_struct_discriminant_count(np) > 0) &
+         call add_slot(0_int64, node_struct_discriminant_offset(np)*16_int64, 16_int64)
+      fl = node_struct_fields(np, err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         if (field_which(f) == FIELD_GROUP) then
+            gidx = find_node(field_group_type_id(f))
+            if (gidx == 0) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            call collect_group_slots(g_nodes(gidx)%p, sec, at, wid, n, err, depth + 1)
+            if (err /= CAPNP_OK) return
+            cycle
+         end if
+         t = field_slot_type(f, err)
+         if (err /= CAPNP_OK) return
+         select case (type_which(t))
+         case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+            call add_slot(1_int64, field_slot_offset(f), 1_int64)
+         case default
+            select case (type_which(t))
+            case (TYPE_VOID); bits = 0_int64
+            case (TYPE_BOOL); bits = 1_int64
+            case (TYPE_INT8, TYPE_UINT8); bits = 8_int64
+            case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); bits = 16_int64
+            case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); bits = 32_int64
+            case default; bits = 64_int64
+            end select
+            call add_slot(0_int64, field_slot_offset(f)*bits, bits)
+         end select
+      end do
+   contains
+      subroutine add_slot(s, a, wd)
+         integer(int64), intent(in) :: s, a, wd
+         integer(int64), allocatable :: tmp(:)
+         if (n == size(sec)) then
+            allocate (tmp(2*n)); tmp(1:n) = sec; call move_alloc(tmp, sec)
+            allocate (tmp(2*n)); tmp(1:n) = at; call move_alloc(tmp, at)
+            allocate (tmp(2*n)); tmp(1:n) = wid; call move_alloc(tmp, wid)
+         end if
+         n = n + 1
+         sec(n) = s; at(n) = a; wid(n) = wd
+      end subroutine add_slot
+   end subroutine collect_group_slots
+
    !> Emit accessors for every field of node np. Accessors take handle type
    !> ht_t; generated names start with pfx (differs from ht for groups).
    recursive subroutine emit_fields_of(np, ht, pfx, err, depth)
@@ -2605,6 +2722,8 @@ contains
             call w('      type('//ht//'_t), intent(in) :: h')
             call w('      integer, intent(out) :: err')
             call emit_disc(gset)
+            call emit_group_zero(g_nodes(gidx)%p, err, d + 1)
+            if (err /= CAPNP_OK) return
             call w('   end subroutine '//an//'_select')
             call w('')
          end if
@@ -2824,7 +2943,7 @@ contains
       call w('')
       call w('   subroutine '//an//'_set(h, c, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      type('//tn//'_t), intent(in) :: c')
+      call w('      class('//tn//'_t), intent(in) :: c')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: q')
       call emit_disc(gset)
@@ -4212,8 +4331,14 @@ contains
          call emit_annotations_decl(al, ident_fit(upcase(tn)//'_'//upcase(mn)), err)
          if (err /= CAPNP_OK) return
       end do
-      call w('   type :: '//tn//'_client_t')
-      call w('      type(rpc_cap_t) :: cap')
+      ! A subtype client is accepted wherever its first superclass's client
+      ! is, as capnpc-c++.c++ derives each Client from its superclasses.
+      if (len(parent) > 0) then
+         call w('   type, extends('//parent//'_client_t) :: '//tn//'_client_t')
+      else
+         call w('   type :: '//tn//'_client_t')
+         call w('      type(rpc_cap_t) :: cap')
+      end if
       call w('   end type '//tn//'_client_t')
       if (len(parent) > 0) then
          call w('   type, extends('//parent//'_server_t), abstract :: '//tn//'_server_t')

@@ -442,6 +442,8 @@ contains
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 8_int64, 0_int32, err)
       if (err /= CAPNP_OK) return
+      call capnp_set_i64(h%p, 0_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
    end subroutine shape_circle_select
 
    function shape_circle_radius_get(h) result(v)
@@ -461,6 +463,8 @@ contains
       type(shape_t), intent(in) :: h
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 8_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_i64(h%p, 0_int64, 0_int64, err)
       if (err /= CAPNP_OK) return
    end subroutine shape_square_select
 
@@ -749,6 +753,26 @@ contains
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
       if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 0_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 8_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 12_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 16_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 20_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 24_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 28_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 32_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 36_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 40_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
    end subroutine deep_groups_g1_select
 
    function deep_groups_g1_v1_get(h) result(v)
@@ -928,6 +952,12 @@ contains
       type(nested_union_t), intent(in) :: h
       integer, intent(out) :: err
       call capnp_set_u16(h%p, 4_int64, 1_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u32(h%p, 0_int64, 0_int64, err)
+      if (err /= CAPNP_OK) return
+      call capnp_set_u16(h%p, 6_int64, 0_int32, err)
+      if (err /= CAPNP_OK) return
+      call capnp_setp(h%p, 0, capnp_ptr_t(), err)
       if (err /= CAPNP_OK) return
    end subroutine nested_union_g_select
 

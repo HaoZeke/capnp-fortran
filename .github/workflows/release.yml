@@ -121,8 +121,7 @@ jobs:
           pixi run -e interop meson compile -C build-interop
       - name: golden master vs c-capnproto
         run: |
-          pixi run -e interop meson test -C build-interop rpc_interop_cpp -v
-          pixi run -e interop meson test -C build-interop golden_master -v
+          pixi run -e interop meson test -C build-interop -v
 
   packaging:
     needs: gate

@@ -12,7 +12,8 @@ module test_dynamic
                                 type_list_element, type_type_id, type_anyptr_which, &
                                 type_param_scope_id, ANYPTR_PARAMETER, &
                                 value_which, value_text, node_id, &
-                                node_struct_discriminant_offset
+                                node_struct_discriminant_offset, node_struct_data_words, &
+                                node_struct_pointer_count
    use kitchen_capnp, only: sink_t, sink_new_root, SCHEMA__KITCHEN_CAPNP_NOTE_ANNOTATION_ID
    use addressbook_capnp, only: person_t, person_employment_which, &
                                 person_employment_employer_set, &
@@ -34,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(45))
+      allocate (testsuite(51))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -125,6 +126,18 @@ contains
       testsuite(44)%test => run_init_list_handle
       testsuite(45)%name = "dynamic-init-short"
       testsuite(45)%test => run_init_short
+      testsuite(46)%name = "dynamic-set-group"
+      testsuite(46)%test => run_set_group
+      testsuite(47)%name = "dynamic-capability-subtype"
+      testsuite(47)%test => run_capability_subtype
+      testsuite(48)%name = "dynamic-set-version-skew"
+      testsuite(48)%test => run_set_version_skew
+      testsuite(49)%name = "dynamic-iface-visit-limit"
+      testsuite(49)%test => run_iface_visit_limit
+      testsuite(50)%name = "dynamic-set-same-message"
+      testsuite(50)%test => run_set_same_message
+      testsuite(51)%name = "dynamic-null-structlist"
+      testsuite(51)%test => run_null_structlist
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -1188,33 +1201,52 @@ contains
       type(error_type), allocatable, intent(inout) :: error
       type(capnp_dyn_schema_t), intent(inout) :: schema
       logical, intent(out) :: ok
+      character(len=80), parameter :: lines(5) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a11;', &
+         'struct Leaf { v @0 :UInt32; }', &
+         'struct Mid { leaf @0 :Leaf = (v = 7); }', &
+         'struct Outer { mid @0 :Mid = (); }', &
+         'struct Pick { union { a @0 :Leaf = (v = 1); b @1 :Leaf = (v = 2); } }']
+      call load_inline_schema(error, 'defaults', lines, schema, ok)
+   end subroutine load_defaults_schema
+
+   !> Write lines to build/dyn_inline/<stem>.capnp, compile it with the
+   !> capnp tool and load the result. Skips the test without the tool.
+   subroutine load_inline_schema(error, stem, lines, schema, ok)
+      type(error_type), allocatable, intent(inout) :: error
+      character(len=*), intent(in) :: stem
+      character(len=*), intent(in) :: lines(:)
+      type(capnp_dyn_schema_t), intent(inout) :: schema
+      logical, intent(out) :: ok
       character(len=*), parameter :: dir = 'build/dyn_inline'
       integer(int8), allocatable :: bytes(:)
-      integer :: u, ios, stat, cs, err
+      integer :: u, ios, stat, cs, err, i
       ok = .false.
+      stat = 0
+      cs = 0
       call execute_command_line('mkdir -p '//dir, exitstat=stat, cmdstat=cs)
-      open (newunit=u, file=dir//'/defaults.capnp', status='replace', action='write', iostat=ios)
+      open (newunit=u, file=dir//'/'//stem//'.capnp', status='replace', action='write', iostat=ios)
       if (ios /= 0 .or. cs /= 0) then
          call skip_test(error, 'cannot write '//dir)
          return
       end if
-      write (u, '(a)') '@0xd1f0c3a5b7e90a11;'
-      write (u, '(a)') 'struct Leaf { v @0 :UInt32; }'
-      write (u, '(a)') 'struct Mid { leaf @0 :Leaf = (v = 7); }'
-      write (u, '(a)') 'struct Outer { mid @0 :Mid = (); }'
-      write (u, '(a)') 'struct Pick { union { a @0 :Leaf = (v = 1); b @1 :Leaf = (v = 2); } }'
+      do i = 1, size(lines)
+         write (u, '(a)') trim(lines(i))
+      end do
       close (u)
-      call execute_command_line('capnp compile -o- '//dir//'/defaults.capnp > '// &
-                                dir//'/defaults.cgr', exitstat=stat, cmdstat=cs)
+      stat = 0
+      cs = 0
+      call execute_command_line('capnp compile -o- '//dir//'/'//stem//'.capnp > '// &
+                                dir//'/'//stem//'.cgr', exitstat=stat, cmdstat=cs)
       if (cs /= 0 .or. stat /= 0) then
          call skip_test(error, 'capnp compile is not available')
          return
       end if
-      call capnp_read_file(dir//'/defaults.cgr', bytes, err)
+      call capnp_read_file(dir//'/'//stem//'.cgr', bytes, err)
       if (err /= CAPNP_OK) return
       call capnp_dyn_load(schema, bytes, err)
       ok = err == CAPNP_OK
-   end subroutine load_defaults_schema
+   end subroutine load_inline_schema
 
    !> A defaulted pointer inside a frozen default view reads its own
    !> default, as a reader does.
@@ -2861,5 +2893,436 @@ contains
       call capnp_dyn_free(kit)
       call capnp_dyn_free(dyn)
    end subroutine run_init_short
+
+   !> dynamic.c++ Builder::set on a group (651-666) clears the group, then
+   !> copies the active arm and the members that have a value. Expected
+   !> words come from Cap'n Proto C++ 1.4.0 on the same schema.
+   subroutine run_set_group(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: sm, msg, rm
+      type(capnp_ptr_t) :: src, dst, view, q, sq, rdst
+      integer(int8), allocatable :: bytes(:), before(:)
+      character(len=:), allocatable :: s
+      integer :: err, rc, sidx, square_idx, idx, gidx
+
+      call capnp_read_file('test/fixtures/dynamic.cgr.bin', bytes, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, bytes, err)
+      sidx = capnp_dyn_find(schema, 'Shape', err)
+      square_idx = capnp_dyn_find(schema, 'Shape.square', err)
+      idx = capnp_dyn_find(schema, 'NestedUnion', err)
+      gidx = capnp_dyn_find(schema, 'NestedUnion.g', err)
+      call capnp_message_init_builder(sm, err)
+      call capnp_message_init_builder(msg, err)
+
+      src = fresh(sm, sidx)
+      sq = capnp_dyn_init_struct(schema, sidx, src, 'square', err)
+      call capnp_dyn_set_f64(schema, square_idx, src, 'width', 4.0_real64, err)
+      dst = fresh(msg, sidx)
+      call capnp_dyn_setp(schema, sidx, dst, 'square', &
+                          capnp_dyn_getp(schema, sidx, src, 'square', err), err)
+      call check_(error, err == CAPNP_OK .and. capnp_which(dst, 4) == 1 .and. &
+                  capnp_get_f64(dst, 0_int64) == 4.0_real64, 'set-group: Shape.square copied')
+
+      src = capnp_dyn_new_root(schema, idx, sm, err)
+      sq = capnp_dyn_init_struct(schema, idx, src, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'hi', err)
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      view = capnp_dyn_getp(schema, idx, src, 'g', err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', view, err)
+      rc = err
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_which(dst, 3) == 1 .and. capnp_get_i32(dst, 0_int64) == 0 .and. &
+                  s == 'hi', 'set-group: inner arm and text copied')
+
+      ! Same message: the text is copied, so the two structs share nothing.
+      src = fresh(msg, idx)
+      sq = capnp_dyn_init_struct(schema, idx, src, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'own', err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      q = capnp_getp(dst, 0, err)
+      sq = capnp_getp(src, 0, err)
+      call capnp_dyn_set_text(schema, gidx, src, 'y', 'changed', err)
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. q%off /= sq%off .and. &
+                  s == 'own', 'set-group: same-message pointer is a copy')
+
+      ! The active arm is set even when null: Text reads as "" and is written.
+      src = fresh(msg, idx)
+      call capnp_set_u16(src, 4_int64, 1_int32, err)
+      call capnp_set_u16(src, 6_int64, 1_int32, err)
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      q = capnp_getp(dst, 0, err)
+      call check_(error, rc == CAPNP_OK .and. capnp_which(dst, 3) == 1 .and. &
+                  q%kind == CAPNP_PK_LIST .and. q%nelem == 1_int64, &
+                  'set-group: null active Text arm becomes empty Text')
+
+      ! A value that is not a struct selects the arm and stores nothing.
+      dst = fresh(msg, idx)
+      call capnp_dyn_set_int(schema, idx, dst, 'a', 5_int64, err)
+      call capnp_dyn_setp(schema, idx, dst, 'g', capnp_ptr_t(), err)
+      call check_(error, err == CAPNP_ERR_KIND .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_get_i32(dst, 0_int64) == 5, 'set-group: non-struct value rejected')
+
+      ! A struct of another type fails after the group is cleared.
+      dst = fresh(msg, idx)
+      sq = capnp_dyn_init_struct(schema, idx, dst, 'g', err)
+      call capnp_dyn_set_text(schema, gidx, dst, 'y', 'old', err)
+      call capnp_set_i32(dst, 0_int64, 9_int32, err)
+      src = fresh(msg, sidx)
+      call capnp_dyn_setp(schema, idx, dst, 'g', src, err)
+      rc = err
+      call capnp_get_text(dst, 0, s, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. capnp_which(dst, 2) == 1 .and. &
+                  capnp_which(dst, 3) == 0 .and. capnp_get_i32(dst, 0_int64) == 0 .and. &
+                  s == 'old', 'set-group: other struct type cleared and rejected')
+
+      ! A reader is not written.
+      call capnp_serialize_bytes(sm, before, err)
+      call capnp_deserialize_bytes(before, rm, err)
+      rdst = capnp_root(rm, err)
+      call capnp_dyn_setp(schema, idx, rdst, 'g', view, err)
+      call check_(error, err == CAPNP_ERR_KIND .and. same_bytes(rm, before), &
+                  'set-group: reader untouched')
+
+      call capnp_message_free(rm)
+      call capnp_message_free(sm)
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      !> A struct of node nidx that is not the root, so a later root
+      !> does not clear it.
+      function fresh(m, nidx) result(h)
+         type(capnp_message_t), intent(inout), target :: m
+         integer, intent(in) :: nidx
+         type(capnp_ptr_t) :: h
+         integer :: e
+         h = capnp_new_struct(m, node_struct_data_words(schema%nodes(nidx)), &
+                              node_struct_pointer_count(schema%nodes(nidx)), e)
+         h%schema_id = node_id(schema%nodes(nidx))
+      end function fresh
+   end subroutine run_set_group
+
+   !> dynamic.c++ Builder::set (636-644) takes a capability whose interface
+   !> extends the field's and rejects any other. A value without an
+   !> interface id is stored as before.
+   subroutine run_capability_subtype(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, v, q
+      character(len=80), parameter :: lines(6) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a12;', &
+         'interface Base { a @0 () -> (); }', &
+         'interface Side { s @0 () -> (); }', &
+         'interface Sub extends(Side, Base) { b @0 () -> (); }', &
+         'interface Other { c @0 () -> (); }', &
+         'struct Holder { base @0 :Base; }']
+      integer :: err, rc, hidx
+      logical :: ok
+      call load_inline_schema(error, 'ifaces', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      hidx = capnp_dyn_find(schema, 'Holder', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, hidx, msg, err)
+      v = capnp_ptr_t()
+      v%msg => msg
+      v%kind = CAPNP_PK_CAP
+      v%capidx = 3_int64
+
+      v%schema_id = iface_id('Sub')
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%kind == CAPNP_PK_CAP .and. q%capidx == 3_int64, &
+                  'capability: second superclass accepted')
+      v%schema_id = iface_id('Base')
+      v%capidx = 4_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 4_int64, 'capability: same interface accepted')
+      v%schema_id = iface_id('Other')
+      v%capidx = 5_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%capidx == 4_int64, &
+                  'capability: unrelated interface rejected')
+      v%schema_id = 0_int64
+      call capnp_dyn_setp(schema, hidx, root, 'base', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 5_int64, &
+                  'capability: value without an interface id stored')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      integer(int64) function iface_id(name)
+         character(len=*), intent(in) :: name
+         integer :: e
+         iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
+      end function iface_id
+   end subroutine run_capability_subtype
+
+   !> A struct, or a struct list, written by an older version of the schema
+   !> is read back through capnp_dyn_getp and stored at its own size, as
+   !> dynamic.c++ Builder::set (577-595) checks only the schema.
+   subroutine run_set_version_skew(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: smsg, dmsg
+      type(capnp_ptr_t) :: src, dst, old, q
+      character(len=80), parameter :: lines(4) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a13;', &
+         'struct Inner { a @0 :Int32; b @1 :Int64; t @2 :Text; }', &
+         'struct Twin { a @0 :Int32; b @1 :Int64; t @2 :Text; }', &
+         'struct Outer { inner @0 :Inner; list @1 :List(Inner); twin @2 :Twin; }']
+      integer :: err, rc, oidx
+      logical :: ok
+      call load_inline_schema(error, 'skew', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      oidx = capnp_dyn_find(schema, 'Outer', err)
+      call capnp_message_init_builder(smsg, err)
+      call capnp_message_init_builder(dmsg, err)
+      src = capnp_dyn_new_root(schema, oidx, smsg, err)
+      dst = capnp_dyn_new_root(schema, oidx, dmsg, err)
+      old = capnp_new_struct(smsg, 1, 0, err)
+      call capnp_set_i32(old, 0_int64, 5_int32, err)
+      call capnp_setp(src, 0, old, err)
+      old = capnp_new_composite_list(smsg, 2_int64, 1, 0, err)
+      call capnp_setp(src, 1, old, err)
+
+      q = capnp_dyn_getp(schema, oidx, src, 'inner', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'inner', q, rc)
+      q = capnp_getp(dst, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%dwords == 1 .and. q%pwords == 0 .and. &
+                  capnp_get_i32(q, 0_int64) == 5_int32, 'skew: older struct stored at its size')
+      if (allocated(error)) return
+      q = capnp_dyn_getp(schema, oidx, src, 'list', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'list', q, rc)
+      q = capnp_getp(dst, 1, err)
+      call check_(error, rc == CAPNP_OK .and. q%nelem == 2_int64 .and. q%dwords == 1, &
+                  'skew: older struct list stored')
+      if (allocated(error)) return
+      q = capnp_dyn_init_struct(schema, oidx, src, 'inner', err)
+      call capnp_dyn_setp(schema, oidx, dst, 'twin', q, rc)
+      q = capnp_getp(dst, 2, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'skew: struct of another type with the same layout rejected')
+      call capnp_message_free(smsg)
+      call capnp_message_free(dmsg)
+      call capnp_dyn_free(schema)
+   end subroutine run_set_version_skew
+
+   !> schema.c++ InterfaceSchema::extends accepts 64 visits and returns
+   !> false on the next one, before the identity check. I63 extends I00
+   !> is the 64th visit. I64 extends I00 is the 65th.
+   subroutine run_iface_visit_limit(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, v, q
+      character(len=80), allocatable :: lines(:)
+      integer :: err, rc, hidx, i
+      logical :: ok
+      allocate (lines(68))
+      lines(1) = '@0xd1f0c3a5b7e90a21;'
+      lines(2) = 'interface I00 {}'
+      do i = 1, 64
+         write (lines(i + 2), '(a,i2.2,a,i2.2,a)') &
+            'interface I', i, ' extends(I', i - 1, ') {}'
+      end do
+      lines(67) = 'interface Loop extends(Loop) {}'
+      lines(68) = 'struct Holder { far @0 :I00; near @1 :I01; other @2 :I00; }'
+      call load_inline_schema(error, 'visit', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      hidx = capnp_dyn_find(schema, 'Holder', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, hidx, msg, err)
+      v = capnp_ptr_t()
+      v%msg => msg
+      v%kind = CAPNP_PK_CAP
+      v%capidx = 7_int64
+
+      v%schema_id = iface_id('I64')
+      call capnp_dyn_setp(schema, hidx, root, 'far', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'extends: 65th visit returns false')
+      v%schema_id = iface_id('I63')
+      call capnp_dyn_setp(schema, hidx, root, 'far', v, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%kind == CAPNP_PK_CAP .and. q%capidx == 7_int64, &
+                  'extends: 64th visit still matches')
+      v%schema_id = iface_id('I64')
+      v%capidx = 8_int64
+      call capnp_dyn_setp(schema, hidx, root, 'near', v, rc)
+      q = capnp_getp(root, 1, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 8_int64, &
+                  'extends: 64th visit matches a nearer base')
+      v%schema_id = iface_id('Loop')
+      v%capidx = 9_int64
+      call capnp_dyn_setp(schema, hidx, root, 'other', v, rc)
+      q = capnp_getp(root, 2, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_NULL, &
+                  'extends: a cycle returns false')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      integer(int64) function iface_id(name)
+         character(len=*), intent(in) :: name
+         integer :: e
+         iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
+      end function iface_id
+   end subroutine run_iface_visit_limit
+
+   !> dynamic.c++ Builder::set copies a struct, text, data, or list that
+   !> already lives in the message. Replacing the source leaves the copy.
+   subroutine run_set_same_message(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, src, dst, q, got
+      character(len=:), allocatable :: s
+      character(len=80), parameter :: lines(10) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a22;', &
+         'struct Inner { name @0 :Text; }', &
+         'struct Box {', &
+         '  src @0 :Inner;', &
+         '  dst @1 :Inner;', &
+         '  label @2 :Text;', &
+         '  raw @3 :Data;', &
+         '  nums @4 :List(Int32);', &
+         '  any @5 :AnyPointer;', &
+         '}']
+      integer(int8) :: ab(0:1), zz, c0, c1
+      integer(int8), allocatable :: raw(:)
+      integer :: err, rc, bidx, iidx
+      integer(int32) :: n0
+      logical :: ok
+      ab = [int(iachar('a'), int8), int(iachar('b'), int8)]
+      zz = int(iachar('z'), int8)
+      call load_inline_schema(error, 'alias', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      bidx = capnp_dyn_find(schema, 'Box', err)
+      iidx = capnp_dyn_find(schema, 'Inner', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, bidx, msg, err)
+      src = capnp_dyn_init_struct(schema, bidx, root, 'src', err)
+      call capnp_dyn_set_text(schema, iidx, src, 'name', 'ab', err)
+      call capnp_dyn_setp(schema, bidx, root, 'dst', src, rc)
+      call capnp_dyn_set_text(schema, iidx, src, 'name', 'zz', err)
+      dst = capnp_dyn_getp(schema, bidx, root, 'dst', err)
+      call capnp_dyn_get_text(schema, iidx, dst, 'name', s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. s == 'ab', &
+                  'same-message: struct keeps ab')
+      call capnp_dyn_get_text(schema, iidx, src, 'name', s, err)
+      call check_(error, err == CAPNP_OK .and. s == 'zz', &
+                  'same-message: source replaced with zz')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'label', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      call capnp_dyn_get_text(schema, bidx, root, 'label', s, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. s == 'ab', &
+                  'same-message: text keeps ab')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 2_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'raw', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      call capnp_dyn_get_data(schema, bidx, root, 'raw', raw, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. size(raw) == 2 .and. &
+                  raw(0) == ab(0) .and. raw(1) == ab(1), 'same-message: data keeps ab')
+
+      q = capnp_new_list(msg, CAPNP_SZ_FOUR, 1_int64, err)
+      call capnp_list_set_i32(q, 0_int64, 7_int32, err)
+      call capnp_dyn_setp(schema, bidx, root, 'nums', q, rc)
+      call capnp_list_set_i32(q, 0_int64, 9_int32, err)
+      got = capnp_dyn_getp(schema, bidx, root, 'nums', err)
+      n0 = capnp_list_get_i32(got, 0_int64, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. n0 == 7_int32, &
+                  'same-message: list keeps its element')
+
+      q = capnp_new_list(msg, CAPNP_SZ_BYTE, 3_int64, err)
+      call capnp_list_set_i8(q, 0_int64, ab(0), err)
+      call capnp_list_set_i8(q, 1_int64, ab(1), err)
+      call capnp_dyn_setp(schema, bidx, root, 'any', q, rc)
+      call capnp_list_set_i8(q, 0_int64, zz, err)
+      call capnp_list_set_i8(q, 1_int64, zz, err)
+      got = capnp_dyn_getp(schema, bidx, root, 'any', err)
+      c0 = capnp_list_get_i8(got, 0_int64, err)
+      c1 = capnp_list_get_i8(got, 1_int64, err)
+      call check_(error, rc == CAPNP_OK .and. err == CAPNP_OK .and. c0 == ab(0) .and. &
+                  c1 == ab(1), 'same-message: anypointer text keeps ab')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   end subroutine run_set_same_message
+
+   !> Active null List(Struct) group copy against Cap'n Proto C++ 1.4.0.
+   !> items has no explicit default: the tag is 0 data words and 0 pointer
+   !> words. plain is `= []`: the tag carries Elem's 1 data word and 1
+   !> pointer. Golden files are messageToFlatArray from that C++ library.
+   subroutine run_null_structlist(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: sm, dm
+      type(capnp_ptr_t) :: src, dst
+      integer(int8), allocatable :: cgr(:), got(:), want(:)
+      integer :: err, widx
+      logical :: ok
+
+      call capnp_read_file('test/fixtures/null_structlist.cgr.bin', cgr, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, cgr, err)
+      widx = capnp_dyn_find(schema, 'Wrap', err)
+      call check_(error, err == CAPNP_OK .and. widx > 0, 'null-structlist: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+
+      call copy_arm(1, 'test/fixtures/null_structlist_items.bin', &
+                    'null-structlist: null default matches C++ 1.4.0')
+      call copy_arm(4, 'test/fixtures/null_structlist_plain.bin', &
+                    'null-structlist: empty default matches C++ 1.4.0')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine copy_arm(arm, path, title)
+         integer, intent(in) :: arm
+         character(len=*), intent(in) :: path, title
+         integer :: rc
+         call capnp_message_init_builder(sm, err)
+         call capnp_message_init_builder(dm, err)
+         src = capnp_dyn_new_root(schema, widx, sm, err)
+         call capnp_set_u16(src, 4_int64, 1_int32, err)
+         call capnp_set_u16(src, 6_int64, arm, err)
+         dst = capnp_dyn_new_root(schema, widx, dm, err)
+         call capnp_dyn_setp(schema, widx, dst, 'g', src, rc)
+         call capnp_serialize_bytes(dm, got, err)
+         call capnp_read_file(path, want, err)
+         ok = rc == CAPNP_OK .and. err == CAPNP_OK .and. allocated(got) .and. allocated(want)
+         if (ok) ok = size(got) == size(want)
+         if (ok) ok = all(got == want)
+         call check_(error, ok, title)
+         call capnp_message_free(sm)
+         call capnp_message_free(dm)
+      end subroutine copy_arm
+   end subroutine run_null_structlist
 
 end module test_dynamic

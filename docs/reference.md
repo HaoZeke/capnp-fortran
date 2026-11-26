@@ -426,13 +426,16 @@ surface per struct `Foo`: `foo_t` handle type, `FOO_DWORDS`/`FOO_PWORDS`,
 struct lists, `<union>_which` plus `<PFX>_<MEMBER>_TAG`
 constants, group `_select` setters, enum `<TYPE>_<MEMBER>` constants, and
 constants (scalar parameters; Data as byte arrays; struct/list consts as
-accessor functions over embedded blobs).
+accessor functions over embedded blobs). A group `_select` sets the
+discriminant and zeroes every slot of the group, nested groups included.
 
 Interfaces emit an `INTERFACE_ID` parameter, a `<iface>_client_t` handle,
 per-method `_begin`/`_wait` helpers over the vat, and an abstract
 `<iface>_server_t` whose generated dispatch routes method ordinals to
 deferred typed procedures. `-> stream` methods pair the generated
-`_begin` with `rpc_stream_send`/`rpc_stream_finish`.
+`_begin` with `rpc_stream_send`/`rpc_stream_finish`. The client handle of an
+interface that extends others extends the client handle of its first
+superclass, so the setter of a field of that superclass type takes it.
 
 Branded generic uses (`Box(Text)`) produce brand-resolved
 instantiations: a `box_text_t` handle plus the generic's accessors with

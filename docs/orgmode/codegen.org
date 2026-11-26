@@ -25,14 +25,14 @@ For a struct =Person= in file =addressbook.capnp= the generator emits (names are
 | =person_<field>_get_elem= / =_set_elem= | =List(Text)= / =List(Data)= helpers |
 | typed =_get_elem= for struct lists | element as =<type>_t= |
 
-Unions get =which= helpers and =<PFX>_<MEMBER>_TAG= constants. Groups expose =_select= setters. Enums become integer parameters. Constants become parameters or blob-backed accessors for pointer-valued consts.
+Unions get =which= helpers and =<PFX>_<MEMBER>_TAG= constants. Groups expose =_select= setters, which zero every slot of the group. Enums become integer parameters. Constants become parameters or blob-backed accessors for pointer-valued consts.
 
 * Interfaces
 
 An =interface Adder= yields:
 
 - =ADDER_INTERFACE_ID= (and method ordinals as needed)
-- =adder_client_t= with per-method =_begin= / wait helpers over the vat
+- =adder_client_t= with per-method =_begin= / wait helpers over the vat; the client of an interface that extends others extends its first superclass's client, so a setter of that superclass type takes it
 - abstract =adder_server_t= whose dispatch routes method ordinals to deferred typed procedures
 
 =-> stream= methods pair generated =_begin= with =rpc_stream_send= / =rpc_stream_finish=. Interface-typed *struct* fields emit capability-slot accessors for =rpc_make_cap_ptr= / =rpc_result_cap=.

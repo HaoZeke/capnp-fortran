@@ -1275,7 +1275,11 @@ contains
       call dyn_pointer_readable(p, int(field_slot_offset(f)), err)
       if (err /= CAPNP_OK) return
       q = capnp_getp(p, int(field_slot_offset(f)), err)
-      if (err /= CAPNP_OK .or. q%kind /= CAPNP_PK_NULL) return
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_NULL) then
+         call dyn_tag_value(t, q)
+         return
+      end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
       q = value_pointer(dv, err)
@@ -1295,10 +1299,7 @@ contains
       else
          call dyn_copy_default(p, int(field_slot_offset(f)), q, err)
       end if
-      if (err == CAPNP_OK .and. type_which(t) == TYPE_STRUCT .and. &
-          q%kind == CAPNP_PK_STRUCT) then
-         q%schema_id = type_type_id(t)
-      end if
+      if (err == CAPNP_OK) call dyn_tag_value(t, q)
       if (err == CAPNP_OK) then
          if (p%kind == CAPNP_PK_NULL .or. .not. associated(p%msg)) then
             q%frozen = .true.
@@ -1307,6 +1308,25 @@ contains
          end if
       end if
    end function capnp_dyn_getp
+
+   !> Stamp q with the struct id of field type t: a struct with its own id,
+   !> a struct list with its element id. capnp_dyn_setp then checks the
+   !> type by id, as dynamic.c++ Builder::set (577-595) checks the schema.
+   subroutine dyn_tag_value(t, q)
+      type(capnp_ptr_t), intent(in) :: t
+      type(capnp_ptr_t), intent(inout) :: q
+      type(capnp_ptr_t) :: elem
+      integer :: err
+      select case (type_which(t))
+      case (TYPE_STRUCT)
+         if (q%kind == CAPNP_PK_STRUCT) q%schema_id = type_type_id(t)
+      case (TYPE_LIST)
+         if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_COMPOSITE) return
+         elem = type_list_element(t, err)
+         if (err /= CAPNP_OK) return
+         if (type_which(elem) == TYPE_STRUCT) q%schema_id = type_type_id(elem)
+      end select
+   end subroutine dyn_tag_value
 
    !> Copy a schema default into a reader-owned arena once per field and
    !> freeze the handle. Later reads of the same field reuse that copy.
@@ -1812,7 +1832,7 @@ contains
    end subroutine capnp_dyn_set_data
 
    !> True when value is a struct of the field's schema. A non-zero schema
-   !> id must match the field, and the layout must match the node.
+   !> id must match the field. Without one, the layout must match the node.
    function dyn_struct_ok(schema, t, value) result(ok)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: t, value
@@ -1822,7 +1842,12 @@ contains
       ok = .false.
       if (value%kind /= CAPNP_PK_STRUCT) return
       sid = type_type_id(t)
-      if (value%schema_id /= 0_int64 .and. value%schema_id /= sid) return
+      if (value%schema_id /= 0_int64) then
+         ! setStruct copies a struct of any size, so one written by an
+         ! older or newer version of the schema is taken.
+         ok = value%schema_id == sid
+         return
+      end if
       nidx = dyn_node_by_id(schema, sid)
       if (nidx /= 0) then
          if (value%dwords /= node_struct_data_words(schema%nodes(nidx))) return
@@ -1831,7 +1856,8 @@ contains
       ok = .true.
    end function dyn_struct_ok
 
-   !> True when a list's element size matches the field's element type.
+   !> True when a list's element size matches the field's element type. A
+   !> struct list stamped with an element id must name the field's element.
    function dyn_list_ok(schema, elem, value) result(ok)
       type(capnp_dyn_schema_t), intent(in) :: schema
       type(capnp_ptr_t), intent(in) :: elem, value
@@ -1856,6 +1882,10 @@ contains
          ok = value%esize == CAPNP_SZ_PTR
       case (TYPE_STRUCT)
          if (value%esize /= CAPNP_SZ_COMPOSITE) return
+         if (value%schema_id /= 0_int64) then
+            ok = value%schema_id == type_type_id(elem)
+            return
+         end if
          nidx = dyn_node_by_id(schema, type_type_id(elem))
          ok = .true.
          if (nidx /= 0) then
@@ -1904,9 +1934,13 @@ contains
       type(capnp_ptr_t), intent(in) :: p, value
       character(len=*), intent(in) :: fname
       integer, intent(out) :: err
-      type(capnp_ptr_t) :: f, t, elem
+      type(capnp_ptr_t) :: f, t, elem, stored
       call dyn_field(schema, idx, fname, f, err)
       if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         call dyn_set_group(schema, idx, p, f, value, err)
+         return
+      end if
       t = field_slot_type(f, err)
       if (err /= CAPNP_OK) return
       select case (type_which(t))
@@ -1947,17 +1981,257 @@ contains
                   call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
                   return
                end if
+               ! dynamic.c++ Builder::set (636-644) takes a capability whose
+               ! interface extends the field's. A value without an interface
+               ! id, or with one this schema does not hold, is not checked.
+               if (value%schema_id /= 0_int64) then
+                  if (dyn_node_by_id(schema, value%schema_id) /= 0 .and. &
+                      .not. dyn_iface_extends(schema, value%schema_id, type_type_id(t))) then
+                     call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
+                     return
+                  end if
+               end if
             ! dynamic.c++ Builder::set (599-633) stores any pointer value in
             ! an AnyPointer field without checking whichAnyPointerKind.
             end select
          end if
          call dyn_set_in_union(schema, idx, p, f, err)
          if (err /= CAPNP_OK) return
-         call capnp_setp(p, int(field_slot_offset(f)), value, err)
+         ! layout.c++ setTextPointer, setDataPointer, setListPointer and
+         ! setStructPointer allocate a fresh object. Copy a same-message
+         ! value first, as dyn_copy_member does, so a later write to the
+         ! source leaves the stored value unchanged. A capability pointer
+         ! is stored as the capability.
+         stored = value
+         if (stored%kind /= CAPNP_PK_NULL .and. stored%kind /= CAPNP_PK_CAP) then
+            if (associated(p%msg) .and. associated(stored%msg, p%msg)) then
+               stored = capnp_copy(p%msg, stored, err)
+               if (err /= CAPNP_OK) return
+            end if
+         end if
+         call capnp_setp(p, int(field_slot_offset(f)), stored, err)
       case default
          call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
       end select
    end subroutine capnp_dyn_setp
+
+   !> True when interface id is base or inherits from it.
+   !> schema.c++ InterfaceSchema::extends (637-644) increments a visit
+   !> counter before the identity check and returns false when that
+   !> counter passes 64.
+   function dyn_iface_extends(schema, id, base) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id, base
+      logical :: ok
+      integer :: visits
+      visits = 0
+      ok = iface_extends_visit(schema, id, base, visits)
+   end function dyn_iface_extends
+
+   !> One extends() call. The counter is shared for the whole walk, so
+   !> a cycle ends once 64 visits have been accepted.
+   recursive function iface_extends_visit(schema, id, base, visits) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer(int64), intent(in) :: id, base
+      integer, intent(inout) :: visits
+      logical :: ok
+      type(capnp_ptr_t) :: sl, sc
+      integer(int64) :: i
+      integer :: nidx, err
+      integer, parameter :: max_superclasses = 64
+      visits = visits + 1
+      if (visits > max_superclasses) then
+         ok = .false.
+         return
+      end if
+      ok = id == base
+      if (ok) return
+      nidx = dyn_node_by_id(schema, id)
+      if (nidx == 0) return
+      if (node_which(schema%nodes(nidx)) /= NODE_INTERFACE) return
+      sl = node_interface_superclasses(schema%nodes(nidx), err)
+      if (err /= CAPNP_OK) return
+      do i = 0_int64, capnp_list_len(sl) - 1_int64
+         sc = capnp_list_get_struct(sl, int(i), err)
+         if (err /= CAPNP_OK) return
+         if (iface_extends_visit(schema, superclass_id(sc), base, visits)) then
+            ok = .true.
+            return
+         end if
+      end do
+   end function iface_extends_visit
+
+   !> dynamic.c++ Builder::set on a group (651-666): select the arm, clear
+   !> the group as init does, then copy the active union member and every
+   !> other member that has a value. value is a struct handle that holds
+   !> the group, as capnp_dyn_getp returns it.
+   subroutine dyn_set_group(schema, idx, p, f, value, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p, f, value
+      integer, intent(out) :: err
+      integer :: gidx
+      call dyn_init_target(schema, idx, p, f, capnp_ptr_t(), TYPE_STRUCT, err)
+      if (err /= CAPNP_OK) return
+      gidx = dyn_node_by_id(schema, field_group_type_id(f))
+      if (gidx == 0) then
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_ARG, err)
+         return
+      end if
+      if (value%kind /= CAPNP_PK_STRUCT) then
+         call dyn_reject_set(schema, idx, p, f, CAPNP_ERR_KIND, err)
+         return
+      end if
+      call dyn_set_in_union(schema, idx, p, f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_clear_slots(schema, gidx, p, 0, .false., err)
+      if (err /= CAPNP_OK) return
+      ! C++ throws at the first copied member of a struct of another type,
+      ! after the clear.
+      if (.not. dyn_group_value_ok(schema, gidx, value)) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
+      call dyn_copy_group(schema, gidx, value, p, 0, err)
+   end subroutine dyn_set_group
+
+   !> A group value is addressed through the struct that contains it, so
+   !> its schema id may name the group or any struct enclosing it.
+   function dyn_group_value_ok(schema, gidx, value) result(ok)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: gidx
+      type(capnp_ptr_t), intent(in) :: value
+      logical :: ok
+      integer :: nidx, depth
+      ok = value%schema_id == 0_int64
+      nidx = gidx
+      depth = 0
+      do while (.not. ok .and. nidx /= 0 .and. depth <= SCHEMA_WALK_LIMIT)
+         ok = value%schema_id == node_id(schema%nodes(nidx))
+         if (.not. node_struct_is_group(schema%nodes(nidx))) exit
+         nidx = dyn_node_by_id(schema, node_scope_id(schema%nodes(nidx)))
+         depth = depth + 1
+      end do
+   end function dyn_group_value_ok
+
+   recursive subroutine dyn_copy_group(schema, gidx, src, dst, depth, err)
+      use capnp_union, only: capnp_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: gidx
+      type(capnp_ptr_t), intent(in) :: src, dst
+      integer, intent(in) :: depth
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: fl, f
+      integer(int64) :: i
+      integer :: disc
+      err = CAPNP_OK
+      if (depth > SCHEMA_WALK_LIMIT) then
+         err = CAPNP_ERR_DEPTH
+         return
+      end if
+      fl = node_struct_fields(schema%nodes(gidx), err)
+      if (err /= CAPNP_OK) return
+      disc = NO_DISCRIMINANT
+      if (node_struct_discriminant_count(schema%nodes(gidx)) > 0) then
+         disc = capnp_which(src, int(node_struct_discriminant_offset(schema%nodes(gidx))))
+      end if
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         if (field_discriminant(f) == NO_DISCRIMINANT) cycle
+         if (field_discriminant(f) /= disc) cycle
+         call dyn_copy_member(schema, gidx, f, src, dst, .true., depth, err)
+         if (err /= CAPNP_OK) return
+         exit
+      end do
+      do i = 0_int64, capnp_list_len(fl) - 1_int64
+         f = capnp_list_get_struct(fl, int(i), err)
+         if (err /= CAPNP_OK) return
+         if (field_discriminant(f) /= NO_DISCRIMINANT) cycle
+         call dyn_copy_member(schema, gidx, f, src, dst, .false., depth, err)
+         if (err /= CAPNP_OK) return
+      end do
+   end subroutine dyn_copy_group
+
+   !> One dst.set(field, src.get(field)) of the group copy. Data bits are
+   !> copied raw: both sides share the field default. A null pointer is
+   !> skipped unless it is the active arm, which C++ sets from the read
+   !> default: the schema default, or an empty Text, Data, List or struct.
+   recursive subroutine dyn_copy_member(schema, gidx, f, src, dst, active, depth, err)
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: gidx, depth
+      type(capnp_ptr_t), intent(in) :: f, src, dst
+      logical, intent(in) :: active
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: t, q, elem
+      integer(int64) :: off
+      integer :: cidx, slot
+      call dyn_set_in_union(schema, gidx, dst, f, err)
+      if (err /= CAPNP_OK) return
+      if (field_which(f) == FIELD_GROUP) then
+         cidx = dyn_node_by_id(schema, field_group_type_id(f))
+         if (cidx == 0) then
+            err = CAPNP_ERR_ARG
+            return
+         end if
+         call dyn_clear_slots(schema, cidx, dst, depth + 1, .false., err)
+         if (err /= CAPNP_OK) return
+         call dyn_copy_group(schema, cidx, src, dst, depth + 1, err)
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      off = field_slot_offset(f)
+      select case (type_which(t))
+      case (TYPE_BOOL)
+         call capnp_set_bool(dst, off, capnp_get_bool(src, off), err)
+      case (TYPE_INT8, TYPE_UINT8)
+         call capnp_set_i8(dst, off, capnp_get_i8(src, off), err)
+      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM)
+         call capnp_set_i16(dst, off*2_int64, capnp_get_i16(src, off*2_int64), err)
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32)
+         call capnp_set_i32(dst, off*4_int64, capnp_get_i32(src, off*4_int64), err)
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64)
+         call capnp_set_i64(dst, off*8_int64, capnp_get_i64(src, off*8_int64), err)
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+         slot = int(off)
+         q = capnp_getp(src, slot, err)
+         if (err /= CAPNP_OK) return
+         if (q%kind == CAPNP_PK_NULL) then
+            if (.not. active) return
+            q = value_pointer(field_slot_default(f, err), err)
+            if (err /= CAPNP_OK) return
+         end if
+         if (q%kind == CAPNP_PK_NULL .and. active) then
+            select case (type_which(t))
+            case (TYPE_TEXT)
+               q = capnp_new_list(dst%msg, CAPNP_SZ_BYTE, 1_int64, err)
+            case (TYPE_DATA)
+               q = capnp_new_list(dst%msg, CAPNP_SZ_BYTE, 0_int64, err)
+            case (TYPE_STRUCT)
+               q = capnp_new_struct(dst%msg, 0, 0, err)
+            case (TYPE_LIST)
+               elem = type_list_element(t, err)
+               if (err /= CAPNP_OK) return
+               if (type_which(elem) == TYPE_STRUCT) then
+                  ! layout.c++ readListPointer (2269) returns
+                  ! ListReader(INLINE_COMPOSITE) with zero struct sizes
+                  ! (layout.h:762). setListPointer (1920) writes that tag.
+                  ! initStructList (dynamic.c++:724) and an explicit empty
+                  ! default keep structSizeFromSchema in the tag.
+                  q = capnp_new_composite_list(dst%msg, 0_int64, 0, 0, err)
+               else
+                  q = capnp_new_list(dst%msg, dyn_list_esize(type_which(elem)), 0_int64, err)
+               end if
+            end select
+            if (err /= CAPNP_OK) return
+         else if (q%kind /= CAPNP_PK_NULL .and. q%kind /= CAPNP_PK_CAP) then
+            q = capnp_copy(dst%msg, q, err)
+            if (err /= CAPNP_OK) return
+         end if
+         call capnp_setp(dst, slot, q, err)
+      end select
+   end subroutine dyn_copy_member
 
    function capnp_dyn_get_capability(schema, idx, p, fname, err) result(capidx)
       type(capnp_dyn_schema_t), intent(in) :: schema
@@ -2136,7 +2410,7 @@ contains
       integer(int64), intent(in) :: n
       integer, intent(out) :: err
       type(capnp_ptr_t) :: value, f, t, elem
-      integer :: nidx, esize, slot
+      integer :: nidx, slot
       integer(int64) :: nb
       value = capnp_ptr_t()
       call dyn_field(schema, idx, fname, f, err)
@@ -2183,22 +2457,9 @@ contains
          end if
          value = capnp_new_composite_list(p%msg, n, node_struct_data_words(schema%nodes(nidx)), &
                                           node_struct_pointer_count(schema%nodes(nidx)), err)
+         value%schema_id = type_type_id(elem)
       else
-         select case (type_which(elem))
-         case (TYPE_VOID); esize = CAPNP_SZ_VOID
-         case (TYPE_BOOL); esize = CAPNP_SZ_BIT
-         case (TYPE_INT8, TYPE_UINT8); esize = CAPNP_SZ_BYTE
-         case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); esize = CAPNP_SZ_TWO
-         case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); esize = CAPNP_SZ_FOUR
-         case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); esize = CAPNP_SZ_EIGHT
-         case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
-            esize = CAPNP_SZ_PTR
-         case default
-            ! Unknown dynamic element tags are forward-compatible void lists
-            ! in Cap'n Proto C++ 1.4.0.
-            esize = CAPNP_SZ_VOID
-         end select
-         value = capnp_new_list(p%msg, esize, n, err)
+         value = capnp_new_list(p%msg, dyn_list_esize(type_which(elem)), n, err)
       end if
       if (err /= CAPNP_OK) then
          value = capnp_ptr_t()
@@ -2207,5 +2468,26 @@ contains
       call capnp_setp(p, slot, value, err)
       if (err /= CAPNP_OK) value = capnp_ptr_t()
    end function capnp_dyn_init_list
+
+   !> Wire element size of a non-struct list element type, as dynamic.c++
+   !> elementSizeFor (70-97) maps it.
+   pure function dyn_list_esize(tw) result(esize)
+      integer, intent(in) :: tw
+      integer :: esize
+      select case (tw)
+      case (TYPE_VOID); esize = CAPNP_SZ_VOID
+      case (TYPE_BOOL); esize = CAPNP_SZ_BIT
+      case (TYPE_INT8, TYPE_UINT8); esize = CAPNP_SZ_BYTE
+      case (TYPE_INT16, TYPE_UINT16, TYPE_ENUM); esize = CAPNP_SZ_TWO
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32); esize = CAPNP_SZ_FOUR
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64); esize = CAPNP_SZ_EIGHT
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_ANY_POINTER, TYPE_INTERFACE)
+         esize = CAPNP_SZ_PTR
+      case default
+         ! Unknown dynamic element tags are forward-compatible void lists
+         ! in Cap'n Proto C++ 1.4.0.
+         esize = CAPNP_SZ_VOID
+      end select
+   end function dyn_list_esize
 
 end module capnp_dynamic
