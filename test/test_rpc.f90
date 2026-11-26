@@ -202,7 +202,7 @@ contains
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
       ! Ordered cases. They share one socketpair, so a failure
       ! names the check and the later checks still run.
-      allocate (testsuite(156))
+      allocate (testsuite(158))
       testsuite(1)%name = "rpc-bootstrap-and-echo"
       testsuite(1)%test => w_bootstrap_and_echo
       testsuite(2)%name = "rpc-cap-result-and-pipeline"
@@ -515,6 +515,10 @@ contains
       testsuite(155)%test => t_resolve_long_chain_release
       testsuite(156)%name = "rpc-framing-segment-size-overflow"
       testsuite(156)%test => t_framing_segment_size_overflow
+      testsuite(157)%name = "rpc-take-from-canceled-missing"
+      testsuite(157)%test => w_take_from_canceled_missing
+      testsuite(158)%name = "rpc-take-from-live-missing"
+      testsuite(158)%test => w_take_from_live_missing
    end subroutine collect_rpc
 
    subroutine check_(error, cond, name)
@@ -1706,6 +1710,20 @@ contains
       if (allocated(error)) return
       call t_return_canceled_after_cancel(error)
    end subroutine w_return_canceled_after_cancel
+
+   subroutine w_take_from_canceled_missing(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_take_from_canceled_missing(error)
+   end subroutine w_take_from_canceled_missing
+
+   subroutine w_take_from_live_missing(error)
+      type(error_type), allocatable, intent(out) :: error
+      call ensure_rpc(error)
+      if (allocated(error)) return
+      call t_take_from_live_missing(error)
+   end subroutine w_take_from_live_missing
 
    subroutine w_return_elsewhere_not_tail(error)
       type(error_type), allocatable, intent(out) :: error
@@ -6017,6 +6035,27 @@ contains
       call capnp_message_free(m)
    end subroutine send_raw_return
 
+   subroutine send_take_from(fd, qid, other, e)
+      integer, intent(in) :: fd
+      integer(int64), intent(in) :: qid, other
+      integer, intent(out) :: e
+      type(capnp_message_t), target :: m
+      type(message_t) :: msg
+      type(return_t) :: r
+      call capnp_message_init_builder(m, e)
+      if (e /= CAPNP_OK) return
+      msg = message_new_root(m, e)
+      if (e /= CAPNP_OK) return
+      r = message_return_init(msg, e)
+      if (e /= CAPNP_OK) return
+      call return_answer_id_set(r, qid, e)
+      if (e /= CAPNP_OK) return
+      call return_take_from_other_question_set(r, other, e)
+      if (e /= CAPNP_OK) return
+      call rpc_send_message(fd, m, e)
+      call capnp_message_free(m)
+   end subroutine send_take_from
+
    subroutine expect_abort(conn, peer_fd, fragment, error, name)
       type(rpc_conn_t), intent(inout) :: conn
       integer, intent(in) :: peer_fd
@@ -6199,6 +6238,73 @@ contains
       call rpc_conn_close(cconn)
       call rpc_conn_close(sconn)
    end subroutine t_return_canceled_after_cancel
+
+   !> A canceled question may takeFrom an answer id that is not present.
+   subroutine t_take_from_canceled_missing(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e
+      integer(int64) :: qboot, q
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'return: missing takeFrom drains the call')
+      call rpc_request_cancellation(cconn, q, e)
+      call drain_one(sconn%fd, error, 'return: missing takeFrom drains the finish')
+      call send_take_from(sconn%fd, q, -1_int64, e)
+      call rpc_pump_once(cconn, e)
+      call check_(error, e == CAPNP_OK .and. rpc_conn_alive(cconn), &
+                  'return: canceled takeFrom of a missing answer stays up')
+      call check_(error, .not. cconn%questions(int(q))%used, &
+                  'return: canceled takeFrom frees the question')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_take_from_canceled_missing
+
+   !> A live question aborts when takeFrom names an answer that is not present.
+   subroutine t_take_from_live_missing(error)
+      type(error_type), allocatable, intent(inout) :: error
+      type(rpc_conn_t), target :: cconn, sconn
+      type(echo_srv_t), target :: echo
+      type(rpc_cap_t) :: cap
+      type(capnp_message_t), target :: m
+      type(payload_t) :: params
+      type(capnp_ptr_t) :: s
+      integer :: e
+      integer(int64) :: qboot, q
+      call open_echo_pair(cconn, sconn, echo, e)
+      call rpc_bootstrap_send(cconn, cap, e)
+      qboot = cap%id
+      call rpc_pump_once(sconn, e)
+      call rpc_wait(cconn, qboot, e)
+      call rpc_result_cap(cconn, qboot, [integer ::], cap, e)
+      call rpc_call_begin(cconn, cap, ECHO_IFACE, 0, m, params, q, e)
+      s = capnp_new_struct(m, 1, 1, e)
+      call capnp_set_i64(s, 0_int64, 1_int64, e)
+      call capnp_set_text(s, 0, 'x', e)
+      call payload_content_set(params, s, e)
+      call rpc_call_send(cconn, m, e)
+      call drain_one(sconn%fd, error, 'return: live takeFrom drains the call')
+      call send_take_from(sconn%fd, q, -1_int64, e)
+      call expect_abort(cconn, sconn%fd, 'invalid answer ID', error, &
+                        'return: live takeFrom of a missing answer aborts')
+      call rpc_conn_close(cconn)
+      call rpc_conn_close(sconn)
+   end subroutine t_take_from_live_missing
 
    !> resultsSentElsewhere on a call that was not sendResultsTo.yourself aborts.
    subroutine t_return_elsewhere_not_tail(error)

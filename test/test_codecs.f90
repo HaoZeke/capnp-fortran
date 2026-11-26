@@ -708,9 +708,20 @@ contains
          'nan(017)', 'nan(08)', 'nan(abc_9)', 'nan(0xffffffffffffffffffff)', &
          'nan(', 'nan(1', 'nan(-1)', 'nan( 1)', 'nanx', &
          ' 1.5', '  -2', '1.5 ', '1,5', ' ', '+', '-', '.', 'e5', '1e', &
-         '1e+', '1.5x', '--1', '1..2', '+-1', '1e5.5', '0..', '00012.500']
+         '1e+', '1.5x', '--1', '1..2', '+-1', '1e5.5', '0..', '00012.500', '0', '1']
       integer :: i, nbad
       integer :: seed
+      character(len=:), allocatable :: fmt
+      real(real64) :: one
+      integer :: ferr
+      call capnp_fmt_f64(1.0e-7_real64, fmt)
+      call check_(error, fmt == '1e-07', 'float format: trim 1e-07')
+      call capnp_fmt_f64(1.25_real64, fmt)
+      call check_(error, fmt == '1.25', 'float format: trim 1.25')
+      call capnp_parse_f64('0', one, ferr)
+      call check_(error, ferr == CAPNP_OK .and. one == 0.0_real64, 'float parse: 0')
+      call capnp_parse_f64('1', one, ferr)
+      call check_(error, ferr == CAPNP_OK .and. one == 1.0_real64, 'float parse: 1')
       nbad = 0
       do i = 1, size(fixed)
          call strtod_case(trim(fixed(i)), nbad)
