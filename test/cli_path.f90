@@ -174,12 +174,28 @@ contains
    end function is_file
 
    !> True when capnp and the three dev schemas are installed.
+   !> CAPNP_FORTRAN_ROOT, when set, is the repo root. With it unset the
+   !> script is test/dev_schemas.sh in the working directory.
    function have_capnp() result(y)
       logical :: y
-      integer :: st, cs
+      character(len=:), allocatable :: root, script
+      integer :: n, st, cs
+      call get_environment_variable('CAPNP_FORTRAN_ROOT', length=n)
+      if (n > 0) then
+         allocate (character(len=n) :: root)
+         call get_environment_variable('CAPNP_FORTRAN_ROOT', root)
+         root = trim(root)
+      else
+         root = ''
+      end if
+      if (len(root) > 0) then
+         script = root//'/test/dev_schemas.sh'
+      else
+         script = 'test/dev_schemas.sh'
+      end if
       st = 0
       cs = 0
-      call execute_command_line('bash test/dev_schemas.sh', exitstat=st, cmdstat=cs, &
+      call execute_command_line('bash '//shell_quote(script), exitstat=st, cmdstat=cs, &
          wait=.true.)
       y = cs == 0 .and. st == 0
    end function have_capnp

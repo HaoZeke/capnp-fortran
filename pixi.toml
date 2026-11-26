@@ -57,6 +57,6 @@ coverage = ["coverage"]
 [tasks]
 gen = { cmd = "bash scripts/fypp-gen.sh" }
 build = { cmd = "fpm build" }
-test = { cmd = "fpm test" }
+test = { cmd = "fpm test", env = { CAPNP_FORTRAN_ROOT = "$PIXI_PROJECT_ROOT" } }
 prek = { cmd = "prek run -a", description = "Run all prek hooks" }
 coverage = { cmd = "bash scripts/coverage.sh", description = "fpm test with gfortran --coverage; report under coverage-report/" }
