@@ -223,9 +223,16 @@ contains
       tag = int(capnp_get_u16(h%p, 4_int64))
    end function dynamic_choice_which
 
-   function dynamic_choice_number_get(h) result(v)
+   function dynamic_choice_number_get(h, err) result(v)
       type(dynamic_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (dynamic_choice_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 0_int64)
    end function dynamic_choice_number_get
 
@@ -251,6 +258,10 @@ contains
       type(dynamic_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (dynamic_choice_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 3, s, err)
    end subroutine dynamic_choice_label_get
 
@@ -276,6 +287,10 @@ contains
       type(dynamic_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: l
+      if (dynamic_choice_which(h) /= 2) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       l = capnp_getp(h%p, 3, err)
    end function dynamic_choice_items_get
 
@@ -733,9 +748,16 @@ contains
       tag = int(capnp_get_u16(h%p, 4_int64))
    end function deep_groups_which
 
-   function deep_groups_a_get(h) result(v)
+   function deep_groups_a_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 0_int64)
    end function deep_groups_a_get
 
@@ -933,9 +955,16 @@ contains
       tag = int(capnp_get_u16(h%p, 4_int64))
    end function nested_union_which
 
-   function nested_union_a_get(h) result(v)
+   function nested_union_a_get(h, err) result(v)
       type(nested_union_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (nested_union_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 0_int64)
    end function nested_union_a_get
 
@@ -967,9 +996,16 @@ contains
       tag = int(capnp_get_u16(h%p, 6_int64))
    end function nested_union_g_which
 
-   function nested_union_g_x_get(h) result(v)
+   function nested_union_g_x_get(h, err) result(v)
       type(nested_union_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (nested_union_g_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 0_int64)
    end function nested_union_g_x_get
 
@@ -995,6 +1031,10 @@ contains
       type(nested_union_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (nested_union_g_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 0, s, err)
    end subroutine nested_union_g_y_get
 

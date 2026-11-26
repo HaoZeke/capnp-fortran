@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g54|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g55|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -2958,6 +2958,137 @@ EOF
   echo "g54 ok"
 }
 
+# Inactive union getters return the kind error. C++ requires which()==arm.
+g55() {
+  local d c
+  d=$(work)
+  cd "$d"
+  cat > u.capnp << 'EOS'
+@0xf0000000000008e4;
+enum Hue { red @0; blue @1; }
+struct Box { x @0 :Int32; }
+interface Ping { ping @0 (); }
+struct U {
+  union {
+    a @0 :Int32 = 7;
+    b @1 :Text = "fallback";
+    d @2 :Data;
+    s @3 :Box;
+    l @4 :List(Int32);
+    ap @5 :AnyPointer;
+    flag @6 :Bool = true;
+    ratio @7 :Float64 = 1.5;
+    hue @8 :Hue = blue;
+    cap @9 :Ping;
+    as @10 :AnyStruct;
+    al @11 :AnyList;
+    ac @12 :Capability;
+  }
+}
+EOS
+  capnp compile "${CAPNP_INC[@]}" -oc++ u.capnp
+  cat > cpp.cpp << 'EOS'
+#include "u.capnp.h"
+#include <capnp/message.h>
+#include <kj/exception.h>
+#include <cstdio>
+static int grab_a(U::Builder r, int& v) {
+  try { v = r.getA(); return 0; }
+  catch (const kj::Exception&) { return 2; }
+}
+static int grab_b(U::Builder r) {
+  try { (void)r.getB(); return 0; }
+  catch (const kj::Exception&) { return 2; }
+}
+int main() {
+  capnp::MallocMessageBuilder m;
+  auto r = m.initRoot<U>();
+  r.setB("hello");
+  int v = 0;
+  int ea = grab_a(r, v);
+  r.setA(9);
+  int eb = grab_b(r);
+  int eok = grab_a(r, v);
+  std::printf("%d %d %d %d\n", ea, eb, eok, v);
+}
+EOS
+  capnp_cxx_flags
+  # The interface arm pulls Capability::Server. Static libcapnp-rpc must
+  # precede libcapnp.
+  local cxxlibs=() w
+  for w in "${CAPNP_PC[@]}"; do
+    if [[ "$w" == -lcapnp ]]; then
+      cxxlibs+=(-lcapnp-rpc -lcapnp -lkj-async)
+    else
+      cxxlibs+=("$w")
+    fi
+  done
+  "$CXX" -std=c++17 cpp.cpp u.capnp.c++ "${cxxlibs[@]}" -o cppdrv
+  c=$(./cppdrv)
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" u.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use capnp_any, only: any_struct_t, any_list_t, capability_client_t
+   use u_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(u_t) :: h
+   type(box_t) :: bx
+   type(capnp_ptr_t) :: q
+   type(ping_client_t) :: cli
+   type(any_struct_t) :: as
+   type(any_list_t) :: al
+   type(capability_client_t) :: ac
+   integer(int8), allocatable :: bytes(:)
+   character(len=:), allocatable :: s
+   integer(int32) :: a
+   logical :: flag
+   real(real64) :: ratio
+   integer :: err, ea, eb, eok, ef, er, eh, ed, es, el, eap, ecap, eas, eal, eac
+   integer :: hue
+   call capnp_message_init_builder(m, err)
+   h = u_new_root(m, err)
+   if (err /= 0) error stop 1
+   call u_b_set(h, 'hello', err)
+   if (err /= 0) error stop 2
+   a = u_a_get(h, ea)
+   flag = u_flag_get(h, ef)
+   ratio = u_ratio_get(h, er)
+   hue = u_hue_get(h, eh)
+   call u_d_get(h, bytes, ed)
+   bx = u_s_get(h, es)
+   q = u_l_get(h, el)
+   q = u_ap_get(h, eap)
+   cli = u_cap_get(h, ecap)
+   as = u_as_get(h, eas)
+   al = u_al_get(h, eal)
+   ac = u_ac_get(h, eac)
+   if (ea /= 2 .or. ef /= 2 .or. er /= 2 .or. eh /= 2) error stop 3
+   if (ed /= 2 .or. es /= 2 .or. el /= 2 .or. eap /= 2) error stop 4
+   if (ecap /= 2 .or. eas /= 2 .or. eal /= 2 .or. eac /= 2) error stop 5
+   call u_b_get(h, s, err)
+   if (err /= 0 .or. s /= 'hello') error stop 6
+   call u_a_set(h, 9_int32, err)
+   if (err /= 0) error stop 7
+   a = u_a_get(h, eok)
+   call u_b_get(h, s, eb)
+   print '(i0,1x,i0,1x,i0,1x,i0)', ea, eb, eok, a
+   a = u_a_get(h)
+   if (a /= 9_int32) error stop 8
+   call u_b_set(h, 'z', err)
+   if (err /= 0) error stop 9
+   a = u_a_get(h)
+   if (a /= 0_int32) error stop 10
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc u_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "$c"
+  echo "g55 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -3013,11 +3144,12 @@ case "$CASE" in
   g52) g52 ;;
   g53) g53 ;;
   g54) g54 ;;
+  g55) g55 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54; g55
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|g55|all" >&2
     exit 2
     ;;
 esac

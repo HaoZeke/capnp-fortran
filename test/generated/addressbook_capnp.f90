@@ -174,6 +174,10 @@ contains
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (person_employment_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 3, s, err)
    end subroutine person_employment_employer_get
 
@@ -199,6 +203,10 @@ contains
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (person_employment_which(h) /= 2) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 3, s, err)
    end subroutine person_employment_school_get
 
