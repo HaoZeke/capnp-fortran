@@ -2214,6 +2214,11 @@ contains
                elem = type_list_element(t, err)
                if (err /= CAPNP_OK) return
                if (type_which(elem) == TYPE_STRUCT) then
+                  ! layout.c++ readListPointer (2269) returns
+                  ! ListReader(INLINE_COMPOSITE) with zero struct sizes
+                  ! (layout.h:762). setListPointer (1920) writes that tag.
+                  ! initStructList (dynamic.c++:724) and an explicit empty
+                  ! default keep structSizeFromSchema in the tag.
                   q = capnp_new_composite_list(dst%msg, 0_int64, 0, 0, err)
                else
                   q = capnp_new_list(dst%msg, dyn_list_esize(type_which(elem)), 0_int64, err)

@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(50))
+      allocate (testsuite(51))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -136,6 +136,8 @@ contains
       testsuite(49)%test => run_iface_visit_limit
       testsuite(50)%name = "dynamic-set-same-message"
       testsuite(50)%test => run_set_same_message
+      testsuite(51)%name = "dynamic-null-structlist"
+      testsuite(51)%test => run_null_structlist
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3268,5 +3270,59 @@ contains
       call capnp_message_free(msg)
       call capnp_dyn_free(schema)
    end subroutine run_set_same_message
+
+   !> Active null List(Struct) group copy against Cap'n Proto C++ 1.4.0.
+   !> items has no explicit default: the tag is 0 data words and 0 pointer
+   !> words. plain is `= []`: the tag carries Elem's 1 data word and 1
+   !> pointer. Golden files are messageToFlatArray from that C++ library.
+   subroutine run_null_structlist(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: sm, dm
+      type(capnp_ptr_t) :: src, dst
+      integer(int8), allocatable :: cgr(:), got(:), want(:)
+      integer :: err, widx
+      logical :: ok
+
+      call capnp_read_file('test/fixtures/null_structlist.cgr.bin', cgr, err)
+      if (err /= CAPNP_OK) then
+         call skip_test(error, 'fixtures not found (run from project root)')
+         return
+      end if
+      call capnp_dyn_load(schema, cgr, err)
+      widx = capnp_dyn_find(schema, 'Wrap', err)
+      call check_(error, err == CAPNP_OK .and. widx > 0, 'null-structlist: schema')
+      if (allocated(error)) then
+         call capnp_dyn_free(schema)
+         return
+      end if
+
+      call copy_arm(1, 'test/fixtures/null_structlist_items.bin', &
+                    'null-structlist: null default matches C++ 1.4.0')
+      call copy_arm(4, 'test/fixtures/null_structlist_plain.bin', &
+                    'null-structlist: empty default matches C++ 1.4.0')
+      call capnp_dyn_free(schema)
+   contains
+      subroutine copy_arm(arm, path, title)
+         integer, intent(in) :: arm
+         character(len=*), intent(in) :: path, title
+         integer :: rc
+         call capnp_message_init_builder(sm, err)
+         call capnp_message_init_builder(dm, err)
+         src = capnp_dyn_new_root(schema, widx, sm, err)
+         call capnp_set_u16(src, 4_int64, 1_int32, err)
+         call capnp_set_u16(src, 6_int64, arm, err)
+         dst = capnp_dyn_new_root(schema, widx, dm, err)
+         call capnp_dyn_setp(schema, widx, dst, 'g', src, rc)
+         call capnp_serialize_bytes(dm, got, err)
+         call capnp_read_file(path, want, err)
+         ok = rc == CAPNP_OK .and. err == CAPNP_OK .and. allocated(got) .and. allocated(want)
+         if (ok) ok = size(got) == size(want)
+         if (ok) ok = all(got == want)
+         call check_(error, ok, title)
+         call capnp_message_free(sm)
+         call capnp_message_free(dm)
+      end subroutine copy_arm
+   end subroutine run_null_structlist
 
 end module test_dynamic
