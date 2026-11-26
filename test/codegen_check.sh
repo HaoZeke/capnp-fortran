@@ -34,6 +34,18 @@ out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 cd "$out"
 
+cat > "$out/handlemod.py" << 'ENDHANDLE'
+def handle(text, fn, prefix=""):
+    import re
+    import sys
+    m = re.search(
+        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
+        text)
+    if not m:
+        sys.exit(prefix + "no handle for " + fn)
+    return m.group(1)
+ENDHANDLE
+
 need_capnp() {
   if ! command -v capnp >/dev/null 2>&1; then
     echo "capnp is not on PATH, skipped" >&2
@@ -52,20 +64,14 @@ box_default_order() {
   gen=$(find "$out" -name "${stem}_capnp.f90" | head -1)
   test -n "$gen"
   python3 - "$gen" "$label" << 'PY'
-import re, sys
+import sys
+from handlemod import handle
 text = open(sys.argv[1]).read()
 label = sys.argv[2]
+prefix = label + " "
 
-def handle(fn):
-    m = re.search(
-        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
-        text)
-    if not m:
-        sys.exit(label + " no handle for " + fn)
-    return m.group(1)
-
-plain = handle("plain_bare_get")
-method = handle("factory_boxy_params_box_get")
+plain = handle(text, "plain_bare_get", prefix)
+method = handle(text, "factory_boxy_params_box_get", prefix)
 if plain != "box_any_t":
     sys.exit(label + " plain handle " + plain)
 if method != "box_any_2_t":
@@ -241,6 +247,7 @@ implicit-golden)
   diff -q "$gen" "$root/test/generated/implicit_capnp.f90"
   python3 - "$gen" << 'PY'
 import sys
+from handlemod import handle
 text = open(sys.argv[1]).read()
 need = [
     "factory_pair_params_left_get_data",
@@ -293,17 +300,8 @@ present = [n for n in bad if n in text]
 if present:
     sys.exit("unexpected " + ", ".join(present))
 
-def handle(fn):
-    import re
-    m = re.search(
-        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
-        text)
-    if not m:
-        sys.exit("no handle for " + fn)
-    return m.group(1)
-
-plain = handle("plain_bare_get")
-method = handle("factory_boxy_params_box_get")
+plain = handle(text, "plain_bare_get")
+method = handle(text, "factory_boxy_params_box_get")
 stem = method[:-2] if method.endswith("_t") else method
 if plain != "box_any_t":
     sys.exit("plain-first plain handle " + plain)
@@ -329,22 +327,17 @@ EOS
   mf=$(find "$out" -name 'method_first_capnp.f90' | head -1)
   test -n "$mf"
   python3 - "$mf" << 'PY'
-import re, sys
+import sys
+from handlemod import handle
 text = open(sys.argv[1]).read()
 
-def handle(fn):
-    m = re.search(
-        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
-        text)
-    if not m:
-        sys.exit("no handle for " + fn)
-    return m.group(1)
-
-plain = handle("plain_bare_get")
-method = handle("factory_boxy_params_box_get")
+plain = handle(text, "plain_bare_get")
+method = handle(text, "factory_boxy_params_box_get")
 stem = method[:-2] if method.endswith("_t") else method
 if plain != "box_any_t":
     sys.exit("method-first plain handle " + plain)
+if method != "box_any_2_t":
+    sys.exit("method-first method handle " + method)
 if method == plain or (stem + "_value_get_text") not in text:
     sys.exit("method-first method handle " + method)
 if "box_any_value_get_text" in text:

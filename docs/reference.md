@@ -468,11 +468,12 @@ struct. The field keeps its AnyPointer accessors and adds kind accessors
 `_set_struct`, `_init_struct`, `_get_list`, `_set_list`, `_init_list`,
 `_init_composite`, `_get_iface`, and `_set_iface`. The client helper is
 `<iface>_<method>_request`. A union arm keeps the which() check on those
-accessors. `Box(AnyPointer)` and a method parameter `Box(T)` stay separate
-instantiations. The plain `Box(AnyPointer)` keeps the name `box_any`
-in either declaration order, and the method parameter takes the next name. A brand
-parameter of a generic struct keeps the AnyPointer accessors alone. Interface-typed struct
-fields emit capability-slot pointer accessors for use with
+accessors. `Box(AnyPointer)` and a method parameter `Box(T)` stay
+separate instantiations. The plain `Box(AnyPointer)` keeps the name
+`box_any` in either declaration order, and the method parameter takes
+the next name. A brand parameter of a generic struct keeps the
+AnyPointer accessors alone. Interface-typed struct fields emit
+capability-slot pointer accessors for use with
 `rpc_make_cap_ptr`/`rpc_result_cap`.
 
 An instantiation of a generic interface, and a struct instantiation met
