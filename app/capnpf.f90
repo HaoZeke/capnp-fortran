@@ -479,10 +479,11 @@ contains
          ! declaration in the imported file stays uncompiled. A const
          ! or other value name fails that compile, and the whole file
          ! is compiled afterwards.
-         shcmd = shcmd//'ABS=$(readlink -f '//shell_quote(trim(path))//') || exit 1; ' &
-                 //'W=$(mktemp /tmp/capnpf-lazy-XXXXXX.capnp) || exit 1; ' &
-                 //'O=$(mktemp /tmp/capnpf-lazy-XXXXXX.bin) || exit 1; ' &
-                 //'E=$(mktemp /tmp/capnpf-lazy-XXXXXX.err) || exit 1; ' &
+         shcmd = shcmd//'dir=$(mktemp -d) || exit 1; ' &
+                 //'trap ''rm -rf "$dir"'' EXIT INT TERM; ' &
+                 //'ABS=$(readlink -f '//shell_quote(trim(path))//') || exit 1; ' &
+                 //'W=$dir/capnpf-lazy.capnp; ' &
+                 //'O=$dir/capnpf-lazy.bin; E=$dir/capnpf-lazy.err; ' &
                  //'printf ''%s\n'' ''@0x8e1e4a11b22c3d4f;'' ' &
                  //'"using CapnpfOrig = import \"$ABS\";" ' &
                  //'''struct CapnpfBrandHost {'' ' &
@@ -502,7 +503,7 @@ contains
             shcmd = shcmd//'capnp compile'//extra_inc//' -I"$INC" -o- ' &
                     //shell_quote(trim(path))
          end if
-         shcmd = shcmd//'; rc=$?; fi; rm -f "$W" "$O" "$E"; exit $rc'
+         shcmd = shcmd//'; rc=$?; fi; exit $rc'
       end if
       call read_pipe(shcmd, bytes, err)
       if (err /= CAPNP_OK) return
