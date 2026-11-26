@@ -1,5 +1,6 @@
 program test_gate2
    use capnp
+   use cli_path, only: have_capnp
    use, intrinsic :: iso_c_binding, only: c_int, c_char, c_size_t, c_null_char
    implicit none
    interface
@@ -16,14 +17,16 @@ program test_gate2
       end function c_readlink
    end interface
    character(len=:), allocatable :: cap
-   integer :: skipped = 0, rc0, st0
+   integer :: skipped = 0, rc0, st0, nci
+   call get_environment_variable('CI', length=nci)
    call execute_command_line('command -v capnp > /dev/null 2>&1', exitstat=rc0, cmdstat=st0)
    if (st0 /= 0 .or. rc0 /= 0) then
+      if (nci > 0) error stop 'test_gate2: capnp is not on PATH'
       write (*, '(a)') 'test_gate2: capnp is not on PATH, every case skipped'
       stop
    end if
-   call execute_command_line('bash test/dev_schemas.sh', exitstat=rc0, cmdstat=st0)
-   if (st0 /= 0 .or. rc0 /= 0) then
+   if (.not. have_capnp()) then
+      if (nci > 0) error stop 'test_gate2: capnp standard schemas are not installed'
       write (*, '(a)') 'test_gate2: capnp standard schemas are not installed, every case skipped'
       stop
    end if
