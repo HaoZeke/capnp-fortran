@@ -450,7 +450,8 @@ superclass, so the setter of a field of that superclass type takes it.
 Each further superclass `S`, transitive parents of those superclasses
 included and duplicates dropped, has `<iface>_as_<S>(client)`. It returns
 an `<S>_client_t` that shares the capability handle, so that superclass's
-methods can be called.
+methods can be called. When the module already declares that name, the
+conversion takes a numeric suffix.
 
 Branded generic uses (`Box(Text)`) produce brand-resolved
 instantiations: a `box_text_t` handle plus the generic's accessors with

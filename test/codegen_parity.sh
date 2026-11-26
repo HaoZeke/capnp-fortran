@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g57|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g58|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -3359,6 +3359,394 @@ EOS
   echo "g57 ok"
 }
 
+
+g58() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > clash.capnp << 'EOF'
+@0xf000000000000921;
+interface Alpha {
+  ping @0 () -> (x :Int32);
+}
+interface BetaBegin {
+  pong @0 () -> (y :Int32);
+}
+const childAsBetaBegin :Int32 = 4;
+interface Child extends(Alpha, BetaBegin) {
+  asBeta @0 () -> (z :Int32);
+}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" clash.capnp
+  grep -q 'function child_as_beta_begin_2(' clash_capnp.f90
+  grep -q 'subroutine child_as_beta_begin_f(' clash_capnp.f90
+  grep -q 'parameter :: CHILD_AS_BETA_BEGIN =' clash_capnp.f90
+  if grep -q 'function child_as_beta_begin(' clash_capnp.f90; then
+    echo "unsuffixed conversion" >&2
+    exit 1
+  fi
+  cat > drv.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use clash_capnp
+   implicit none
+   integer :: beta_hits = 0
+   type, extends(child_server_t) :: srv_t
+   contains
+      procedure :: ping => do_ping
+      procedure :: as_beta => do_as_beta
+      procedure :: pong => do_pong
+   end type srv_t
+contains
+   subroutine do_ping(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(alpha_ping_params_t), intent(in) :: params
+      type(alpha_ping_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+   end subroutine do_ping
+   subroutine do_as_beta(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(child_as_beta_params_t), intent(in) :: params
+      type(child_as_beta_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+   end subroutine do_as_beta
+   subroutine do_pong(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(beta_begin_pong_params_t), intent(in) :: params
+      type(beta_begin_pong_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      beta_hits = beta_hits + 1
+      err = CAPNP_OK
+      call beta_begin_pong_results_y_set(results, 9_int32, err)
+   end subroutine do_pong
+end module impl
+program drv
+   use capnp
+   use capnp_posix
+   use capnp_rpc
+   use clash_capnp
+   use impl
+   implicit none
+   type(rpc_conn_t), target :: cli, srv_conn
+   type(srv_t), target :: srv
+   class(rpc_server_t), pointer :: boot
+   type(rpc_cap_t) :: root
+   type(child_client_t) :: ccli
+   type(beta_begin_client_t) :: bcli
+   type(capnp_message_t), target :: m
+   type(beta_begin_pong_params_t) :: bp
+   type(beta_begin_pong_results_t) :: br
+   integer(int64) :: q
+   integer :: fa, fb, err, y
+   if (child_as_beta_begin /= 4_int64) error stop 1
+   call px_socketpair(fa, fb, err)
+   if (err /= CAPNP_OK) error stop 2
+   boot => srv
+   call rpc_conn_init(srv_conn, fb, boot)
+   boot => null()
+   call rpc_conn_init(cli, fa, boot)
+   call rpc_bootstrap_send(cli, root, err)
+   q = root%id
+   call rpc_pump_once(srv_conn, err)
+   call rpc_wait(cli, q, err)
+   call rpc_result_cap(cli, q, [integer ::], root, err)
+   call rpc_finish_send(cli, q, .true., err)
+   call rpc_pump_once(srv_conn, err)
+   ccli%cap = root
+   bcli = child_as_beta_begin_2(ccli)
+   if (bcli%cap%id /= ccli%cap%id) error stop 3
+   call beta_begin_pong_begin(cli, bcli, m, bp, q, err)
+   if (err /= CAPNP_OK) error stop 4
+   call rpc_call_send(cli, m, err)
+   call rpc_pump_once(srv_conn, err)
+   call beta_begin_pong_wait(cli, q, br, err)
+   y = beta_begin_pong_results_y_get(br)
+   call rpc_finish_send(cli, q, .false., err)
+   call rpc_pump_once(srv_conn, err)
+   print '(i0,1x,i0)', y, beta_hits
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv_conn)
+end program drv
+EOF
+  fc clash_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "9 1"
+
+  d=$(work)
+  cd "$d"
+  cat > cross.capnp << 'EOF'
+@0xf000000000000931;
+interface Alpha {
+  z @0 () -> ();
+}
+interface AsBeta {
+  pong @0 () -> (y :Int32);
+}
+interface Beta {
+  ping @0 () -> (x :Int32);
+}
+interface Child extends(Alpha, AsBeta) {}
+interface ChildAs extends(Alpha, Beta) {}
+EOF
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" cross.capnp
+  grep -q 'function child_as_as_beta(' cross_capnp.f90
+  grep -q 'function child_as_as_beta_2(' cross_capnp.f90
+  fc -c cross_capnp.f90 -I "$MOD" -J .
+
+  d=$(work)
+  cd "$d"
+  cat > dia.capnp << 'EOF'
+@0xf000000000000901;
+interface A {
+  a @0 () -> (n :Int32);
+}
+interface B extends(A) {
+  b @0 () -> (n :Int32);
+}
+interface C extends(A) {
+  c @0 () -> (n :Int32);
+}
+interface D extends(B, C) {}
+interface E extends(B) {}
+EOF
+  cxx_ok dia.capnp
+  cat > cpp.cpp << 'EOF'
+#include "dia.capnp.h"
+static void take_a(A::Client) {}
+static void take_b(B::Client) {}
+static void take_c(C::Client) {}
+void f(D::Client d, E::Client e) {
+  take_a(d);
+  take_b(d);
+  take_c(d);
+  take_a(e);
+  take_b(e);
+}
+EOF
+  "$CXX" -std=c++17 -fsyntax-only "${CAPNP_PC[@]}" cpp.cpp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" dia.capnp
+  grep -q 'function d_as_c(' dia_capnp.f90
+  if grep -q 'function d_as_a(' dia_capnp.f90; then
+    echo "unexpected d_as_a" >&2
+    exit 1
+  fi
+  if grep -q 'function d_as_b(' dia_capnp.f90; then
+    echo "unexpected d_as_b" >&2
+    exit 1
+  fi
+  if grep -q 'function e_as_a(' dia_capnp.f90; then
+    echo "unexpected e_as_a" >&2
+    exit 1
+  fi
+  cat > drv.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use dia_capnp
+   implicit none
+   integer :: hit_a = 0
+   type, extends(d_server_t) :: dsrv_t
+   contains
+      procedure :: a => d_do_a
+      procedure :: b => d_do_b
+      procedure :: c => d_do_c
+   end type dsrv_t
+   type, extends(e_server_t) :: esrv_t
+   contains
+      procedure :: a => e_do_a
+      procedure :: b => e_do_b
+   end type esrv_t
+contains
+   subroutine d_do_a(self, ctx, params, results, err)
+      class(dsrv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(a_a_params_t), intent(in) :: params
+      type(a_a_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      hit_a = hit_a + 1
+      err = CAPNP_OK
+      call a_a_results_n_set(results, 11_int32, err)
+   end subroutine d_do_a
+   subroutine d_do_b(self, ctx, params, results, err)
+      class(dsrv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(b_b_params_t), intent(in) :: params
+      type(b_b_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      call b_b_results_n_set(results, 22_int32, err)
+   end subroutine d_do_b
+   subroutine d_do_c(self, ctx, params, results, err)
+      class(dsrv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(c_c_params_t), intent(in) :: params
+      type(c_c_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      call c_c_results_n_set(results, 33_int32, err)
+   end subroutine d_do_c
+   subroutine e_do_a(self, ctx, params, results, err)
+      class(esrv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(a_a_params_t), intent(in) :: params
+      type(a_a_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      hit_a = hit_a + 1
+      err = CAPNP_OK
+      call a_a_results_n_set(results, 55_int32, err)
+   end subroutine e_do_a
+   subroutine e_do_b(self, ctx, params, results, err)
+      class(esrv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(b_b_params_t), intent(in) :: params
+      type(b_b_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+      call b_b_results_n_set(results, 66_int32, err)
+   end subroutine e_do_b
+end module impl
+program drv
+   use capnp
+   use capnp_posix
+   use capnp_rpc
+   use dia_capnp
+   use impl
+   implicit none
+   type(rpc_conn_t), target :: cli, srv_conn
+   type(dsrv_t), target :: dsrv
+   type(esrv_t), target :: esrv
+   class(rpc_server_t), pointer :: boot
+   type(rpc_cap_t) :: root
+   type(d_client_t) :: dcli
+   type(e_client_t) :: ecli
+   type(a_client_t) :: acli
+   type(b_client_t) :: bcli
+   type(c_client_t) :: ccli
+   integer :: na, nb, nc
+   call open_d
+   bcli = dcli%b_client_t
+   acli = dcli%a_client_t
+   ccli = d_as_c(dcli)
+   if (bcli%cap%id /= dcli%cap%id) error stop 2
+   if (acli%cap%id /= dcli%cap%id) error stop 3
+   if (ccli%cap%id /= dcli%cap%id) error stop 4
+   na = call_a(acli)
+   nb = call_b(bcli)
+   nc = call_c(ccli)
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv_conn)
+   call open_e
+   bcli = ecli%b_client_t
+   acli = ecli%a_client_t
+   if (bcli%cap%id /= ecli%cap%id) error stop 6
+   if (acli%cap%id /= ecli%cap%id) error stop 7
+   na = na + call_a(acli)
+   nb = nb + call_b(bcli)
+   print '(i0,1x,i0,1x,i0,1x,i0)', na, nb, nc, hit_a
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv_conn)
+contains
+   subroutine open_d
+      integer :: fa, fb, err
+      integer(int64) :: q
+      call px_socketpair(fa, fb, err)
+      if (err /= CAPNP_OK) error stop 11
+      boot => dsrv
+      call rpc_conn_init(srv_conn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      call rpc_bootstrap_send(cli, root, err)
+      q = root%id
+      call rpc_pump_once(srv_conn, err)
+      call rpc_wait(cli, q, err)
+      call rpc_result_cap(cli, q, [integer ::], root, err)
+      call rpc_finish_send(cli, q, .true., err)
+      call rpc_pump_once(srv_conn, err)
+      dcli%cap = root
+   end subroutine open_d
+   subroutine open_e
+      integer :: fa, fb, err
+      integer(int64) :: q
+      call px_socketpair(fa, fb, err)
+      if (err /= CAPNP_OK) error stop 12
+      boot => esrv
+      call rpc_conn_init(srv_conn, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      call rpc_bootstrap_send(cli, root, err)
+      q = root%id
+      call rpc_pump_once(srv_conn, err)
+      call rpc_wait(cli, q, err)
+      call rpc_result_cap(cli, q, [integer ::], root, err)
+      call rpc_finish_send(cli, q, .true., err)
+      call rpc_pump_once(srv_conn, err)
+      ecli%cap = root
+   end subroutine open_e
+   function call_a(client) result(n)
+      type(a_client_t), intent(in) :: client
+      integer :: n
+      type(capnp_message_t), target :: m
+      type(a_a_params_t) :: p
+      type(a_a_results_t) :: r
+      integer(int64) :: q
+      integer :: err
+      call a_a_begin(cli, client, m, p, q, err)
+      if (err /= CAPNP_OK) error stop 21
+      call rpc_call_send(cli, m, err)
+      call rpc_pump_once(srv_conn, err)
+      call a_a_wait(cli, q, r, err)
+      n = a_a_results_n_get(r)
+      call rpc_finish_send(cli, q, .false., err)
+      call rpc_pump_once(srv_conn, err)
+   end function call_a
+   function call_b(client) result(n)
+      type(b_client_t), intent(in) :: client
+      integer :: n
+      type(capnp_message_t), target :: m
+      type(b_b_params_t) :: p
+      type(b_b_results_t) :: r
+      integer(int64) :: q
+      integer :: err
+      call b_b_begin(cli, client, m, p, q, err)
+      if (err /= CAPNP_OK) error stop 22
+      call rpc_call_send(cli, m, err)
+      call rpc_pump_once(srv_conn, err)
+      call b_b_wait(cli, q, r, err)
+      n = b_b_results_n_get(r)
+      call rpc_finish_send(cli, q, .false., err)
+      call rpc_pump_once(srv_conn, err)
+   end function call_b
+   function call_c(client) result(n)
+      type(c_client_t), intent(in) :: client
+      integer :: n
+      type(capnp_message_t), target :: m
+      type(c_c_params_t) :: p
+      type(c_c_results_t) :: r
+      integer(int64) :: q
+      integer :: err
+      call c_c_begin(cli, client, m, p, q, err)
+      if (err /= CAPNP_OK) error stop 23
+      call rpc_call_send(cli, m, err)
+      call rpc_pump_once(srv_conn, err)
+      call c_c_wait(cli, q, r, err)
+      n = c_c_results_n_get(r)
+      call rpc_finish_send(cli, q, .false., err)
+      call rpc_pump_once(srv_conn, err)
+   end function call_c
+end program drv
+EOF
+  fc dia_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "66 88 33 2"
+  echo "g58 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -3417,11 +3805,12 @@ case "$CASE" in
   g55) g55 ;;
   g56) g56 ;;
   g57) g57 ;;
+  g58) g58 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54; g55; g56; g57
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54; g55; g56; g57; g58
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|g55|g56|g57|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|g55|g56|g57|g58|all" >&2
     exit 2
     ;;
 esac
