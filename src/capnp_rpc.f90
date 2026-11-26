@@ -42,7 +42,7 @@ module capnp_rpc
                                    recipient_id_vat_init, &
                                    vat_id_t, vat_id_host_get, vat_id_port_get, &
                                    vat_id_host_set, vat_id_port_set
-   use capnp_posix, only: PX_BAD_FD, px_tcp_connect_host
+   use capnp_posix, only: PX_BAD_FD, px_tcp_connect_host, px_sndbuf
    use capnp_rpc_transport, only: rpc_send_message, rpc_recv_message, &
                                  rpc_byte_stream_t, rpc_fd_stream_t, &
                                  rpc_fd_stream_init
@@ -597,18 +597,21 @@ module capnp_rpc
       integer :: eids(0:MAXJOINPARTS - 1) = -1
    end type rpc_join_slot_t
 
-   !> Client-side flow control for `-> stream` methods. The window is a
-   !> byte budget, matching RpcFlowController::DEFAULT_WINDOW_SIZE. The
-   !> first call is sent even when it is larger than the window; the next
-   !> waits until acknowledged bytes bring the in-flight total back under
-   !> it. After any stream call fails, later sends fail immediately.
+   !> Client-side flow control for `-> stream` methods, matching
+   !> WindowFlowController. A socket window is SO_SNDBUF; any other
+   !> stream uses 65536. Bytes are the message body. A later send waits
+   !> when in-flight bytes exceed the largest body and the window plus
+   !> that body. After any stream call fails, later sends fail
+   !> immediately.
    type :: rpc_stream_t
       integer :: window = 65536
       integer :: nout = 0
-      integer :: used_bytes = 0
-      integer :: sizes(0:63) = 0
-      integer(int64) :: qids(0:63) = -1_int64
+      integer(int64) :: used_bytes = 0_int64
+      integer :: max_message = 0
+      integer, allocatable :: sizes(:)
+      integer(int64), allocatable :: qids(:)
       logical :: failed = .false.
+      logical :: fixed_window = .false.
    end type rpc_stream_t
 
    !> What a vat knows across all its connections.
@@ -5178,28 +5181,80 @@ contains
    subroutine rpc_stream_init(stream, window)
       type(rpc_stream_t), intent(out) :: stream
       integer, intent(in), optional :: window
-      if (present(window)) stream%window = max(1, window)
+      if (present(window)) then
+         stream%window = max(1, window)
+         stream%fixed_window = .true.
+      end if
    end subroutine rpc_stream_init
 
-   !> Bytes on the wire for one message: framing header plus segment
-   !> bodies. This is what the stream window counts.
-   function framed_message_bytes(m) result(n)
+   !> Body bytes of one message, with no framing. This is what the
+   !> stream window counts.
+   function message_body_bytes(m) result(n)
       type(capnp_message_t), intent(in) :: m
       integer :: n
       integer(int64) :: total
-      integer :: i
-      total = ((1_int64 + int(m%nsegs, int64))*4_int64 + 7_int64)/8_int64*8_int64
-      if (allocated(m%segs)) then
-         do i = 1, m%nsegs
-            total = total + m%segs(i)%len
-         end do
-      end if
+      total = capnp_message_nbytes(m)
       if (total > int(huge(n), int64)) then
          n = huge(n)
+      else if (total < 0_int64) then
+         n = 0
       else
          n = int(total)
       end if
-   end function framed_message_bytes
+   end function message_body_bytes
+
+   pure function stream_ready(stream) result(yes)
+      type(rpc_stream_t), intent(in) :: stream
+      logical :: yes
+      integer(int64) :: inflight, maxs, win
+      inflight = stream%used_bytes
+      maxs = int(stream%max_message, int64)
+      win = int(stream%window, int64)
+      yes = inflight <= maxs .or. inflight < win + maxs
+   end function stream_ready
+
+   !> A passed window stays put. Otherwise the window is SO_SNDBUF, or
+   !> 65536 when that option is not available.
+   subroutine stream_refresh_window(conn, stream)
+      type(rpc_conn_t), intent(in) :: conn
+      type(rpc_stream_t), intent(inout) :: stream
+      integer :: n
+      if (stream%fixed_window) return
+      n = px_sndbuf(conn%fd)
+      if (n > 0) then
+         stream%window = n
+      else
+         stream%window = 65536
+      end if
+   end subroutine stream_refresh_window
+
+   subroutine stream_ensure(stream, idx)
+      type(rpc_stream_t), intent(inout) :: stream
+      integer, intent(in) :: idx
+      integer :: cap, n
+      integer(int64), allocatable :: nq(:)
+      integer, allocatable :: ns(:)
+      if (allocated(stream%qids)) then
+         if (idx < size(stream%qids)) return
+         cap = size(stream%qids)
+         n = cap
+      else
+         cap = 0
+         n = 16
+      end if
+      do while (n <= idx)
+         n = n*2
+      end do
+      allocate (nq(0:n - 1), ns(0:n - 1))
+      nq = -1_int64
+      ns = 0
+      if (cap > 0) then
+         nq(0:cap - 1) = stream%qids
+         ns(0:cap - 1) = stream%sizes
+      end if
+      call move_alloc(nq, stream%qids)
+      call move_alloc(ns, stream%sizes)
+   end subroutine stream_ensure
 
    !> Send a prepared stream call (from a generated _begin) without
    !> waiting for its return. Blocks only when the window is full, and
@@ -5218,24 +5273,28 @@ contains
          err = RPC_ERR_EXCEPTION
          return
       end if
-      do while (stream%nout > 0 .and. &
-                (stream%nout >= 64 .or. stream%used_bytes >= stream%window))
+      call stream_refresh_window(conn, stream)
+      do while (.not. stream_ready(stream))
+         if (stream%nout <= 0) exit
          call retire_oldest(conn, stream, err)
          if (err /= CAPNP_OK) then
             call capnp_message_free(m)
             call release_question(conn, qid)
             return
          end if
+         call stream_refresh_window(conn, stream)
       end do
-      bytes = framed_message_bytes(m)
+      bytes = message_body_bytes(m)
       call rpc_call_send(conn, m, err)
       if (err /= CAPNP_OK) then
          call release_question(conn, qid)
          return
       end if
+      if (bytes > stream%max_message) stream%max_message = bytes
+      call stream_ensure(stream, stream%nout)
       stream%qids(stream%nout) = qid
       stream%sizes(stream%nout) = bytes
-      stream%used_bytes = stream%used_bytes + bytes
+      stream%used_bytes = stream%used_bytes + int(bytes, int64)
       stream%nout = stream%nout + 1
    end subroutine rpc_stream_send
 
@@ -5274,9 +5333,11 @@ contains
          if (cerr /= CAPNP_OK .and. err == CAPNP_OK) err = cerr
       end do
       stream%nout = 0
-      stream%qids = -1_int64
-      stream%sizes = 0
-      stream%used_bytes = 0
+      if (allocated(stream%qids)) then
+         stream%qids = -1_int64
+         stream%sizes = 0
+      end if
+      stream%used_bytes = 0_int64
       stream%failed = .true.
    end subroutine rpc_stream_cancel
 
@@ -5296,7 +5357,7 @@ contains
          stream%sizes(i) = stream%sizes(i + 1)
       end do
       stream%nout = stream%nout - 1
-      stream%used_bytes = stream%used_bytes - bytes
+      stream%used_bytes = stream%used_bytes - int(bytes, int64)
       call rpc_wait(conn, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(conn, qid, content, werr)

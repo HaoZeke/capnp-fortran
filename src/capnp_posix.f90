@@ -17,6 +17,7 @@ module capnp_posix
    public :: px_tcp_listen, px_tcp_accept, px_tcp_connect, px_tcp_connect_host
    public :: px_tcp_bound_port
    public :: px_poll_in
+   public :: px_sndbuf
 
    integer, parameter, public :: PX_BAD_FD = -1
 
@@ -33,6 +34,7 @@ module capnp_posix
    integer(c_int), parameter :: F_GETFL = 3_c_int
    integer(c_int), parameter :: F_SETFL = 4_c_int
    integer(c_int), parameter :: SO_ERROR = 4_c_int
+   integer(c_int), parameter :: SO_SNDBUF = 7_c_int
 
    interface
       function capnp_posix_o_nonblock() bind(c, name="capnp_posix_o_nonblock")
@@ -209,6 +211,22 @@ contains
       fd_a = int(sv(1))
       fd_b = int(sv(2))
    end subroutine px_socketpair
+
+   !> Socket send buffer in bytes, the value getsockopt(SO_SNDBUF)
+   !> returns. Negative when fd is not a socket or the option is absent.
+   function px_sndbuf(fd) result(n)
+      integer, intent(in) :: fd
+      integer :: n
+      integer(c_int), target :: buf, optlen
+      n = -1
+      if (fd < 0) return
+      buf = 0_c_int
+      optlen = 4_c_int
+      if (c_getsockopt(int(fd, c_int), SOL_SOCKET, SO_SNDBUF, &
+                       c_loc(buf), c_loc(optlen)) /= 0_c_int) return
+      if (buf <= 0_c_int) return
+      n = int(buf)
+   end function px_sndbuf
 
    subroutine px_close(fd)
       integer, intent(in) :: fd

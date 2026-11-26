@@ -136,7 +136,8 @@ feature has same-language wire tests but no live C++ peer test.
 
 ``rpc_request_cancellation`` abandons an outstanding question by sending
 Finish with ``requireEarlyCancellationWorkaround = false``. This is the
-behavior of Cap'n Proto 1.0 and newer. ``rpc_stream_cancel`` sends the
+behavior of Cap'n Proto 1.0 and newer. A stream window counts message bodies. On a socket it is
+``SO_SNDBUF``; otherwise it is 65536. ``rpc_stream_cancel`` sends the
 same request for every call still in a stream window. Cancellation is
 cooperative after application delivery: methods that do not opt in may
 continue to completion, matching capnp-C++ ``allowCancellation``. The
