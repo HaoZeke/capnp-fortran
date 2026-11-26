@@ -461,7 +461,17 @@ elements come back as `box_text_t` via `_get_elem`), list bindings
 (`Box(List(Text))` gets the typed `List(Text)` surface including
 element helpers), and brands nested inside another generic (`Box(T)`
 fields of `Nest(T)` settle through the instantiation's own bindings).
-Unbound parameters keep AnyPointer accessors. Interface-typed struct
+Unbound parameters keep AnyPointer accessors. A method implicit
+parameter is a field of that method's generated parameter or result
+struct. The field keeps its AnyPointer accessors and adds kind accessors
+`_get_text`, `_set_text`, `_get_data`, `_set_data`, `_get_struct`,
+`_set_struct`, `_init_struct`, `_get_list`, `_set_list`, `_init_list`,
+`_init_composite`, `_get_iface`, and `_set_iface`. The client helper is
+`<iface>_<method>_request`. A union arm keeps the which() check on those
+accessors. `Box(AnyPointer)` and a method parameter `Box(T)` stay separate
+instantiations. The plain `Box(AnyPointer)` keeps the name `box_any`
+in either declaration order, and the method parameter takes the next name. A brand
+parameter of a generic struct keeps the AnyPointer accessors alone. Interface-typed struct
 fields emit capability-slot pointer accessors for use with
 `rpc_make_cap_ptr`/`rpc_result_cap`.
 

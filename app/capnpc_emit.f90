@@ -17,6 +17,8 @@ module capnpc_emit
    type :: blob_t
       character(len=:), allocatable :: name
       integer(int8), allocatable :: bytes(:)
+      !> Instantiation that registered this blob, or 0.
+      integer :: owner = 0
    end type blob_t
 
    type(node_ref_t), allocatable :: g_nodes(:)
@@ -56,6 +58,12 @@ module capnpc_emit
    !> the current walk.
    type(nameset_t) :: g_as_avoid, g_as_walk
    type(nameset_t) :: g_proc_seen, g_other_seen, g_dup_found, g_ren_from
+   !> Set by open_proc so note_decl does not record that procedure twice.
+   character(len=64) :: g_skip_next_proc = ''
+   !> Node ids of detached method $Params/$Results structs that carry the
+   !> method's implicit parameters.
+   integer(int64), allocatable :: g_impl_scope(:)
+   integer :: g_nimpl_scope = 0
    character(len=64), allocatable :: g_ren_to(:)
    !> While set, w() leaves the procedure names of the lines it writes as
    !> they are: a constant accessor keeps the name of its constant.
@@ -159,8 +167,8 @@ module capnpc_emit
    type :: inst_t
       integer :: gidx = 0
       character(len=:), allocatable :: name
-      !> Identifies the instantiation: the generic node and the node id of
-      !> every binding, so two nodes that share a name stay apart.
+      !> Identifies the instantiation: the generic node and each binding.
+      !> An implicit method parameter is not the same binding as AnyPointer.
       character(len=:), allocatable :: full
       !> 0-based binding list. Sized to the brand, so arity is not capped.
       type(capnp_ptr_t), allocatable :: bindings(:)
@@ -181,6 +189,8 @@ module capnpc_emit
    integer :: g_ninsts = 0
    !> Nonzero while emitting an instantiation's accessors.
    integer :: g_cur_inst = 0
+   !> Instantiation index recorded on blobs registered during its walk.
+   integer :: g_blob_owner = 0
    !> While set, an import is for the names a generic instantiation or an
    !> inherited interface uses, and the `use` statement lists only those.
    logical :: g_soft = .false.
@@ -225,6 +235,8 @@ contains
          g_nodes(i)%id = node_id(g_nodes(i)%p)
       end do
       call build_modnames(err)
+      if (err /= CAPNP_OK) return
+      call note_implicit_scopes(err)
    end subroutine load_nodes
 
    !> The text of a file's display name without directory and extension,
@@ -983,6 +995,7 @@ contains
       g_nblobs = g_nblobs + 1
       g_blobs(g_nblobs)%name = name
       g_blobs(g_nblobs)%bytes = bytes
+      g_blobs(g_nblobs)%owner = g_blob_owner
    end subroutine note_blob
 
    !> Typed constructor. The int8 value -128 is spelled with huge()
@@ -1029,9 +1042,11 @@ contains
       end do
       g_ninsts = 0
       g_cur_inst = 0
+      g_blob_owner = 0
       do k = 1, g_nblobs
          if (allocated(g_blobs(k)%name)) deallocate (g_blobs(k)%name)
          if (allocated(g_blobs(k)%bytes)) deallocate (g_blobs(k)%bytes)
+         g_blobs(k)%owner = 0
       end do
       g_nblobs = 0
    end subroutine reset_emit_state
@@ -1177,6 +1192,7 @@ contains
          call emit_inst_procs(i, err)
          i = i + 1
       end do
+      if (err == CAPNP_OK) call prefer_implicit_inst_names()
       ! Annotation Data values are blobs. Record them while collection
       ! is open, before emit_blob_params writes the parameters.
       if (err == CAPNP_OK .and. .not. g_probe) &
@@ -1607,6 +1623,7 @@ contains
       g_own%n = 0
       g_priv%n = 0
       g_in_abstract = .false.
+      g_skip_next_proc = ''
       g_capture = .true.
       call pass_write(fidx, modname, g_prefix, err)
       g_capture = .false.
@@ -1942,15 +1959,44 @@ contains
             q = 0
             p = 1
          end if
-         if (q >= p) call declare_name(t(p:q), .true.)
+         if (q >= p) call note_proc_name(t(p:q))
          return
       end if
       p = index(t, 'subroutine ')
       if (p > 0) then
          call ident_at(t, p + 11, p, q)
-         if (q >= p) call declare_name(t(p:q), .true.)
+         if (q >= p) call note_proc_name(t(p:q))
       end if
    end subroutine note_decl
+
+   !> Record one procedure during the duplicate scan, and remember it so
+   !> the declaration line's own note_decl does not count it again.
+   subroutine open_proc(name)
+      character(len=*), intent(in) :: name
+      if (.not. g_dup_scan) return
+      call declare_name(name, .true.)
+      g_skip_next_proc = lowcase(name)
+   end subroutine open_proc
+
+   !> Write the declaration line of a module procedure. open_proc puts the
+   !> name in g_proc_seen on the duplicate scan; note_decl records every
+   !> other walk, including a renamed spelling.
+   subroutine w_proc(kind, name, rest)
+      character(len=*), intent(in) :: kind, name, rest
+      call open_proc(name)
+      call w('   '//kind//' '//name//rest)
+   end subroutine w_proc
+
+   subroutine note_proc_name(name)
+      character(len=*), intent(in) :: name
+      if (len_trim(g_skip_next_proc) > 0) then
+         if (lowcase(name) == trim(g_skip_next_proc)) then
+            g_skip_next_proc = ''
+            return
+         end if
+      end if
+      call declare_name(name, .true.)
+   end subroutine note_proc_name
 
    pure function starts(s, pre) result(yes)
       character(len=*), intent(in) :: s, pre
@@ -2866,6 +2912,10 @@ contains
          call emit_interface_field(an, ht, int(off), t, gset, gchk, err)
       case (TYPE_ANY_POINTER)
          call emit_anyptr_field(an, ht, int(off), t, gset, gchk, err)
+         if (err == CAPNP_OK) then
+            if (implicit_method_slot(t)) &
+               call emit_implicit_accessors(an, ht, int(off), gset, gchk)
+         end if
       case default
          call w('   ! field '//an//': unsupported type '// &
                 itoa(int(type_which(t), int64)))
@@ -2974,6 +3024,246 @@ contains
          call w('')
       end select
    end subroutine emit_anyptr_field
+
+   !> Record detached $Params/$Results ids for methods with implicit
+   !> parameters. capnpc-c++ 1.4.0 compileParamList sets scopeId 0 on
+   !> those structs and stores the method parameters as their brand
+   !> parameters. A named param struct keeps its own scope and is skipped.
+   subroutine note_implicit_scopes(err)
+      integer, intent(out) :: err
+      integer :: i
+      type(capnp_ptr_t) :: ml, mp
+      integer(int64) :: j, nimpl
+      err = CAPNP_OK
+      g_nimpl_scope = 0
+      if (.not. allocated(g_nodes)) return
+      do i = 1, size(g_nodes)
+         if (node_which(g_nodes(i)%p) /= NODE_INTERFACE) cycle
+         ml = node_interface_methods(g_nodes(i)%p, err)
+         if (err /= CAPNP_OK) return
+         do j = 0_int64, capnp_list_len(ml) - 1_int64
+            mp = capnp_list_get_struct(ml, int(j), err)
+            if (err /= CAPNP_OK) return
+            nimpl = method_implicit_count(mp, err)
+            if (err /= CAPNP_OK) return
+            if (nimpl <= 0_int64) cycle
+            call remember_impl_scope(method_param_struct_type(mp), err)
+            if (err /= CAPNP_OK) return
+            call remember_impl_scope(method_result_struct_type(mp), err)
+            if (err /= CAPNP_OK) return
+         end do
+      end do
+   end subroutine note_implicit_scopes
+
+   subroutine remember_impl_scope(id, err)
+      integer(int64), intent(in) :: id
+      integer, intent(out) :: err
+      integer :: idx, k
+      integer(int64), allocatable :: tmp(:)
+      err = CAPNP_OK
+      if (id == 0_int64) return
+      idx = find_node(id)
+      if (idx == 0) return
+      if (node_which(g_nodes(idx)%p) /= NODE_STRUCT) return
+      if (node_scope_id(g_nodes(idx)%p) /= 0_int64) return
+      do k = 1, g_nimpl_scope
+         if (g_impl_scope(k) == id) return
+      end do
+      if (.not. allocated(g_impl_scope)) allocate (g_impl_scope(16))
+      if (g_nimpl_scope == size(g_impl_scope)) then
+         allocate (tmp(2*size(g_impl_scope)))
+         tmp(1:g_nimpl_scope) = g_impl_scope(1:g_nimpl_scope)
+         call move_alloc(tmp, g_impl_scope)
+      end if
+      g_nimpl_scope = g_nimpl_scope + 1
+      g_impl_scope(g_nimpl_scope) = id
+   end subroutine remember_impl_scope
+
+   !> True when t is still a method implicit parameter. A brand binding
+   !> that names a concrete type has already replaced t. On a field, that
+   !> parameter is a brand parameter of the method's $Params or $Results
+   !> struct. A brand parameter of an ordinary generic struct is not.
+   function implicit_method_slot(t) result(yes)
+      type(capnp_ptr_t), intent(in) :: t
+      logical :: yes
+      integer :: k, aw
+      integer(int64) :: sid
+      yes = .false.
+      if (type_which(t) /= TYPE_ANY_POINTER) return
+      aw = type_anyptr_which(t)
+      if (aw /= ANYPTR_PARAMETER) return
+      if (.not. allocated(g_impl_scope)) return
+      sid = type_param_scope_id(t)
+      do k = 1, g_nimpl_scope
+         if (g_impl_scope(k) == sid) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function implicit_method_slot
+
+   !> Kind accessors for one implicit parameter slot. capnpc-c++.c++
+   !> templates MakeParams<T>; each kind below is the accessor shape a
+   !> branded struct parameter would get for that binding. The untyped
+   !> capnp_ptr_t get and set are emitted separately and stay in place.
+   subroutine emit_implicit_accessors(an, ht, pidx, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
+      integer, intent(in) :: pidx
+      character(len=:), allocatable :: ix, st, lt, ct, gn
+      ix = itoa(int(pidx, int64))
+      st = trim(g_anystruct)
+      lt = trim(g_anylist)
+      ct = trim(g_capcli)
+      g_need_any_struct = .true.
+      g_need_any_list = .true.
+      g_need_capability = .true.
+      gn = ident_fit(an//'_get_text')
+      call w_proc('subroutine', gn, '(h, s, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      character(len=:), allocatable, intent(out) :: s')
+      call w('      integer, intent(out) :: err')
+      call emit_arm_guard(gchk)
+      call w('      call capnp_get_text(h%p, '//ix//', s, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_set_text')
+      call w_proc('subroutine', gn, '(h, s, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      character(len=*), intent(in) :: s')
+      call w('      integer, intent(out) :: err')
+      call emit_disc(gset)
+      call w('      call capnp_set_text(h%p, '//ix//', s, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_get_data')
+      call w_proc('subroutine', gn, '(h, b, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer(int8), allocatable, intent(out) :: b(:)')
+      call w('      integer, intent(out) :: err')
+      call emit_arm_guard(gchk)
+      call w('      call capnp_get_data(h%p, '//ix//', b, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_set_data')
+      call w_proc('subroutine', gn, '(h, b, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer(int8), intent(in) :: b(:)')
+      call w('      integer, intent(out) :: err')
+      call emit_disc(gset)
+      call w('      call capnp_set_data(h%p, '//ix//', b, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_get_struct')
+      call w_proc('function', gn, '(h, err) result(o)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//st//') :: o')
+      call emit_arm_guard(gchk)
+      call w('      o%p = capnp_getp(h%p, '//ix//', err)')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_set_struct')
+      call w_proc('subroutine', gn, '(h, src, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      type('//st//'), intent(in) :: src')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: c')
+      call emit_disc(gset)
+      call w('      c = capnp_copy(h%p%msg, src%p, err)')
+      call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '//ix//', c, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_init_struct')
+      call w_proc('function', gn, '(h, dwords, pwords, err) result(o)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(in) :: dwords, pwords')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//st//') :: o')
+      call emit_disc(gset)
+      call w('      o%p = capnp_new_struct(h%p%msg, dwords, pwords, err)')
+      call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '//ix//', o%p, err)')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_get_list')
+      call w_proc('function', gn, '(h, err) result(o)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//lt//') :: o')
+      call emit_arm_guard(gchk)
+      call w('      o%p = capnp_getp(h%p, '//ix//', err)')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_set_list')
+      call w_proc('subroutine', gn, '(h, src, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      type('//lt//'), intent(in) :: src')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: c')
+      call emit_disc(gset)
+      call w('      c = capnp_copy(h%p%msg, src%p, err)')
+      call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '//ix//', c, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+      gn = ident_fit(an//'_init_list')
+      call w_proc('function', gn, '(h, n, esize, err) result(o)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer(int64), intent(in) :: n')
+      call w('      integer, intent(in) :: esize')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//lt//') :: o')
+      call emit_disc(gset)
+      call w('      o%p = capnp_new_list(h%p%msg, esize, n, err)')
+      call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '//ix//', o%p, err)')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_init_composite')
+      call w_proc('function', gn, '(h, n, dwords, pwords, err) result(o)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer(int64), intent(in) :: n')
+      call w('      integer, intent(in) :: dwords, pwords')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//lt//') :: o')
+      call emit_disc(gset)
+      call w('      o%p = capnp_new_composite_list(h%p%msg, n, dwords, pwords, err)')
+      call w('      if (err == CAPNP_OK) call capnp_setp(h%p, '//ix//', o%p, err)')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_get_iface')
+      call w_proc('function', gn, '(h, err, ctab) result(c)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(out) :: err')
+      call w('      type('//ct//') :: c')
+      call w('      type(capnp_ptr_t), intent(in), optional :: ctab')
+      call w('      type(capnp_ptr_t) :: q')
+      call w('      c%kind = 0')
+      call w('      c%id = 0_int64')
+      call emit_arm_guard(gchk)
+      call w('      q = capnp_getp(h%p, '//ix//', err)')
+      call w('      if (err /= CAPNP_OK) return')
+      call w('      if (q%kind /= CAPNP_PK_CAP) return')
+      call w('      if (present(ctab)) then')
+      call w('         call '//trim(g_cap_resolve_id)//'(ctab, q%capidx, c%kind, c%id, err)')
+      call w('      else')
+      call w('         c%kind = 1')
+      call w('         c%id = q%capidx')
+      call w('      end if')
+      call w('   end function '//gn)
+      call w('')
+      gn = ident_fit(an//'_set_iface')
+      call w_proc('subroutine', gn, '(h, c, err)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      type('//ct//'), intent(in) :: c')
+      call w('      integer, intent(out) :: err')
+      call w('      type(capnp_ptr_t) :: q')
+      call emit_disc(gset)
+      call w('      q = capnp_ptr_t()')
+      call w('      if (associated(h%p%msg)) q%msg => h%p%msg')
+      call w('      q%kind = CAPNP_PK_CAP')
+      call w('      q%capidx = c%id')
+      call w('      call capnp_setp(h%p, '//ix//', q, err)')
+      call w('   end subroutine '//gn)
+      call w('')
+   end subroutine emit_implicit_accessors
 
    subroutine emit_wrapped_ptr(an, ht, pidx, tn, gset, gchk)
       character(len=*), intent(in) :: an, ht, tn, gset, gchk
@@ -3826,6 +4116,88 @@ contains
    !> A long name truncates deterministically, a second sighting of the
    !> same instantiation finds its entry, and a different instantiation
    !> that truncates to a taken name gets a counter.
+   !> Box(AnyPointer) and a method parameter Box(T) share the visible
+   !> spelling box_any. The plain instantiation keeps that name, the one an
+   !> unbranded walk emits, in either registration order. The method
+   !> instantiation takes the next free name. A default blob moves with
+   !> the instantiation that registered it.
+   subroutine prefer_implicit_inst_names()
+      integer :: i, j, best
+      do i = 1, g_ninsts
+         if (.not. inst_bindings_implicit(i)) cycle
+         best = 0
+         do j = 1, g_ninsts
+            if (j == i) cycle
+            if (g_insts(j)%gidx /= g_insts(i)%gidx) cycle
+            if (g_insts(j)%fresh .neqv. g_insts(i)%fresh) cycle
+            if (inst_bindings_implicit(j)) cycle
+            if (.not. allocated(g_insts(i)%plain)) cycle
+            if (.not. allocated(g_insts(j)%plain)) cycle
+            if (g_insts(i)%plain /= g_insts(j)%plain) cycle
+            if (.not. allocated(g_insts(j)%name)) cycle
+            if (.not. allocated(g_insts(i)%name)) cycle
+            ! Plain already owns the short name.
+            if (len(g_insts(i)%name) >= len(g_insts(j)%name)) cycle
+            if (best == 0) then
+               best = j
+            else if (len(g_insts(j)%name) < len(g_insts(best)%name)) then
+               best = j
+            end if
+         end do
+         if (best /= 0) call swap_inst_name(i, best)
+      end do
+   end subroutine prefer_implicit_inst_names
+
+   function inst_bindings_implicit(k) result(yes)
+      integer, intent(in) :: k
+      logical :: yes
+      integer :: i
+      yes = .false.
+      if (.not. allocated(g_insts(k)%bindings)) return
+      do i = 0, g_insts(k)%nbind - 1
+         if (implicit_method_slot(g_insts(k)%bindings(i))) then
+            yes = .true.
+            return
+         end if
+      end do
+   end function inst_bindings_implicit
+
+   subroutine swap_inst_name(i, j)
+      integer, intent(in) :: i, j
+      character(len=:), allocatable :: a, b
+      a = g_insts(i)%name
+      b = g_insts(j)%name
+      g_insts(i)%name = b
+      g_insts(j)%name = a
+      call retitle_owned(i, a, b)
+      call retitle_owned(j, b, a)
+   end subroutine swap_inst_name
+
+   !> Rename blobs registered by one instantiation so their spelling follows
+   !> its new name. Blobs registered by any other walk stay put.
+   subroutine retitle_owned(owner, from, to)
+      integer, intent(in) :: owner
+      character(len=*), intent(in) :: from, to
+      character(len=:), allocatable :: name, src, dst
+      integer :: i, n
+      if (owner <= 0) return
+      src = upcase(from)
+      dst = upcase(to)
+      n = len(src)
+      do i = 1, g_nblobs
+         if (g_blobs(i)%owner /= owner) cycle
+         if (.not. allocated(g_blobs(i)%name)) cycle
+         name = g_blobs(i)%name
+         if (len(name) > n) then
+            if (name(1:n) == src) then
+               if (name(n + 1:n + 1) == '_') then
+                  g_blobs(i)%name = dst//name(n + 1:)
+               end if
+            end if
+         end if
+      end do
+   end subroutine retitle_owned
+
    subroutine register_inst(gidx, n, btypes, bctx, sid, o, ol, full, err, plain)
       integer, intent(in) :: gidx, n
       type(capnp_ptr_t), intent(in) :: btypes(0:)
@@ -4066,6 +4438,18 @@ contains
          part = 'text'
       case (TYPE_DATA)
          part = 'data'
+      case (TYPE_ANY_POINTER)
+         part = 'any'
+         ! An implicit method parameter and unconstrained AnyPointer both
+         ! spell "any". The key keeps them apart so each keeps its bindings.
+         if (implicit_method_slot(bt)) then
+            key = 'impl'//itoa(type_param_scope_id(bt))//'_'// &
+                  itoa(int(type_param_index(bt), int64))
+         else
+            key = part
+         end if
+         if (present(mpart)) mpart = part
+         return
       case (TYPE_LIST)
          et = type_list_element(bt, err)
          if (err /= CAPNP_OK) return
@@ -4243,18 +4627,22 @@ contains
       integer, intent(out) :: err
       character(len=:), allocatable :: tn
       type(capnp_ptr_t) :: np
-      integer :: prev
+      integer :: prev, prev_owner
       tn = g_insts(k)%name
       np = g_nodes(g_insts(k)%gidx)%p
       prev = g_cur_inst
+      prev_owner = g_blob_owner
       g_cur_inst = k
+      g_blob_owner = k
       if (node_which(np) == NODE_INTERFACE) then
          call emit_interface_procs(np, err)
          g_cur_inst = prev
+         g_blob_owner = prev_owner
          return
       end if
       if (node_which(np) /= NODE_STRUCT) then
          g_cur_inst = prev
+         g_blob_owner = prev_owner
          err = CAPNP_OK
          return
       end if
@@ -4275,6 +4663,7 @@ contains
       call w('')
       call emit_fields_of(np, tn, tn, err)
       g_cur_inst = prev
+      g_blob_owner = prev_owner
    end subroutine emit_inst_body
 
    ! --- interfaces -----------------------------------------------------------
@@ -4469,8 +4858,8 @@ contains
       type(capnp_ptr_t), intent(in) :: np
       integer, intent(out) :: err
       type(capnp_ptr_t) :: ml, mp, al
-      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent, dn, pre
-      integer(int64) :: i
+      character(len=:), allocatable :: tn, mn, bn, pn, rn, parent, dn, pre, gn
+      integer(int64) :: i, nimpl
       character(len=64), allocatable :: own(:), ex(:)
       type(nameset_t) :: seen
       integer :: nsuper, extra_ids(64), nextra, base_ids(64), nbase, n_own, nex
@@ -4515,6 +4904,32 @@ contains
          call w('      if (err == CAPNP_OK) call '//rpcn('payload_content_set')//'(pl, params%p, err)')
          call w('   end subroutine '//ident_fit(tn//'_'//mn//'_begin'))
          call w('')
+         ! capnpc-c++.c++ emits makeRequest<T>() when the method lists
+         ! implicit parameters. The wire call does not depend on T; the
+         ! kind accessors on the param and result structs do.
+         nimpl = method_implicit_count(mp, err)
+         if (err /= CAPNP_OK) return
+         if (nimpl > 0_int64) then
+            gn = ident_fit(tn//'_'//mn//'_request')
+            call w_proc('subroutine', gn, '(conn, client, m, params, qid, err)')
+            call w('      type(rpc_conn_t), intent(inout), target :: conn')
+            call w('      type('//tn//'_client_t), intent(in) :: client')
+            call w('      type(capnp_message_t), intent(inout), target :: m')
+            call w('      type('//pn//'_t), intent(out) :: params')
+            call w('      integer(int64), intent(out) :: qid')
+            call w('      integer, intent(out) :: err')
+            call w('      type('//rpcn('payload_t')//') :: pl')
+            call w('      call rpc_call_begin(conn, client%cap, '// &
+                   ident_const(upcase(tn)//'_INTERFACE_ID')//', '//itoa(i)// &
+                   ', m, pl, qid, err)')
+            call w('      if (err /= CAPNP_OK) return')
+            call w('      params%p = capnp_new_struct(m, '//upcase(pn)//'_DWORDS, '// &
+                   upcase(pn)//'_PWORDS, err)')
+            call w('      if (err == CAPNP_OK) call '//rpcn('payload_content_set')// &
+                   '(pl, params%p, err)')
+            call w('   end subroutine '//gn)
+            call w('')
+         end if
          call w('   subroutine '//ident_fit(tn//'_'//mn//'_wait')//'(conn, qid, results, err)')
          call w('      type(rpc_conn_t), intent(inout), target :: conn')
          call w('      integer(int64), intent(in) :: qid')

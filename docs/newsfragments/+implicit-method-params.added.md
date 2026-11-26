@@ -1,0 +1,1 @@
+Methods with an implicit type parameter gain kind-specific struct, text, data, list and interface accessors, and a client request helper, on that method's parameter and result structs. Untyped pointer accessors stay as they are. A union arm keeps the which() check.
