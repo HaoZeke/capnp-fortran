@@ -54,14 +54,11 @@ contains
    function dual_primary_text_a_has(h) result(v)
       type(dual_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
       if (dual_primary_which(h) /= 1) then
          v = .false.
          return
       end if
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function dual_primary_text_a_has
 
    subroutine dual_primary_text_a_get(h, s, err)

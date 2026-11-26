@@ -139,10 +139,7 @@ contains
    function dynamic_capability_has(h) result(v)
       type(dynamic_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function dynamic_capability_has
 
    function dynamic_capability_get(h, err, ctab) result(c)
@@ -174,10 +171,7 @@ contains
    function dynamic_any_struct_has(h) result(v)
       type(dynamic_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function dynamic_any_struct_has
 
    function dynamic_any_struct_get(h, err) result(o)
@@ -197,10 +191,7 @@ contains
    function dynamic_any_list_has(h) result(v)
       type(dynamic_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 2, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 2)
    end function dynamic_any_list_has
 
    function dynamic_any_list_get(h, err) result(o)
@@ -248,14 +239,11 @@ contains
    function dynamic_choice_label_has(h) result(v)
       type(dynamic_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
       if (dynamic_choice_which(h) /= 1) then
          v = .false.
          return
       end if
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 3)
    end function dynamic_choice_label_has
 
    subroutine dynamic_choice_label_get(h, s, err)
@@ -281,14 +269,11 @@ contains
    function dynamic_choice_items_has(h) result(v)
       type(dynamic_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
       if (dynamic_choice_which(h) /= 2) then
          v = .false.
          return
       end if
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 3)
    end function dynamic_choice_items_has
 
    function dynamic_choice_items_get(h, err) result(l)
@@ -469,9 +454,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine shape_circle_select
 
-   function shape_circle_radius_get(h) result(v)
+   function shape_circle_radius_get(h, err) result(v)
       type(shape_t), intent(in) :: h
+      integer, intent(out), optional :: err
       real(real64) :: v
+      if (shape_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0.0_real64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_f64(h%p, 0_int64)
    end function shape_circle_radius_get
 
@@ -491,9 +483,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine shape_square_select
 
-   function shape_square_width_get(h) result(v)
+   function shape_square_width_get(h, err) result(v)
       type(shape_t), intent(in) :: h
+      integer, intent(out), optional :: err
       real(real64) :: v
+      if (shape_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0.0_real64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_f64(h%p, 0_int64)
    end function shape_square_width_get
 
@@ -685,10 +684,7 @@ contains
    function scalars_note_has(h) result(v)
       type(scalars_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function scalars_note_has
 
    subroutine scalars_note_get(h, s, err)
@@ -708,10 +704,7 @@ contains
    function scalars_blob_has(h) result(v)
       type(scalars_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function scalars_blob_has
 
    subroutine scalars_blob_get(h, b, err)
@@ -805,9 +798,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine deep_groups_g1_select
 
-   function deep_groups_g1_v1_get(h) result(v)
+   function deep_groups_g1_v1_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 0_int64)
    end function deep_groups_g1_v1_get
 
@@ -818,9 +818,16 @@ contains
       call capnp_set_i32(h%p, 0_int64, v, err)
    end subroutine deep_groups_g1_v1_set
 
-   function deep_groups_g1_g2_v2_get(h) result(v)
+   function deep_groups_g1_g2_v2_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 8_int64)
    end function deep_groups_g1_g2_v2_get
 
@@ -831,9 +838,16 @@ contains
       call capnp_set_i32(h%p, 8_int64, v, err)
    end subroutine deep_groups_g1_g2_v2_set
 
-   function deep_groups_g1_g2_g3_v3_get(h) result(v)
+   function deep_groups_g1_g2_g3_v3_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 12_int64)
    end function deep_groups_g1_g2_g3_v3_get
 
@@ -844,9 +858,16 @@ contains
       call capnp_set_i32(h%p, 12_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_v3_set
 
-   function deep_groups_g1_g2_g3_g4_v4_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_v4_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 16_int64)
    end function deep_groups_g1_g2_g3_g4_v4_get
 
@@ -857,9 +878,16 @@ contains
       call capnp_set_i32(h%p, 16_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_v4_set
 
-   function deep_groups_g1_g2_g3_g4_g5_v5_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_v5_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 20_int64)
    end function deep_groups_g1_g2_g3_g4_g5_v5_get
 
@@ -870,9 +898,16 @@ contains
       call capnp_set_i32(h%p, 20_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_v5_set
 
-   function deep_groups_g1_g2_g3_g4_g5_g6_v6_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_g6_v6_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 24_int64)
    end function deep_groups_g1_g2_g3_g4_g5_g6_v6_get
 
@@ -883,9 +918,16 @@ contains
       call capnp_set_i32(h%p, 24_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_g6_v6_set
 
-   function deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 28_int64)
    end function deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_get
 
@@ -896,9 +938,16 @@ contains
       call capnp_set_i32(h%p, 28_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_v7_set
 
-   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 32_int64)
    end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_get
 
@@ -909,9 +958,16 @@ contains
       call capnp_set_i32(h%p, 32_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_v8_set
 
-   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 36_int64)
    end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_get
 
@@ -922,9 +978,16 @@ contains
       call capnp_set_i32(h%p, 36_int64, v, err)
    end subroutine deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_v9_set
 
-   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_get(h) result(v)
+   function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_get(h, err) result(v)
       type(deep_groups_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (deep_groups_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_i32(h%p, 40_int64)
    end function deep_groups_g1_g2_g3_g4_g5_g6_g7_g8_g9_g10_v10_get
 
@@ -1008,7 +1071,7 @@ contains
       type(nested_union_t), intent(in) :: h
       integer, intent(out), optional :: err
       integer(int32) :: v
-      if (nested_union_g_which(h) /= 0) then
+      if ((nested_union_which(h) /= 1) .or. (nested_union_g_which(h) /= 0)) then
          if (present(err)) err = CAPNP_ERR_KIND
          v = 0_int32
          return
@@ -1029,21 +1092,18 @@ contains
    function nested_union_g_y_has(h) result(v)
       type(nested_union_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      if (nested_union_g_which(h) /= 1) then
+      if ((nested_union_which(h) /= 1) .or. (nested_union_g_which(h) /= 1)) then
          v = .false.
          return
       end if
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function nested_union_g_y_has
 
    subroutine nested_union_g_y_get(h, s, err)
       type(nested_union_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
-      if (nested_union_g_which(h) /= 1) then
+      if ((nested_union_which(h) /= 1) .or. (nested_union_g_which(h) /= 1)) then
          err = CAPNP_ERR_KIND
          return
       end if

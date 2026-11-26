@@ -86,10 +86,7 @@ contains
    function vat_id_host_has(h) result(v)
       type(vat_id_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function vat_id_host_has
 
    subroutine vat_id_host_get(h, s, err)
@@ -179,10 +176,7 @@ contains
    function recipient_id_vat_has(h) result(v)
       type(recipient_id_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function recipient_id_vat_has
 
    function recipient_id_vat_get(h, err) result(o)
@@ -247,10 +241,7 @@ contains
    function third_party_cap_id_vat_has(h) result(v)
       type(third_party_cap_id_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function third_party_cap_id_vat_has
 
    function third_party_cap_id_vat_get(h, err) result(o)
@@ -402,10 +393,7 @@ contains
    function join_result_cap_has(h) result(v)
       type(join_result_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function join_result_cap_has
 
    function join_result_cap_get(h, err, ctab) result(c)

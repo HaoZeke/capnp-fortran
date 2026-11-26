@@ -143,10 +143,7 @@ contains
    function sink_label_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function sink_label_has
 
    subroutine sink_label_get(h, s, err)
@@ -172,10 +169,7 @@ contains
    function sink_payload_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function sink_payload_has
 
    subroutine sink_payload_get(h, b, err)
@@ -201,10 +195,7 @@ contains
    function sink_origin_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 2, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 2)
    end function sink_origin_has
 
    function sink_origin_get(h, err) result(o)
@@ -267,10 +258,7 @@ contains
    function sink_tags_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 3)
    end function sink_tags_has
 
    function sink_tags_get(h, err) result(l)
@@ -312,10 +300,7 @@ contains
    function sink_blobs_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 4, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 4)
    end function sink_blobs_has
 
    function sink_blobs_get(h, err) result(l)
@@ -357,10 +342,7 @@ contains
    function sink_grid_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 5, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 5)
    end function sink_grid_has
 
    function sink_grid_get(h, err) result(l)
@@ -401,10 +383,7 @@ contains
    function sink_stuff_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 6, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 6)
    end function sink_stuff_has
 
    function sink_stuff_get(h, err) result(q)
@@ -424,10 +403,7 @@ contains
    function sink_spots_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 7, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 7)
    end function sink_spots_has
 
    function sink_spots_get(h, err) result(l)
@@ -459,10 +435,7 @@ contains
    function sink_scores_has(h) result(v)
       type(sink_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 8, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 8)
    end function sink_scores_has
 
    function sink_scores_get(h, err) result(l)

@@ -184,10 +184,7 @@ contains
    function holder_svc_has(h) result(v)
       type(holder_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function holder_svc_has
 
    function holder_svc_get(h, err, ctab) result(c)
@@ -224,10 +221,7 @@ contains
    function holder_note_has(h) result(v)
       type(holder_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function holder_note_has
 
    subroutine holder_note_get(h, s, err)

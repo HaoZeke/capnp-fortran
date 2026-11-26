@@ -2684,16 +2684,20 @@ contains
 
    !> Emit accessors for every field of node np. Accessors take handle type
    !> ht_t; generated names start with pfx (differs from ht for groups).
-   recursive subroutine emit_fields_of(np, ht, pfx, err, depth)
+   recursive subroutine emit_fields_of(np, ht, pfx, err, depth, guard)
       type(capnp_ptr_t), intent(in) :: np
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
       integer, intent(in), optional :: depth
+      character(len=*), intent(in), optional :: guard
       type(capnp_ptr_t) :: fl, f
+      character(len=:), allocatable :: og
       integer(int64) :: i
       integer :: disc_count, d
       d = 0
       if (present(depth)) d = depth
+      og = ''
+      if (present(guard)) og = guard
       if (d > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
@@ -2713,23 +2717,26 @@ contains
       do i = 0_int64, capnp_list_len(fl) - 1_int64
          f = capnp_list_get_struct(fl, int(i), err)
          if (err /= CAPNP_OK) return
-         call emit_field(np, f, ht, pfx, err, d)
+         call emit_field(np, f, ht, pfx, err, d, og)
          if (err /= CAPNP_OK) return
       end do
    end subroutine emit_fields_of
 
-   recursive subroutine emit_field(np, f, ht, pfx, err, depth)
+   recursive subroutine emit_field(np, f, ht, pfx, err, depth, guard)
       type(capnp_ptr_t), intent(in) :: np, f
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
       integer, intent(in), optional :: depth
+      character(len=*), intent(in), optional :: guard
       type(capnp_ptr_t) :: t, dv
-      character(len=:), allocatable :: fn, an, gset, gchk
+      character(len=:), allocatable :: fn, an, gset, gchk, og, own
       integer :: disc, gidx, ctx, saved, d
       integer(int64) :: off
 
       d = 0
       if (present(depth)) d = depth
+      og = ''
+      if (present(guard)) og = guard
       if (d > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
@@ -2741,12 +2748,22 @@ contains
       if (err /= CAPNP_OK) return
       disc = field_discriminant(f)
       gset = ''
-      gchk = ''
+      own = ''
       if (disc /= NO_DISCRIMINANT) then
          gset = '      call capnp_set_u16(h%p, '// &
                 itoa(node_struct_discriminant_offset(np)*2_int64)// &
                 '_int64, '//itoa(int(disc, int64))//'_int32, err)'
-         gchk = pfx//'_which(h) /= '//itoa(int(disc, int64))
+         own = pfx//'_which(h) /= '//itoa(int(disc, int64))
+      end if
+      ! A group arm has no reader object. C++ checks which() on the group,
+      ! so each child carries that check, and a nested union keeps its own.
+      gchk = own
+      if (len(og) > 0) then
+         if (len(own) > 0) then
+            gchk = '('//og//') .or. ('//own//')'
+         else
+            gchk = og
+         end if
       end if
 
       if (field_which(f) == FIELD_GROUP) then
@@ -2766,7 +2783,7 @@ contains
             call w('   end subroutine '//an//'_select')
             call w('')
          end if
-         call emit_fields_of(g_nodes(gidx)%p, ht, an, err, d + 1)
+         call emit_fields_of(g_nodes(gidx)%p, ht, an, err, d + 1, gchk)
          return
       end if
 
@@ -2884,16 +2901,13 @@ contains
       call w('   function '//an//'_has(h) result(v)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      logical :: v')
-      call w('      type(capnp_ptr_t) :: q')
-      call w('      integer :: err')
       if (len(gchk) > 0) then
          call w('      if ('//gchk//') then')
          call w('         v = .false.')
          call w('         return')
          call w('      end if')
       end if
-      call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
-      call w('      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL')
+      call w('      v = capnp_hasp(h%p, '//itoa(int(pidx, int64))//')')
       call w('   end function '//an//'_has')
       call w('')
    end subroutine emit_has

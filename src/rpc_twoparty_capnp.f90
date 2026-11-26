@@ -295,10 +295,7 @@ contains
    function join_result_cap_has(h) result(v)
       type(join_result_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function join_result_cap_has
 
    function join_result_cap_get(h, err, ctab) result(c)

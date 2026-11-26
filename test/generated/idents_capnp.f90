@@ -144,10 +144,7 @@ contains
    function seed_text_has(h) result(v)
       type(seed_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function seed_text_has
 
    subroutine seed_text_get(h, s, err)
@@ -195,10 +192,7 @@ contains
    function hold_body_has(h) result(v)
       type(hold_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function hold_body_has
 
    function hold_body_get(h, err) result(o)
@@ -270,10 +264,7 @@ contains
    function hold_use_h_has(h) result(v)
       type(hold_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function hold_use_h_has
 
    function hold_use_h_get(h, err) result(o)
@@ -498,10 +489,7 @@ contains
    function hold_data_body_has(h) result(v)
       type(hold_data_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function hold_data_body_has
 
    function hold_data_body_get(h, err) result(o)
