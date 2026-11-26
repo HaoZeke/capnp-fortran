@@ -11,7 +11,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(13))
+      allocate (testsuite(15))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -38,6 +38,10 @@ contains
       testsuite(12)%test => run_box_plain
       testsuite(13)%name = "codegen-box-default"
       testsuite(13)%test => run_box_default
+      testsuite(14)%name = "codegen-box-const"
+      testsuite(14)%test => run_box_const
+      testsuite(15)%name = "codegen-box-any-tag"
+      testsuite(15)%test => run_box_any_tag
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -251,6 +255,16 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_with_capnp(error, 'box-default', 'codegen: box pointer default round trip')
    end subroutine run_box_default
+
+   subroutine run_box_const(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'box-const', 'codegen: const default decodes')
+   end subroutine run_box_const
+
+   subroutine run_box_any_tag(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'box-any-tag', 'codegen: longer name leaves the tag default')
+   end subroutine run_box_any_tag
 
    !> Same probe as test_gate2: exit 77 / a missing capnp skips the case.
    subroutine run_with_capnp(error, mode, what)

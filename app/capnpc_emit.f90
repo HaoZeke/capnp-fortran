@@ -17,6 +17,8 @@ module capnpc_emit
    type :: blob_t
       character(len=:), allocatable :: name
       integer(int8), allocatable :: bytes(:)
+      !> Instantiation that registered this blob, or 0.
+      integer :: owner = 0
    end type blob_t
 
    type(node_ref_t), allocatable :: g_nodes(:)
@@ -180,6 +182,8 @@ module capnpc_emit
    integer :: g_ninsts = 0
    !> Nonzero while emitting an instantiation's accessors.
    integer :: g_cur_inst = 0
+   !> Instantiation index recorded on blobs registered during its walk.
+   integer :: g_blob_owner = 0
    !> While set, an import is for the names a generic instantiation or an
    !> inherited interface uses, and the `use` statement lists only those.
    logical :: g_soft = .false.
@@ -984,6 +988,7 @@ contains
       g_nblobs = g_nblobs + 1
       g_blobs(g_nblobs)%name = name
       g_blobs(g_nblobs)%bytes = bytes
+      g_blobs(g_nblobs)%owner = g_blob_owner
    end subroutine note_blob
 
    !> Typed constructor. The int8 value -128 is spelled with huge()
@@ -1030,9 +1035,11 @@ contains
       end do
       g_ninsts = 0
       g_cur_inst = 0
+      g_blob_owner = 0
       do k = 1, g_nblobs
          if (allocated(g_blobs(k)%name)) deallocate (g_blobs(k)%name)
          if (allocated(g_blobs(k)%bytes)) deallocate (g_blobs(k)%bytes)
+         g_blobs(k)%owner = 0
       end do
       g_nblobs = 0
    end subroutine reset_emit_state
@@ -4094,8 +4101,8 @@ contains
    !> Box(AnyPointer) and a method parameter Box(T) share the visible
    !> spelling box_any. The plain instantiation keeps that name, the one an
    !> unbranded walk emits, in either registration order. The method
-   !> instantiation takes the next free name. Default blobs move with the
-   !> whole instantiation name.
+   !> instantiation takes the next free name. A default blob moves with
+   !> the instantiation that registered it.
    subroutine prefer_implicit_inst_names()
       integer :: i, j, best
       do i = 1, g_ninsts
@@ -4144,50 +4151,34 @@ contains
       b = g_insts(j)%name
       g_insts(i)%name = b
       g_insts(j)%name = a
-      call retitle_blobs(a, b)
+      call retitle_owned(i, a, b)
+      call retitle_owned(j, b, a)
    end subroutine swap_inst_name
 
-   !> Move default blobs with a swapped pair. Each blob is rewritten once.
-   !> The owner is the longest instantiation name that is a whole identifier
-   !> prefix of the blob (that name, then '_').
-   subroutine retitle_blobs(from_a, from_b)
-      character(len=*), intent(in) :: from_a, from_b
-      character(len=:), allocatable :: name, owner, dst
+   !> Rename blobs registered by one instantiation so their spelling follows
+   !> its new name. Blobs registered by any other walk stay put.
+   subroutine retitle_owned(owner, from, to)
+      integer, intent(in) :: owner
+      character(len=*), intent(in) :: from, to
+      character(len=:), allocatable :: name, src, dst
       integer :: i, n
+      if (owner <= 0) return
+      src = upcase(from)
+      dst = upcase(to)
+      n = len(src)
       do i = 1, g_nblobs
+         if (g_blobs(i)%owner /= owner) cycle
          if (.not. allocated(g_blobs(i)%name)) cycle
          name = g_blobs(i)%name
-         call blob_owner(name, owner)
-         if (len(owner) == 0) cycle
-         if (owner == upcase(from_a)) then
-            dst = upcase(from_b)
-         else if (owner == upcase(from_b)) then
-            dst = upcase(from_a)
-         else
-            cycle
+         if (len(name) > n) then
+            if (name(1:n) == src) then
+               if (name(n + 1:n + 1) == '_') then
+                  g_blobs(i)%name = dst//name(n + 1:)
+               end if
+            end if
          end if
-         n = len(owner)
-         g_blobs(i)%name = dst//name(n + 1:)
       end do
-   end subroutine retitle_blobs
-
-   !> Longest instantiation name that prefixes the blob as a whole identifier.
-   subroutine blob_owner(name, owner)
-      character(len=*), intent(in) :: name
-      character(len=:), allocatable, intent(out) :: owner
-      character(len=:), allocatable :: cand
-      integer :: k, n
-      owner = ''
-      do k = 1, g_ninsts
-         if (.not. allocated(g_insts(k)%name)) cycle
-         cand = upcase(g_insts(k)%name)
-         n = len(cand)
-         if (len(name) <= n) cycle
-         if (name(1:n) /= cand) cycle
-         if (name(n + 1:n + 1) /= '_') cycle
-         if (len(cand) > len(owner)) owner = cand
-      end do
-   end subroutine blob_owner
+   end subroutine retitle_owned
 
    subroutine register_inst(gidx, n, btypes, bctx, sid, o, ol, full, err, plain)
       integer, intent(in) :: gidx, n
@@ -4618,18 +4609,22 @@ contains
       integer, intent(out) :: err
       character(len=:), allocatable :: tn
       type(capnp_ptr_t) :: np
-      integer :: prev
+      integer :: prev, prev_owner
       tn = g_insts(k)%name
       np = g_nodes(g_insts(k)%gidx)%p
       prev = g_cur_inst
+      prev_owner = g_blob_owner
       g_cur_inst = k
+      g_blob_owner = k
       if (node_which(np) == NODE_INTERFACE) then
          call emit_interface_procs(np, err)
          g_cur_inst = prev
+         g_blob_owner = prev_owner
          return
       end if
       if (node_which(np) /= NODE_STRUCT) then
          g_cur_inst = prev
+         g_blob_owner = prev_owner
          err = CAPNP_OK
          return
       end if
@@ -4650,6 +4645,7 @@ contains
       call w('')
       call emit_fields_of(np, tn, tn, err)
       g_cur_inst = prev
+      g_blob_owner = prev_owner
    end subroutine emit_inst_body
 
    ! --- interfaces -----------------------------------------------------------

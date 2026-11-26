@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
 #   multifile | suffix | annot | longann | fresh | voidconst |
-#   implicit-golden | implicit-roundtrip | box-plain | box-default
+#   implicit-golden | implicit-roundtrip | box-plain | box-default |
+#   box-const | box-any-tag
 # The plugin and the module directory come from the environment, set by
 # the unit test to the binary it is running. Searching the build tree
 # would accept a stale profile.
@@ -112,6 +113,35 @@ program drv
    call capnp_message_free(msg)
 end program drv
 EOF
+  gfortran $san $cov -std=f2018 -ffree-line-length-none \
+    -J"$out/rt-$stem" -I"$out/rt-$stem" -I"$moddir" \
+    "$gen" "$out/rt-$stem/drv.f90" "$lib" -o "$out/rt-$stem/roundtrip"
+  "$out/rt-$stem/roundtrip"
+}
+
+load_runtime() {
+  lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+  test -n "$lib"
+  san=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
+    san="-fsanitize=address,undefined"
+  fi
+  cov=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
+    cov=--coverage
+  fi
+}
+
+run_codegen_drv() {
+  local stem="$1"
+  local gen mod
+  (cd "$out" && capnp compile -o- "$stem.capnp") > "$out/$stem.cgr"
+  "$bin" "$out/$stem.cgr"
+  gen=$(find "$out" -name "${stem}_capnp.f90" | head -1)
+  test -n "$gen"
+  mod=$(sed -n 's/^module //p' "$gen" | head -1)
+  test -n "$mod"
+  mkdir -p "$out/rt-$stem"
   gfortran $san $cov -std=f2018 -ffree-line-length-none \
     -J"$out/rt-$stem" -I"$out/rt-$stem" -I"$moddir" \
     "$gen" "$out/rt-$stem/drv.f90" "$lib" -o "$out/rt-$stem/roundtrip"
@@ -413,8 +443,133 @@ EOS
   box_default_order plain_first plain-first
   box_default_order method_first method-first
   ;;
+box-const)
+  need_capnp
+  load_runtime
+  cat > "$out/box_const.capnp" << 'EOS'
+@0xb0a1d4e7c3f25811;
+
+struct Tag {
+  n @0 :Int32;
+}
+
+struct Box(T) {
+  value @0 :T;
+  tag @1 :Tag = (n = 7);
+}
+
+interface Factory {
+  boxy @0 [T] (box :Box(T)) -> (out :T);
+}
+
+struct Plain {
+  bare @0 :Box(AnyPointer);
+}
+
+const boxAny :Tag = (n = 9);
+EOS
+  mkdir -p "$out/rt-box_const"
+  cat > "$out/rt-box_const/drv.f90" << 'EOF'
+program drv
+   use capnp
+   use box_const_capnp
+   implicit none
+   type(capnp_message_t), target :: msg
+   type(box_any_t) :: plain
+   type(box_any_2_t) :: boxed
+   type(tag_t) :: tg, cst
+   integer(int32) :: n
+   integer :: err
+   call capnp_message_init_builder(msg, err)
+   if (err /= 0) error stop 1
+   cst = box_any(err)
+   if (err /= 0) error stop 2
+   n = tag_n_get(cst)
+   if (n /= 9_int32) error stop 3
+   plain = box_any_new(msg, err)
+   if (err /= 0) error stop 4
+   tg = box_any_tag_get(plain, err)
+   if (err /= 0) error stop 5
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 6
+   boxed = box_any_2_new(msg, err)
+   if (err /= 0) error stop 7
+   tg = box_any_2_tag_get(boxed, err)
+   if (err /= 0) error stop 8
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 9
+   call capnp_message_free(msg)
+end program drv
+EOF
+  run_codegen_drv box_const
+  ;;
+box-any-tag)
+  need_capnp
+  load_runtime
+  cat > "$out/box_any_tag.capnp" << 'EOS'
+@0xb0a1d4e7c3f25812;
+
+struct Tag {
+  n @0 :Int32;
+}
+
+struct AnyTag {
+}
+
+struct Box(T) {
+  value @0 :T;
+  tag @1 :Tag = (n = 7);
+}
+
+interface Factory {
+  boxy @0 [T] (box :Box(T)) -> (out :T);
+}
+
+struct Plain {
+  bare @0 :Box(AnyPointer);
+  held @1 :Box(AnyTag);
+}
+EOS
+  mkdir -p "$out/rt-box_any_tag"
+  cat > "$out/rt-box_any_tag/drv.f90" << 'EOF'
+program drv
+   use capnp
+   use box_any_tag_capnp
+   implicit none
+   type(capnp_message_t), target :: msg
+   type(box_any_t) :: plain
+   type(box_any_2_t) :: boxed
+   type(box_any_tag_t) :: held
+   type(tag_t) :: tg
+   integer(int32) :: n
+   integer :: err
+   call capnp_message_init_builder(msg, err)
+   if (err /= 0) error stop 1
+   plain = box_any_new(msg, err)
+   if (err /= 0) error stop 2
+   tg = box_any_tag_get(plain, err)
+   if (err /= 0) error stop 3
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 4
+   boxed = box_any_2_new(msg, err)
+   if (err /= 0) error stop 5
+   tg = box_any_2_tag_get(boxed, err)
+   if (err /= 0) error stop 6
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 7
+   held = box_any_tag_new(msg, err)
+   if (err /= 0) error stop 8
+   tg = box_any_tag_tag_get(held, err)
+   if (err /= 0) error stop 9
+   n = tag_n_get(tg)
+   if (n /= 7_int32) error stop 10
+   call capnp_message_free(msg)
+end program drv
+EOF
+  run_codegen_drv box_any_tag
+  ;;
 *)
-  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst|implicit-golden|implicit-roundtrip|box-plain|box-default" >&2
+  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst|implicit-golden|implicit-roundtrip|box-plain|box-default|box-const|box-any-tag" >&2
   exit 2
   ;;
 esac
