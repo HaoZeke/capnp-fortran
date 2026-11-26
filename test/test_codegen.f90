@@ -266,7 +266,7 @@ contains
       call run_with_capnp(error, 'box-any-tag', 'codegen: longer name leaves the tag default')
    end subroutine run_box_any_tag
 
-   !> Same probe as test_gate2: exit 77 / a missing capnp skips the case.
+   !> Skip the case when capnp is absent from PATH. Script exit 77 fails the case.
    subroutine run_with_capnp(error, mode, what)
       type(error_type), allocatable, intent(out) :: error
       character(len=*), intent(in) :: mode, what
