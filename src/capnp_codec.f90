@@ -258,12 +258,9 @@ contains
       if (form /= FLT_BAD) return
       if (n - i >= 1) then
          if (tok(i:i) == '0') then
-            ! One character remains when i == n. The next index is past the token.
-            if (i < n) then
-               if (tok(i + 1:i + 1) == 'x' .or. tok(i + 1:i + 1) == 'X') then
-                  if (digits_ok(tok(i + 2:), .true.)) form = FLT_HEX
-                  return
-               end if
+            if (tok(i + 1:i + 1) == 'x' .or. tok(i + 1:i + 1) == 'X') then
+               if (digits_ok(tok(i + 2:), .true.)) form = FLT_HEX
+               return
             end if
          end if
       end if
