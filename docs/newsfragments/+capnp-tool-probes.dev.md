@@ -1,1 +1,1 @@
-A missing capnp tool fails these tests when CI is set and skips when CI is unset. Include directories come from CAPNP_PREFIX, or from the capnp binary after symlinks are resolved.
+A missing capnp tool fails these tests when CI is set and skips when CI is unset. The standard include directory is CAPNP_PREFIX/include when CAPNP_PREFIX is non-empty and that directory exists, and otherwise the parent of the capnp bin directory after a readlink loop and cd -P. Shell expansions in that lookup are quoted.
