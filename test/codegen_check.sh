@@ -160,6 +160,7 @@ run_codegen_drv() {
 
 case "${1:-}" in
 multifile)
+  need_capnp
   (cd "$root" && capnp compile -o- -Ischema \
     schema/pair_a.capnp schema/pair_b.capnp) > "$out/m.cgr"
   "$bin" "$out/m.cgr"
@@ -167,6 +168,7 @@ multifile)
   test -s "$out/schema/pair_b_capnp.f90"
   ;;
 suffix)
+  need_capnp
   (cd "$root" && capnp compile -o- schema/longinst.capnp) > "$out/l.cgr"
   "$bin" "$out/l.cgr"
   python3 - "$out/schema/longinst_capnp.f90" <<'PY'
@@ -186,6 +188,7 @@ PY
     "$out/schema/longinst_capnp.f90"
   ;;
 annot)
+  need_capnp
   (cd "$root" && capnp compile -o- schema/idents.capnp) > "$out/i.cgr"
   "$bin" "$out/i.cgr"
   python3 - "$out/schema/idents_capnp.f90" <<'PY'
@@ -202,6 +205,7 @@ for k in kinds:
 PY
   ;;
 longann)
+  need_capnp
   (cd "$root" && capnp compile -o- schema/longann.capnp) > "$out/t.cgr"
   "$bin" "$out/t.cgr"
   f=$(find "$out" -name longann_capnp.f90 | head -1)
@@ -222,6 +226,7 @@ fresh)
   diff -q "$out/schema/adder_capnp.f90" "$root/test/generated/adder_capnp.f90"
   ;;
 voidconst)
+  need_capnp
   (cd "$root" && capnp compile -o- schema/voidconst.capnp) > "$out/v.cgr"
   "$bin" "$out/v.cgr"
   diff -u "$root/test/generated/voidconst_capnp.f90" "$out/schema/voidconst_capnp.f90"

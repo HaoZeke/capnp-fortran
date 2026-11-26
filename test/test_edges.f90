@@ -1,7 +1,7 @@
 !> Differentials against capnp 1.4.0 for the inputs the codecs used to
 !> reject or reshape, plus a message just past the default reader budget.
 module test_edges
-   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed, skip_test
+   use testdrive, only: new_unittest, unittest_type, error_type, check, test_failed
    use, intrinsic :: iso_fortran_env, only: int64
    use, intrinsic :: iso_c_binding, only: c_int
    use capnp
@@ -180,7 +180,7 @@ contains
          call test_failed(error, 'edges: write '//label)
          return
       end if
-      cmd = capnpf_setup()//' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      cmd = capnpf_setup()//' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" '//conv//' '//tmp//'/all.capnp All < ' &
          //tmp//'/in.txt > '//tmp//'/ref.out 2>'//tmp//'/ref.err; echo $? > '//tmp//'/ref.rc' &
          //' && "$CAP" convert -I"$INC" '//conv//' '//tmp//'/all.capnp All < ' &
@@ -199,7 +199,7 @@ contains
       integer :: err
       character(len=:), allocatable :: cmd
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -213,7 +213,7 @@ contains
          call test_failed(error, 'layout: input')
          return
       end if
-      cmd = capnpf_setup()//' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      cmd = capnpf_setup()//' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" text:binary '//tmp//'/two.capnp Two < ' &
          //tmp//'/two.txt > '//tmp//'/two.binary.ref' &
          //' && "$CAP" convert -I"$INC" text:binary '//tmp//'/two.capnp Two < ' &
@@ -234,7 +234,7 @@ contains
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -259,7 +259,7 @@ contains
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -353,7 +353,7 @@ contains
          'struct Node { kid @0 :Node; v @1 :Int32; }'//achar(10)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -401,7 +401,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       integer(int8), allocatable :: raw(:)
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -532,7 +532,7 @@ contains
       call spit(tmp//'/seg.json', payload, err)
       call check_(error, err == 0, 'sweep: payload')
       call check_(error, sh(capnpf_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && nerr=0' &
          //' && for n in $(seq 1 64); do' &
          //' capnp convert -I"$INC" --segment-size=$n json:binary '//tmp &
@@ -553,7 +553,7 @@ contains
          'struct Pad { txt @0 :Text; }'//achar(10)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -564,7 +564,7 @@ contains
       call check_(error, err == 0, 'pad: schema')
       call spit(tmp//'/pad.txt', '(txt = "hello")', err)
       call check_(error, sh(capnpf_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" --segment-size=2 text:binary '//tmp &
          //'/pad.capnp Pad < '//tmp//'/pad.txt > '//tmp//'/pad.ref' &
          //' && "$CAP" convert -I"$INC" --segment-size=2 text:binary '//tmp &
@@ -584,7 +584,7 @@ contains
          '@0x8f0c3d2b1a947e66;'//achar(10)// &
          'struct IntList { xs @0 :List(Int32); }'//achar(10)
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -636,7 +636,7 @@ contains
       integer(int64) :: nbytes
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then

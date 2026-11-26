@@ -399,6 +399,22 @@ contains
       if (err /= CAPNP_OK .or. idx <= 0) err = CAPNP_ERR_ARG
    end subroutine bind_root
 
+   !> Shell text that sets INC to the standard include directory.
+   !> CAPNP_PREFIX/include is used when CAPNP_PREFIX is non-empty and that
+   !> directory exists. Otherwise command -v capnp is followed with readlink
+   !> and cd -P, and INC is the parent of the resolved bin directory with
+   !> /include appended.
+   function std_include_sh() result(s)
+      character(len=:), allocatable :: s
+      s = ' if [ -n "${CAPNP_PREFIX:-}" ] && [ -d "$CAPNP_PREFIX/include" ]; then' &
+         //' INC="${CAPNP_PREFIX}/include"; else' &
+         //' p=$(command -v capnp) || exit 1;' &
+         //' while [ -L "$p" ]; do t=$(readlink "$p") || exit 1;' &
+         //' case "$t" in /*) p="$t";; *) p="$(dirname "$p")/$t";; esac; done;' &
+         //' d=$(cd -P "$(dirname "$p")" && pwd -P) || exit 1;' &
+         //' INC="$(dirname "$d")/include"; fi'
+   end function std_include_sh
+
    subroutine load_schema(path, extra_inc, no_std, type_name, annotations, sch, err)
       character(len=*), intent(in) :: path, extra_inc, type_name
       logical, intent(in) :: no_std, annotations
@@ -436,7 +452,7 @@ contains
          ! The helper is not installed beside the capnp headers, so the
          ! standard import path is the same one `capnp compile` uses.
          ! User -I paths stay in front of it.
-         shcmd = shcmd//' INC=$(dirname $(dirname $(command -v capnp)))/include;'
+         shcmd = shcmd//std_include_sh()//';'
       end if
       shcmd = shcmd//' if test -n "$REQ"; then exec "$REQ" --annotations '//ann//std &
               //extra_inc
@@ -445,7 +461,7 @@ contains
       if (index(type_name, '(') > 0) then
          ! Without the helper, a wrapper file names the generic root as a
          ! field type. Its names are looked up in the original file.
-         if (.not. no_std) shcmd = shcmd//'INC=$(dirname $(dirname $(command -v capnp)))/include; '
+         if (.not. no_std) shcmd = shcmd//std_include_sh()//'; '
          shcmd = shcmd//'ABS=$(readlink -f '//shell_quote(trim(path))//') || exit 1; ' &
                  //'W=$(mktemp /tmp/capnpf-brand-XXXXXX.capnp) || exit 1; ' &
                  //'printf ''%s\n'' ''@0x8e1e4a11b22c3d4f;'' "using CapnpfOrig = import \"$ABS\";" ' &
@@ -462,7 +478,7 @@ contains
          shcmd = shcmd//'capnp compile --no-standard-import'//extra_inc//' -o- ' &
                  //shell_quote(trim(path))
       else
-         shcmd = shcmd//'INC=$(dirname $(dirname $(command -v capnp)))/include && ' &
+         shcmd = shcmd//std_include_sh()//' && ' &
                  //'capnp compile'//extra_inc//' -I"$INC" -o- ' &
                  //shell_quote(trim(path))
       end if

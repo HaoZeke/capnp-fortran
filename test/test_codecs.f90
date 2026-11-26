@@ -112,7 +112,7 @@ contains
       character(len=:), allocatable :: text, file
       integer :: err, idx
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp// &
@@ -161,7 +161,7 @@ contains
       integer :: err, idx
       src = kitchen_text()
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -229,7 +229,7 @@ contains
             '  title = "\x41B\?''caf'//achar(195)//achar(169)//'",'//achar(10)// &
             '  blob = "\x00\xffA" )'//achar(10)
       call spit(tmp//'/te.txt', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp encode -I"$INC" schema/codec.capnp Sample < '//tmp//'/te.txt > '//tmp//'/te.bin' &
          //' && capnp decode -I"$INC" schema/codec.capnp Sample < '//tmp//'/te.bin > '//tmp//'/te.out' &
          //' && capnp convert -I"$INC" binary:canonical schema/codec.capnp Sample < '//tmp//'/te.bin > '//tmp//'/te.can')) then
@@ -259,7 +259,7 @@ contains
          call capnp_set_i32(root, 8_int64, 20_int32, err)
          call capnp_serialize_bytes(msg, bytes, err)
          call capnp_write_file(tmp//'/ud.bin', bytes, err)
-         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp decode -I"$INC" schema/codec.capnp UnionDefaults < '//tmp//'/ud.bin > '//tmp//'/ud.txt')) then
             call test_failed(error, 'capnp decode UnionDefaults')
             call capnp_message_free(msg)
@@ -306,7 +306,7 @@ contains
       character(len=:), allocatable :: src, text, jtxt
       integer :: err, idx
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       src = '( textBox = (value = "hello", label = "l1"),'//achar(10)// &
@@ -364,7 +364,7 @@ contains
       character(len=:), allocatable :: text, file
       integer :: err, idx
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp// &
@@ -408,7 +408,7 @@ contains
       integer :: err, idx
       src = kitchen_text()
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -472,7 +472,7 @@ contains
       call compile_codec_schema(error, schema)
       if (allocated(error)) return
       call spit(tmp//'/s.txt', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp encode -I"$INC" schema/codec.capnp Sample < '//tmp//'/s.txt > '//tmp//'/s.bin' &
          //' && capnp convert -I"$INC" binary:json schema/codec.capnp Sample < '//tmp//'/s.bin > '//tmp//'/s.json' &
          //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp Sample < '//tmp//'/s.bin > '//tmp//'/s.short.json' &
@@ -528,7 +528,7 @@ contains
          call capnp_set_i32(root, 8_int64, 22_int32, err)
          call capnp_serialize_bytes(msg, bytes, err)
          call capnp_write_file(tmp//'/jud.bin', bytes, err)
-         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp convert -I"$INC" binary:json schema/codec.capnp' &
             //' UnionDefaults < '//tmp//'/jud.bin > '//tmp//'/jud.json' &
             //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
@@ -548,7 +548,7 @@ contains
       ! UInt64 JSON number >= 2^63, decimal "0777" string, and null base64/hex Data.
       js = '{"ubig":10000000000000000000,"big":"0777","b64":null,"hexed":null,"hue":"azure"}'
       call spit(tmp//'/je.json', js, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < '//tmp//'/je.json > '//tmp//'/je.can')) then
          call test_failed(error, 'capnp convert json-edges')
          call capnp_dyn_free(schema)
@@ -631,14 +631,14 @@ contains
          call capnp_json_decode(schema, idx, js, decoded, err)
          if (b == 0) then
             call check_(error, err /= CAPNP_OK, label//': decode fails')
-            call check_(error, .not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            call check_(error, .not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
                //' && capnp convert -I"$INC" json:binary schema/codec.capnp Sample < ' &
                //tmp//'/raw.json > /dev/null 2>&1'), label//': capnp fails')
             call capnp_message_free(decoded)
             cycle
          end if
          call check_(error, err == CAPNP_OK, label//': decode')
-         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp convert -I"$INC" json:binary schema/codec.capnp Sample < ' &
             //tmp//'/raw.json > '//tmp//'/raw.bin' &
             //' && capnp convert -I"$INC" binary:json schema/codec.capnp Sample < ' &
@@ -670,7 +670,7 @@ contains
       logical :: soft
       if (allocated(error)) return
       call spit(tmp//'/soft.json', js, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && ! capnp convert -I"$INC" json:text schema/codec.capnp Sample < ' &
          //tmp//'/soft.json > '//tmp//'/soft.txt 2>/dev/null')) then
          call test_failed(error, label//': capnp did not report the number')
@@ -1007,7 +1007,7 @@ contains
       call check_(error, idx > 0, label//': node')
       if (allocated(error)) return
       call spit(tmp//'/vc.txt', src_txt//achar(10), err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp encode -I"$INC" schema/codec.capnp '//tname//' < '//tmp//'/vc.txt > '//tmp//'/vc.bin' &
          //' && capnp convert -I"$INC" binary:json schema/codec.capnp '//tname//' < '//tmp//'/vc.bin > '//tmp//'/vc.json' &
          //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp ' &
@@ -1339,7 +1339,7 @@ contains
       character(len=:), allocatable :: got, exp
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp// &
@@ -1385,7 +1385,7 @@ contains
       ! 1. flat-packed encode, decode, convert, and multi-segment schema-less binary:flat / binary:flat-packed.
       if (.not. sh('mkdir -p '//tmp// &
          ' && '//capnpf_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
          //' | "$CAP" encode --flat -p schema/common.capnp Vec3 > '//tmp//'/fp.ours' &
          //' && printf "(x = 1.5, y = -2.5, z = 4)\n"' &
@@ -1429,7 +1429,7 @@ contains
 
       ! 3. Deep eval paths and binary/packed/flat/flat-packed/canonical/json eval output formats.
       if (.not. sh(capnpf_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && "$CAP" eval -I "$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ours' &
          //' && capnp eval -I"$INC" schema/codec.capnp "evalConst.items[1].matrix[1][0]" > '//tmp//'/ev1.ref' &
          //' && "$CAP" eval -I"$INC" schema/codec.capnp "EvalRoot.items[1].matrix[1][1]" > '//tmp//'/ev2.ours' &
@@ -1547,7 +1547,7 @@ contains
       call capnp_write_file(tmp//'/codec.fixture.cgr', kept, err)
       call check_(error, err == CAPNP_OK, 'write '//fixture)
       if (allocated(error)) return
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr' &
          //' && capnp decode "$INC/capnp/schema.capnp" CodeGeneratorRequest < ' &
          //tmp//'/codec.cgr > '//tmp//'/codec.cgr.txt' &

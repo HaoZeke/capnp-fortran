@@ -246,7 +246,7 @@ contains
       integer(int8), allocatable :: got(:), ref(:)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -290,7 +290,7 @@ contains
       integer(int64) :: c1, c2, rate, n
       real :: elapsed
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -391,7 +391,7 @@ contains
       end if
       src = clash_schema()
       call spit(tmp//'/clash.capnp', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/clash.capnp > '//tmp//'/clash.cgr' &
          //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp NameClash > ' &
          //tmp//'/name.bin' &
@@ -455,7 +455,7 @@ contains
          return
       end if
       call spit(tmp//'/clash.capnp', clash_schema(), err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/clash.capnp > '//tmp//'/clash.cgr' &
          //' && printf "()\n" | capnp encode -I"$INC" '//tmp//'/clash.capnp VoidVal > ' &
          //tmp//'/void.bin' &
@@ -663,7 +663,7 @@ contains
          call capnp_set_i32(root, 8_int64, 22_int32, err)
          call capnp_serialize_bytes(msg, bytes, err)
          call capnp_write_file(tmp//'/nd.bin', bytes, err)
-         if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp convert -I"$INC" binary:json --short schema/codec.capnp' &
             //' UnionDefaults < '//tmp//'/nd.bin > '//tmp//'/nd.json')) then
             call test_failed(error, 'null-disc: capnp convert')
@@ -838,7 +838,7 @@ contains
          return
       end if
       call spit(tmp//'/uj.json', js, err)
-      cpp_ok = sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      cpp_ok = sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" json:canonical schema/codec.capnp '//tname &
          //' < '//tmp//'/uj.json > '//tmp//'/uj.can 2>'//tmp//'/uj.err')
       call capnp_json_decode(schema, idx, js, decoded, err)
@@ -950,7 +950,7 @@ contains
       call check_(error, err /= CAPNP_OK, label)
       call capnp_message_free(decoded)
       call spit(tmp//'/bad.json', js, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
          //tmp//'/bad.json > '//tmp//'/bad.can 2>/dev/null')) then
          return
@@ -1094,7 +1094,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/eval-annotations && '//cap_setup() &
-         //' && export CAP TMPD='//tmp//'/eval-annotations INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && export CAP TMPD='//tmp//'/eval-annotations INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && python3 - <<''PY'''//achar(10)// &
          'import os, shutil, subprocess, sys'//achar(10)// &
          'cap = os.environ["CAP"]'//achar(10)// &
@@ -1160,7 +1160,7 @@ contains
       integer(int8), allocatable :: got(:), ref(:)
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && echo kept > '//tmp//'/kept' &
@@ -1324,7 +1324,7 @@ contains
       character(len=*), parameter :: sch = &
          '@0x8c1e4a7b2d9056f3;'//achar(10)//'struct F { x @0 :Float32; }'//achar(10)
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -1525,13 +1525,13 @@ contains
       call io_ok(error, '"$CAP" --help', 'io: help')
       call io_ok(error, '"$CAP" --version', 'io: version')
       call io_ok(error, '"$CAP" eval schema/kitchen.capnp answer', 'io: text eval')
-      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      call io_fail(error, 'INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && "$CAP" eval -I "$INC" -ojson schema/codec.capnp evalConst', &
          'io: json eval')
-      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      call io_fail(error, 'INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && "$CAP" eval -I "$INC" -b schema/codec.capnp evalConst', &
          'io: binary eval')
-      call io_fail(error, 'INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      call io_fail(error, 'INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && "$CAP" eval -I "$INC" -p schema/codec.capnp evalConst', &
          'io: packed eval')
       call io_fail(error, 'printf "(x = 1, y = 0, z = 0)\n" | "$CAP" encode schema/common.capnp Vec3', &
@@ -1624,7 +1624,7 @@ contains
          call test_failed(error, 'mkdir')
          return
       end if
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- schema/codec.capnp > '//tmp//'/codec.cgr')) then
          call test_failed(error, 'capnp compile codec schema')
          return
@@ -1644,7 +1644,7 @@ contains
       integer :: err
       if (allocated(error)) return
       call spit(tmp//'/one.json', js, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp convert -I"$INC" json:canonical schema/codec.capnp Sample < ' &
          //tmp//'/one.json > '//tmp//'/one.can')) then
          call test_failed(error, label//': capnp')
@@ -1897,7 +1897,7 @@ contains
             '}'//achar(10)// &
             'struct Bag { rows @0 :List(Item); }'//achar(10)
       call spit(tmp//'/many.capnp', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/many.capnp > '//tmp//'/many.cgr')) then
          call test_failed(error, 'union-many: compile')
          return
@@ -1968,7 +1968,7 @@ contains
             '  child @4 :Node;'//achar(10)// &
             '}'//achar(10)
       call spit(tmp//'/nested.capnp', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/nested.capnp > '//tmp//'/nested.cgr')) then
          call test_failed(error, 'union-nested: compile')
          return
@@ -2129,7 +2129,7 @@ contains
       integer(int8), allocatable :: bytes(:)
       integer :: err, idx, i
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -2233,7 +2233,7 @@ contains
             '  }'//achar(10)// &
             '}'//achar(10)
       call spit(tmp//'/sp.capnp', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/sp.capnp > '//tmp//'/sp.cgr' &
          //' && printf ''{"a": 1, "a ": 2}\n''' &
          //' | capnp convert -I"$INC" json:json --short '//tmp//'/sp.capnp Sp > '//tmp//'/sp.ref')) then
@@ -2334,7 +2334,7 @@ contains
             '  }'//achar(10)// &
             '}'//achar(10)
       call spit(tmp//'/uc.capnp', src, err)
-      if (.not. sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+      if (.not. sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && capnp compile -I"$INC" -o- '//tmp//'/uc.capnp > '//tmp//'/uc.cgr')) then
          call test_failed(error, 'union-clear: compile')
          return
@@ -2367,7 +2367,7 @@ contains
             return
          end if
          call spit(tmp//'/uc.json', js, e2)
-         cpp_ok = sh('INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         cpp_ok = sh('INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp convert -I"$INC" json:canonical '//tmp//'/uc.capnp '//tname &
             //' < '//tmp//'/uc.json > '//tmp//'/uc.can 2>'//tmp//'/uc.err')
          call capnp_json_decode(schema, idx, js, decoded, e2)
@@ -2895,7 +2895,7 @@ contains
             return
          end if
          if (.not. sh(cap_setup() &
-            //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && capnp convert -I"$INC" json:text --short schema/codec.capnp Sample' &
             //' < '//tmp//'/num.in > '//tmp//'/num.ref 2>/dev/null; echo $? > '//tmp//'/num.ref.rc' &
             //' && "$CAP" convert -I"$INC" json:text --short schema/codec.capnp Sample' &
@@ -3032,7 +3032,7 @@ contains
             return
          end if
          if (.not. sh(cap_setup() &
-            //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+            //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
             //' && python3 -c "open('''//tmp//'/pk.bin'',''wb'').write(bytes.fromhex(open(''' &
             //tmp//'/pk.hex'').read()))"' &
             //' && capnp convert -I"$INC" binary:'//fmt//' --short '//schema//' '//typ &
@@ -3053,7 +3053,7 @@ contains
       character(len=:), allocatable :: src, diag
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3215,7 +3215,7 @@ contains
       character(len=:), allocatable :: src
       integer :: err
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
@@ -3375,7 +3375,7 @@ contains
          'd.joinpath("scores.bin").write_bytes(bytes.fromhex(h))'//achar(10)// &
          'PY'//achar(10)// &
          'SCH='//tmp//'/kind.capnp'//achar(10)// &
-         'INC=$(dirname $(dirname $(command -v capnp)))/include'//achar(10)// &
+         'INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)'//achar(10)// &
          'bad=0'//achar(10)// &
          'cmpb() {'//achar(10)// &
          '  capnp convert "binary:$2" --short "$SCH" "$3" < "$1" > '//tmp//'/ref 2>/dev/null'//achar(10)// &
@@ -3482,7 +3482,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && export CAP INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && python3 - <<''PY'''//achar(10)// &
          'import os, subprocess, sys'//achar(10)// &
          'inc = os.environ["INC"]'//achar(10)// &
@@ -3528,7 +3528,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && J=$INC/capnp/compat/json.capnp' &
          //' && cat > '//tmp//'/wrap.capnp <<''EOF'''//achar(10)// &
          '@0x91b3c4d5e6f70819;'//achar(10)// &
@@ -3597,7 +3597,7 @@ contains
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
          //' && test -x ./build/schema-request' &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && SRC="${CAPNP_SRC:-}"' &
          //' && if [ -z "$SRC" ]; then SRC=$(cd "$(dirname "$(command -v capnp)")/../../src/capnproto-c++-1.4.0/src" && pwd); fi' &
          //' && test -f "$SRC/capnp/test.capnp"' &
@@ -3634,7 +3634,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && printf ''(big = 1)\n'' | capnp convert -I"$INC" text:flat' &
          //' schema/codec.capnp Sample > '//tmp//'/msg.flat' &
          //' && python3 - <<''PY'''//achar(10)// &
@@ -3660,7 +3660,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && export CAP INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && python3 - <<''PY'''//achar(10)// &
          'import os, subprocess, sys'//achar(10)// &
          'from pathlib import Path'//achar(10)// &
@@ -3687,11 +3687,11 @@ contains
    subroutine run_json_value_object(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && export CAP INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && python3 - <<''PY'''//achar(10)// &
          'import os, subprocess, sys'//achar(10)// &
          'inc = os.environ["INC"]; cap = os.environ["CAP"]'//achar(10)// &
@@ -3718,7 +3718,7 @@ contains
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
-         //' && export CAP INC=$(dirname $(dirname $(command -v capnp)))/include' &
+         //' && export CAP INC=$("${CAPNP_FORTRAN_ROOT:-.}/test/dev_schemas.sh" --include)' &
          //' && python3 - <<''PY'''//achar(10)// &
          'import os, subprocess, sys'//achar(10)// &
          'inc = os.environ["INC"]; cap = os.environ["CAP"]'//achar(10)// &
@@ -3746,7 +3746,7 @@ contains
    subroutine run_text_plausible(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3774,7 +3774,7 @@ contains
    subroutine run_canonical_reject(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//' && '//cap_setup() &
@@ -3825,7 +3825,7 @@ contains
    subroutine run_generic_root(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/generic-root && '//cap_setup() &
@@ -3899,7 +3899,7 @@ contains
    subroutine run_cli_options(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/cli-options && '//cap_setup() &
@@ -3961,7 +3961,7 @@ contains
    subroutine run_cap_pointers(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/cap-pointers && '//cap_setup() &
@@ -4011,7 +4011,7 @@ contains
    subroutine run_plausible_sniff(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/plausible-sniff && '//cap_setup() &
@@ -4072,7 +4072,7 @@ contains
    subroutine run_nonstruct_root(error)
       type(error_type), allocatable, intent(out) :: error
       if (.not. capnp_bin()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call schema_skip(error)
          return
       end if
       if (.not. sh('mkdir -p '//tmp//'/nonstruct-root && '//cap_setup() &

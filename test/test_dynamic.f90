@@ -4,6 +4,7 @@
 !> capnp_dyn_get_bool / capnp_dyn_get_f64 then re-read by name.
 module test_dynamic
    use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
+   use cli_path, only: schema_skip
    use capnp
    use capnp_dynamic
    use capnp_schema, only: TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_VOID, TYPE_INT64, &
@@ -1215,7 +1216,8 @@ contains
    end subroutine load_defaults_schema
 
    !> Write lines to build/dyn_inline/<stem>.capnp, compile it with the
-   !> capnp tool and load the result. Skips the test without the tool.
+   !> capnp tool and load the result. A missing tool fails when CI is set
+   !> and skips when CI is unset.
    subroutine load_inline_schema(error, stem, lines, schema, ok)
       type(error_type), allocatable, intent(inout) :: error
       character(len=*), intent(in) :: stem
@@ -1243,7 +1245,7 @@ contains
       call execute_command_line('capnp compile -o- '//dir//'/'//stem//'.capnp > '// &
                                 dir//'/'//stem//'.cgr', exitstat=stat, cmdstat=cs)
       if (cs /= 0 .or. stat /= 0) then
-         call skip_test(error, 'capnp compile is not available')
+         call schema_skip(error)
          return
       end if
       call capnp_read_file(dir//'/'//stem//'.cgr', bytes, err)
