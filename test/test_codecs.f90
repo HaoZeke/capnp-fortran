@@ -33,13 +33,13 @@ module test_codecs
       end function c_setlocale
       function c_strtod(nptr, endptr) bind(c, name="strtod") result(v)
          import :: c_char, c_ptr, c_double
-         character(kind=c_char), intent(in) :: nptr(*)
+         character(kind=c_char), intent(in), target :: nptr(*)
          type(c_ptr), intent(out) :: endptr
          real(c_double) :: v
       end function c_strtod
       function c_strtof(nptr, endptr) bind(c, name="strtof") result(v)
          import :: c_char, c_ptr, c_float
-         character(kind=c_char), intent(in) :: nptr(*)
+         character(kind=c_char), intent(in), target :: nptr(*)
          type(c_ptr), intent(out) :: endptr
          real(c_float) :: v
       end function c_strtof
