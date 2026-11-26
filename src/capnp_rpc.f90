@@ -8713,7 +8713,18 @@ contains
       logical :: found
       integer(int8), allocatable :: bytes(:)
       call answer_find(conn, other, slot, found)
-      if (.not. found .or. .not. associated(slot) .or. .not. slot%used) then
+      ! A missing answer leaves slot null. .or. would still read it.
+      if (.not. found) then
+         call abort_conn(conn, &
+                         '`Return.takeFromOtherQuestion` had invalid answer ID.', err)
+         return
+      end if
+      if (.not. associated(slot)) then
+         call abort_conn(conn, &
+                         '`Return.takeFromOtherQuestion` had invalid answer ID.', err)
+         return
+      end if
+      if (.not. slot%used) then
          call abort_conn(conn, &
                          '`Return.takeFromOtherQuestion` had invalid answer ID.', err)
          return
@@ -8748,8 +8759,10 @@ contains
       integer :: i, eid
       err = CAPNP_OK
       call answer_find(conn, other, slot, found)
+      ! A missing answer leaves slot null. .or. would still read it.
       if (.not. found) return
-      if (.not. associated(slot) .or. .not. slot%used) return
+      if (.not. associated(slot)) return
+      if (.not. slot%used) return
       if (.not. slot%redirected .or. .not. slot%has_results) return
       do i = 0, slot%nexp - 1
          eid = slot%exports(i)
