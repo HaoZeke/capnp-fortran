@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(51))
+      allocate (testsuite(52))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -138,6 +138,8 @@ contains
       testsuite(50)%test => run_set_same_message
       testsuite(51)%name = "dynamic-null-structlist"
       testsuite(51)%test => run_null_structlist
+      testsuite(52)%name = "dynamic-setcap-iface"
+      testsuite(52)%test => run_setcap_iface
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3324,5 +3326,57 @@ contains
          call capnp_message_free(dm)
       end subroutine copy_arm
    end subroutine run_null_structlist
+
+   !> dynamic.c++ Builder::set (636-644) accepts a capability whose
+   !> interface extends the field and rejects any other. An absent id
+   !> and a zero id stay unchecked.
+   subroutine run_setcap_iface(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg
+      type(capnp_ptr_t) :: root, q
+      character(len=80), parameter :: lines(6) = [character(len=80) :: &
+         '@0xd1f0c3a5b7e90a23;', &
+         'interface Base { a @0 () -> (); }', &
+         'interface Side { s @0 () -> (); }', &
+         'interface Sub extends(Side, Base) { b @0 () -> (); }', &
+         'interface Other { c @0 () -> (); }', &
+         'struct Holder { base @0 :Base; }']
+      integer :: err, rc, hidx
+      logical :: ok
+      call load_inline_schema(error, 'setcap', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      hidx = capnp_dyn_find(schema, 'Holder', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, hidx, msg, err)
+
+      call capnp_dyn_set_capability(schema, hidx, root, 'base', 3_int64, rc, &
+                                    interface_id=iface_id('Sub'))
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%kind == CAPNP_PK_CAP .and. &
+                  q%capidx == 3_int64, 'setcap: derived interface accepted')
+      call capnp_dyn_set_capability(schema, hidx, root, 'base', 9_int64, rc, &
+                                    interface_id=iface_id('Other'))
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_ERR_KIND .and. q%kind == CAPNP_PK_CAP .and. &
+                  q%capidx == 3_int64, 'setcap: unrelated interface rejected')
+      call capnp_dyn_set_capability(schema, hidx, root, 'base', 5_int64, rc)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 5_int64, &
+                  'setcap: absent interface id accepted')
+      call capnp_dyn_set_capability(schema, hidx, root, 'base', 6_int64, rc, &
+                                    interface_id=0_int64)
+      q = capnp_getp(root, 0, err)
+      call check_(error, rc == CAPNP_OK .and. q%capidx == 6_int64, &
+                  'setcap: zero interface id accepted')
+      call capnp_message_free(msg)
+      call capnp_dyn_free(schema)
+   contains
+      integer(int64) function iface_id(name)
+         character(len=*), intent(in) :: name
+         integer :: e
+         iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
+      end function iface_id
+   end subroutine run_setcap_iface
 
 end module test_dynamic

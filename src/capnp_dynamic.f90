@@ -2270,13 +2270,20 @@ contains
       capidx = value%capidx
    end function capnp_dyn_get_capability
 
-   subroutine capnp_dyn_set_capability(schema, idx, p, fname, capidx, err)
+   !> interface_id, when present and non-zero, is the capability interface.
+   !> capnp_dyn_setp accepts it when dyn_iface_extends is true, as
+   !> dynamic.c++ Builder::set (636-644) requires. A mismatch returns
+   !> CAPNP_ERR_KIND and does not store the capability. Absent or zero
+   !> skips that check.
+   subroutine capnp_dyn_set_capability(schema, idx, p, fname, capidx, err, &
+                                       interface_id)
       type(capnp_dyn_schema_t), intent(in) :: schema
       integer, intent(in) :: idx
       type(capnp_ptr_t), intent(in) :: p
       character(len=*), intent(in) :: fname
       integer(int64), intent(in) :: capidx
       integer, intent(out) :: err
+      integer(int64), intent(in), optional :: interface_id
       type(capnp_ptr_t) :: value
       if (capidx < 0_int64 .or. capidx > 4294967295_int64) then
          err = CAPNP_ERR_ARG
@@ -2286,6 +2293,7 @@ contains
       if (associated(p%msg)) value%msg => p%msg
       value%kind = CAPNP_PK_CAP
       value%capidx = capidx
+      if (present(interface_id)) value%schema_id = interface_id
       call capnp_dyn_setp(schema, idx, p, fname, value, err)
    end subroutine capnp_dyn_set_capability
 
