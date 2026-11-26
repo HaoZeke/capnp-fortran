@@ -239,6 +239,17 @@ $ fpm build
 $ fpm test
 ```
 
+Live codec and codegen comparisons need the standard schemas beside `capnp`
+(`include/capnp/compat/json.capnp`) and, for the C++ parity cases, `capnp.pc`,
+`g++`, `pkg-config`, and `python3`. Debian and Ubuntu put the compiler in
+`capnproto` and those schemas plus `capnp.pc` in `libcapnp-dev`:
+
+```console
+$ sudo apt install gfortran g++ pkg-config python3 capnproto libcapnp-dev
+```
+
+Without the schemas, comparisons that import them are skipped and `fpm test` exits 0.
+
 To depend on it, name the git source and a tag in your own `fpm.toml`:
 
 ```toml

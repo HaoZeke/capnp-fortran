@@ -111,7 +111,7 @@ contains
       integer(int8), allocatable :: bytes(:), ours(:), ref(:)
       character(len=:), allocatable :: text, file
       integer :: err, idx
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -160,7 +160,7 @@ contains
       character(len=:), allocatable :: text, src
       integer :: err, idx
       src = kitchen_text()
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -212,7 +212,7 @@ contains
       character(len=:), allocatable :: src, text
       integer :: err, idx, uidx, beg, topos, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -305,7 +305,7 @@ contains
       integer(int8), allocatable :: bytes(:), ours(:), ref(:)
       character(len=:), allocatable :: src, text, jtxt
       integer :: err, idx
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -363,7 +363,7 @@ contains
       integer(int8), allocatable :: bytes(:), ours(:), ref(:)
       character(len=:), allocatable :: text, file
       integer :: err, idx
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -407,7 +407,7 @@ contains
       character(len=:), allocatable :: text, src
       integer :: err, idx
       src = kitchen_text()
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -466,7 +466,7 @@ contains
          '  where = (city = "Pune", zip = 411),'//achar(10)// &
          '  scores = [1, -1] )'//achar(10)
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -511,7 +511,7 @@ contains
       character(len=:), allocatable :: text, js
       integer :: err, idx, uidx, disc
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -583,7 +583,7 @@ contains
       type(capnp_dyn_schema_t), target :: schema
       integer :: idx, err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -613,7 +613,7 @@ contains
       character(len=8) :: label
       integer :: idx, err, b
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -939,7 +939,7 @@ contains
       type(capnp_message_t), target :: decoded
       integer :: err, idx
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
       call compile_codec_schema(error, schema)
@@ -1338,7 +1338,7 @@ contains
       type(error_type), allocatable, intent(out) :: error
       character(len=:), allocatable :: got, exp
       integer :: err
-      if (.not. have_capnp()) then
+      if (.not. capnp_bin()) then
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
@@ -1378,7 +1378,7 @@ contains
       integer(int8), allocatable :: b_got(:), b_exp(:)
       integer :: err
       if (.not. have_capnp()) then
-         call skip_test(error, 'capnp tool not on PATH')
+         call skip_test(error, 'capnp standard schemas are not available')
          return
       end if
 
@@ -1710,9 +1710,16 @@ contains
       end if
    end function capnp_as_i8_local
 
-   function have_capnp() result(y)
+   function capnp_bin() result(y)
       logical :: y
       y = sh('command -v capnp >/dev/null 2>&1')
+   end function capnp_bin
+
+   function have_capnp() result(y)
+      logical :: y
+      y = sh('bin=$(command -v capnp) && test -n "$bin" && ' &
+         // 'inc=$(dirname "$(dirname "$bin")")/include && ' &
+         // 'test -f "$inc/capnp/compat/json.capnp"')
    end function have_capnp
 
    function sh(cmd) result(ok)

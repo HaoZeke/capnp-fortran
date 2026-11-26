@@ -6,7 +6,12 @@
 - A Fortran 2018 compiler (gfortran 13+ is what CI and =pixi= pin)
 - [[https://fpm.fortran-lang.org][fpm]] for the library and tests
 - [[https://fypp.readthedocs.io][fypp]] to regenerate =capnp_endian= / =capnp_message= from =.fypp= sources
-- The Cap'n Proto =capnp= tool when compiling schemas or regenerating fixtures
+- The Cap'n Proto =capnp= tool when compiling schemas or regenerating fixtures.
+  Codec and codegen comparisons need the standard schemas beside it
+  (=include/capnp/compat/json.capnp=) and =capnp.pc=. Debian and Ubuntu place
+  those files in =libcapnp-dev=, separate from the =capnproto= package.
+  =g++=, =pkg-config=, and =python3= run the C++ parity cases. Without the
+  schemas, comparisons that import them are skipped and =fpm test= exits 0.
 
 Optional interop tier:
 
