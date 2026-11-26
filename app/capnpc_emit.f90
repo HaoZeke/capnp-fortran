@@ -4091,9 +4091,10 @@ contains
    !> A long name truncates deterministically, a second sighting of the
    !> same instantiation finds its entry, and a different instantiation
    !> that truncates to a taken name gets a counter.
-   !> Box(AnyPointer) and a method parameter Box(T) share the visible name
-   !> box_any. The method instantiation keeps that short name. Default blobs
-   !> collected under the earlier spelling move with the name.
+   !> Box(AnyPointer) and a method parameter Box(T) share the visible
+   !> spelling box_any. The plain instantiation keeps that name, the one an
+   !> unbranded walk emits, in either registration order. The method
+   !> instantiation takes the next free name. Default blobs move with it.
    subroutine prefer_implicit_inst_names()
       integer :: i, j, best
       do i = 1, g_ninsts
@@ -4109,7 +4110,8 @@ contains
             if (g_insts(i)%plain /= g_insts(j)%plain) cycle
             if (.not. allocated(g_insts(j)%name)) cycle
             if (.not. allocated(g_insts(i)%name)) cycle
-            if (len(g_insts(j)%name) >= len(g_insts(i)%name)) cycle
+            ! Plain already owns the short name.
+            if (len(g_insts(i)%name) >= len(g_insts(j)%name)) cycle
             if (best == 0) then
                best = j
             else if (len(g_insts(j)%name) < len(g_insts(best)%name)) then

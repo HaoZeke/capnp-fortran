@@ -118,13 +118,13 @@ contains
       type(factory_boxy_params_t), intent(in) :: params
       type(factory_boxy_results_t), intent(in) :: results
       integer, intent(out) :: err
-      type(box_any_t) :: bx
+      type(box_any_2_t) :: bx
       character(len=:), allocatable :: s, note
       associate (server => self, ignored => ctx)
       end associate
       bx = factory_boxy_params_box_get(params, err)
       if (err /= CAPNP_OK) return
-      call box_any_value_get_text(bx, s, err)
+      call box_any_2_value_get_text(bx, s, err)
       if (err /= CAPNP_OK) return
       call factory_boxy_params_note_get(params, note, err)
       if (err /= CAPNP_OK) return
@@ -229,7 +229,7 @@ program implicit_roundtrip
    type(capnp_ptr_t) :: q
    type(any_struct_t) :: slot
    type(any_list_t) :: lst
-   type(box_any_t) :: bx
+   type(box_any_2_t) :: bx
    type(item_t) :: item
    type(capability_client_t) :: cap
    character(len=:), allocatable :: s
@@ -350,7 +350,7 @@ program implicit_roundtrip
    if (s /= 'kept') error stop 'note accessor'
    bx = factory_boxy_params_box_init(bparams, err)
    if (err /= CAPNP_OK) error stop 'box init'
-   call box_any_value_set_text(bx, 'boxed', err)
+   call box_any_2_value_set_text(bx, 'boxed', err)
    if (err /= CAPNP_OK) error stop 'box text'
    call rpc_call_send(cli, m, err)
    if (err /= CAPNP_OK) error stop 'boxy send'

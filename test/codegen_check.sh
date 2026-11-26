@@ -149,8 +149,9 @@ need = [
     "factory_pair_results_items_get",
     "holder_put_params_extra_get_text_f",
     "box_value_get",
-    "box_any_value_get_text",
+    "box_any_2_value_get_text",
     "plain_bare_get",
+    "type(box_any_t)",
     "type(box_any_2_t)",
     "pick_any_value_get_text",
     "factory_pick_request",
@@ -173,12 +174,70 @@ bad = [
     "box_value_set_struct",
     "box_value_get_iface",
     "pick_value_get_text",
-    "box_any_2_value_get_text",
+    "box_any_value_get_text",
     "holder_put_params_extra_get_text(",
 ]
 present = [n for n in bad if n in text]
 if present:
     sys.exit("unexpected " + ", ".join(present))
+
+def handle(fn):
+    import re
+    m = re.search(
+        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
+        text)
+    if not m:
+        sys.exit("no handle for " + fn)
+    return m.group(1)
+
+plain = handle("plain_bare_get")
+method = handle("factory_boxy_params_box_get")
+stem = method[:-2] if method.endswith("_t") else method
+if plain != "box_any_t":
+    sys.exit("plain-first plain handle " + plain)
+if method == plain or (stem + "_value_get_text") not in text:
+    sys.exit("plain-first method handle " + method)
+PY
+  # Method declared before Plain. The plain instantiation still spells
+  # box_any, and the method parameter keeps its kind accessors.
+  cat > "$out/method_first.capnp" << 'EOS'
+@0xe1d4a7c03b5926f9;
+struct Box(T) {
+  value @0 :T;
+}
+interface Factory {
+  boxy @0 [T] (box :Box(T)) -> (out :T);
+}
+struct Plain {
+  bare @0 :Box(AnyPointer);
+}
+EOS
+  (cd "$out" && capnp compile -o- method_first.capnp) > "$out/mf.cgr"
+  "$bin" "$out/mf.cgr"
+  mf=$(find "$out" -name 'method_first_capnp.f90' | head -1)
+  test -n "$mf"
+  python3 - "$mf" << 'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+
+def handle(fn):
+    m = re.search(
+        r"function %s\(h, err\) result\(o\)\n(?:.*\n){0,8}?[ \t]+type\((\w+)\) :: o" % fn,
+        text)
+    if not m:
+        sys.exit("no handle for " + fn)
+    return m.group(1)
+
+plain = handle("plain_bare_get")
+method = handle("factory_boxy_params_box_get")
+stem = method[:-2] if method.endswith("_t") else method
+if plain != "box_any_t":
+    sys.exit("method-first plain handle " + plain)
+if method == plain or (stem + "_value_get_text") not in text:
+    sys.exit("method-first method handle " + method)
+if "box_any_value_get_text" in text:
+    sys.exit("method-first plain type gained kind accessors")
+print("plain", plain, "method", method)
 PY
   ;;
 implicit-roundtrip)

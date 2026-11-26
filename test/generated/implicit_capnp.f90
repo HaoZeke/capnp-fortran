@@ -122,11 +122,11 @@ module schema__implicit_capnp
    end type holder_put_results_t
 
    integer(int64), parameter :: HOLDER_PUT_PARAMS_EXTRA_GET_TEXT = 4_int64
-   integer, parameter :: BOX_ANY_2_DWORDS = 0
-   integer, parameter :: BOX_ANY_2_PWORDS = 1
-   type :: box_any_2_t
+   integer, parameter :: BOX_ANY_DWORDS = 0
+   integer, parameter :: BOX_ANY_PWORDS = 1
+   type :: box_any_t
       type(capnp_ptr_t) :: p
-   end type box_any_2_t
+   end type box_any_t
 
    integer, parameter :: ROW_ANY_DWORDS = 0
    integer, parameter :: ROW_ANY_PWORDS = 1
@@ -134,11 +134,11 @@ module schema__implicit_capnp
       type(capnp_ptr_t) :: p
    end type row_any_t
 
-   integer, parameter :: BOX_ANY_DWORDS = 0
-   integer, parameter :: BOX_ANY_PWORDS = 1
-   type :: box_any_t
+   integer, parameter :: BOX_ANY_2_DWORDS = 0
+   integer, parameter :: BOX_ANY_2_PWORDS = 1
+   type :: box_any_2_t
       type(capnp_ptr_t) :: p
-   end type box_any_t
+   end type box_any_2_t
 
    integer, parameter :: PICK_ANY_DWORDS = 1
    integer, parameter :: PICK_ANY_PWORDS = 1
@@ -487,21 +487,21 @@ contains
    function plain_bare_get(h, err) result(o)
       type(plain_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_any_2_t) :: o
+      type(box_any_t) :: o
       o%p = capnp_getp(h%p, 0, err)
    end function plain_bare_get
 
    function plain_bare_init(h, err) result(o)
       type(plain_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_any_2_t) :: o
-      o%p = capnp_new_struct(h%p%msg, BOX_ANY_2_DWORDS, BOX_ANY_2_PWORDS, err)
+      type(box_any_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
    end function plain_bare_init
 
    subroutine plain_bare_set(h, src, err)
       type(plain_t), intent(in) :: h
-      type(box_any_2_t), intent(in) :: src
+      type(box_any_t), intent(in) :: src
       integer, intent(out) :: err
       type(capnp_ptr_t) :: c
       c = capnp_copy(h%p%msg, src%p, err)
@@ -1532,21 +1532,21 @@ contains
    function factory_boxy_params_box_get(h, err) result(o)
       type(factory_boxy_params_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_any_t) :: o
+      type(box_any_2_t) :: o
       o%p = capnp_getp(h%p, 0, err)
    end function factory_boxy_params_box_get
 
    function factory_boxy_params_box_init(h, err) result(o)
       type(factory_boxy_params_t), intent(in) :: h
       integer, intent(out) :: err
-      type(box_any_t) :: o
-      o%p = capnp_new_struct(h%p%msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
+      type(box_any_2_t) :: o
+      o%p = capnp_new_struct(h%p%msg, BOX_ANY_2_DWORDS, BOX_ANY_2_PWORDS, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
    end function factory_boxy_params_box_init
 
    subroutine factory_boxy_params_box_set(h, src, err)
       type(factory_boxy_params_t), intent(in) :: h
-      type(box_any_t), intent(in) :: src
+      type(box_any_2_t), intent(in) :: src
       integer, intent(out) :: err
       type(capnp_ptr_t) :: c
       c = capnp_copy(h%p%msg, src%p, err)
@@ -2965,39 +2965,39 @@ contains
       end select
    end subroutine holder_dispatch
 
-   function box_any_2_new(msg, err) result(h)
+   function box_any_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
-      type(box_any_2_t) :: h
-      h%p = capnp_new_struct(msg, BOX_ANY_2_DWORDS, BOX_ANY_2_PWORDS, err)
-   end function box_any_2_new
+      type(box_any_t) :: h
+      h%p = capnp_new_struct(msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
+   end function box_any_new
 
-   function box_any_2_read_root(msg, err) result(h)
+   function box_any_read_root(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
-      type(box_any_2_t) :: h
+      type(box_any_t) :: h
       h%p = capnp_root(msg, err)
-   end function box_any_2_read_root
+   end function box_any_read_root
 
-   function box_any_2_value_has(h) result(v)
-      type(box_any_2_t), intent(in) :: h
+   function box_any_value_has(h) result(v)
+      type(box_any_t), intent(in) :: h
       logical :: v
       v = capnp_hasp(h%p, 0)
-   end function box_any_2_value_has
+   end function box_any_value_has
 
-   function box_any_2_value_get(h, err) result(q)
-      type(box_any_2_t), intent(in) :: h
+   function box_any_value_get(h, err) result(q)
+      type(box_any_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       q = capnp_getp(h%p, 0, err)
-   end function box_any_2_value_get
+   end function box_any_value_get
 
-   subroutine box_any_2_value_set(h, q, err)
-      type(box_any_2_t), intent(in) :: h
+   subroutine box_any_value_set(h, q, err)
+      type(box_any_t), intent(in) :: h
       type(capnp_ptr_t), intent(in) :: q
       integer, intent(out) :: err
       call capnp_setp(h%p, 0, q, err)
-   end subroutine box_any_2_value_set
+   end subroutine box_any_value_set
 
    function row_any_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
@@ -3153,131 +3153,131 @@ contains
       call capnp_setp(h%p, 0, q, err)
    end subroutine row_any_cell_set_iface
 
-   function box_any_new(msg, err) result(h)
+   function box_any_2_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
-      type(box_any_t) :: h
-      h%p = capnp_new_struct(msg, BOX_ANY_DWORDS, BOX_ANY_PWORDS, err)
-   end function box_any_new
+      type(box_any_2_t) :: h
+      h%p = capnp_new_struct(msg, BOX_ANY_2_DWORDS, BOX_ANY_2_PWORDS, err)
+   end function box_any_2_new
 
-   function box_any_read_root(msg, err) result(h)
+   function box_any_2_read_root(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
       integer, intent(out) :: err
-      type(box_any_t) :: h
+      type(box_any_2_t) :: h
       h%p = capnp_root(msg, err)
-   end function box_any_read_root
+   end function box_any_2_read_root
 
-   function box_any_value_has(h) result(v)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_has(h) result(v)
+      type(box_any_2_t), intent(in) :: h
       logical :: v
       v = capnp_hasp(h%p, 0)
-   end function box_any_value_has
+   end function box_any_2_value_has
 
-   function box_any_value_get(h, err) result(q)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_get(h, err) result(q)
+      type(box_any_2_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
       q = capnp_getp(h%p, 0, err)
-   end function box_any_value_get
+   end function box_any_2_value_get
 
-   subroutine box_any_value_set(h, q, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set(h, q, err)
+      type(box_any_2_t), intent(in) :: h
       type(capnp_ptr_t), intent(in) :: q
       integer, intent(out) :: err
       call capnp_setp(h%p, 0, q, err)
-   end subroutine box_any_value_set
+   end subroutine box_any_2_value_set
 
-   subroutine box_any_value_get_text(h, s, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_get_text(h, s, err)
+      type(box_any_2_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
       call capnp_get_text(h%p, 0, s, err)
-   end subroutine box_any_value_get_text
+   end subroutine box_any_2_value_get_text
 
-   subroutine box_any_value_set_text(h, s, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set_text(h, s, err)
+      type(box_any_2_t), intent(in) :: h
       character(len=*), intent(in) :: s
       integer, intent(out) :: err
       call capnp_set_text(h%p, 0, s, err)
-   end subroutine box_any_value_set_text
+   end subroutine box_any_2_value_set_text
 
-   subroutine box_any_value_get_data(h, b, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_get_data(h, b, err)
+      type(box_any_2_t), intent(in) :: h
       integer(int8), allocatable, intent(out) :: b(:)
       integer, intent(out) :: err
       call capnp_get_data(h%p, 0, b, err)
-   end subroutine box_any_value_get_data
+   end subroutine box_any_2_value_get_data
 
-   subroutine box_any_value_set_data(h, b, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set_data(h, b, err)
+      type(box_any_2_t), intent(in) :: h
       integer(int8), intent(in) :: b(:)
       integer, intent(out) :: err
       call capnp_set_data(h%p, 0, b, err)
-   end subroutine box_any_value_set_data
+   end subroutine box_any_2_value_set_data
 
-   function box_any_value_get_struct(h, err) result(o)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_get_struct(h, err) result(o)
+      type(box_any_2_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_any_any_struct_t) :: o
       o%p = capnp_getp(h%p, 0, err)
-   end function box_any_value_get_struct
+   end function box_any_2_value_get_struct
 
-   subroutine box_any_value_set_struct(h, src, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set_struct(h, src, err)
+      type(box_any_2_t), intent(in) :: h
       type(capnp_any_any_struct_t), intent(in) :: src
       integer, intent(out) :: err
       type(capnp_ptr_t) :: c
       c = capnp_copy(h%p%msg, src%p, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, c, err)
-   end subroutine box_any_value_set_struct
+   end subroutine box_any_2_value_set_struct
 
-   function box_any_value_init_struct(h, dwords, pwords, err) result(o)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_init_struct(h, dwords, pwords, err) result(o)
+      type(box_any_2_t), intent(in) :: h
       integer, intent(in) :: dwords, pwords
       integer, intent(out) :: err
       type(capnp_any_any_struct_t) :: o
       o%p = capnp_new_struct(h%p%msg, dwords, pwords, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
-   end function box_any_value_init_struct
+   end function box_any_2_value_init_struct
 
-   function box_any_value_get_list(h, err) result(o)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_get_list(h, err) result(o)
+      type(box_any_2_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_any_any_list_t) :: o
       o%p = capnp_getp(h%p, 0, err)
-   end function box_any_value_get_list
+   end function box_any_2_value_get_list
 
-   subroutine box_any_value_set_list(h, src, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set_list(h, src, err)
+      type(box_any_2_t), intent(in) :: h
       type(capnp_any_any_list_t), intent(in) :: src
       integer, intent(out) :: err
       type(capnp_ptr_t) :: c
       c = capnp_copy(h%p%msg, src%p, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, c, err)
-   end subroutine box_any_value_set_list
+   end subroutine box_any_2_value_set_list
 
-   function box_any_value_init_list(h, n, esize, err) result(o)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_init_list(h, n, esize, err) result(o)
+      type(box_any_2_t), intent(in) :: h
       integer(int64), intent(in) :: n
       integer, intent(in) :: esize
       integer, intent(out) :: err
       type(capnp_any_any_list_t) :: o
       o%p = capnp_new_list(h%p%msg, esize, n, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
-   end function box_any_value_init_list
+   end function box_any_2_value_init_list
 
-   function box_any_value_init_composite(h, n, dwords, pwords, err) result(o)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_init_composite(h, n, dwords, pwords, err) result(o)
+      type(box_any_2_t), intent(in) :: h
       integer(int64), intent(in) :: n
       integer, intent(in) :: dwords, pwords
       integer, intent(out) :: err
       type(capnp_any_any_list_t) :: o
       o%p = capnp_new_composite_list(h%p%msg, n, dwords, pwords, err)
       if (err == CAPNP_OK) call capnp_setp(h%p, 0, o%p, err)
-   end function box_any_value_init_composite
+   end function box_any_2_value_init_composite
 
-   function box_any_value_get_iface(h, err, ctab) result(c)
-      type(box_any_t), intent(in) :: h
+   function box_any_2_value_get_iface(h, err, ctab) result(c)
+      type(box_any_2_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_any_capability_client_t) :: c
       type(capnp_ptr_t), intent(in), optional :: ctab
@@ -3293,10 +3293,10 @@ contains
          c%kind = 1
          c%id = q%capidx
       end if
-   end function box_any_value_get_iface
+   end function box_any_2_value_get_iface
 
-   subroutine box_any_value_set_iface(h, c, err)
-      type(box_any_t), intent(in) :: h
+   subroutine box_any_2_value_set_iface(h, c, err)
+      type(box_any_2_t), intent(in) :: h
       type(capnp_any_capability_client_t), intent(in) :: c
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
@@ -3305,7 +3305,7 @@ contains
       q%kind = CAPNP_PK_CAP
       q%capidx = c%id
       call capnp_setp(h%p, 0, q, err)
-   end subroutine box_any_value_set_iface
+   end subroutine box_any_2_value_set_iface
 
    function pick_any_new(msg, err) result(h)
       type(capnp_message_t), intent(inout), target :: msg
