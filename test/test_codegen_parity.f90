@@ -11,7 +11,7 @@ contains
 
    subroutine collect_codegen_parity(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(55))
+      allocate (testsuite(56))
       testsuite(1)%name = "g1_min_signed"
       testsuite(1)%test => test_g1
       testsuite(2)%name = "g2_text_escape"
@@ -122,6 +122,8 @@ contains
       testsuite(54)%test => test_g54
       testsuite(55)%name = "g55_inactive_union_get"
       testsuite(55)%test => test_g55
+      testsuite(56)%name = "g56_inactive_union_has"
+      testsuite(56)%test => test_g56
    end subroutine collect_codegen_parity
 
 
@@ -408,5 +410,10 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_gap(error, 'g55')
    end subroutine test_g55
+
+   subroutine test_g56(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_gap(error, 'g56')
+   end subroutine test_g56
 
 end module test_codegen_parity

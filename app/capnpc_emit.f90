@@ -2878,14 +2878,20 @@ contains
 
    !> Pointer-field presence. capnpc-c++.c++ emits hasX() as a null check
    !> on the pointer slot.
-   subroutine emit_has(an, ht, pidx)
-      character(len=*), intent(in) :: an, ht
+   subroutine emit_has(an, ht, pidx, gchk)
+      character(len=*), intent(in) :: an, ht, gchk
       integer, intent(in) :: pidx
       call w('   function '//an//'_has(h) result(v)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      logical :: v')
       call w('      type(capnp_ptr_t) :: q')
       call w('      integer :: err')
+      if (len(gchk) > 0) then
+         call w('      if ('//gchk//') then')
+         call w('         v = .false.')
+         call w('         return')
+         call w('      end if')
+      end if
       call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
       call w('      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL')
       call w('   end function '//an//'_has')
@@ -2904,7 +2910,7 @@ contains
       err = CAPNP_OK
       akind = ANYPTR_KIND_ANY
       if (type_anyptr_which(t) == ANYPTR_UNCONSTRAINED) akind = type_anyptr_kind(t)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       select case (akind)
       case (ANYPTR_KIND_STRUCT)
          g_need_any_struct = .true.
@@ -3059,7 +3065,7 @@ contains
       if (err /= CAPNP_OK) return
       if (len(iname) > 0) st = iname
       g_has_iface = .true.
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call emit_cap_client(an, ht, pidx, st//'_client', gset, gchk)
    end subroutine emit_interface_field
 
@@ -3203,7 +3209,7 @@ contains
       dtext = ''
       if (value_which(dv) == TYPE_TEXT) call value_text(dv, dtext, err)
       if (err /= CAPNP_OK) return
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   subroutine '//an//'_get(h, s, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      character(len=:), allocatable, intent(out) :: s')
@@ -3244,7 +3250,7 @@ contains
       else
          allocate (db(0))
       end if
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   subroutine '//an//'_get(h, b, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer(int8), allocatable, intent(out) :: b(:)')
@@ -3298,7 +3304,7 @@ contains
       if (len(iname) > 0) st = iname
       hasdef = .false.
       if (had_default) hasdef = register_default_blob(an, dv)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   function '//an//'_get(h, err) result(o)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
@@ -3399,7 +3405,7 @@ contains
       end select
       hasdef = .false.
       if (had_default) hasdef = register_default_blob(an, dv)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   function '//an//'_get(h, err) result(l)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')

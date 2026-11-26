@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g55|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g56|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -3089,6 +3089,70 @@ EOS
   echo "g55 ok"
 }
 
+# Inactive union pointer arms report has false.
+g56() {
+  local d c
+  d=$(work)
+  cd "$d"
+  cat > u.capnp << 'EOS'
+@0xf0000000000008e5;
+struct U {
+  union {
+    a @0 :Int32 = 7;
+    b @1 :Text = "fallback";
+  }
+}
+EOS
+  capnp compile "${CAPNP_INC[@]}" -oc++ u.capnp
+  cat > cpp.cpp << 'EOS'
+#include "u.capnp.h"
+#include <capnp/message.h>
+#include <cstdio>
+int main() {
+  capnp::MallocMessageBuilder m;
+  auto r = m.initRoot<U>();
+  r.setB("hello");
+  std::printf("%d\n", r.hasB() ? 1 : 0);
+  r.setA(9);
+  std::printf("%d\n", r.hasB() ? 1 : 0);
+  r.setB("x");
+  std::printf("%d\n", r.hasB() ? 1 : 0);
+}
+EOS
+  capnp_cxx_flags
+  "$CXX" -std=c++17 cpp.cpp u.capnp.c++ "${CAPNP_PC[@]}" -o cppdrv
+  c=$(./cppdrv)
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" u.capnp
+  cat > drv.f90 << 'EOS'
+program drv
+   use capnp
+   use u_capnp
+   implicit none
+   type(capnp_message_t), target :: m
+   type(u_t) :: h
+   integer :: err
+   call capnp_message_init_builder(m, err)
+   h = u_new_root(m, err)
+   if (err /= 0) error stop 1
+   call u_b_set(h, 'hello', err)
+   if (err /= 0) error stop 2
+   print '(i0)', merge(1, 0, u_b_has(h))
+   call u_a_set(h, 9_int32, err)
+   if (err /= 0) error stop 3
+   print '(i0)', merge(1, 0, u_b_has(h))
+   call u_b_set(h, 'x', err)
+   if (err /= 0) error stop 4
+   print '(i0)', merge(1, 0, u_b_has(h))
+   call capnp_message_free(m)
+end program drv
+EOS
+  fc u_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "$c"
+  echo "g56 ok"
+}
+
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -3145,11 +3209,12 @@ case "$CASE" in
   g53) g53 ;;
   g54) g54 ;;
   g55) g55 ;;
+  g56) g56 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54; g55
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54; g55; g56
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|g55|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|g55|g56|all" >&2
     exit 2
     ;;
 esac

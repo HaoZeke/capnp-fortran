@@ -166,6 +166,10 @@ contains
       logical :: v
       type(capnp_ptr_t) :: q
       integer :: err
+      if (person_employment_which(h) /= 1) then
+         v = .false.
+         return
+      end if
       q = capnp_getp(h%p, 3, err)
       v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
    end function person_employment_employer_has
@@ -195,6 +199,10 @@ contains
       logical :: v
       type(capnp_ptr_t) :: q
       integer :: err
+      if (person_employment_which(h) /= 2) then
+         v = .false.
+         return
+      end if
       q = capnp_getp(h%p, 3, err)
       v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
    end function person_employment_school_has

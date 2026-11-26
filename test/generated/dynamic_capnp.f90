@@ -250,6 +250,10 @@ contains
       logical :: v
       type(capnp_ptr_t) :: q
       integer :: err
+      if (dynamic_choice_which(h) /= 1) then
+         v = .false.
+         return
+      end if
       q = capnp_getp(h%p, 3, err)
       v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
    end function dynamic_choice_label_has
@@ -279,6 +283,10 @@ contains
       logical :: v
       type(capnp_ptr_t) :: q
       integer :: err
+      if (dynamic_choice_which(h) /= 2) then
+         v = .false.
+         return
+      end if
       q = capnp_getp(h%p, 3, err)
       v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
    end function dynamic_choice_items_has
@@ -1023,6 +1031,10 @@ contains
       logical :: v
       type(capnp_ptr_t) :: q
       integer :: err
+      if (nested_union_g_which(h) /= 1) then
+         v = .false.
+         return
+      end if
       q = capnp_getp(h%p, 0, err)
       v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
    end function nested_union_g_y_has
