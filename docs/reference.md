@@ -406,6 +406,14 @@ schema as `intent(inout)`. A routine that only holds the schema as
 `intent(in)` cannot call them. Builders still copy a default into the
 caller's own message. Writes through a reader handle are refused.
 
+`capnp_dyn_has(schema, idx, struct, field, has, err, mode)` reports whether
+a field is present. `mode` defaults to `CAPNP_HAS_NON_NULL` and follows
+C++: void, bool, numeric, and enum fields are present, and a group is
+present when its union arm is selected. `CAPNP_HAS_NON_DEFAULT` reports a
+data field when its encoded bits are non-zero. A pointer field is present
+when its pointer word is non-null, so a null text field still reads its
+schema default from `capnp_dyn_get_text`. An inactive union arm is absent.
+
 ## Code generator (`capnpc-fortran`)
 
 Run as a `capnp` plugin: `capnp compile -o <path-to-capnpc-fortran>

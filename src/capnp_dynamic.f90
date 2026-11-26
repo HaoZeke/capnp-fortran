@@ -20,7 +20,8 @@ module capnp_dynamic
    public :: capnp_dyn_setp, capnp_dyn_init_struct, capnp_dyn_init_list
    public :: capnp_dyn_get_capability, capnp_dyn_set_capability
    public :: capnp_dyn_get_any_struct, capnp_dyn_get_any_list
-   public :: capnp_dyn_select, capnp_dyn_which, capnp_dyn_field_type
+   public :: capnp_dyn_select, capnp_dyn_which, capnp_dyn_has, capnp_dyn_field_type
+   public :: CAPNP_HAS_NON_NULL, CAPNP_HAS_NON_DEFAULT
    public :: capnp_dyn_brand_t, capnp_dyn_brand_scope_t, capnp_dyn_brand_binding_t
    public :: capnp_dyn_field_schema, capnp_dyn_load_brand
    public :: capnp_dyn_annotation_t, capnp_dyn_node_annotations
@@ -32,6 +33,10 @@ module capnp_dynamic
    ! compiles chains of hundreds. Stop only before a cyclic graph in a
    ! corrupt schema exhausts the stack.
    integer, parameter :: SCHEMA_WALK_LIMIT = 4096
+
+   !> HasMode from DynamicStruct::has. NON_NULL is the default.
+   integer, parameter :: CAPNP_HAS_NON_NULL = 0
+   integer, parameter :: CAPNP_HAS_NON_DEFAULT = 1
 
    !> A loaded compiled schema: the CGR message plus a node index.
    type :: capnp_dyn_schema_t
@@ -1514,6 +1519,116 @@ contains
       ! C++ which() is empty when the discriminant names no arm.
       if (tag < 0 .or. tag >= disc_count) tag = -1
    end function capnp_dyn_which
+
+   !> Field presence. mode defaults to CAPNP_HAS_NON_NULL: void, bool,
+   !> numeric, and enum fields are present, and a group is present when
+   !> its union arm is selected. CAPNP_HAS_NON_DEFAULT reports a data
+   !> field when its encoded bits are non-zero. A pointer field is
+   !> present when its pointer word is non-zero. An inactive union arm
+   !> is absent.
+   subroutine capnp_dyn_has(schema, idx, p, fname, has, err, mode)
+      use capnp_union, only: capnp_which
+      type(capnp_dyn_schema_t), intent(in) :: schema
+      integer, intent(in) :: idx
+      type(capnp_ptr_t), intent(in) :: p
+      character(len=*), intent(in) :: fname
+      logical, intent(out) :: has
+      integer, intent(out) :: err
+      integer, intent(in), optional :: mode
+      type(capnp_ptr_t) :: f, t
+      integer(int64) :: off
+      integer :: disc, doff, m, tw
+      has = .false.
+      m = CAPNP_HAS_NON_NULL
+      if (present(mode)) m = mode
+      if (m /= CAPNP_HAS_NON_NULL .and. m /= CAPNP_HAS_NON_DEFAULT) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call dyn_field(schema, idx, fname, f, err)
+      if (err /= CAPNP_OK) return
+      disc = field_discriminant(f)
+      if (disc /= NO_DISCRIMINANT) then
+         if (node_struct_discriminant_count(schema%nodes(idx)) <= 0) then
+            err = CAPNP_ERR_KIND
+            return
+         end if
+         doff = int(node_struct_discriminant_offset(schema%nodes(idx)))
+         call dyn_bits_readable(p, int(doff, int64)*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
+         if (capnp_which(p, doff) /= disc) return
+      end if
+      if (field_which(f) == FIELD_GROUP) then
+         has = .true.
+         return
+      end if
+      t = field_slot_type(f, err)
+      if (err /= CAPNP_OK) return
+      off = field_slot_offset(f)
+      tw = type_which(t)
+      select case (tw)
+      case (TYPE_VOID)
+         has = m == CAPNP_HAS_NON_NULL
+      case (TYPE_BOOL, TYPE_INT8, TYPE_UINT8, TYPE_INT16, TYPE_UINT16, TYPE_ENUM, &
+            TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32, TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64)
+         if (m == CAPNP_HAS_NON_NULL) then
+            has = .true.
+         else
+            has = dyn_slot_nonzero(p, off, tw, err)
+         end if
+      case (TYPE_TEXT, TYPE_DATA, TYPE_LIST, TYPE_STRUCT, TYPE_INTERFACE, TYPE_ANY_POINTER)
+         call dyn_pointer_readable(p, int(off), err)
+         if (err /= CAPNP_OK) return
+         if (p%kind /= CAPNP_PK_STRUCT) return
+         if (int(off) < 0 .or. int(off) >= p%pwords) return
+         has = cp_get_i64(p%msg%segs(p%seg)%bytes, &
+                          p%off + (int(p%dwords, int64) + off)*8_int64) /= 0_int64
+      case default
+         has = .false.
+      end select
+   end subroutine capnp_dyn_has
+
+   !> Encoded data word is non-zero. Width follows the field type.
+   function dyn_slot_nonzero(p, off, tw, err) result(nz)
+      type(capnp_ptr_t), intent(in) :: p
+      integer(int64), intent(in) :: off
+      integer, intent(in) :: tw
+      integer, intent(out) :: err
+      logical :: nz
+      nz = .false.
+      select case (tw)
+      case (TYPE_BOOL)
+         call dyn_bits_readable(p, off, 1_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_bool(p, off)
+      case (TYPE_INT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_i8(p, off) /= 0_int8
+      case (TYPE_UINT8)
+         call dyn_bits_readable(p, off*8_int64, 8_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_u8(p, off) /= 0_int16
+      case (TYPE_INT16)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_i16(p, off*2_int64) /= 0_int16
+      case (TYPE_UINT16, TYPE_ENUM)
+         call dyn_bits_readable(p, off*16_int64, 16_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_u16(p, off*2_int64) /= 0_int32
+      case (TYPE_INT32, TYPE_UINT32, TYPE_FLOAT32)
+         call dyn_bits_readable(p, off*32_int64, 32_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_i32(p, off*4_int64) /= 0_int32
+      case (TYPE_INT64, TYPE_UINT64, TYPE_FLOAT64)
+         call dyn_bits_readable(p, off*64_int64, 64_int64, err)
+         if (err /= CAPNP_OK) return
+         nz = capnp_get_i64(p, off*8_int64) /= 0_int64
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   end function dyn_slot_nonzero
 
    !> Select a union member by its field name before initializing or assigning
    !> its value. The supplied node must be the struct or named-union group
