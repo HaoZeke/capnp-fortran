@@ -41,6 +41,8 @@ An =interface Adder= yields:
 
 Branded uses such as =Box(Text)= produce brand-resolved instantiations (=box_text_t= and substituted accessors). Substitution reaches list elements, list bindings, and nested brands. Unbound parameters keep AnyPointer-style accessors.
 
+A method implicit parameter, written =make @0 [T] (value :T) -> (out :T)=, is a field of that method's generated parameter or result struct. The field keeps its AnyPointer =get= / =set= and also gains kind accessors: =_get_text= / =_set_text=, =_get_data= / =_set_data=, =_get_struct= / =_set_struct= / =_init_struct=, =_get_list= / =_set_list= / =_init_list= / =_init_composite=, and =_get_iface= / =_set_iface=. The client helper is =<iface>_<method>_request=. A union arm keeps the which() check on those accessors. A brand parameter of a generic struct, such as =Box(T).value=, keeps the AnyPointer accessors alone.
+
 * Workflow tips
 
 1. Keep schemas under =schema/= (or your project tree) and regenerate modules into a known directory.

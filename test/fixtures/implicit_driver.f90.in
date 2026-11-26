@@ -1,0 +1,396 @@
+!> Round-trip implicit method parameters through the generated client.
+module implicit_server
+   use capnp
+   use capnp_rpc, only: rpc_call_ctx_t, rpc_server_t, rpc_ctx_export_cap
+   use capnp_any, only: any_list_t, any_struct_t, capability_client_t
+   use implicit_capnp
+   implicit none
+   private
+   public :: my_factory_t, my_holder_t
+
+   type, extends(factory_server_t) :: my_factory_t
+      class(rpc_server_t), pointer :: me => null()
+   contains
+      procedure :: make => my_make
+      procedure :: pair => my_pair
+      procedure :: boxy => my_boxy
+      procedure :: talk => my_talk
+      procedure :: pick => my_pick
+   end type my_factory_t
+
+   type, extends(holder_server_t) :: my_holder_t
+   contains
+      procedure :: put => my_put
+   end type my_holder_t
+
+contains
+
+   subroutine my_make(self, ctx, params, results, err)
+      class(my_factory_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(factory_make_params_t), intent(in) :: params
+      type(factory_make_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      type(any_struct_t) :: slot
+      character(len=:), allocatable :: s
+      associate (server => self, ignored => ctx)
+      end associate
+      q = factory_make_params_value_get(params, err)
+      if (err /= CAPNP_OK) return
+      if (q%kind == CAPNP_PK_STRUCT) then
+         slot = factory_make_params_value_get_struct(params, err)
+         if (err /= CAPNP_OK) return
+         call factory_make_results_out_set_struct(results, slot, err)
+      else
+         call factory_make_params_value_get_text(params, s, err)
+         if (err /= CAPNP_OK) return
+         call factory_make_results_out_set_text(results, s, err)
+      end if
+      if (err /= CAPNP_OK) return
+      call factory_make_results_ok_set(results, .true., err)
+   end subroutine my_make
+
+   subroutine my_pair(self, ctx, params, results, err)
+      class(my_factory_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(factory_pair_params_t), intent(in) :: params
+      type(factory_pair_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      integer(int8), allocatable :: raw(:)
+      type(any_list_t) :: lst
+      type(capnp_ptr_t) :: items
+      integer :: lb
+      associate (server => self, ignored => ctx)
+      end associate
+      call factory_pair_params_left_get_data(params, raw, err)
+      if (err /= CAPNP_OK) return
+      if (.not. allocated(raw)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (size(raw) /= 3) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      lb = lbound(raw, 1)
+      if (raw(lb) /= 1_int8 .or. raw(lb + 1) /= 2_int8 .or. raw(lb + 2) /= 3_int8) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call factory_pair_results_left_set_data(results, raw, err)
+      if (err /= CAPNP_OK) return
+      lst = factory_pair_params_right_get_list(params, err)
+      if (err /= CAPNP_OK) return
+      if (capnp_list_len(lst%p) /= 4_int64) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call factory_pair_results_right_set_list(results, lst, err)
+      if (err /= CAPNP_OK) return
+      call factory_pair_params_blob_get(params, raw, err)
+      if (err /= CAPNP_OK) return
+      if (.not. allocated(raw)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      lb = lbound(raw, 1)
+      if (size(raw) /= 2 .or. raw(lb) /= 9_int8 .or. raw(lb + 1) /= 8_int8) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      items = factory_pair_results_items_init(results, 2_int64, err)
+      if (err /= CAPNP_OK) return
+      if (capnp_list_len(items) /= 2_int64) err = CAPNP_ERR_ARG
+   end subroutine my_pair
+
+   subroutine my_boxy(self, ctx, params, results, err)
+      class(my_factory_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(factory_boxy_params_t), intent(in) :: params
+      type(factory_boxy_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      type(box_any_t) :: bx
+      character(len=:), allocatable :: s, note
+      associate (server => self, ignored => ctx)
+      end associate
+      bx = factory_boxy_params_box_get(params, err)
+      if (err /= CAPNP_OK) return
+      call box_any_value_get_text(bx, s, err)
+      if (err /= CAPNP_OK) return
+      call factory_boxy_params_note_get(params, note, err)
+      if (err /= CAPNP_OK) return
+      if (note /= 'kept' .or. s /= 'boxed') then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call factory_boxy_results_out_set_text(results, s, err)
+   end subroutine my_boxy
+
+   subroutine my_talk(self, ctx, params, results, err)
+      class(my_factory_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(factory_talk_params_t), intent(in) :: params
+      type(factory_talk_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      type(capability_client_t) :: c
+      integer :: idx
+      c = factory_talk_params_peer_get_iface(params, err)
+      if (err /= CAPNP_OK) return
+      idx = rpc_ctx_export_cap(ctx, self%me, err)
+      if (err /= CAPNP_OK) return
+      c%kind = 1
+      c%id = int(idx, int64)
+      call factory_talk_results_peer_set_iface(results, c, err)
+   end subroutine my_talk
+
+   subroutine my_pick(self, ctx, params, results, err)
+      class(my_factory_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(factory_pick_params_t), intent(in) :: params
+      type(factory_pick_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      associate (server => self, ignored => ctx, p => params, r => results)
+      end associate
+      err = CAPNP_OK
+   end subroutine my_pick
+
+   subroutine my_put(self, ctx, params, results, err)
+      class(my_holder_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(holder_put_params_t), intent(in) :: params
+      type(holder_put_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      integer(int8), allocatable :: raw(:)
+      associate (server => self, ignored => ctx)
+      end associate
+      q = holder_put_params_value_get(params, err)
+      if (err /= CAPNP_OK) return
+      if (q%kind == CAPNP_PK_NULL) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      call holder_put_results_kept_set(results, q, err)
+      if (err /= CAPNP_OK) return
+      call holder_put_params_extra_get_data(params, raw, err)
+      if (err /= CAPNP_OK) return
+      call holder_put_results_out_set_data(results, raw, err)
+   end subroutine my_put
+
+end module implicit_server
+
+program implicit_roundtrip
+   use capnp
+   use capnp_posix, only: px_socketpair
+   use capnp_rpc
+   use capnp_any, only: any_struct_t, any_list_t, capability_client_t
+   use implicit_capnp
+   use implicit_server
+   implicit none
+
+   type(rpc_conn_t), target :: cli, srv
+   type(my_factory_t), target :: impl
+   type(my_holder_t), target :: himpl
+   class(rpc_server_t), pointer :: boot
+   type(factory_client_t) :: client
+   type(holder_client_t) :: hclient
+   type(capnp_message_t), target :: m
+   type(factory_make_params_t) :: mparams
+   type(factory_make_results_t) :: mresults
+   type(factory_pair_params_t) :: pparams
+   type(factory_pair_results_t) :: presults
+   type(factory_boxy_params_t) :: bparams
+   type(factory_boxy_results_t) :: bresults
+   type(factory_talk_params_t) :: tparams
+   type(factory_talk_results_t) :: tresults
+   type(holder_put_params_t) :: hparams
+   type(holder_put_results_t) :: hresults
+   type(capnp_ptr_t) :: q
+   type(any_struct_t) :: slot
+   type(any_list_t) :: lst
+   type(box_any_t) :: bx
+   type(item_t) :: item
+   type(capability_client_t) :: cap
+   character(len=:), allocatable :: s
+   integer(int8) :: raw(3), blob(2)
+   integer(int8), allocatable :: got(:)
+   integer :: lb
+   integer(int64) :: qid
+   integer(int32) :: n
+   integer :: fda, fdb, err
+
+   call px_socketpair(fda, fdb, err)
+   if (err /= CAPNP_OK) error stop 'socketpair'
+   impl%me => impl
+   boot => impl
+   call rpc_conn_init(srv, fdb, boot)
+   boot => null()
+   call rpc_conn_init(cli, fda, boot)
+   call rpc_bootstrap_send(cli, client%cap, err)
+   if (err /= CAPNP_OK) error stop 'bootstrap'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'bootstrap pump'
+
+   call factory_make_request(cli, client, m, mparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'text request'
+   call factory_make_params_value_set_text(mparams, 'implicit text', err)
+   if (err /= CAPNP_OK) error stop 'text set'
+   q = factory_make_params_value_get(mparams, err)
+   if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) error stop 'untyped text pointer'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'text send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'text dispatch'
+   call factory_make_wait(cli, qid, mresults, err)
+   if (err /= CAPNP_OK) error stop 'text wait'
+   if (.not. factory_make_results_ok_get(mresults)) error stop 'text ok'
+   call factory_make_results_out_get_text(mresults, s, err)
+   if (err /= CAPNP_OK .or. s /= 'implicit text') error stop 'text round trip'
+
+   call factory_make_request(cli, client, m, mparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'struct request'
+   slot = factory_make_params_value_init_struct(mparams, ITEM_DWORDS, ITEM_PWORDS, err)
+   if (err /= CAPNP_OK) error stop 'struct init'
+   item%p = slot%p
+   call item_name_set(item, 'bolt', err)
+   if (err /= CAPNP_OK) error stop 'struct name'
+   call item_n_set(item, 7_int32, err)
+   if (err /= CAPNP_OK) error stop 'struct n'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'struct send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'struct dispatch'
+   call factory_make_wait(cli, qid, mresults, err)
+   if (err /= CAPNP_OK) error stop 'struct wait'
+   if (.not. factory_make_results_ok_get(mresults)) error stop 'struct ok'
+   slot = factory_make_results_out_get_struct(mresults, err)
+   if (err /= CAPNP_OK) error stop 'struct get'
+   item%p = slot%p
+   call item_name_get(item, s, err)
+   n = item_n_get(item)
+   if (err /= CAPNP_OK .or. s /= 'bolt' .or. n /= 7_int32) error stop 'struct round trip'
+
+   raw = [1_int8, 2_int8, 3_int8]
+   blob = [9_int8, 8_int8]
+   call factory_pair_request(cli, client, m, pparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'pair request'
+   call factory_pair_params_left_set_data(pparams, raw, err)
+   if (err /= CAPNP_OK) error stop 'data set'
+   call factory_pair_params_left_get_data(pparams, got, err)
+   if (err /= CAPNP_OK .or. .not. allocated(got)) error stop 'data get'
+   lb = lbound(got, 1)
+   if (size(got) /= 3 .or. got(lb) /= 1_int8 .or. got(lb + 2) /= 3_int8) error stop 'data bytes'
+   call factory_pair_params_blob_set(pparams, blob, err)
+   if (err /= CAPNP_OK) error stop 'blob set'
+   call factory_pair_params_blob_get(pparams, got, err)
+   lb = lbound(got, 1)
+   if (err /= CAPNP_OK .or. size(got) /= 2 .or. got(lb) /= 9_int8) error stop 'blob accessor'
+   lst = factory_pair_params_right_init_list(pparams, 4_int64, CAPNP_SZ_BYTE, err)
+   if (err /= CAPNP_OK .or. capnp_list_len(lst%p) /= 4_int64) error stop 'list init'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'pair send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'pair dispatch'
+   call factory_pair_wait(cli, qid, presults, err)
+   if (err /= CAPNP_OK) error stop 'pair wait'
+   call factory_pair_results_left_get_data(presults, got, err)
+   lb = lbound(got, 1)
+   if (err /= CAPNP_OK .or. size(got) /= 3 .or. got(lb + 1) /= 2_int8) error stop 'data round trip'
+   lst = factory_pair_results_right_get_list(presults, err)
+   if (err /= CAPNP_OK .or. capnp_list_len(lst%p) /= 4_int64) error stop 'list round trip'
+   q = factory_pair_results_items_get(presults, err)
+   if (err /= CAPNP_OK .or. capnp_list_len(q) /= 2_int64) error stop 'List(T) accessor'
+
+   call factory_boxy_request(cli, client, m, bparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'boxy request'
+   call factory_boxy_params_note_set(bparams, 'kept', err)
+   if (err /= CAPNP_OK) error stop 'note set'
+   call factory_boxy_params_note_get(bparams, s, err)
+   if (err /= CAPNP_OK .or. s /= 'kept') error stop 'note accessor'
+   bx = factory_boxy_params_box_init(bparams, err)
+   if (err /= CAPNP_OK) error stop 'box init'
+   call box_any_value_set_text(bx, 'boxed', err)
+   if (err /= CAPNP_OK) error stop 'box text'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'boxy send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'boxy dispatch'
+   call factory_boxy_wait(cli, qid, bresults, err)
+   if (err /= CAPNP_OK) error stop 'boxy wait'
+   call factory_boxy_results_out_get_text(bresults, s, err)
+   if (err /= CAPNP_OK .or. s /= 'boxed') error stop 'box round trip'
+
+   call factory_talk_request(cli, client, m, tparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'talk request'
+   cap%kind = 1
+   cap%id = 7_int64
+   call factory_talk_params_peer_set_iface(tparams, cap, err)
+   if (err /= CAPNP_OK) error stop 'iface set'
+   cap = factory_talk_params_peer_get_iface(tparams, err)
+   if (err /= CAPNP_OK .or. cap%kind /= 1 .or. cap%id /= 7_int64) error stop 'iface get'
+   q = capnp_ptr_t()
+   call factory_talk_params_peer_set(tparams, q, err)
+   if (err /= CAPNP_OK) error stop 'iface clear'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'talk send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'talk dispatch'
+   call factory_talk_wait(cli, qid, tresults, err)
+   if (err /= CAPNP_OK) error stop 'talk wait'
+   cap = factory_talk_results_peer_get_iface(tresults, err)
+   if (err /= CAPNP_OK .or. cap%kind /= 1) error stop 'iface round trip'
+
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv)
+
+   call px_socketpair(fda, fdb, err)
+   if (err /= CAPNP_OK) error stop 'holder socket'
+   boot => himpl
+   call rpc_conn_init(srv, fdb, boot)
+   boot => null()
+   call rpc_conn_init(cli, fda, boot)
+   call rpc_bootstrap_send(cli, hclient%cap, err)
+   if (err /= CAPNP_OK) error stop 'holder bootstrap'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'holder pump'
+   call holder_put_request(cli, hclient, m, hparams, qid, err)
+   if (err /= CAPNP_OK) error stop 'holder request'
+   call capnp_set_text(hparams%p, 0, 'brand', err)
+   if (err /= CAPNP_OK) error stop 'brand text'
+   q = holder_put_params_value_get(hparams, err)
+   if (err /= CAPNP_OK .or. q%kind == CAPNP_PK_NULL) error stop 'brand get'
+   call holder_put_params_value_set(hparams, q, err)
+   if (err /= CAPNP_OK) error stop 'brand set'
+   call holder_put_params_extra_set_data(hparams, raw, err)
+   if (err /= CAPNP_OK) error stop 'extra set'
+   call rpc_call_send(cli, m, err)
+   if (err /= CAPNP_OK) error stop 'holder send'
+   call rpc_pump_once(srv, err)
+   if (err /= CAPNP_OK) error stop 'holder dispatch'
+   call holder_put_wait(cli, qid, hresults, err)
+   if (err /= CAPNP_OK) error stop 'holder wait'
+   q = holder_put_results_kept_get(hresults, err)
+   if (err /= CAPNP_OK .or. q%nelem /= 6_int64) error stop 'brand kept'
+   call holder_put_results_out_get_data(hresults, got, err)
+   lb = lbound(got, 1)
+   if (err /= CAPNP_OK .or. size(got) /= 3 .or. got(lb) /= 1_int8) error stop 'extra round trip'
+
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv)
+
+   block
+      type(capnp_message_t), target :: pm
+      type(pick_any_t) :: slot
+      character(len=:), allocatable :: arm
+      call capnp_message_init_builder(pm, err)
+      if (err /= CAPNP_OK) error stop 'pick message'
+      slot = pick_any_new(pm, err)
+      if (err /= CAPNP_OK) error stop 'pick new'
+      call pick_any_alt_set(slot, 3_int32, err)
+      if (err /= CAPNP_OK) error stop 'pick alt'
+      call pick_any_value_get_text(slot, arm, err)
+      if (err /= CAPNP_ERR_KIND) error stop 'union arm'
+      call capnp_message_free(pm)
+   end block
+end program implicit_roundtrip

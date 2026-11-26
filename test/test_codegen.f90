@@ -2,7 +2,7 @@
 !> stems, and checked-in modules that drift from the plugin.
 module test_codegen
    use capnp
-   use testdrive, only: unittest_type, error_type, check, test_failed
+   use testdrive, only: unittest_type, error_type, check, test_failed, skip_test
    implicit none
    private
    public :: collect_codegen
@@ -11,7 +11,7 @@ contains
 
    subroutine collect_codegen(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(9))
+      allocate (testsuite(12))
       testsuite(1)%name = "codegen-multifile-generics"
       testsuite(1)%test => run_multifile
       testsuite(2)%name = "codegen-suffix-clamp"
@@ -30,6 +30,12 @@ contains
       testsuite(8)%test => run_wire_count
       testsuite(9)%name = "codegen-void-const"
       testsuite(9)%test => run_voidconst
+      testsuite(10)%name = "codegen-implicit-golden"
+      testsuite(10)%test => run_implicit_golden
+      testsuite(11)%name = "codegen-implicit-roundtrip"
+      testsuite(11)%test => run_implicit_roundtrip
+      testsuite(12)%name = "codegen-box-plain"
+      testsuite(12)%test => run_box_plain
    end subroutine collect_codegen
 
    subroutine run_multifile(error)
@@ -223,6 +229,37 @@ contains
       type(error_type), allocatable, intent(out) :: error
       call run_mode(error, 'voidconst', 'codegen: void constant is a named integer')
    end subroutine run_voidconst
+
+   subroutine run_implicit_golden(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'implicit-golden', 'codegen: implicit method golden')
+   end subroutine run_implicit_golden
+
+   subroutine run_implicit_roundtrip(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'implicit-roundtrip', 'codegen: implicit method round trip')
+   end subroutine run_implicit_roundtrip
+
+   subroutine run_box_plain(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_with_capnp(error, 'box-plain', 'codegen: box gains no implicit accessors')
+   end subroutine run_box_plain
+
+   !> Same probe as test_gate2: exit 77 / a missing capnp skips the case.
+   subroutine run_with_capnp(error, mode, what)
+      type(error_type), allocatable, intent(out) :: error
+      character(len=*), intent(in) :: mode, what
+      integer :: rc0, st0
+      rc0 = 0
+      st0 = 0
+      call execute_command_line('command -v capnp > /dev/null 2>&1', &
+                                exitstat=rc0, cmdstat=st0)
+      if (st0 /= 0 .or. rc0 /= 0) then
+         call skip_test(error, 'capnp is not on PATH')
+         return
+      end if
+      call run_mode(error, mode, what)
+   end subroutine run_with_capnp
 
    !> A 4096-node zero-sized table loads as in C++ 1.4.0, charged against
    !> the plugin's 2**30-word budget. Zero-sized requested files reach

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Generator checks used by the codegen unit suite. Arguments:
-#   multifile | suffix | annot | longann | fresh | voidconst
+#   multifile | suffix | annot | longann | fresh | voidconst |
+#   implicit-golden | implicit-roundtrip | box-plain
 # The plugin and the module directory come from the environment, set by
 # the unit test to the binary it is running. Searching the build tree
 # would accept a stale profile.
@@ -31,6 +32,13 @@ fi
 out=$(mktemp -d)
 trap 'rm -rf "$out"' EXIT
 cd "$out"
+
+need_capnp() {
+  if ! command -v capnp >/dev/null 2>&1; then
+    echo "capnp is not on PATH, skipped" >&2
+    exit 77
+  fi
+}
 
 case "${1:-}" in
 multifile)
@@ -112,8 +120,105 @@ EOF
   gfortran -std=f2018 -fsyntax-only -I"$moddir" -J"$out" \
     "$out/schema/voidconst_capnp.f90" "$out/drv.f90"
   ;;
+implicit-golden)
+  need_capnp
+  (cd "$root" && capnp compile -o- schema/implicit.capnp) > "$out/i.cgr"
+  "$bin" "$out/i.cgr"
+  gen=$(find "$out" -name 'implicit_capnp.f90' | head -1)
+  test -n "$gen"
+  diff -q "$gen" "$root/test/generated/implicit_capnp.f90"
+  python3 - "$gen" << 'PY'
+import sys
+text = open(sys.argv[1]).read()
+need = [
+    "factory_pair_params_left_get_data",
+    "factory_pair_params_left_set_data",
+    "factory_pair_params_right_get_list",
+    "factory_pair_params_right_set_list",
+    "factory_pair_params_right_init_list",
+    "factory_talk_params_peer_get_iface",
+    "factory_talk_params_peer_set_iface",
+    "factory_talk_request",
+    "factory_pair_request",
+    "factory_boxy_request",
+    "holder_put_params_extra_get_data",
+    "holder_put_request",
+    "factory_boxy_params_note_get",
+    "factory_make_results_ok_get",
+    "factory_pair_params_blob_get",
+    "factory_pair_results_items_get",
+    "holder_put_params_extra_get_text_f",
+    "box_value_get",
+    "pick_any_value_get_text",
+    "factory_pick_request",
+    "if (pick_any_which(h) /= 0) then",
+]
+missing = [n for n in need if n not in text]
+if missing:
+    sys.exit("missing " + ", ".join(missing))
+bad = [
+    "holder_put_params_value_get_text",
+    "holder_put_params_value_get_data",
+    "holder_put_params_value_get_list",
+    "holder_put_params_value_get_iface",
+    "holder_put_results_kept_get_text",
+    "factory_boxy_params_note_get_text",
+    "factory_make_results_ok_get_text",
+    "factory_pair_params_blob_get_text",
+    "box_value_get_text",
+    "box_value_get_data",
+    "box_value_set_struct",
+    "box_value_get_iface",
+    "pick_value_get_text",
+    "holder_put_params_extra_get_text(",
+]
+present = [n for n in bad if n in text]
+if present:
+    sys.exit("unexpected " + ", ".join(present))
+PY
+  ;;
+implicit-roundtrip)
+  need_capnp
+  (cd "$root" && capnp compile -o- schema/implicit.capnp) > "$out/i.cgr"
+  "$bin" "$out/i.cgr"
+  gen=$(find "$out" -name 'implicit_capnp.f90' | head -1)
+  test -n "$gen"
+  lib=$(find "$root/build" -name 'libcapnp.a' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+  test -n "$lib"
+  san=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __asan'; then
+    san="-fsanitize=address,undefined"
+  fi
+  cov=
+  if nm -A "$lib" 2>/dev/null | grep -q ' __gcov_init'; then
+    cov=--coverage
+  fi
+  mkdir -p "$out/rt"
+  cp "$root/test/fixtures/implicit_driver.f90.in" "$out/rt/implicit_driver.f90"
+  gfortran $san $cov -std=f2018 -ffree-line-length-none -J"$out/rt" -I"$out/rt" -I"$moddir" \
+    "$gen" "$out/rt/implicit_driver.f90" "$lib" -o "$out/rt/roundtrip"
+  "$out/rt/roundtrip"
+  ;;
+box-plain)
+  need_capnp
+  (cd "$root" && capnp compile -o- schema/box.capnp) > "$out/b.cgr"
+  "$bin" "$out/b.cgr"
+  gen="$out/schema/box_capnp.f90"
+  test -s "$gen"
+  diff -q "$gen" "$root/test/generated/box_capnp.f90"
+  python3 - "$gen" << 'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+bad = re.findall(
+    r"\bbox_value_(?:get|set|init)_(?:text|data|struct|list|iface|composite)\w*",
+    text,
+)
+if bad:
+    sys.exit("box value gained implicit accessors: %s" % bad[:8])
+PY
+  ;;
 *)
-  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst" >&2
+  echo "usage: codegen_check.sh multifile|suffix|annot|longann|fresh|voidconst|implicit-golden|implicit-roundtrip|box-plain" >&2
   exit 2
   ;;
 esac
