@@ -70,10 +70,7 @@ contains
    function person_name_has(h) result(v)
       type(person_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function person_name_has
 
    subroutine person_name_get(h, s, err)
@@ -93,10 +90,7 @@ contains
    function person_email_has(h) result(v)
       type(person_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function person_email_has
 
    subroutine person_email_get(h, s, err)
@@ -116,10 +110,7 @@ contains
    function person_phones_has(h) result(v)
       type(person_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 2, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 2)
    end function person_phones_has
 
    function person_phones_get(h, err) result(l)
@@ -164,16 +155,21 @@ contains
    function person_employment_employer_has(h) result(v)
       type(person_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (person_employment_which(h) /= 1) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 3)
    end function person_employment_employer_has
 
    subroutine person_employment_employer_get(h, s, err)
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (person_employment_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 3, s, err)
    end subroutine person_employment_employer_get
 
@@ -189,16 +185,21 @@ contains
    function person_employment_school_has(h) result(v)
       type(person_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (person_employment_which(h) /= 2) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 3)
    end function person_employment_school_has
 
    subroutine person_employment_school_get(h, s, err)
       type(person_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
       integer, intent(out) :: err
+      if (person_employment_which(h) /= 2) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       call capnp_get_text(h%p, 3, s, err)
    end subroutine person_employment_school_get
 
@@ -243,10 +244,7 @@ contains
    function person_phone_number_number_has(h) result(v)
       type(person_phone_number_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function person_phone_number_number_has
 
    subroutine person_phone_number_number_get(h, s, err)
@@ -301,10 +299,7 @@ contains
    function address_book_people_has(h) result(v)
       type(address_book_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function address_book_people_has
 
    function address_book_people_get(h, err) result(l)

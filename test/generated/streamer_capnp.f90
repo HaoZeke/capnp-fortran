@@ -98,10 +98,7 @@ contains
    function writer_write_params_chunk_has(h) result(v)
       type(writer_write_params_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function writer_write_params_chunk_has
 
    subroutine writer_write_params_chunk_get(h, b, err)

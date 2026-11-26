@@ -17,7 +17,7 @@ module capnp_message
    private
 
    public :: capnp_ptr_t
-   public :: capnp_root, capnp_set_root, capnp_getp, capnp_setp
+   public :: capnp_root, capnp_set_root, capnp_getp, capnp_hasp, capnp_setp
    public :: capnp_new_struct, capnp_new_list, capnp_new_composite_list
    public :: capnp_list_len, capnp_count_fits, capnp_list_getp, capnp_list_get_struct
    public :: capnp_get_text, capnp_set_text, capnp_get_data, capnp_set_data
@@ -393,6 +393,25 @@ contains
       type(capnp_ptr_t) :: q
       q = getp_impl(p, i, err, charged=.true.)
    end function capnp_getp
+
+   !> True when struct pointer field i is a non-zero word.
+   !> The word is not resolved. An out-of-bounds or over-deep target
+   !> stays present, and the following get reports the error. A slot
+   !> past the pointer section is absent.
+   function capnp_hasp(p, i) result(v)
+      type(capnp_ptr_t), intent(in) :: p
+      integer, intent(in) :: i
+      logical :: v
+      integer(int64) :: slot
+      v = .false.
+      if (.not. associated(p%msg)) return
+      if (p%kind /= CAPNP_PK_STRUCT) return
+      if (i < 0 .or. i >= p%pwords) return
+      if (p%seg < 1 .or. p%seg > p%msg%nsegs) return
+      slot = p%off + int(p%dwords, int64)*8_int64 + int(i, int64)*8_int64
+      if (slot < 0_int64 .or. slot + 8_int64 > p%msg%segs(p%seg)%len) return
+      v = cp_get_i64(p%msg%segs(p%seg)%bytes, slot) /= 0_int64
+   end function capnp_hasp
 
    function getp_impl(p, i, err, charged) result(q)
       type(capnp_ptr_t), intent(in) :: p

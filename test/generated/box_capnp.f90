@@ -109,10 +109,7 @@ contains
    function box_value_has(h) result(v)
       type(box_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_value_has
 
    function box_value_get(h, err) result(q)
@@ -132,10 +129,7 @@ contains
    function box_label_has(h) result(v)
       type(box_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_label_has
 
    subroutine box_label_get(h, s, err)
@@ -177,10 +171,7 @@ contains
    function nest_inner_has(h) result(v)
       type(nest_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function nest_inner_has
 
    function nest_inner_get(h, err) result(o)
@@ -210,10 +201,7 @@ contains
    function nest_boxes_has(h) result(v)
       type(nest_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function nest_boxes_has
 
    function nest_boxes_get(h, err) result(l)
@@ -267,10 +255,7 @@ contains
    function box_use_text_box_has(h) result(v)
       type(box_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_use_text_box_has
 
    function box_use_text_box_get(h, err) result(o)
@@ -300,10 +285,7 @@ contains
    function box_use_any_box_has(h) result(v)
       type(box_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_use_any_box_has
 
    function box_use_any_box_get(h, err) result(o)
@@ -333,10 +315,7 @@ contains
    function box_use_boxes_has(h) result(v)
       type(box_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 2, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 2)
    end function box_use_boxes_has
 
    function box_use_boxes_get(h, err) result(l)
@@ -368,10 +347,7 @@ contains
    function box_use_list_box_has(h) result(v)
       type(box_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 3, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 3)
    end function box_use_list_box_has
 
    function box_use_list_box_get(h, err) result(o)
@@ -401,10 +377,7 @@ contains
    function box_use_nest_has(h) result(v)
       type(box_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 4, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 4)
    end function box_use_nest_has
 
    function box_use_nest_get(h, err) result(o)
@@ -456,10 +429,7 @@ contains
    function q_a_has(h) result(v)
       type(q_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function q_a_has
 
    function q_a_get(h, err) result(q)
@@ -479,10 +449,7 @@ contains
    function q_e_has(h) result(v)
       type(q_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function q_e_has
 
    function q_e_get(h, err) result(q)
@@ -524,10 +491,7 @@ contains
    function q_use_q_has(h) result(v)
       type(q_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function q_use_q_has
 
    function q_use_q_get(h, err) result(o)
@@ -614,10 +578,7 @@ contains
    function bag_use_bag_has(h) result(v)
       type(bag_use_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function bag_use_bag_has
 
    function bag_use_bag_get(h, err) result(o)
@@ -661,10 +622,7 @@ contains
    function box_any_value_has(h) result(v)
       type(box_any_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_any_value_has
 
    function box_any_value_get(h, err) result(q)
@@ -684,10 +642,7 @@ contains
    function box_any_label_has(h) result(v)
       type(box_any_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_any_label_has
 
    subroutine box_any_label_get(h, s, err)
@@ -721,10 +676,7 @@ contains
    function box_text_value_has(h) result(v)
       type(box_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_text_value_has
 
    subroutine box_text_value_get(h, s, err)
@@ -744,10 +696,7 @@ contains
    function box_text_label_has(h) result(v)
       type(box_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_text_label_has
 
    subroutine box_text_label_get(h, s, err)
@@ -781,10 +730,7 @@ contains
    function box_list_text_value_has(h) result(v)
       type(box_list_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_list_text_value_has
 
    function box_list_text_value_get(h, err) result(l)
@@ -826,10 +772,7 @@ contains
    function box_list_text_label_has(h) result(v)
       type(box_list_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_list_text_label_has
 
    subroutine box_list_text_label_get(h, s, err)
@@ -863,10 +806,7 @@ contains
    function nest_text_inner_has(h) result(v)
       type(nest_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function nest_text_inner_has
 
    function nest_text_inner_get(h, err) result(o)
@@ -896,10 +836,7 @@ contains
    function nest_text_boxes_has(h) result(v)
       type(nest_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function nest_text_boxes_has
 
    function nest_text_boxes_get(h, err) result(l)
@@ -945,10 +882,7 @@ contains
    function q_text_text_text_text_a_has(h) result(v)
       type(q_text_text_text_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function q_text_text_text_text_a_has
 
    subroutine q_text_text_text_text_a_get(h, s, err)
@@ -968,10 +902,7 @@ contains
    function q_text_text_text_text_e_has(h) result(v)
       type(q_text_text_text_text_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function q_text_text_text_text_e_has
 
    subroutine q_text_text_text_text_e_get(h, b, err)
@@ -1005,10 +936,7 @@ contains
    function box_list_item_value_has(h) result(v)
       type(box_list_item_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function box_list_item_value_has
 
    function box_list_item_value_get(h, err) result(l)
@@ -1040,10 +968,7 @@ contains
    function box_list_item_label_has(h) result(v)
       type(box_list_item_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function box_list_item_label_has
 
    subroutine box_list_item_label_get(h, s, err)

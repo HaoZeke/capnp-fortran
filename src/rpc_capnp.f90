@@ -193,16 +193,21 @@ contains
    function message_unimplemented_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 0) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_unimplemented_has
 
    function message_unimplemented_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(message_t) :: o
+      if (message_which(h) /= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_unimplemented_get
 
@@ -230,16 +235,21 @@ contains
    function message_abort_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 1) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_abort_has
 
    function message_abort_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(exception_t) :: o
+      if (message_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_abort_get
 
@@ -267,16 +277,21 @@ contains
    function message_call_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 2) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_call_has
 
    function message_call_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(call_t) :: o
+      if (message_which(h) /= 2) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_call_get
 
@@ -304,16 +319,21 @@ contains
    function message_return_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 3) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_return_has
 
    function message_return_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(return_t) :: o
+      if (message_which(h) /= 3) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_return_get
 
@@ -341,16 +361,21 @@ contains
    function message_finish_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 4) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_finish_has
 
    function message_finish_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(finish_t) :: o
+      if (message_which(h) /= 4) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_finish_get
 
@@ -378,16 +403,21 @@ contains
    function message_resolve_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 5) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_resolve_has
 
    function message_resolve_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(resolve_t) :: o
+      if (message_which(h) /= 5) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_resolve_get
 
@@ -415,16 +445,21 @@ contains
    function message_release_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 6) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_release_has
 
    function message_release_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(release_t) :: o
+      if (message_which(h) /= 6) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_release_get
 
@@ -452,16 +487,21 @@ contains
    function message_obsolete_save_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 7) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_obsolete_save_has
 
    function message_obsolete_save_get(h, err) result(q)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      if (message_which(h) /= 7) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       q = capnp_getp(h%p, 0, err)
    end function message_obsolete_save_get
 
@@ -477,16 +517,21 @@ contains
    function message_bootstrap_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 8) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_bootstrap_has
 
    function message_bootstrap_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(bootstrap_t) :: o
+      if (message_which(h) /= 8) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_bootstrap_get
 
@@ -514,16 +559,21 @@ contains
    function message_obsolete_delete_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 9) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_obsolete_delete_has
 
    function message_obsolete_delete_get(h, err) result(q)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      if (message_which(h) /= 9) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       q = capnp_getp(h%p, 0, err)
    end function message_obsolete_delete_get
 
@@ -539,16 +589,21 @@ contains
    function message_provide_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 10) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_provide_has
 
    function message_provide_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(provide_t) :: o
+      if (message_which(h) /= 10) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_provide_get
 
@@ -576,16 +631,21 @@ contains
    function message_accept_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 11) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_accept_has
 
    function message_accept_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(accept_t) :: o
+      if (message_which(h) /= 11) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_accept_get
 
@@ -613,16 +673,21 @@ contains
    function message_join_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 12) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_join_has
 
    function message_join_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(join_t) :: o
+      if (message_which(h) /= 12) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_join_get
 
@@ -650,16 +715,21 @@ contains
    function message_disembargo_has(h) result(v)
       type(message_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_which(h) /= 13) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_disembargo_has
 
    function message_disembargo_get(h, err) result(o)
       type(message_t), intent(in) :: h
       integer, intent(out) :: err
       type(disembargo_t) :: o
+      if (message_which(h) /= 13) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_disembargo_get
 
@@ -709,10 +779,7 @@ contains
    function exception_reason_has(h) result(v)
       type(exception_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function exception_reason_has
 
    subroutine exception_reason_get(h, s, err)
@@ -771,10 +838,7 @@ contains
    function exception_trace_has(h) result(v)
       type(exception_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function exception_trace_has
 
    subroutine exception_trace_get(h, s, err)
@@ -829,10 +893,7 @@ contains
    function call_target_has(h) result(v)
       type(call_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function call_target_has
 
    function call_target_get(h, err) result(o)
@@ -888,10 +949,7 @@ contains
    function call_params_has(h) result(v)
       type(call_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function call_params_has
 
    function call_params_get(h, err) result(o)
@@ -941,16 +999,21 @@ contains
    function call_send_results_to_third_party_has(h) result(v)
       type(call_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 2, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (call_send_results_to_which(h) /= 2) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 2)
    end function call_send_results_to_third_party_has
 
    function call_send_results_to_third_party_get(h, err) result(q)
       type(call_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      if (call_send_results_to_which(h) /= 2) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       q = capnp_getp(h%p, 2, err)
    end function call_send_results_to_third_party_get
 
@@ -1059,16 +1122,21 @@ contains
    function return_results_has(h) result(v)
       type(return_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (return_which(h) /= 0) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function return_results_has
 
    function return_results_get(h, err) result(o)
       type(return_t), intent(in) :: h
       integer, intent(out) :: err
       type(payload_t) :: o
+      if (return_which(h) /= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function return_results_get
 
@@ -1096,16 +1164,21 @@ contains
    function return_exception_has(h) result(v)
       type(return_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (return_which(h) /= 1) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function return_exception_has
 
    function return_exception_get(h, err) result(o)
       type(return_t), intent(in) :: h
       integer, intent(out) :: err
       type(exception_t) :: o
+      if (return_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function return_exception_get
 
@@ -1144,9 +1217,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine return_results_sent_elsewhere_set
 
-   function return_take_from_other_question_get(h) result(v)
+   function return_take_from_other_question_get(h, err) result(v)
       type(return_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (return_which(h) /= 4) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 8_int64)
    end function return_take_from_other_question_get
 
@@ -1162,16 +1242,21 @@ contains
    function return_accept_from_third_party_has(h) result(v)
       type(return_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (return_which(h) /= 5) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function return_accept_from_third_party_has
 
    function return_accept_from_third_party_get(h, err) result(q)
       type(return_t), intent(in) :: h
       integer, intent(out) :: err
       type(capnp_ptr_t) :: q
+      if (return_which(h) /= 5) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       q = capnp_getp(h%p, 0, err)
    end function return_accept_from_third_party_get
 
@@ -1302,16 +1387,21 @@ contains
    function resolve_cap_has(h) result(v)
       type(resolve_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (resolve_which(h) /= 0) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function resolve_cap_has
 
    function resolve_cap_get(h, err) result(o)
       type(resolve_t), intent(in) :: h
       integer, intent(out) :: err
       type(cap_descriptor_t) :: o
+      if (resolve_which(h) /= 0) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function resolve_cap_get
 
@@ -1339,16 +1429,21 @@ contains
    function resolve_exception_has(h) result(v)
       type(resolve_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (resolve_which(h) /= 1) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function resolve_exception_has
 
    function resolve_exception_get(h, err) result(o)
       type(resolve_t), intent(in) :: h
       integer, intent(out) :: err
       type(exception_t) :: o
+      if (resolve_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function resolve_exception_get
 
@@ -1459,10 +1554,7 @@ contains
    function bootstrap_deprecated_object_id_has(h) result(v)
       type(bootstrap_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function bootstrap_deprecated_object_id_has
 
    function bootstrap_deprecated_object_id_get(h, err) result(q)
@@ -1517,10 +1609,7 @@ contains
    function provide_target_has(h) result(v)
       type(provide_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function provide_target_has
 
    function provide_target_get(h, err) result(o)
@@ -1550,10 +1639,7 @@ contains
    function provide_recipient_has(h) result(v)
       type(provide_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function provide_recipient_has
 
    function provide_recipient_get(h, err) result(q)
@@ -1608,10 +1694,7 @@ contains
    function accept_provision_has(h) result(v)
       type(accept_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function accept_provision_has
 
    function accept_provision_get(h, err) result(q)
@@ -1679,10 +1762,7 @@ contains
    function join_target_has(h) result(v)
       type(join_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function join_target_has
 
    function join_target_get(h, err) result(o)
@@ -1712,10 +1792,7 @@ contains
    function join_key_part_has(h) result(v)
       type(join_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function join_key_part_has
 
    function join_key_part_get(h, err) result(q)
@@ -1757,10 +1834,7 @@ contains
    function disembargo_target_has(h) result(v)
       type(disembargo_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function disembargo_target_has
 
    function disembargo_target_get(h, err) result(o)
@@ -1793,9 +1867,16 @@ contains
       tag = int(capnp_get_u16(h%p, 4_int64))
    end function disembargo_context_which
 
-   function disembargo_context_sender_loopback_get(h) result(v)
+   function disembargo_context_sender_loopback_get(h, err) result(v)
       type(disembargo_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (disembargo_context_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 0_int64)
    end function disembargo_context_sender_loopback_get
 
@@ -1808,9 +1889,16 @@ contains
       call capnp_set_u32(h%p, 0_int64, v, err)
    end subroutine disembargo_context_sender_loopback_set
 
-   function disembargo_context_receiver_loopback_get(h) result(v)
+   function disembargo_context_receiver_loopback_get(h, err) result(v)
       type(disembargo_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (disembargo_context_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 0_int64)
    end function disembargo_context_receiver_loopback_get
 
@@ -1830,9 +1918,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine disembargo_context_accept_set
 
-   function disembargo_context_provide_get(h) result(v)
+   function disembargo_context_provide_get(h, err) result(v)
       type(disembargo_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (disembargo_context_which(h) /= 3) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 0_int64)
    end function disembargo_context_provide_get
 
@@ -1873,9 +1968,16 @@ contains
       tag = int(capnp_get_u16(h%p, 4_int64))
    end function message_target_which
 
-   function message_target_imported_cap_get(h) result(v)
+   function message_target_imported_cap_get(h, err) result(v)
       type(message_target_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (message_target_which(h) /= 0) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 0_int64)
    end function message_target_imported_cap_get
 
@@ -1891,16 +1993,21 @@ contains
    function message_target_promised_answer_has(h) result(v)
       type(message_target_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (message_target_which(h) /= 1) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function message_target_promised_answer_has
 
    function message_target_promised_answer_get(h, err) result(o)
       type(message_target_t), intent(in) :: h
       integer, intent(out) :: err
       type(promised_answer_t) :: o
+      if (message_target_which(h) /= 1) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function message_target_promised_answer_get
 
@@ -1950,10 +2057,7 @@ contains
    function payload_content_has(h) result(v)
       type(payload_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function payload_content_has
 
    function payload_content_get(h, err) result(q)
@@ -1973,10 +2077,7 @@ contains
    function payload_cap_table_has(h) result(v)
       type(payload_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 1, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 1)
    end function payload_cap_table_has
 
    function payload_cap_table_get(h, err) result(l)
@@ -2043,10 +2144,7 @@ contains
    function promised_answer_transform_has(h) result(v)
       type(promised_answer_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function promised_answer_transform_has
 
    function promised_answer_transform_get(h, err) result(l)
@@ -2110,9 +2208,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine promised_answer_op_noop_set
 
-   function promised_answer_op_get_pointer_field_get(h) result(v)
+   function promised_answer_op_get_pointer_field_get(h, err) result(v)
       type(promised_answer_op_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int32) :: v
+      if (promised_answer_op_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int32
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u16(h%p, 2_int64)
    end function promised_answer_op_get_pointer_field_get
 
@@ -2160,9 +2265,16 @@ contains
       if (err /= CAPNP_OK) return
    end subroutine cap_descriptor_none_set
 
-   function cap_descriptor_sender_hosted_get(h) result(v)
+   function cap_descriptor_sender_hosted_get(h, err) result(v)
       type(cap_descriptor_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (cap_descriptor_which(h) /= 1) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 4_int64)
    end function cap_descriptor_sender_hosted_get
 
@@ -2175,9 +2287,16 @@ contains
       call capnp_set_u32(h%p, 4_int64, v, err)
    end subroutine cap_descriptor_sender_hosted_set
 
-   function cap_descriptor_sender_promise_get(h) result(v)
+   function cap_descriptor_sender_promise_get(h, err) result(v)
       type(cap_descriptor_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (cap_descriptor_which(h) /= 2) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 4_int64)
    end function cap_descriptor_sender_promise_get
 
@@ -2190,9 +2309,16 @@ contains
       call capnp_set_u32(h%p, 4_int64, v, err)
    end subroutine cap_descriptor_sender_promise_set
 
-   function cap_descriptor_receiver_hosted_get(h) result(v)
+   function cap_descriptor_receiver_hosted_get(h, err) result(v)
       type(cap_descriptor_t), intent(in) :: h
+      integer, intent(out), optional :: err
       integer(int64) :: v
+      if (cap_descriptor_which(h) /= 3) then
+         if (present(err)) err = CAPNP_ERR_KIND
+         v = 0_int64
+         return
+      end if
+      if (present(err)) err = CAPNP_OK
       v = capnp_get_u32(h%p, 4_int64)
    end function cap_descriptor_receiver_hosted_get
 
@@ -2208,16 +2334,21 @@ contains
    function cap_descriptor_receiver_answer_has(h) result(v)
       type(cap_descriptor_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (cap_descriptor_which(h) /= 4) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function cap_descriptor_receiver_answer_has
 
    function cap_descriptor_receiver_answer_get(h, err) result(o)
       type(cap_descriptor_t), intent(in) :: h
       integer, intent(out) :: err
       type(promised_answer_t) :: o
+      if (cap_descriptor_which(h) /= 4) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function cap_descriptor_receiver_answer_get
 
@@ -2245,16 +2376,21 @@ contains
    function cap_descriptor_third_party_hosted_has(h) result(v)
       type(cap_descriptor_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      if (cap_descriptor_which(h) /= 5) then
+         v = .false.
+         return
+      end if
+      v = capnp_hasp(h%p, 0)
    end function cap_descriptor_third_party_hosted_has
 
    function cap_descriptor_third_party_hosted_get(h, err) result(o)
       type(cap_descriptor_t), intent(in) :: h
       integer, intent(out) :: err
       type(third_party_cap_descriptor_t) :: o
+      if (cap_descriptor_which(h) /= 5) then
+         err = CAPNP_ERR_KIND
+         return
+      end if
       o%p = capnp_getp(h%p, 0, err)
    end function cap_descriptor_third_party_hosted_get
 
@@ -2317,10 +2453,7 @@ contains
    function third_party_cap_descriptor_id_has(h) result(v)
       type(third_party_cap_descriptor_t), intent(in) :: h
       logical :: v
-      type(capnp_ptr_t) :: q
-      integer :: err
-      q = capnp_getp(h%p, 0, err)
-      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL
+      v = capnp_hasp(h%p, 0)
    end function third_party_cap_descriptor_id_has
 
    function third_party_cap_descriptor_id_get(h, err) result(q)

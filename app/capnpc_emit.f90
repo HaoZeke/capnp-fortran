@@ -2531,6 +2531,40 @@ contains
       call w('      if (err /= CAPNP_OK) return')
    end subroutine emit_disc
 
+   !> Inactive union arm. An empty check means the field is not a union member.
+   !> capnpc-c++.c++ requires which() to equal the arm before get.
+   subroutine emit_arm_guard(gchk)
+      character(len=*), intent(in) :: gchk
+      if (len(gchk) == 0) return
+      call w('      if ('//gchk//') then')
+      call w('         err = CAPNP_ERR_KIND')
+      call w('         return')
+      call w('      end if')
+   end subroutine emit_arm_guard
+
+   !> Scalar getter. A union arm takes optional err and returns
+   !> CAPNP_ERR_KIND when which() names another arm.
+   subroutine emit_scalar_get_head(an, ht, vt, zero, gchk)
+      character(len=*), intent(in) :: an, ht, vt, zero, gchk
+      if (len(gchk) == 0) then
+         call w('   function '//an//'_get(h) result(v)')
+         call w('      type('//ht//'_t), intent(in) :: h')
+         call w('      '//vt//' :: v')
+         return
+      end if
+      call w('   function '//an//'_get(h, err) result(v)')
+      call w('      type('//ht//'_t), intent(in) :: h')
+      call w('      integer, intent(out), optional :: err')
+      call w('      '//vt//' :: v')
+      call w('      if ('//gchk//') then')
+      call w('         if (present(err)) err = CAPNP_ERR_KIND')
+      call w('         v = '//zero)
+      call w('         return')
+      call w('      end if')
+      call w('      if (present(err)) err = CAPNP_OK')
+   end subroutine emit_scalar_get_head
+
+
    !> Zero every slot of group node np, nested groups and inner
    !> discriminants included, as capnpc-c++.c++ init<Group> (1243-1259)
    !> does over getSortedSlots (1068-1121). A slot inside a wider one
@@ -2650,16 +2684,20 @@ contains
 
    !> Emit accessors for every field of node np. Accessors take handle type
    !> ht_t; generated names start with pfx (differs from ht for groups).
-   recursive subroutine emit_fields_of(np, ht, pfx, err, depth)
+   recursive subroutine emit_fields_of(np, ht, pfx, err, depth, guard)
       type(capnp_ptr_t), intent(in) :: np
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
       integer, intent(in), optional :: depth
+      character(len=*), intent(in), optional :: guard
       type(capnp_ptr_t) :: fl, f
+      character(len=:), allocatable :: og
       integer(int64) :: i
       integer :: disc_count, d
       d = 0
       if (present(depth)) d = depth
+      og = ''
+      if (present(guard)) og = guard
       if (d > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
@@ -2679,23 +2717,26 @@ contains
       do i = 0_int64, capnp_list_len(fl) - 1_int64
          f = capnp_list_get_struct(fl, int(i), err)
          if (err /= CAPNP_OK) return
-         call emit_field(np, f, ht, pfx, err, d)
+         call emit_field(np, f, ht, pfx, err, d, og)
          if (err /= CAPNP_OK) return
       end do
    end subroutine emit_fields_of
 
-   recursive subroutine emit_field(np, f, ht, pfx, err, depth)
+   recursive subroutine emit_field(np, f, ht, pfx, err, depth, guard)
       type(capnp_ptr_t), intent(in) :: np, f
       character(len=*), intent(in) :: ht, pfx
       integer, intent(out) :: err
       integer, intent(in), optional :: depth
+      character(len=*), intent(in), optional :: guard
       type(capnp_ptr_t) :: t, dv
-      character(len=:), allocatable :: fn, an, gset
+      character(len=:), allocatable :: fn, an, gset, gchk, og, own
       integer :: disc, gidx, ctx, saved, d
       integer(int64) :: off
 
       d = 0
       if (present(depth)) d = depth
+      og = ''
+      if (present(guard)) og = guard
       if (d > SCHEMA_WALK_LIMIT) then
          err = CAPNP_ERR_DEPTH
          return
@@ -2707,10 +2748,22 @@ contains
       if (err /= CAPNP_OK) return
       disc = field_discriminant(f)
       gset = ''
+      own = ''
       if (disc /= NO_DISCRIMINANT) then
          gset = '      call capnp_set_u16(h%p, '// &
                 itoa(node_struct_discriminant_offset(np)*2_int64)// &
                 '_int64, '//itoa(int(disc, int64))//'_int32, err)'
+         own = pfx//'_which(h) /= '//itoa(int(disc, int64))
+      end if
+      ! A group arm has no reader object. C++ checks which() on the group,
+      ! so each child carries that check, and a nested union keeps its own.
+      gchk = own
+      if (len(og) > 0) then
+         if (len(own) > 0) then
+            gchk = '('//og//') .or. ('//own//')'
+         else
+            gchk = og
+         end if
       end if
 
       if (field_which(f) == FIELD_GROUP) then
@@ -2730,7 +2783,7 @@ contains
             call w('   end subroutine '//an//'_select')
             call w('')
          end if
-         call emit_fields_of(g_nodes(gidx)%p, ht, an, err, d + 1)
+         call emit_fields_of(g_nodes(gidx)%p, ht, an, err, d + 1, gchk)
          return
       end if
 
@@ -2773,28 +2826,28 @@ contains
             call w('')
          end if
       case (TYPE_BOOL)
-         call emit_bool_field(an, ht, off, dv, gset)
+         call emit_bool_field(an, ht, off, dv, gset, gchk)
       case (TYPE_INT8, TYPE_INT16, TYPE_INT32, TYPE_INT64, &
             TYPE_UINT8, TYPE_UINT16, TYPE_UINT32, TYPE_UINT64)
-         call emit_int_field(an, ht, type_which(t), off, dv, gset)
+         call emit_int_field(an, ht, type_which(t), off, dv, gset, gchk)
       case (TYPE_FLOAT32, TYPE_FLOAT64)
-         call emit_float_field(an, ht, type_which(t), off, dv, gset)
+         call emit_float_field(an, ht, type_which(t), off, dv, gset, gchk)
       case (TYPE_ENUM)
-         call emit_enum_field(an, ht, off, dv, gset)
+         call emit_enum_field(an, ht, off, dv, gset, gchk)
       case (TYPE_TEXT)
-         call emit_text_field(an, ht, int(off), dv, gset, err)
+         call emit_text_field(an, ht, int(off), dv, gset, gchk, err)
       case (TYPE_DATA)
-         call emit_data_field(an, ht, int(off), dv, gset, err)
+         call emit_data_field(an, ht, int(off), dv, gset, gchk, err)
       case (TYPE_STRUCT)
          call emit_struct_field(an, ht, int(off), t, &
-                                field_slot_had_default(f), dv, gset, err)
+                                field_slot_had_default(f), dv, gset, gchk, err)
       case (TYPE_LIST)
          call emit_list_field(an, ht, int(off), t, &
-                              field_slot_had_default(f), dv, gset, err)
+                              field_slot_had_default(f), dv, gset, gchk, err)
       case (TYPE_INTERFACE)
-         call emit_interface_field(an, ht, int(off), t, gset, err)
+         call emit_interface_field(an, ht, int(off), t, gset, gchk, err)
       case (TYPE_ANY_POINTER)
-         call emit_anyptr_field(an, ht, int(off), t, gset, err)
+         call emit_anyptr_field(an, ht, int(off), t, gset, gchk, err)
       case default
          call w('   ! field '//an//': unsupported type '// &
                 itoa(int(type_which(t), int64)))
@@ -2842,16 +2895,19 @@ contains
 
    !> Pointer-field presence. capnpc-c++.c++ emits hasX() as a null check
    !> on the pointer slot.
-   subroutine emit_has(an, ht, pidx)
-      character(len=*), intent(in) :: an, ht
+   subroutine emit_has(an, ht, pidx, gchk)
+      character(len=*), intent(in) :: an, ht, gchk
       integer, intent(in) :: pidx
       call w('   function '//an//'_has(h) result(v)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      logical :: v')
-      call w('      type(capnp_ptr_t) :: q')
-      call w('      integer :: err')
-      call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
-      call w('      v = err == CAPNP_OK .and. q%kind /= CAPNP_PK_NULL')
+      if (len(gchk) > 0) then
+         call w('      if ('//gchk//') then')
+         call w('         v = .false.')
+         call w('         return')
+         call w('      end if')
+      end if
+      call w('      v = capnp_hasp(h%p, '//itoa(int(pidx, int64))//')')
       call w('   end function '//an//'_has')
       call w('')
    end subroutine emit_has
@@ -2859,8 +2915,8 @@ contains
    !> AnyPointer fields keep a typed handle when the schema names a kind.
    !> capnpc-c++.c++ maps unconstrained anyPointer to AnyPointer, AnyStruct,
    !> AnyList, or Capability. anyKind stays capnp_ptr_t.
-   subroutine emit_anyptr_field(an, ht, pidx, t, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_anyptr_field(an, ht, pidx, t, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: t
       integer, intent(out) :: err
@@ -2868,24 +2924,25 @@ contains
       err = CAPNP_OK
       akind = ANYPTR_KIND_ANY
       if (type_anyptr_which(t) == ANYPTR_UNCONSTRAINED) akind = type_anyptr_kind(t)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       select case (akind)
       case (ANYPTR_KIND_STRUCT)
          g_need_any_struct = .true.
-         call emit_wrapped_ptr(an, ht, pidx, trim(g_anystruct), gset)
+         call emit_wrapped_ptr(an, ht, pidx, trim(g_anystruct), gset, gchk)
       case (ANYPTR_KIND_LIST)
          g_need_any_list = .true.
-         call emit_wrapped_ptr(an, ht, pidx, trim(g_anylist), gset)
+         call emit_wrapped_ptr(an, ht, pidx, trim(g_anylist), gset, gchk)
       case (ANYPTR_KIND_CAPABILITY)
          ! Use a local client. The three-party schema is used by capnp_rpc,
          ! so this module must not use capnp_rpc in return.
          g_need_capability = .true.
-         call emit_capability_field(an, ht, pidx, gset)
+         call emit_capability_field(an, ht, pidx, gset, gchk)
       case default
          call w('   function '//an//'_get(h, err) result(q)')
          call w('      type('//ht//'_t), intent(in) :: h')
          call w('      integer, intent(out) :: err')
          call w('      type(capnp_ptr_t) :: q')
+         call emit_arm_guard(gchk)
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('   end function '//an//'_get')
          call w('')
@@ -2900,13 +2957,14 @@ contains
       end select
    end subroutine emit_anyptr_field
 
-   subroutine emit_wrapped_ptr(an, ht, pidx, tn, gset)
-      character(len=*), intent(in) :: an, ht, tn, gset
+   subroutine emit_wrapped_ptr(an, ht, pidx, tn, gset, gchk)
+      character(len=*), intent(in) :: an, ht, tn, gset, gchk
       integer, intent(in) :: pidx
       call w('   function '//an//'_get(h, err) result(o)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
       call w('      type('//tn//') :: o')
+      call emit_arm_guard(gchk)
       call w('      o%p = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
       call w('   end function '//an//'_get')
       call w('')
@@ -2922,8 +2980,8 @@ contains
 
    !> Capability client get/set. The optional cap table resolves the slot
    !> the way layout.c++ injectCap does; without it the slot index is the id.
-   subroutine emit_cap_client(an, ht, pidx, tn, gset)
-      character(len=*), intent(in) :: an, ht, tn, gset
+   subroutine emit_cap_client(an, ht, pidx, tn, gset, gchk)
+      character(len=*), intent(in) :: an, ht, tn, gset, gchk
       integer, intent(in) :: pidx
       call w('   function '//an//'_get(h, err, ctab) result(c)')
       call w('      type('//ht//'_t), intent(in) :: h')
@@ -2933,6 +2991,7 @@ contains
       call w('      type(capnp_ptr_t) :: q')
       call w('      c%cap%kind = RPC_CAP_NONE')
       call w('      c%cap%id = 0_int64')
+      call emit_arm_guard(gchk)
       call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
       call w('      if (err /= CAPNP_OK) return')
       call w('      if (q%kind /= CAPNP_PK_CAP) return')
@@ -2962,8 +3021,8 @@ contains
    !> AnyPointer(Capability). The getter returns a client (kind, id). The
    !> setter still takes the wire pointer: capnp_rpc passes
    !> rpc_make_cap_ptr into join_result_cap_set.
-   subroutine emit_capability_field(an, ht, pidx, gset)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_capability_field(an, ht, pidx, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       call w('   function '//an//'_get(h, err, ctab) result(c)')
       call w('      type('//ht//'_t), intent(in) :: h')
@@ -2973,6 +3032,7 @@ contains
       call w('      type(capnp_ptr_t) :: q')
       call w('      c%kind = 0')
       call w('      c%id = 0_int64')
+      call emit_arm_guard(gchk)
       call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
       call w('      if (err /= CAPNP_OK) return')
       call w('      if (q%kind /= CAPNP_PK_CAP) return')
@@ -2997,8 +3057,8 @@ contains
    !> Interface-typed struct field: get/set the wire capability as a
    !> <iface>_client_t (cap index in/out). Uses the same client type the
    !> method stubs generate for that interface.
-   subroutine emit_interface_field(an, ht, pidx, t, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_interface_field(an, ht, pidx, t, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: t
       integer, intent(out) :: err
@@ -3019,14 +3079,14 @@ contains
       if (err /= CAPNP_OK) return
       if (len(iname) > 0) st = iname
       g_has_iface = .true.
-      call emit_has(an, ht, pidx)
-      call emit_cap_client(an, ht, pidx, st//'_client', gset)
+      call emit_has(an, ht, pidx, gchk)
+      call emit_cap_client(an, ht, pidx, st//'_client', gset, gchk)
    end subroutine emit_interface_field
 
    ! --- field emitters ------------------------------------------------------
 
-   subroutine emit_bool_field(an, ht, bit_off, dv, gset)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_bool_field(an, ht, bit_off, dv, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer(int64), intent(in) :: bit_off
       type(capnp_ptr_t), intent(in) :: dv
       character(len=:), allocatable :: defarg
@@ -3034,9 +3094,7 @@ contains
       if (value_which(dv) == TYPE_BOOL) then
          if (value_bool(dv)) defarg = ', default=.true.'
       end if
-      call w('   function '//an//'_get(h) result(v)')
-      call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      logical :: v')
+      call emit_scalar_get_head(an, ht, 'logical', '.false.', gchk)
       call w('      v = capnp_get_bool(h%p, '//itoa(bit_off)//'_int64'//defarg//')')
       call w('   end function '//an//'_get')
       call w('')
@@ -3050,8 +3108,8 @@ contains
       call w('')
    end subroutine emit_bool_field
 
-   subroutine emit_int_field(an, ht, tw, off, dv, gset)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_int_field(an, ht, tw, off, dv, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: tw
       integer(int64), intent(in) :: off
       type(capnp_ptr_t), intent(in) :: dv
@@ -3070,9 +3128,7 @@ contains
       d = const_int_value(dv)
       defarg = ''
       if (d /= 0_int64) defarg = ', default='//signed_lit(d, kind_suffix(vt))
-      call w('   function '//an//'_get(h) result(v)')
-      call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      '//vt//' :: v')
+      call emit_scalar_get_head(an, ht, vt, '0'//kind_suffix(vt), gchk)
       call w('      v = capnp_get_'//acc//'(h%p, '//itoa(off*bytes)//'_int64'//defarg//')')
       call w('   end function '//an//'_get')
       call w('')
@@ -3092,15 +3148,16 @@ contains
       s = '_'//vt(9:len(vt) - 1) ! integer(intNN) -> _intNN
    end function kind_suffix
 
-   subroutine emit_float_field(an, ht, tw, off, dv, gset)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_float_field(an, ht, tw, off, dv, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: tw
       integer(int64), intent(in) :: off
       type(capnp_ptr_t), intent(in) :: dv
-      character(len=:), allocatable :: acc, vt, defarg
+      character(len=:), allocatable :: acc, vt, defarg, zero
       integer(int64) :: bytes
       if (tw == TYPE_FLOAT32) then
          acc = 'f32'; vt = 'real(real32)'; bytes = 4
+         zero = '0.0_real32'
          defarg = ''
          if (value_which(dv) == TYPE_FLOAT32) then
             if (cp_f32_bits(value_f32(dv)) /= 0_int32) &
@@ -3109,6 +3166,7 @@ contains
          end if
       else
          acc = 'f64'; vt = 'real(real64)'; bytes = 8
+         zero = '0.0_real64'
          defarg = ''
          if (value_which(dv) == TYPE_FLOAT64) then
             if (cp_f64_bits(value_f64(dv)) /= 0_int64) &
@@ -3116,9 +3174,7 @@ contains
                         signed_lit(cp_f64_bits(value_f64(dv)), '_int64')//')'
          end if
       end if
-      call w('   function '//an//'_get(h) result(v)')
-      call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      '//vt//' :: v')
+      call emit_scalar_get_head(an, ht, vt, zero, gchk)
       call w('      v = capnp_get_'//acc//'(h%p, '//itoa(off*bytes)//'_int64'//defarg//')')
       call w('   end function '//an//'_get')
       call w('')
@@ -3132,8 +3188,8 @@ contains
       call w('')
    end subroutine emit_float_field
 
-   subroutine emit_enum_field(an, ht, off, dv, gset)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_enum_field(an, ht, off, dv, gset, gchk)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer(int64), intent(in) :: off
       type(capnp_ptr_t), intent(in) :: dv
       character(len=:), allocatable :: defarg
@@ -3142,9 +3198,7 @@ contains
       if (value_which(dv) == TYPE_ENUM) d = value_enum(dv)
       defarg = ''
       if (d /= 0) defarg = ', default='//itoa(int(d, int64))//'_int32'
-      call w('   function '//an//'_get(h) result(v)')
-      call w('      type('//ht//'_t), intent(in) :: h')
-      call w('      integer :: v')
+      call emit_scalar_get_head(an, ht, 'integer', '0', gchk)
       call w('      v = int(capnp_get_u16(h%p, '//itoa(off*2_int64)//'_int64'//defarg//'))')
       call w('   end function '//an//'_get')
       call w('')
@@ -3159,8 +3213,8 @@ contains
       call w('')
    end subroutine emit_enum_field
 
-   subroutine emit_text_field(an, ht, pidx, dv, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_text_field(an, ht, pidx, dv, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: dv
       integer, intent(out) :: err
@@ -3169,13 +3223,14 @@ contains
       dtext = ''
       if (value_which(dv) == TYPE_TEXT) call value_text(dv, dtext, err)
       if (err /= CAPNP_OK) return
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   subroutine '//an//'_get(h, s, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      character(len=:), allocatable, intent(out) :: s')
       call w('      integer, intent(out) :: err')
+      if (len(dtext) > 0) call w('      type(capnp_ptr_t) :: q')
+      call emit_arm_guard(gchk)
       if (len(dtext) > 0) then
-         call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
          call w('         s = '//ftext(dtext, 14))
@@ -3195,8 +3250,8 @@ contains
       call w('')
    end subroutine emit_text_field
 
-   subroutine emit_data_field(an, ht, pidx, dv, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_data_field(an, ht, pidx, dv, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: dv
       integer, intent(out) :: err
@@ -3209,13 +3264,14 @@ contains
       else
          allocate (db(0))
       end if
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   subroutine '//an//'_get(h, b, err)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer(int8), allocatable, intent(out) :: b(:)')
       call w('      integer, intent(out) :: err')
+      if (size(db) > 0) call w('      type(capnp_ptr_t) :: q')
+      call emit_arm_guard(gchk)
       if (size(db) > 0) then
-         call w('      type(capnp_ptr_t) :: q')
          call w('      q = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err == CAPNP_OK .and. q%kind == CAPNP_PK_NULL) then')
          call w('         b = '//blob_name(an))
@@ -3235,8 +3291,8 @@ contains
       call w('')
    end subroutine emit_data_field
 
-   subroutine emit_struct_field(an, ht, pidx, t, had_default, dv, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_struct_field(an, ht, pidx, t, had_default, dv, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: t
       logical, intent(in) :: had_default
@@ -3262,7 +3318,7 @@ contains
       if (len(iname) > 0) st = iname
       hasdef = .false.
       if (had_default) hasdef = register_default_blob(an, dv)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   function '//an//'_get(h, err) result(o)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
@@ -3271,6 +3327,9 @@ contains
          call w('      type(capnp_message_t), save, target :: defmsg')
          call w('      logical, save :: defloaded = .false.')
          call w('      type(capnp_ptr_t) :: d')
+      end if
+      call emit_arm_guard(gchk)
+      if (hasdef) then
          call w('      o%p = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. o%p%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
@@ -3320,8 +3379,8 @@ contains
       call w('')
    end subroutine emit_struct_field
 
-   subroutine emit_list_field(an, ht, pidx, t, had_default, dv, gset, err)
-      character(len=*), intent(in) :: an, ht, gset
+   subroutine emit_list_field(an, ht, pidx, t, had_default, dv, gset, gchk, err)
+      character(len=*), intent(in) :: an, ht, gset, gchk
       integer, intent(in) :: pidx
       type(capnp_ptr_t), intent(in) :: t, dv
       logical, intent(in) :: had_default
@@ -3360,18 +3419,21 @@ contains
       end select
       hasdef = .false.
       if (had_default) hasdef = register_default_blob(an, dv)
-      call emit_has(an, ht, pidx)
+      call emit_has(an, ht, pidx, gchk)
       call w('   function '//an//'_get(h, err) result(l)')
       call w('      type('//ht//'_t), intent(in) :: h')
       call w('      integer, intent(out) :: err')
       call w('      type(capnp_ptr_t) :: l')
       if (hasdef) then
-         ! Builder get copies the default into the message. A reader keeps
-         ! the saved default. layout.c++ getWritableListPointer copies the
-         ! default word when the slot is null.
          call w('      type(capnp_message_t), save, target :: defmsg')
          call w('      logical, save :: defloaded = .false.')
          call w('      type(capnp_ptr_t) :: d')
+      end if
+      call emit_arm_guard(gchk)
+      if (hasdef) then
+         ! Builder get copies the default into the message. A reader keeps
+         ! the saved default. layout.c++ getWritableListPointer copies the
+         ! default word when the slot is null.
          call w('      l = capnp_getp(h%p, '//itoa(int(pidx, int64))//', err)')
          call w('      if (err /= CAPNP_OK .or. l%kind /= CAPNP_PK_NULL) return')
          call w('      if (.not. defloaded) then')
