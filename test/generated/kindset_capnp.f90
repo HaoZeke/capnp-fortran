@@ -51,6 +51,12 @@ contains
       call capnp_set_u16(h%p, 0_int64, int(v, int32), err)
    end subroutine input_stanza_kind_set
 
+   function input_stanza_payload_has(h) result(v)
+      type(input_stanza_t), intent(in) :: h
+      logical :: v
+      v = capnp_hasp(h%p, 0)
+   end function input_stanza_payload_has
+
    subroutine input_stanza_payload_get(h, s, err)
       type(input_stanza_t), intent(in) :: h
       character(len=:), allocatable, intent(out) :: s
