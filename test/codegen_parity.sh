@@ -7,7 +7,7 @@ START=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Usage: codegen_parity.sh [g1..g53|all] [build-dir]
+# Usage: codegen_parity.sh [g1..g54|all] [build-dir]
 # The build directory may also come from CAPNP_BUILD_DIR and must contain one
 # complete build. Without one, fpm builds into build-codegen-parity.
 CASE=${1:-all}
@@ -2846,6 +2846,118 @@ EOS
   echo "g53 ok"
 }
 
+# A client of an interface with two superclasses converts to the second
+# superclass client and calls that superclass's method. capnpc-c++.c++
+# 2447-2451 derives Client from every superclass Client. The base emitter
+# has no conversion, so this driver does not compile there.
+g54() {
+  local d
+  d=$(work)
+  cd "$d"
+  cat > pair.capnp << 'EOF'
+@0xf0000000000008f4;
+interface Alpha {
+  ping @0 () -> (x :Int32);
+}
+interface Beta {
+  pong @0 () -> (y :Int32);
+}
+interface Child extends(Alpha, Beta) {}
+EOF
+  cxx_ok pair.capnp
+  cat > cpp.cpp << 'EOF'
+#include "pair.capnp.h"
+static void take_beta(Beta::Client) {}
+void f(Child::Client c) { take_beta(c); }
+EOF
+  "$CXX" -std=c++17 -fsyntax-only "${CAPNP_PC[@]}" cpp.cpp
+  capnp compile "${CAPNP_INC[@]}" -o"$BIN" pair.capnp
+  grep -q 'function child_as_beta(' pair_capnp.f90
+  cat > drv.f90 << 'EOF'
+module impl
+   use capnp
+   use capnp_rpc
+   use pair_capnp
+   implicit none
+   integer :: beta_hits = 0
+   type, extends(child_server_t) :: srv_t
+   contains
+      procedure :: ping => do_ping
+      procedure :: pong => do_pong
+   end type srv_t
+contains
+   subroutine do_ping(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(alpha_ping_params_t), intent(in) :: params
+      type(alpha_ping_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      err = CAPNP_OK
+   end subroutine do_ping
+   subroutine do_pong(self, ctx, params, results, err)
+      class(srv_t), intent(inout) :: self
+      type(rpc_call_ctx_t), intent(inout) :: ctx
+      type(beta_pong_params_t), intent(in) :: params
+      type(beta_pong_results_t), intent(in) :: results
+      integer, intent(out) :: err
+      beta_hits = beta_hits + 1
+      err = CAPNP_OK
+      call beta_pong_results_y_set(results, 9_int32, err)
+   end subroutine do_pong
+end module impl
+program drv
+   use capnp
+   use capnp_posix
+   use capnp_rpc
+   use pair_capnp
+   use impl
+   implicit none
+   type(rpc_conn_t), target :: cli, srv_conn
+   type(srv_t), target :: srv
+   class(rpc_server_t), pointer :: boot
+   type(rpc_cap_t) :: root
+   type(child_client_t) :: ccli
+   type(beta_client_t) :: bcli
+   type(capnp_message_t), target :: m
+   type(beta_pong_params_t) :: bp
+   type(beta_pong_results_t) :: br
+   integer(int64) :: q
+   integer :: fa, fb, err, y
+   call px_socketpair(fa, fb, err)
+   if (err /= CAPNP_OK) error stop 1
+   boot => srv
+   call rpc_conn_init(srv_conn, fb, boot)
+   boot => null()
+   call rpc_conn_init(cli, fa, boot)
+   call rpc_bootstrap_send(cli, root, err)
+   q = root%id
+   call rpc_pump_once(srv_conn, err)
+   call rpc_wait(cli, q, err)
+   call rpc_result_cap(cli, q, [integer ::], root, err)
+   call rpc_finish_send(cli, q, .true., err)
+   call rpc_pump_once(srv_conn, err)
+   ccli%cap = root
+   bcli = child_as_beta(ccli)
+   if (bcli%cap%id /= ccli%cap%id) error stop 2
+   call beta_pong_begin(cli, bcli, m, bp, q, err)
+   if (err /= CAPNP_OK) error stop 3
+   call rpc_call_send(cli, m, err)
+   call rpc_pump_once(srv_conn, err)
+   call beta_pong_wait(cli, q, br, err)
+   y = beta_pong_results_y_get(br)
+   call rpc_finish_send(cli, q, .false., err)
+   call rpc_pump_once(srv_conn, err)
+   print '(i0,1x,i0)', y, beta_hits
+   call rpc_conn_close(cli)
+   call rpc_conn_close(srv_conn)
+end program drv
+EOF
+  fc pair_capnp.f90 drv.f90 -I "$MOD" -J . "${LIBARGS[@]}" -o drv
+  run_drv
+  cmp_out "$DRV_OUT" "9 1"
+  echo "g54 ok"
+}
+
 case "$CASE" in
   g1) g1 ;;
   g2) g2 ;;
@@ -2900,11 +3012,12 @@ case "$CASE" in
   g51) g51 ;;
   g52) g52 ;;
   g53) g53 ;;
+  g54) g54 ;;
   all)
-    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53
+    g1; g2; g3_g4 g3; g3_g4 g4; g5; g6; g7; g8; g9; g10; g11; g12; g13; g14; g15; g16; g17; g18; g19; g20; g21; g22; g23; g24; g25; g26; g27; g28; g29; g30; g31; g32; g33; g34; g35; g36; g37; g38; g39; g40; g41; g42; g43; g44; g45; g46; g47; g48; g49; g50; g51; g52; g53; g54
     ;;
   *)
-    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|all" >&2
+    echo "usage: $0 g1|g2|g3|g4|g5|g6|g7|g8|g9|g10|g11|g12|g13|g14|g15|g16|g17|g18|g19|g20|g21|g22|g23|g24|g25|g26|g27|g28|g29|g30|g31|g32|g33|g34|g35|g36|g37|g38|g39|g40|g41|g42|g43|g44|g45|g46|g47|g48|g49|g50|g51|g52|g53|g54|all" >&2
     exit 2
     ;;
 esac

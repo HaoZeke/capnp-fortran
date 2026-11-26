@@ -4332,7 +4332,9 @@ contains
          if (err /= CAPNP_OK) return
       end do
       ! A subtype client is accepted wherever its first superclass's client
-      ! is, as capnpc-c++.c++ derives each Client from its superclasses.
+      ! is. capnpc-c++.c++ (2447-2451) derives Client from every superclass
+      ! Client. Fortran extends one type, so further superclasses get
+      ! <iface>_as_<S> in emit_client_as_supers.
       if (len(parent) > 0) then
          call w('   type, extends('//parent//'_client_t) :: '//tn//'_client_t')
       else
@@ -4508,7 +4510,61 @@ contains
       call w('      end select')
       call w('   end subroutine '//tn//'_dispatch')
       call w('')
+      call emit_client_as_supers(np, tn, err)
    end subroutine emit_interface_procs
+
+   !> One function per superclass after the first, including supers reached
+   !> through those parents. The set is collect_extra_supers: transitive,
+   !> deduplicated, and bounded the same way as the server-method walk
+   !> (depth 32, 64 ids). The result shares the caller's capability handle
+   !> so every method of that superclass client can be called.
+   subroutine emit_client_as_supers(np, tn, err)
+      type(capnp_ptr_t), intent(in) :: np
+      character(len=*), intent(in) :: tn
+      integer, intent(out) :: err
+      integer :: extra_ids(64), nextra, base_ids(64), nbase
+      integer :: e, sidx, nused, k
+      character(len=64) :: used(64)
+      character(len=:), allocatable :: sn, fn, base
+      err = CAPNP_OK
+      nused = 0
+      call collect_extra_supers(np, extra_ids, nextra, base_ids, nbase, err)
+      if (err /= CAPNP_OK .or. nextra == 0) return
+      do e = 1, nextra
+         sidx = extra_ids(e)
+         call node_fname(g_nodes(sidx)%p, sn, err)
+         if (err /= CAPNP_OK) return
+         base = tn//'_as_'//sn
+         fn = ident_fit(base)
+         if (as_taken(fn)) then
+            base = tn//'_as_'//sn//'_'//u64_hex(node_id(g_nodes(sidx)%p))
+            fn = ident_fit(base)
+            k = 1
+            do while (as_taken(fn))
+               k = k + 1
+               fn = ident_fit(base//'_'//itoa(int(k, int64)))
+            end do
+         end if
+         nused = nused + 1
+         used(nused) = fn
+         call ref_stem(sidx, sn)
+         call w('   function '//fn//'(client) result(c)')
+         call w('      type('//tn//'_client_t), intent(in) :: client')
+         call w('      type('//sn//'_client_t) :: c')
+         call w('      c%cap = client%cap')
+         call w('   end function '//fn)
+         call w('')
+      end do
+   contains
+      logical function as_taken(name)
+         character(len=*), intent(in) :: name
+         integer :: u
+         as_taken = .false.
+         do u = 1, nused
+            if (used(u) == name) as_taken = .true.
+         end do
+      end function as_taken
+   end subroutine emit_client_as_supers
 
    subroutine emit_method_ifc(tn, mn, pn, rn)
       character(len=*), intent(in) :: tn, mn, pn, rn
