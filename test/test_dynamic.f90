@@ -35,7 +35,7 @@ contains
 
    subroutine collect_dynamic(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(52))
+      allocate (testsuite(53))
       testsuite(1)%name = "dynamic"
       testsuite(1)%test => run_dynamic
       testsuite(2)%name = "dynamic-default-isolation"
@@ -140,6 +140,8 @@ contains
       testsuite(51)%test => run_null_structlist
       testsuite(52)%name = "dynamic-setcap-iface"
       testsuite(52)%test => run_setcap_iface
+      testsuite(53)%name = "dynamic-has"
+      testsuite(53)%test => run_dyn_has
    end subroutine collect_dynamic
 
    subroutine check_(error, cond, name)
@@ -3378,5 +3380,181 @@ contains
          iface_id = node_id(schema%nodes(capnp_dyn_find(schema, name, e)))
       end function iface_id
    end subroutine run_setcap_iface
+
+   !> Both HasMode values. The omitted mode is NON_NULL.
+   subroutine run_dyn_has(error)
+      use, intrinsic :: ieee_arithmetic, only: ieee_value, ieee_quiet_nan
+      type(error_type), allocatable, intent(out) :: error
+      type(capnp_dyn_schema_t), target :: schema
+      type(capnp_message_t), target :: msg, smsg
+      type(capnp_ptr_t) :: root, tiny, q
+      character(len=80), parameter :: lines(27) = [character(len=80) :: &
+         '@0xa1b2c3d4e5f60718;', &
+         'enum Hue { red @0; blue @1; }', &
+         'struct Inner { v @0 :Int32; }', &
+         'struct Short {', &
+         '  a @0 :Int64;', &
+         '  b @1 :Int64;', &
+         '  p @2 :Data;', &
+         '  q @3 :Data;', &
+         '}', &
+         'struct Node {', &
+         '  s @0 :Text = "def";', &
+         '  n @1 :Int32 = 9;', &
+         '  v @2 :Void;', &
+         '  b @3 :Bool = true;', &
+         '  f4 @4 :Float32 = 1.5;', &
+         '  f8 @5 :Float64 = 1.5;', &
+         '  hue @6 :Hue = blue;', &
+         '  inner @7 :Inner;', &
+         '  xs @8 :List(Int32);', &
+         '  blob @9 :Data;', &
+         '  union {', &
+         '    g :group {', &
+         '      x @10 :Int32;', &
+         '    }', &
+         '    off @11 :Int32;', &
+         '  }', &
+         '}']
+      character(len=:), allocatable :: s
+      integer(int8) :: raw(0:0)
+      integer :: err, nidx, sidx
+      integer(int64) :: n
+      real(real64) :: d
+      logical :: ok, has
+      call load_inline_schema(error, 'hasnode', lines, schema, ok)
+      if (allocated(error) .or. .not. ok) return
+      nidx = capnp_dyn_find(schema, 'Node', err)
+      sidx = capnp_dyn_find(schema, 'Short', err)
+      call capnp_message_init_builder(msg, err)
+      root = capnp_dyn_new_root(schema, nidx, msg, err)
+      call check_(error, err == CAPNP_OK .and. nidx > 0 .and. sidx > 0, 'has: node root')
+
+      call capnp_dyn_has(schema, nidx, root, 's', has, err)
+      call capnp_dyn_get_text(schema, nidx, root, 's', s, err)
+      call check_(error, err == CAPNP_OK .and. .not. has .and. s == 'def', &
+                  'has: null text default is absent')
+      call want(root, nidx, 's', CAPNP_HAS_NON_DEFAULT, .false., 'has: null text non-default')
+      call capnp_dyn_set_text(schema, nidx, root, 's', 'def', err)
+      call want(root, nidx, 's', CAPNP_HAS_NON_NULL, .true., 'has: set text non-null')
+      call want(root, nidx, 's', CAPNP_HAS_NON_DEFAULT, .true., 'has: set text non-default')
+
+      call capnp_dyn_has(schema, nidx, root, 'v', has, err)
+      call check_(error, err == CAPNP_OK .and. has, 'has: default mode void is present')
+      call want(root, nidx, 'v', CAPNP_HAS_NON_NULL, .true., 'has: void non-null')
+      call want(root, nidx, 'v', CAPNP_HAS_NON_DEFAULT, .false., 'has: void non-default')
+
+      n = capnp_dyn_get_int(schema, nidx, root, 'n', err)
+      call check_(error, err == CAPNP_OK .and. n == 9_int64, 'has: int reads its default')
+      call want(root, nidx, 'n', CAPNP_HAS_NON_NULL, .true., 'has: int default non-null')
+      call want(root, nidx, 'n', CAPNP_HAS_NON_DEFAULT, .false., 'has: int default non-default')
+      call capnp_dyn_set_int(schema, nidx, root, 'n', 9_int64, err)
+      call want(root, nidx, 'n', CAPNP_HAS_NON_DEFAULT, .false., 'has: stored int default')
+      call capnp_dyn_set_int(schema, nidx, root, 'n', 10_int64, err)
+      call want(root, nidx, 'n', CAPNP_HAS_NON_NULL, .true., 'has: int value non-null')
+      call want(root, nidx, 'n', CAPNP_HAS_NON_DEFAULT, .true., 'has: int value non-default')
+
+      call want(root, nidx, 'b', CAPNP_HAS_NON_NULL, .true., 'has: bool default non-null')
+      call want(root, nidx, 'b', CAPNP_HAS_NON_DEFAULT, .false., 'has: bool default non-default')
+      call capnp_dyn_set_bool(schema, nidx, root, 'b', .true., err)
+      call want(root, nidx, 'b', CAPNP_HAS_NON_NULL, .true., 'has: bool true non-null')
+      call want(root, nidx, 'b', CAPNP_HAS_NON_DEFAULT, .false., 'has: bool true non-default')
+      call capnp_dyn_set_bool(schema, nidx, root, 'b', .false., err)
+      call want(root, nidx, 'b', CAPNP_HAS_NON_NULL, .true., 'has: bool false non-null')
+      call want(root, nidx, 'b', CAPNP_HAS_NON_DEFAULT, .true., 'has: bool false non-default')
+
+      call check_float('f4')
+      call check_float('f8')
+
+      call want(root, nidx, 'hue', CAPNP_HAS_NON_NULL, .true., 'has: enum default non-null')
+      call want(root, nidx, 'hue', CAPNP_HAS_NON_DEFAULT, .false., 'has: enum default non-default')
+      call capnp_dyn_set_int(schema, nidx, root, 'hue', 1_int64, err)
+      call want(root, nidx, 'hue', CAPNP_HAS_NON_DEFAULT, .false., 'has: stored enum default')
+      call capnp_dyn_set_int(schema, nidx, root, 'hue', 0_int64, err)
+      call want(root, nidx, 'hue', CAPNP_HAS_NON_NULL, .true., 'has: enum value non-null')
+      call want(root, nidx, 'hue', CAPNP_HAS_NON_DEFAULT, .true., 'has: enum value non-default')
+
+      call want(root, nidx, 'inner', CAPNP_HAS_NON_NULL, .false., 'has: null struct')
+      call want(root, nidx, 'inner', CAPNP_HAS_NON_DEFAULT, .false., 'has: null struct non-default')
+      call want(root, nidx, 'xs', CAPNP_HAS_NON_NULL, .false., 'has: null list')
+      call want(root, nidx, 'xs', CAPNP_HAS_NON_DEFAULT, .false., 'has: null list non-default')
+      call want(root, nidx, 'blob', CAPNP_HAS_NON_NULL, .false., 'has: null data')
+      call want(root, nidx, 'blob', CAPNP_HAS_NON_DEFAULT, .false., 'has: null data non-default')
+      q = capnp_dyn_init_struct(schema, nidx, root, 'inner', err)
+      call check_(error, err == CAPNP_OK, 'has: init struct')
+      call want(root, nidx, 'inner', CAPNP_HAS_NON_NULL, .true., 'has: set struct')
+      call want(root, nidx, 'inner', CAPNP_HAS_NON_DEFAULT, .true., 'has: set struct non-default')
+      q = capnp_dyn_init_list(schema, nidx, root, 'xs', 1_int64, err)
+      call check_(error, err == CAPNP_OK, 'has: init list')
+      call want(root, nidx, 'xs', CAPNP_HAS_NON_NULL, .true., 'has: set list')
+      call want(root, nidx, 'xs', CAPNP_HAS_NON_DEFAULT, .true., 'has: set list non-default')
+      raw(0) = 9_int8
+      call capnp_dyn_set_data(schema, nidx, root, 'blob', raw, err)
+      call check_(error, err == CAPNP_OK, 'has: set data')
+      call want(root, nidx, 'blob', CAPNP_HAS_NON_NULL, .true., 'has: set data pointer')
+      call want(root, nidx, 'blob', CAPNP_HAS_NON_DEFAULT, .true., 'has: set data non-default')
+
+      call want(root, nidx, 'g', CAPNP_HAS_NON_NULL, .true., 'has: active group')
+      call want(root, nidx, 'g', CAPNP_HAS_NON_DEFAULT, .true., 'has: active group non-default')
+      call want(root, nidx, 'off', CAPNP_HAS_NON_NULL, .false., 'has: inactive arm')
+      call want(root, nidx, 'off', CAPNP_HAS_NON_DEFAULT, .false., 'has: inactive arm non-default')
+      call capnp_dyn_set_int(schema, nidx, root, 'off', 3_int64, err)
+      call want(root, nidx, 'g', CAPNP_HAS_NON_NULL, .false., 'has: inactive group')
+      call want(root, nidx, 'g', CAPNP_HAS_NON_DEFAULT, .false., 'has: inactive group non-default')
+
+      call capnp_dyn_has(schema, nidx, root, 'missing', has, err)
+      call check_(error, err == CAPNP_ERR_ARG .and. .not. has, 'has: unknown field')
+      call capnp_dyn_has(schema, nidx, root, 'missing', has, err, CAPNP_HAS_NON_DEFAULT)
+      call check_(error, err == CAPNP_ERR_ARG .and. .not. has, 'has: unknown field non-default')
+
+      call capnp_message_init_builder(smsg, err)
+      tiny = capnp_new_struct(smsg, 1, 1, err)
+      call capnp_set_root(smsg, tiny, err)
+      call check_(error, err == CAPNP_OK, 'has: short struct')
+      call want(tiny, sidx, 'b', CAPNP_HAS_NON_NULL, .true., 'has: short data non-null')
+      call want(tiny, sidx, 'b', CAPNP_HAS_NON_DEFAULT, .false., 'has: short data non-default')
+      call want(tiny, sidx, 'q', CAPNP_HAS_NON_NULL, .false., 'has: short pointer')
+      call want(tiny, sidx, 'q', CAPNP_HAS_NON_DEFAULT, .false., 'has: short pointer non-default')
+      call want(tiny, sidx, 'a', CAPNP_HAS_NON_NULL, .true., 'has: in-section data non-null')
+      call want(tiny, sidx, 'a', CAPNP_HAS_NON_DEFAULT, .false., 'has: in-section data non-default')
+      call want(tiny, sidx, 'p', CAPNP_HAS_NON_NULL, .false., 'has: in-section null pointer')
+      call want(tiny, sidx, 'p', CAPNP_HAS_NON_DEFAULT, .false., 'has: in-section null pointer non-default')
+
+      call capnp_message_free(msg)
+      call capnp_message_free(smsg)
+      call capnp_dyn_free(schema)
+   contains
+      subroutine want(p, idx, field, mode, present, title)
+         type(capnp_ptr_t), intent(in) :: p
+         integer, intent(in) :: idx, mode
+         character(len=*), intent(in) :: field, title
+         logical, intent(in) :: present
+         logical :: got
+         integer :: rc
+         call capnp_dyn_has(schema, idx, p, field, got, rc, mode)
+         call check_(error, rc == CAPNP_OK .and. got .eqv. present, title)
+      end subroutine want
+
+      subroutine check_float(field)
+         character(len=*), intent(in) :: field
+         real(real64) :: nan
+         d = capnp_dyn_get_f64(schema, nidx, root, field, err)
+         call check_(error, err == CAPNP_OK .and. d == 1.5_real64, 'has: '//field//' reads 1.5')
+         call want(root, nidx, field, CAPNP_HAS_NON_NULL, .true., 'has: '//field//' default non-null')
+         call want(root, nidx, field, CAPNP_HAS_NON_DEFAULT, .false., &
+                   'has: '//field//' default non-default')
+         call capnp_dyn_set_f64(schema, nidx, root, field, 1.5_real64, err)
+         call want(root, nidx, field, CAPNP_HAS_NON_NULL, .true., 'has: '//field//' stored 1.5 non-null')
+         call want(root, nidx, field, CAPNP_HAS_NON_DEFAULT, .false., &
+                   'has: '//field//' stored 1.5 non-default')
+         call capnp_dyn_set_f64(schema, nidx, root, field, -0.0_real64, err)
+         call want(root, nidx, field, CAPNP_HAS_NON_NULL, .true., 'has: '//field//' -0 non-null')
+         call want(root, nidx, field, CAPNP_HAS_NON_DEFAULT, .true., 'has: '//field//' -0 non-default')
+         nan = ieee_value(0.0_real64, ieee_quiet_nan)
+         call capnp_dyn_set_f64(schema, nidx, root, field, nan, err)
+         call want(root, nidx, field, CAPNP_HAS_NON_NULL, .true., 'has: '//field//' nan non-null')
+         call want(root, nidx, field, CAPNP_HAS_NON_DEFAULT, .true., 'has: '//field//' nan non-default')
+      end subroutine check_float
+   end subroutine run_dyn_has
 
 end module test_dynamic
