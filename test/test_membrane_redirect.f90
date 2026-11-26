@@ -32,11 +32,22 @@ module test_membrane_redirect
       procedure :: outbound_redirect => redir_go
    end type redir_policy_t
 
+   type, extends(rpc_membrane_reason_policy_t) :: reason_policy_t
+      class(rpc_server_t), pointer :: alt => null()
+      type(rpc_cap_t) :: alt_cap
+      logical :: use_cap = .false.
+   contains
+      procedure :: inbound_call => reason_check
+      procedure :: outbound_call => reason_check
+      procedure :: inbound_redirect => reason_go
+      procedure :: outbound_redirect => reason_go
+   end type reason_policy_t
+
 contains
 
    subroutine collect_membrane_redirect(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(4))
+      allocate (testsuite(5))
       testsuite(1)%name = "membrane-redirect-inbound"
       testsuite(1)%test => run_inbound
       testsuite(2)%name = "membrane-redirect-outbound-server"
@@ -45,6 +56,8 @@ contains
       testsuite(3)%test => run_outbound_client
       testsuite(4)%name = "membrane-redirect-after-revoke"
       testsuite(4)%test => run_after_revoke
+      testsuite(5)%name = "membrane-redirect-revoked-chain"
+      testsuite(5)%test => run_revoked_chain
    end subroutine collect_membrane_redirect
 
    subroutine check_(error, cond, name)
@@ -54,6 +67,44 @@ contains
       if (allocated(error)) return
       call check(error, cond, name)
    end subroutine check_
+
+   !> Stop after a fixed number of polls so a missing Return fails the test.
+   subroutine wait_bounded(conn, qid, err)
+      type(rpc_conn_t), intent(inout) :: conn
+      integer(int64), intent(in) :: qid
+      integer, intent(out) :: err
+      integer :: i, q
+      logical :: handled
+      err = CAPNP_OK
+      if (.not. allocated(conn%questions)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      if (qid < 0_int64 .or. qid >= int(size(conn%questions), int64)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      q = int(qid)
+      if (.not. conn%questions(q)%used) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      if (conn%questions(q)%canceled) then
+         conn%abort_reason = 'call canceled'
+         err = RPC_ERR_EXCEPTION
+         return
+      end if
+      do i = 1, 40
+         if (conn%dead) then
+            err = RPC_ERR_DEAD
+            return
+         end if
+         if (conn%questions(q)%returned) return
+         call rpc_pump_poll(conn, 25, handled, err)
+         if (err /= CAPNP_OK) return
+      end do
+      if (.not. conn%questions(q)%returned) err = CAPNP_ERR_BOUNDS
+   end subroutine wait_bounded
 
    subroutine plus_dispatch(self, ctx, err)
       class(plus_srv_t), intent(inout) :: self
@@ -110,7 +161,6 @@ contains
       integer(int64), intent(in) :: interface_id
       integer, intent(in) :: method_id
       integer, intent(out) :: err
-      if (interface_id < 0_int64 .and. self%use_cap) err = CAPNP_ERR_ARG
       if (method_id == 2) then
          err = RPC_ERR_EXCEPTION
       else
@@ -134,6 +184,36 @@ contains
          server => self%alt
       end if
    end subroutine redir_go
+
+   subroutine reason_check(self, interface_id, method_id, err)
+      class(reason_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      integer, intent(out) :: err
+      if (method_id == 2) then
+         self%reject_reason = 'nope denied'
+         err = RPC_ERR_EXCEPTION
+      else
+         err = CAPNP_OK
+      end if
+   end subroutine reason_check
+
+   subroutine reason_go(self, interface_id, method_id, server, cap)
+      class(reason_policy_t), intent(inout) :: self
+      integer(int64), intent(in) :: interface_id
+      integer, intent(in) :: method_id
+      class(rpc_server_t), pointer, intent(inout) :: server
+      type(rpc_cap_t), intent(inout) :: cap
+      server => null()
+      cap = rpc_cap_t()
+      if (method_id /= 1) return
+      if (interface_id < 0_int64) return
+      if (self%use_cap) then
+         cap = self%alt_cap
+      else if (associated(self%alt)) then
+         server => self%alt
+      end if
+   end subroutine reason_go
 
    subroutine run_call(srv, method, n, value, err, staged)
       class(rpc_server_t), intent(inout) :: srv
@@ -302,7 +382,7 @@ contains
       if (err /= CAPNP_OK) return
       if (pump) call rpc_pump_once(srv, err)
       if (err /= CAPNP_OK) return
-      call rpc_wait(cli, qid, err)
+      call wait_bounded(cli, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(cli, qid, content, err)
       if (err == CAPNP_OK) value = capnp_get_i64(content, 0_int64)
@@ -334,7 +414,7 @@ contains
       if (err /= CAPNP_OK) return
       if (pump) call rpc_pump_once(srv, err)
       if (err /= CAPNP_OK) return
-      call rpc_wait(cli, qid, err)
+      call wait_bounded(cli, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(cli, qid, content, err)
       if (err == CAPNP_OK) value = capnp_get_i64(content, 0_int64)
@@ -389,7 +469,7 @@ contains
       call rpc_bootstrap_send(cli, root, err)
       call check_(error, err == CAPNP_OK, 'redirect client: bootstrap send')
       if (err == CAPNP_OK) call rpc_pump_once(srv, err)
-      if (err == CAPNP_OK) call rpc_wait(cli, root%id, err)
+      if (err == CAPNP_OK) call wait_bounded(cli, root%id, err)
       qid = root%id
       if (err == CAPNP_OK) call rpc_result_cap(cli, qid, [integer ::], root, err)
       if (err == CAPNP_OK) call rpc_finish_send(cli, qid, .true., err)
@@ -458,7 +538,7 @@ contains
       if (err /= CAPNP_OK) return
       if (pump) call rpc_pump_once(srv, err)
       if (err /= CAPNP_OK) return
-      call rpc_wait(cli, qid, err)
+      call wait_bounded(cli, qid, err)
       if (err /= CAPNP_OK) return
       call rpc_result_content(cli, qid, content, err, etype)
       reason = rpc_conn_reason(cli)
@@ -476,7 +556,7 @@ contains
       integer(int64) :: qid
       call rpc_bootstrap_send(cli, root, err)
       if (err == CAPNP_OK) call rpc_pump_once(srv, err)
-      if (err == CAPNP_OK) call rpc_wait(cli, root%id, err)
+      if (err == CAPNP_OK) call wait_bounded(cli, root%id, err)
       qid = root%id
       if (err == CAPNP_OK) call rpc_result_cap(cli, qid, [integer ::], root, err)
       if (err == CAPNP_OK) call rpc_finish_send(cli, qid, .true., err)
@@ -533,10 +613,11 @@ contains
       type(error_type), allocatable, intent(inout) :: error
       type(rpc_conn_t), target :: cli, srv
       type(plus_srv_t), target :: remote, alt
-      type(redir_policy_t), target :: policy_store
+      type(reason_policy_t), target :: policy_store
+      type(redir_policy_t), target :: plain_store
       class(rpc_server_t), pointer :: boot, ap
       class(rpc_membrane_policy_t), pointer :: pp
-      type(rpc_cap_t) :: root, wrapped
+      type(rpc_cap_t) :: root, wrapped, plain_wrapped
       character(len=:), allocatable :: reason
       integer(int64) :: value
       integer :: fa, fb, err, etype
@@ -552,12 +633,20 @@ contains
       call settle_root(cli, srv, root, err)
       call check_(error, err == CAPNP_OK .and. root%kind == RPC_CAP_IMPORT, &
                   'revoke client: import settled')
+      pp => plain_store
+      plain_store%alt => ap
+      plain_wrapped = rpc_membrane_cap(root, pp, reverse=.true.)
+      call rpc_membrane_revoke(plain_store, 'membrane revoked')
+      call vat_probe(cli, srv, plain_wrapped, 2, 5_int64, .false., value, reason, etype, err)
+      call check_(error, err == RPC_ERR_EXCEPTION .and. reason == '' &
+                  .and. remote%hits(2) == 0, &
+                  'revoke client: plain policy deny reason')
       pp => policy_store
       policy_store%alt => ap
       wrapped = rpc_membrane_cap(root, pp, reverse=.true.)
       call rpc_membrane_revoke(policy_store, 'membrane revoked')
       call vat_probe(cli, srv, wrapped, 2, 5_int64, .false., value, reason, etype, err)
-      call check_(error, err == RPC_ERR_EXCEPTION .and. reason == '' &
+      call check_(error, err == RPC_ERR_EXCEPTION .and. reason == 'nope denied' &
                   .and. remote%hits(2) == 0, &
                   'revoke client: denied method')
       call vat_probe(cli, srv, wrapped, 0, 5_int64, .false., value, reason, etype, err)
@@ -580,5 +669,54 @@ contains
       if (allocated(error)) return
       call run_client_reasons(error)
    end subroutine run_after_revoke
+
+   !> Eight redirect hops land on a revoked policy. That policy still
+   !> forwards its redirect (membrane.c++ lines 428 and 459).
+   subroutine run_revoked_chain(error)
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cli, srv
+      type(plus_srv_t), target :: remote, alt
+      type(redir_policy_t), target :: hop(0:8)
+      class(rpc_server_t), pointer :: boot, ap
+      class(rpc_membrane_policy_t), pointer :: pp
+      type(rpc_cap_t) :: root, wrapped, link
+      integer(int64) :: value
+      integer :: fa, fb, err, i
+      alt%add1 = 7
+      ap => alt
+      hop(8)%alt => ap
+      call px_socketpair(fa, fb, err)
+      call check_(error, err == CAPNP_OK, 'chain: socketpair')
+      if (allocated(error)) return
+      boot => remote
+      call rpc_conn_init(srv, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      call settle_root(cli, srv, root, err)
+      call check_(error, err == CAPNP_OK .and. root%kind == RPC_CAP_IMPORT, &
+                  'chain: import settled')
+      if (allocated(error)) then
+         call rpc_conn_close(cli)
+         call rpc_conn_close(srv)
+         return
+      end if
+      do i = 8, 1, -1
+         pp => hop(i)
+         link = rpc_membrane_cap(root, pp, reverse=.true.)
+         hop(i - 1)%use_cap = .true.
+         hop(i - 1)%alt_cap = link
+      end do
+      pp => hop(0)
+      wrapped = rpc_membrane_cap(root, pp, reverse=.true.)
+      do i = 0, 8
+         call rpc_membrane_revoke(hop(i), 'membrane revoked')
+      end do
+      call vat_call(cli, srv, wrapped, 1, 5_int64, .false., value, err)
+      call check_(error, err == CAPNP_OK .and. value == 12_int64 .and. alt%hits(1) == 1 &
+                  .and. remote%hits(1) == 0, &
+                  'chain: revoked redirect at hop cap runs')
+      call rpc_conn_close(cli)
+      call rpc_conn_close(srv)
+   end subroutine run_revoked_chain
 
 end module test_membrane_redirect

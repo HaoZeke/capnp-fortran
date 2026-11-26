@@ -159,10 +159,20 @@ preserving object identity by removing the wrapper.
 ``rpc_membrane_revoke`` marks every wrapper that shares the policy.
 A later call with no redirect fails with the revoke reason.
 When the policy returns a redirect, the call goes to that capability.
-On a server dispatch, name the local server. A vat client redirect
-applies to ``rpc_call_begin``. These are the applicable
-``capnp/membrane.h`` semantics for the runtime's current capability
-surface. No membrane state appears on the wire.
+The server pointer from ``inbound_redirect`` or ``outbound_redirect``
+is borrowed: that server must outlive the call.
+A redirect chain walks at most eight hops. The policy on the last hop
+is asked, and a redirect it returns is forwarded.
+On a server dispatch, name the local server. A redirect that names an
+import, a local export, or a pipeline capability returns
+``CAPNP_ERR_ARG`` from that dispatch. ``rpc_call_begin`` accepts those
+three kinds. A client deny copies ``reject_reason`` when the policy
+extends ``rpc_membrane_reason_policy_t``. A policy extending only
+``rpc_membrane_policy_t`` leaves that abort reason unset. A vat client
+redirect applies to ``rpc_call_begin``.
+These are the applicable ``capnp/membrane.h`` semantics for the
+runtime's current capability surface. No membrane state appears
+on the wire.
 #+end_export
 
 * Procedure reference
@@ -185,8 +195,8 @@ surface. No membrane state appears on the wire.
 | ~rpc_membrane_cap~      | ~(cap, policy, reverse) result(wrapped)~                              | wrap an imported client capability                    |
 | ~rpc_membrane_server_init~ | ~(wrapper, inner, policy, reverse)~                              | wrap a local server capability                        |
 | ~rpc_membrane_revoke~   | ~(policy, reason)~                                                   | revoke every wrapper sharing the policy               |
-| ~inbound_redirect~      | ~(self, interface_id, method_id, server, cap)~                       | optional type-bound redirect; default names nobody    |
-| ~outbound_redirect~     | ~(self, interface_id, method_id, server, cap)~                       | optional type-bound redirect; default names nobody    |
+| ~inbound_redirect~      | ~(self, interface_id, method_id, server, cap)~                       | borrowed server pointer; it must outlive the call     |
+| ~outbound_redirect~     | ~(self, interface_id, method_id, server, cap)~                       | borrowed server pointer; it must outlive the call     |
 | ~rpc_pipeline_cap~      | ~(conn, qid, field_indices) result(cap)~                             | promise pipelining into unreturned results          |
 | ~rpc_wait~              | ~(conn, qid, err)~                                                   | pumps until the question returns                    |
 | ~rpc_result_content~    | ~(conn, qid, content, err)~                                          | ~RPC_ERR_EXCEPTION~ on exception returns             |

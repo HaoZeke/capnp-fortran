@@ -51,6 +51,7 @@ module capnp_rpc
 
    public :: rpc_conn_t, rpc_server_t, rpc_cap_t, rpc_call_ctx_t
    public :: rpc_membrane_policy_t, rpc_membrane_server_t
+   public :: rpc_membrane_reason_policy_t
    public :: rpc_membrane_cap, rpc_membrane_server_init, rpc_membrane_revoke
    public :: rpc_membrane_owned_live, rpc_shared_owners_live
    public :: rpc_conn_init, rpc_conn_init_stream, rpc_conn_close
@@ -137,7 +138,8 @@ module capnp_rpc
    !> `inbound_redirect` and `outbound_redirect` may name another
    !> capability; the call then goes to that capability. A null server
    !> and an `RPC_CAP_NONE` cap leave the call on its original target.
-   !> When both are set, the server is the redirect target. Result
+   !> When both are set, the server is the redirect target. The server
+   !> pointer is borrowed: that server must outlive the call. Result
    !> capabilities of a redirect stay as that capability returned them
    !> (capnp `membrane.h` lines 69-71).
    type, abstract :: rpc_membrane_policy_t
@@ -149,6 +151,13 @@ module capnp_rpc
       procedure :: inbound_redirect => membrane_policy_no_redirect
       procedure :: outbound_redirect => membrane_policy_no_redirect
    end type rpc_membrane_policy_t
+
+   !> Extended policy. A client deny copies `reject_reason` when the
+   !> policy is of this type. Extenders of `rpc_membrane_policy_t` keep
+   !> that type's components.
+   type, abstract, extends(rpc_membrane_policy_t) :: rpc_membrane_reason_policy_t
+      character(len=:), allocatable :: reject_reason
+   end type rpc_membrane_reason_policy_t
 
    !> Client-side reference to a remote capability.
    type :: rpc_cap_t
@@ -911,7 +920,6 @@ contains
       integer, intent(in) :: method_id
       class(rpc_server_t), pointer, intent(inout) :: server
       type(rpc_cap_t), intent(inout) :: cap
-      if (interface_id < 0_int64 .and. method_id < 0) cap%kind = RPC_CAP_NONE
       server => null()
       cap = rpc_cap_t()
    end subroutine membrane_policy_no_redirect
@@ -1028,12 +1036,31 @@ contains
          cur_mem => cap_mem
          cur_reverse = cap_reverse
          steps = steps + 1
+         ! Eight hops bound the walk. This policy is asked for a redirect,
+         ! and a redirect it returns is forwarded. membrane.c++:428 and :459.
          if (steps >= 8) then
             if (associated(cur_mem)) then
                call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
-               if (err == CAPNP_OK .and. cur_mem%revoked) then
-                  err = RPC_ERR_EXCEPTION
-                  revoke_fail = .true.
+               if (err == CAPNP_OK) then
+                  srv => null()
+                  cap_mem => null()
+                  call membrane_offer(cur_mem, cur_reverse, interface_id, method_id, srv, &
+                                      cap_kind, cap_id, cap_nops, cap_ops, cap_reverse, cap_mem)
+                  if (associated(srv)) then
+                     server => srv
+                     cur_mem => null()
+                     cur_reverse = .false.
+                  else if (cap_kind /= RPC_CAP_NONE) then
+                     cur_kind = cap_kind
+                     cur_id = cap_id
+                     cur_nops = cap_nops
+                     cur_ops = cap_ops
+                     cur_mem => cap_mem
+                     cur_reverse = cap_reverse
+                  else if (cur_mem%revoked) then
+                     err = RPC_ERR_EXCEPTION
+                     revoke_fail = .true.
+                  end if
                end if
             end if
             exit
@@ -1104,6 +1131,9 @@ contains
       redir_cap%ops = cap_ops
       redir_cap%membrane => cap_mem
       redir_cap%membrane_reverse = cap_reverse
+      ! A server dispatch can call a local server. An import, a local
+      ! export, or a pipeline cap needs the connection, which this
+      ! procedure does not have. rpc_call_begin accepts those kinds.
       if (redir_cap%kind /= RPC_CAP_NONE) then
          err = CAPNP_ERR_ARG
          return
@@ -1650,9 +1680,17 @@ contains
          effective%membrane_reverse = rev
       end block
       if (err /= CAPNP_OK) then
-         if (revoke_fail .and. associated(effective%membrane)) then
-            if (allocated(effective%membrane%revoke_reason)) &
-               conn%abort_reason = effective%membrane%revoke_reason
+         if (associated(effective%membrane)) then
+            if (revoke_fail) then
+               if (allocated(effective%membrane%revoke_reason)) &
+                  conn%abort_reason = effective%membrane%revoke_reason
+            else
+               select type (pol => effective%membrane)
+               class is (rpc_membrane_reason_policy_t)
+                  if (allocated(pol%reject_reason)) &
+                     conn%abort_reason = pol%reject_reason
+               end select
+            end if
          end if
          qid = -1_int64
          return
