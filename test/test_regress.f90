@@ -144,17 +144,17 @@ contains
    end function have_capnp
 
    !> One read of `capnp --version` for the whole module.
-   function capnp_at_least_1_4() result(y)
+   function capnp_at_least_1_3() result(y)
       logical :: y
       logical, save :: ready = .false.
       logical, save :: ge = .false.
       if (.not. ready) then
          ready = .true.
          ge = sh('ver=$(capnp --version | awk ''{print $NF}''); ' &
-            //'[ "$(printf ''%s\n%s\n'' "$ver" 1.4.0 | sort -V | head -n 1)" = 1.4.0 ]')
+            //'[ "$(printf ''%s\n%s\n'' "$ver" 1.3.0 | sort -V | head -n 1)" = 1.3.0 ]')
       end if
       y = ge
-   end function capnp_at_least_1_4
+   end function capnp_at_least_1_3
 
    function sh(cmd) result(ok)
       character(len=*), intent(in) :: cmd
@@ -3207,7 +3207,7 @@ contains
    !> Struct, list, enum, and data first fields are not single-value
    !> shorthand. The recovered text matches the capnp tool, including a
    !> bool written into a group whose first field is a struct. A list
-   !> assigned to a group aborts capnp before 1.4.0; that case is
+   !> assigned to a group aborts capnp before 1.3.0; that case is
    !> shorthand-group-list.
    subroutine run_shorthand_first(error)
       type(error_type), allocatable, intent(out) :: error
@@ -3271,8 +3271,8 @@ contains
       end if
    end subroutine run_shorthand_first
 
-   !> A list written into a group makes capnp before 1.4.0 execute an
-   !> unreachable branch and print no text. capnp 1.4.0 reports the
+   !> A list written into a group makes capnp before 1.3.0 execute an
+   !> unreachable branch and print no text. capnp 1.3.0 reports the
    !> error and prints the group, and capnpf follows that.
    subroutine run_shorthand_group_list(error)
       type(error_type), allocatable, intent(out) :: error
@@ -3282,8 +3282,8 @@ contains
          call skip_test(error, 'capnp tool not on PATH')
          return
       end if
-      if (.not. capnp_at_least_1_4()) then
-         call skip_test(error, 'capnp before 1.4.0 aborts when a list is assigned to a group')
+      if (.not. capnp_at_least_1_3()) then
+         call skip_test(error, 'capnp before 1.3.0 aborts when a list is assigned to a group')
          return
       end if
       if (.not. sh('mkdir -p '//tmp)) then
