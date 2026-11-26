@@ -107,6 +107,7 @@ TEST_MODULES=(
   test/test_regress.f90
   test/test_edges.f90
   test/test_limits.f90
+  test/test_schema_validate.f90
   test/test_codegen.f90
   test/test_net.f90
   test/test_rpc_lifetime.f90
