@@ -36,6 +36,7 @@ module test_membrane_redirect
       class(rpc_server_t), pointer :: alt => null()
       type(rpc_cap_t) :: alt_cap
       logical :: use_cap = .false.
+      logical :: deny1 = .false.
    contains
       procedure :: inbound_call => reason_check
       procedure :: outbound_call => reason_check
@@ -47,7 +48,7 @@ contains
 
    subroutine collect_membrane_redirect(testsuite)
       type(unittest_type), allocatable, intent(out) :: testsuite(:)
-      allocate (testsuite(5))
+      allocate (testsuite(8))
       testsuite(1)%name = "membrane-redirect-inbound"
       testsuite(1)%test => run_inbound
       testsuite(2)%name = "membrane-redirect-outbound-server"
@@ -58,6 +59,12 @@ contains
       testsuite(4)%test => run_after_revoke
       testsuite(5)%name = "membrane-redirect-revoked-chain"
       testsuite(5)%test => run_revoked_chain
+      testsuite(6)%name = "membrane-redirect-chain-deny"
+      testsuite(6)%test => run_chain_deny
+      testsuite(7)%name = "membrane-redirect-chain-revoked"
+      testsuite(7)%test => run_chain_revoked
+      testsuite(8)%name = "membrane-redirect-chain-server"
+      testsuite(8)%test => run_chain_server
    end subroutine collect_membrane_redirect
 
    subroutine check_(error, cond, name)
@@ -196,7 +203,7 @@ contains
       integer, intent(out) :: err
       associate (unused_interface_id => interface_id)
       end associate
-      if (method_id == 2) then
+      if (method_id == 2 .or. (self%deny1 .and. method_id == 1)) then
          self%reject_reason = 'nope denied'
          err = RPC_ERR_EXCEPTION
       else
@@ -724,5 +731,96 @@ contains
       call rpc_conn_close(cli)
       call rpc_conn_close(srv)
    end subroutine run_revoked_chain
+
+   subroutine run_chain_deny(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_cap_tail(1, error)
+   end subroutine run_chain_deny
+
+   subroutine run_chain_revoked(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_cap_tail(2, error)
+   end subroutine run_chain_revoked
+
+   subroutine run_chain_server(error)
+      type(error_type), allocatable, intent(out) :: error
+      call run_cap_tail(3, error)
+   end subroutine run_chain_server
+
+   !> Hop 8 names another membrane. That membrane denies method 1,
+   !> is revoked with no redirect, or names a local server.
+   subroutine run_cap_tail(kind, error)
+      integer, intent(in) :: kind
+      type(error_type), allocatable, intent(out) :: error
+      type(rpc_conn_t), target :: cli, srv
+      type(plus_srv_t), target :: remote, alt
+      type(redir_policy_t), target :: hop(0:8), tail
+      type(reason_policy_t), target :: deny
+      class(rpc_server_t), pointer :: boot, ap
+      class(rpc_membrane_policy_t), pointer :: pp
+      type(rpc_cap_t) :: root, wrapped, link
+      character(len=:), allocatable :: reason
+      integer(int64) :: value
+      integer :: fa, fb, err, etype, i
+      alt%add1 = 7
+      ap => alt
+      if (kind == 1) deny%deny1 = .true.
+      if (kind == 3) tail%alt => ap
+      call px_socketpair(fa, fb, err)
+      call check_(error, err == CAPNP_OK, 'chain cap: socketpair')
+      if (allocated(error)) return
+      boot => remote
+      call rpc_conn_init(srv, fb, boot)
+      boot => null()
+      call rpc_conn_init(cli, fa, boot)
+      call settle_root(cli, srv, root, err)
+      call check_(error, err == CAPNP_OK .and. root%kind == RPC_CAP_IMPORT, &
+                  'chain cap: import settled')
+      if (allocated(error)) then
+         call rpc_conn_close(cli)
+         call rpc_conn_close(srv)
+         return
+      end if
+      do i = 8, 1, -1
+         pp => hop(i)
+         link = rpc_membrane_cap(root, pp, reverse=.true.)
+         hop(i - 1)%use_cap = .true.
+         hop(i - 1)%alt_cap = link
+      end do
+      if (kind == 1) then
+         pp => deny
+      else
+         pp => tail
+      end if
+      link = rpc_membrane_cap(root, pp, reverse=.true.)
+      hop(8)%use_cap = .true.
+      hop(8)%alt_cap = link
+      pp => hop(0)
+      wrapped = rpc_membrane_cap(root, pp, reverse=.true.)
+      do i = 0, 8
+         call rpc_membrane_revoke(hop(i), 'membrane revoked')
+      end do
+      if (kind == 2) call rpc_membrane_revoke(tail, 'tail revoked')
+      if (kind == 3) call rpc_membrane_revoke(tail, 'membrane revoked')
+      if (kind == 3) then
+         call vat_call(cli, srv, wrapped, 1, 5_int64, .false., value, err)
+         call check_(error, err == CAPNP_OK .and. value == 12_int64 &
+                     .and. alt%hits(1) == 1 .and. remote%hits(1) == 0, &
+                     'chain cap: tail redirect runs')
+      else
+         call vat_probe(cli, srv, wrapped, 1, 5_int64, .true., value, reason, etype, err)
+         if (kind == 1) then
+            call check_(error, err == RPC_ERR_EXCEPTION .and. reason == 'nope denied' &
+                        .and. remote%hits(1) == 0 .and. alt%hits(1) == 0, &
+                        'chain cap: deny stops the call')
+         else
+            call check_(error, err == RPC_ERR_EXCEPTION .and. reason == 'tail revoked' &
+                        .and. remote%hits(1) == 0 .and. alt%hits(1) == 0, &
+                        'chain cap: revoked tail stops the call')
+         end if
+      end if
+      call rpc_conn_close(cli)
+      call rpc_conn_close(srv)
+   end subroutine run_cap_tail
 
 end module test_membrane_redirect
