@@ -920,6 +920,10 @@ contains
       integer, intent(in) :: method_id
       class(rpc_server_t), pointer, intent(inout) :: server
       type(rpc_cap_t), intent(inout) :: cap
+      associate (unused_interface_id => interface_id)
+      end associate
+      associate (unused_method_id => method_id)
+      end associate
       server => null()
       cap = rpc_cap_t()
    end subroutine membrane_policy_no_redirect
