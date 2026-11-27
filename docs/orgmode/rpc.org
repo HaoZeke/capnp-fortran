@@ -162,7 +162,9 @@ When the policy returns a redirect, the call goes to that capability.
 The server pointer from ``inbound_redirect`` or ``outbound_redirect``
 is borrowed: that server must outlive the call.
 A redirect chain walks at most eight hops. The policy on the last hop
-is asked, and a redirect it returns is forwarded.
+is asked, and a redirect it returns is forwarded. A membrane on that
+redirect is asked before the call proceeds. A repeated policy fails
+the call.
 On a server dispatch, name the local server. A redirect that names an
 import, a local export, or a pipeline capability returns
 ``CAPNP_ERR_ARG`` from that dispatch. ``rpc_call_begin`` accepts those

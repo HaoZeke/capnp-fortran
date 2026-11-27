@@ -986,9 +986,15 @@ contains
       integer :: cur_kind, cur_nops, cur_ops(0:MAXOPS - 1)
       integer(int64) :: cap_id, cur_id
       logical :: cap_reverse, cur_reverse
+      type :: pol_node_t
+         class(rpc_membrane_policy_t), pointer :: p => null()
+         type(pol_node_t), pointer :: next => null()
+      end type pol_node_t
+      type(pol_node_t), pointer :: seen_head
       server => null()
       err = CAPNP_OK
       revoke_fail = .false.
+      seen_head => null()
       cur_kind = cap%kind
       cur_id = cap%id
       cur_nops = cap%nops
@@ -1041,7 +1047,9 @@ contains
          cur_reverse = cap_reverse
          steps = steps + 1
          ! Eight hops bound the walk. This policy is asked for a redirect,
-         ! and a redirect it returns is forwarded. membrane.c++:428 and :459.
+         ! and a redirect it returns is forwarded. A membrane on that
+         ! redirect is asked too. A repeated policy fails the call.
+         ! membrane.c++:428 and :459.
          if (steps >= 8) then
             if (associated(cur_mem)) then
                call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
@@ -1055,12 +1063,16 @@ contains
                      cur_mem => null()
                      cur_reverse = .false.
                   else if (cap_kind /= RPC_CAP_NONE) then
-                     cur_kind = cap_kind
-                     cur_id = cap_id
-                     cur_nops = cap_nops
-                     cur_ops = cap_ops
-                     cur_mem => cap_mem
-                     cur_reverse = cap_reverse
+                     if (associated(cap_mem)) then
+                        call follow_cap_mem()
+                     else
+                        cur_kind = cap_kind
+                        cur_id = cap_id
+                        cur_nops = cap_nops
+                        cur_ops = cap_ops
+                        cur_mem => cap_mem
+                        cur_reverse = cap_reverse
+                     end if
                   else if (cur_mem%revoked) then
                      err = RPC_ERR_EXCEPTION
                      revoke_fail = .true.
@@ -1076,6 +1088,90 @@ contains
       out_ops = cur_ops
       out_reverse = cur_reverse
       out_mem => cur_mem
+      call free_seen()
+   contains
+      subroutine note_policy(pol, again)
+         class(rpc_membrane_policy_t), pointer, intent(in) :: pol
+         logical, intent(out) :: again
+         type(pol_node_t), pointer :: node, cur
+         again = .false.
+         if (.not. associated(pol)) return
+         cur => seen_head
+         do while (associated(cur))
+            if (associated(cur%p, pol)) then
+               again = .true.
+               return
+            end if
+            cur => cur%next
+         end do
+         allocate (node)
+         node%p => pol
+         node%next => seen_head
+         seen_head => node
+      end subroutine note_policy
+
+      subroutine free_seen()
+         type(pol_node_t), pointer :: node
+         do while (associated(seen_head))
+            node => seen_head%next
+            deallocate (seen_head)
+            seen_head => node
+         end do
+      end subroutine free_seen
+
+      subroutine follow_cap_mem()
+         logical :: again
+         call note_policy(cur_mem, again)
+         do
+            if (.not. associated(cap_mem)) exit
+            call note_policy(cap_mem, again)
+            if (again) then
+               err = RPC_ERR_EXCEPTION
+               if (cap_mem%revoked) then
+                  revoke_fail = .true.
+                  cur_mem => cap_mem
+                  cur_reverse = cap_reverse
+               else if (associated(cur_mem)) then
+                  if (cur_mem%revoked) revoke_fail = .true.
+               end if
+               exit
+            end if
+            cur_kind = cap_kind
+            cur_id = cap_id
+            cur_nops = cap_nops
+            cur_ops = cap_ops
+            cur_mem => cap_mem
+            cur_reverse = cap_reverse
+            call membrane_check(cur_mem, cur_reverse, interface_id, method_id, err)
+            if (err /= CAPNP_OK) exit
+            srv => null()
+            cap_mem => null()
+            call membrane_offer(cur_mem, cur_reverse, interface_id, method_id, srv, &
+                                cap_kind, cap_id, cap_nops, cap_ops, cap_reverse, cap_mem)
+            if (associated(srv)) then
+               server => srv
+               cur_mem => null()
+               cur_reverse = .false.
+               exit
+            end if
+            if (cap_kind == RPC_CAP_NONE) then
+               if (cur_mem%revoked) then
+                  err = RPC_ERR_EXCEPTION
+                  revoke_fail = .true.
+               end if
+               exit
+            end if
+            if (.not. associated(cap_mem)) then
+               cur_kind = cap_kind
+               cur_id = cap_id
+               cur_nops = cap_nops
+               cur_ops = cap_ops
+               cur_mem => cap_mem
+               cur_reverse = cap_reverse
+               exit
+            end if
+         end do
+      end subroutine follow_cap_mem
    end subroutine membrane_retarget
 
    subroutine membrane_check(policy, reverse, interface_id, method_id, err)
