@@ -49,6 +49,11 @@ module capnp_posix
          import :: c_int
          integer(c_int) :: capnp_posix_einprogress
       end function capnp_posix_einprogress
+      function capnp_posix_tcp_nodelay(fd) bind(c, name="capnp_posix_tcp_nodelay") result(rc)
+         import :: c_int
+         integer(c_int), value :: fd
+         integer(c_int) :: rc
+      end function capnp_posix_tcp_nodelay
    end interface
 
    type, bind(c) :: c_pollfd
@@ -344,7 +349,7 @@ contains
    subroutine px_tcp_accept(listen_fd, fd, err)
       integer, intent(in) :: listen_fd
       integer, intent(out) :: fd, err
-      integer(c_int) :: cfd
+      integer(c_int) :: cfd, rc_nodelay
       err = CAPNP_OK
       fd = PX_BAD_FD
       cfd = c_accept(int(listen_fd, c_int), c_null_ptr, c_null_ptr)
@@ -353,6 +358,7 @@ contains
          return
       end if
       fd = int(cfd)
+      rc_nodelay = capnp_posix_tcp_nodelay(cfd)
    end subroutine px_tcp_accept
 
    subroutine px_tcp_connect(port, fd, err)
@@ -371,7 +377,7 @@ contains
       integer, intent(in), optional :: timeout_ms
       type(c_sockaddr_in), target :: sa
       type(c_pollfd), target :: pfd
-      integer(c_int) :: sfd, flags, cerr
+      integer(c_int) :: sfd, flags, cerr, rc_nodelay
       integer(c_int), target :: soerr, optlen
       character(kind=c_char), allocatable, target :: hostz(:)
       integer :: i, n
@@ -403,6 +409,7 @@ contains
             return
          end if
          fd = int(sfd)
+         rc_nodelay = capnp_posix_tcp_nodelay(sfd)
          return
       end if
       flags = c_fcntl(sfd, F_GETFL, 0_c_int)
@@ -448,6 +455,7 @@ contains
          return
       end if
       fd = int(sfd)
+      rc_nodelay = capnp_posix_tcp_nodelay(sfd)
    end subroutine px_tcp_connect_host
 
    !> Return the local TCP port of a bound or connected IPv4 socket.

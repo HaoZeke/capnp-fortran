@@ -2,6 +2,8 @@
    The numeric values are not the same on every Unix. */
 #include <errno.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 int capnp_posix_o_nonblock(void) { return O_NONBLOCK; }
@@ -23,4 +25,13 @@ long capnp_posix_send(int fd, const void *buf, size_t n)
 #endif
     return (long)send(fd, buf, n, 0);
 #endif
+}
+
+/* Turn off Nagle's algorithm on a TCP socket. RPC sends small messages and
+   waits for small answers; with Nagle and the peer's delayed
+   acknowledgement each round trip can stall for tens of milliseconds. */
+int capnp_posix_tcp_nodelay(int fd)
+{
+    int one = 1;
+    return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
 }

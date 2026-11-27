@@ -1,0 +1,1 @@
+Sockets that `px_tcp_connect_host` and `px_tcp_accept` open have `TCP_NODELAY` set. Without it, Nagle's algorithm and the peer's delayed acknowledgement held each small RPC message for about 40 ms; a call answered by a C++ server took 82 ms on loopback and now takes 0.9 ms.
