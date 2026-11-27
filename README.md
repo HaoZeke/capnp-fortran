@@ -209,6 +209,13 @@ never-ending promise is dropped by the Fortran cancellation request.
 Membranes cover part of `capnp/membrane.h`. A policy can allow or reject
 an inbound or outbound call. `inbound_redirect` and `outbound_redirect`
 may name another capability, and the call goes to that capability.
+The server pointer is borrowed: that server must outlive the call.
+Server dispatch follows a redirect that names a local server. A redirect
+that names an import, a local export, or a pipeline capability returns
+`CAPNP_ERR_ARG` from that dispatch. `rpc_call_begin` accepts those three
+kinds. `rpc_membrane_reason_policy_t` adds `reject_reason`. A client
+deny copies that text when the policy is this extended type. A policy
+extending only `rpc_membrane_policy_t` leaves the abort reason unset.
 The redirect capability is outside the membrane, so capabilities it
 places in results stay as it returned them (`membrane.h` lines 69-71,
 `MembraneHook::newCall` and `MembraneHook::call` in `membrane.c++`).
