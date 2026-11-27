@@ -1225,6 +1225,8 @@ contains
       end if
       dv = field_slot_default(f, err)
       if (err /= CAPNP_OK) return
+      call dyn_store_blob_default(p, int(field_slot_offset(f)), dv, 1_int64, err)
+      if (err /= CAPNP_OK) return
       call value_text(dv, s, err)
    end subroutine capnp_dyn_get_text
 
@@ -1256,6 +1258,8 @@ contains
          return
       end if
       dv = field_slot_default(f, err)
+      if (err /= CAPNP_OK) return
+      call dyn_store_blob_default(p, int(field_slot_offset(f)), dv, 0_int64, err)
       if (err /= CAPNP_OK) return
       call value_data(dv, bytes, err)
    end subroutine capnp_dyn_get_data
@@ -1423,6 +1427,40 @@ contains
       schema%ro_view(schema%n_ro) = copied
       q = copied
    end subroutine dyn_reader_view
+
+   !> A builder slot that can receive a copied default. A null parent, a
+   !> reader, a frozen handle, and a slot past the pointer section cannot.
+   logical function dyn_builder_slot(host, slot) result(yes)
+      type(capnp_ptr_t), intent(in) :: host
+      integer, intent(in) :: slot
+      yes = .false.
+      if (host%kind /= CAPNP_PK_STRUCT) return
+      if (.not. associated(host%msg)) return
+      if (host%frozen) return
+      if (.not. host%msg%is_builder) return
+      if (slot < 0) return
+      if (slot >= host%pwords) return
+      yes = .true.
+   end function dyn_builder_slot
+
+   !> Copy a non-empty Text or Data schema default into a builder field.
+   !> pad is 1 for Text, whose list length counts a trailing NUL, and 0
+   !> for Data. An empty default leaves the pointer null.
+   subroutine dyn_store_blob_default(host, slot, dv, pad, err)
+      type(capnp_ptr_t), intent(in) :: host
+      integer, intent(in) :: slot
+      type(capnp_ptr_t), intent(in) :: dv
+      integer(int64), intent(in) :: pad
+      integer, intent(out) :: err
+      type(capnp_ptr_t) :: q
+      err = CAPNP_OK
+      if (.not. dyn_builder_slot(host, slot)) return
+      q = value_pointer(dv, err)
+      if (err /= CAPNP_OK) return
+      if (q%kind /= CAPNP_PK_LIST .or. q%esize /= CAPNP_SZ_BYTE) return
+      if (q%nelem <= pad) return
+      call dyn_copy_default(host, slot, q, err)
+   end subroutine dyn_store_blob_default
 
    !> Copy a schema default into the caller's builder and, when the slot
    !> exists, store that copy in the field.
