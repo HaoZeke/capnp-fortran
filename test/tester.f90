@@ -23,6 +23,7 @@ program tester
    use test_idents, only: collect_idents
    use test_codegen, only: collect_codegen
    use test_rpc_lifetime, only: collect_rpc_lifetime
+   use test_rpc_callback, only: collect_rpc_callback
    use test_net, only: collect_net
    use test_rpc_peer, only: collect_rpc_peer
    use rpc_servers, only: free_minted_adders
@@ -42,7 +43,7 @@ program tester
    stat = 0
    ! Each name is allocated in the element that owns it. A constructor
    ! of new_testsuite() leaks those strings on this compiler.
-   allocate (testsuites(27))
+   allocate (testsuites(28))
    testsuites(1)%name = "wire"
    testsuites(1)%collect => collect_wire
    testsuites(2)%name = "addressbook"
@@ -97,6 +98,8 @@ program tester
    testsuites(26)%collect => collect_schema_validate
    testsuites(27)%name = "membrane_redirect"
    testsuites(27)%collect => collect_membrane_redirect
+   testsuites(28)%name = "rpc_callback"
+   testsuites(28)%collect => collect_rpc_callback
 
    call get_argument(1, suite_name)
    call get_argument(2, test_name)

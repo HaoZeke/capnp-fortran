@@ -60,7 +60,7 @@ module capnp_rpc
    public :: rpc_finish_send, rpc_release_send
    public :: rpc_request_cancellation
    public :: rpc_pump_once, rpc_pump_poll, rpc_serve
-   public :: rpc_ctx_export_cap, rpc_make_cap_ptr
+   public :: rpc_ctx_export_cap, rpc_make_cap_ptr, rpc_call_export_cap, rpc_ctx_keep_param_cap
    public :: rpc_ctx_fail, rpc_ctx_unimplemented_interface, rpc_ctx_unimplemented_method
    public :: rpc_ctx_defer, rpc_deferred_ctx, rpc_deferred_return
    public :: rpc_question_returned
@@ -5569,6 +5569,128 @@ contains
 
    !> Capability pointer handle for content slots: index into the
    !> payload's capTable.
+   !> Keep a capability that arrived in the parameters of the call being
+   !> dispatched (`capidx`, the index of its capability pointer): it becomes
+   !> an import of `conn` and `cap` a client for it, valid after the
+   !> dispatch returns. The callee releases it with rpc_release_send when
+   !> done, as a C++ callee does with a capability it retained.
+   subroutine rpc_ctx_keep_param_cap(conn, ctx, capidx, cap, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(rpc_call_ctx_t), intent(in) :: ctx
+      integer(int64), intent(in) :: capidx
+      type(rpc_cap_t), intent(out) :: cap
+      integer, intent(out) :: err
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      integer(int64) :: h
+      cap = rpc_cap_t()
+      if (.not. associated(ctx%params%msg)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      msg = message_read_root(ctx%params%msg, err)
+      if (err == CAPNP_OK) c = message_call_get(msg, err)
+      if (err == CAPNP_OK) pl = call_params_get(c, err)
+      if (err == CAPNP_OK) ctab = payload_cap_table_get(pl, err)
+      if (err /= CAPNP_OK) return
+      if (capidx < 0_int64 .or. capidx >= capnp_list_len(ctab)) then
+         err = CAPNP_ERR_BOUNDS
+         return
+      end if
+      cd%p = capnp_list_get_struct(ctab, int(capidx), err)
+      if (err /= CAPNP_OK) return
+      select case (cap_descriptor_which(cd))
+      case (CAP_DESCRIPTOR_SENDER_HOSTED_TAG)
+         call keep_held(cap_descriptor_sender_hosted_get(cd), .false.)
+      case (CAP_DESCRIPTOR_SENDER_PROMISE_TAG)
+         call keep_held(cap_descriptor_sender_promise_get(cd), .true.)
+      case (CAP_DESCRIPTOR_RECEIVER_HOSTED_TAG)
+         cap%kind = RPC_CAP_LOCAL
+         cap%id = cap_descriptor_receiver_hosted_get(cd)
+      case default
+         err = CAPNP_ERR_KIND
+      end select
+   contains
+      !> The call's hold owns the one ref the sender counted for this
+      !> capability while the call runs; kept, that ref moves to the import
+      !> and the hold no longer releases it when the call context goes.
+      subroutine keep_held(wire, promise)
+         integer(int64), intent(in) :: wire
+         logical, intent(in) :: promise
+         integer :: k
+         type(rpc_import_node_t), pointer :: node
+         logical :: found
+         k = hold_by_wire(conn, wire)
+         if (k > 0) then
+            call import_receive(conn, wire, promise, h)
+            if (conn%param_holds(k)%refs > 0_int64) &
+               conn%param_holds(k)%refs = conn%param_holds(k)%refs - 1_int64
+         else
+            ! No hold: the param's ref already went to a live import.
+            call import_find_live(conn, wire, node, found)
+            if (.not. found) then
+               err = CAPNP_ERR_ARG
+               return
+            end if
+            h = node%id
+         end if
+         cap%kind = RPC_CAP_IMPORT
+         cap%id = h
+      end subroutine keep_held
+   end subroutine rpc_ctx_keep_param_cap
+
+   !> Pass a capability this vat hosts in the parameters of a call that
+   !> rpc_call_begin (or a generated *_begin) started in `m`: `srv` is
+   !> exported and becomes entry 0 of the call's capTable as senderHosted,
+   !> so a capability pointer with index 0 in the parameters names it
+   !> (rpc_make_cap_ptr(m, 0), or a generated *_set given a client whose
+   !> cap%id is 0). The peer's calls on it are dispatched to `srv` while this
+   !> vat pumps the connection, until the peer releases it. The caller keeps
+   !> `srv` alive that long; it is not owned by the export. A call carries
+   !> one such capability: a capTable already present is CAPNP_ERR_ARG.
+   subroutine rpc_call_export_cap(conn, m, srv, err)
+      type(rpc_conn_t), intent(inout), target :: conn
+      type(capnp_message_t), intent(inout), target :: m
+      class(rpc_server_t), pointer, intent(in) :: srv
+      integer, intent(out) :: err
+      type(message_t) :: msg
+      type(call_t) :: c
+      type(payload_t) :: pl
+      type(capnp_ptr_t) :: ctab
+      type(cap_descriptor_t) :: cd
+      class(*), pointer :: any
+      integer :: eid
+      if (.not. associated(srv)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      msg = message_read_root(m, err)
+      if (err /= CAPNP_OK) return
+      if (message_which(msg) /= MESSAGE_CALL_TAG) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      c = message_call_get(msg, err)
+      if (err == CAPNP_OK) pl = call_params_get(c, err)
+      if (err /= CAPNP_OK) return
+      if (payload_cap_table_has(pl)) then
+         err = CAPNP_ERR_ARG
+         return
+      end if
+      any => srv
+      eid = export_server(conn, any, .false.)
+      if (eid < 0) then
+         err = CAPNP_ERR_ALLOC
+         return
+      end if
+      ctab = payload_cap_table_init(pl, 1_int64, err)
+      if (err == CAPNP_OK) cd%p = capnp_list_get_struct(ctab, 0, err)
+      if (err == CAPNP_OK) call cap_descriptor_sender_hosted_set(cd, int(eid, int64), err)
+   end subroutine rpc_call_export_cap
+
    function rpc_make_cap_ptr(m, idx) result(p)
       type(capnp_message_t), intent(in), target :: m
       integer, intent(in) :: idx
@@ -9783,7 +9905,9 @@ contains
                call move_alloc(kept, conn%param_holds)
             end block
             if (nid >= 0_int64) call unhold_import(conn, nid, err)
-            if (wire < 0_int64) cycle
+            ! A hold whose refs all moved to an import the callee kept
+            ! (rpc_ctx_keep_param_cap) has nothing left to release.
+            if (wire < 0_int64 .or. refs <= 0_int64) cycle
             call send_release(conn, wire, refs, e)
             if (e /= CAPNP_OK .and. err == CAPNP_OK) err = e
          end do
